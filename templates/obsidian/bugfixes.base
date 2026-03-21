@@ -1,0 +1,23 @@
+filters:
+  and:
+    - type == "bugfix"
+properties:
+  file.name:
+    displayName: Note
+  date:
+    displayName: Date
+  project:
+    displayName: Project
+  tags:
+    displayName: Tags
+views:
+  - type: table
+    name: Bugfixes
+    groupBy:
+      property: date
+      direction: DESC
+    order:
+      - file.name
+      - date
+      - project
+      - tags

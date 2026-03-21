@@ -1,0 +1,20 @@
+filters:
+  and:
+    - file.inFolder("notes")
+    - file.ext == "md"
+formulas:
+  certainty_label: if(certainty == 5, "established", if(certainty == 4, "shipped", if(certainty == 3, "confirmed", if(certainty == 2, "observed", if(certainty == 1, "speculative", "")))))
+properties:
+  formula.certainty_label:
+    displayName: Certainty
+views:
+  - type: cards
+    name: By project
+    groupBy:
+      property: project
+      direction: ASC
+    order:
+      - file.name
+      - type
+      - formula.certainty_label
+      - date

@@ -1,0 +1,27 @@
+filters:
+  and:
+    - file.inFolder("notes")
+    - file.ext == "md"
+formulas:
+  age_days: (now() - file.ctime).days.round(0)
+  certainty_label: if(certainty == 5, "established", if(certainty == 4, "shipped", if(certainty == 3, "confirmed", if(certainty == 2, "observed", if(certainty == 1, "speculative", "")))))
+properties:
+  formula.age_days:
+    displayName: Age (days)
+  formula.certainty_label:
+    displayName: Certainty
+views:
+  - type: table
+    name: By type
+    groupBy:
+      property: type
+      direction: ASC
+    order:
+      - file.name
+      - type
+      - tags
+      - formula.certainty_label
+      - date
+      - formula.age_days
+    summaries:
+      formula.age_days: Average

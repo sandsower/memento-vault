@@ -1,0 +1,20 @@
+filters:
+  and:
+    - file.ext == "md"
+    - (now() - file.ctime).days <= 14
+formulas:
+  age_days: (now() - file.ctime).days.round(0)
+  folder: file.folder
+properties:
+  formula.age_days:
+    displayName: Days ago
+  formula.folder:
+    displayName: Section
+views:
+  - type: list
+    name: Last 14 days
+    order:
+      - file.name
+      - type
+      - formula.folder
+      - formula.age_days

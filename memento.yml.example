@@ -1,0 +1,50 @@
+# Memento Vault configuration
+# Copy this to ~/.config/memento-vault/memento.yml or ~/memento/memento.yml
+
+# Where your vault lives (default: ~/memento)
+vault_path: ~/memento
+
+# --- Triage thresholds ---
+# Sessions with more than this many exchanges are considered "substantial"
+exchange_threshold: 15
+
+# Sessions editing more than this many files are considered "substantial"
+file_count_threshold: 3
+
+# File patterns that force a session to be considered substantial
+# (matched anywhere in the file path)
+notable_patterns: [plan, design, MEMORY.md, CLAUDE.md, SKILL.md]
+
+# --- QMD search ---
+# Name of the QMD collection (must match your qmd index.yml)
+# Set to empty string to disable QMD integration
+qmd_collection: memento
+
+# Additional QMD collections to search (e.g., a team knowledge vault)
+# The concierge agent and delta-check will search these too
+# extra_qmd_collections: [my-team-docs]
+
+# --- Project rules ---
+# Map working directories to project slugs and ticket patterns.
+# Rules are checked in order; first match wins.
+# Without rules, the project slug is the directory name and tickets
+# are extracted by a generic [a-z]+-\d+ pattern.
+#
+# project_rules:
+#   - path_contains: "my-company.git"
+#     slug: "my-company"
+#     ticket_pattern: "(PROJ-\\d+)"
+#   - path_contains: "side-project"
+#     slug: "side-project"
+
+# --- Auto-commit ---
+# Automatically git-commit vault changes after triage
+auto_commit: true
+
+# --- Agent ---
+# Claude model to use for generating atomic notes
+agent_model: sonnet
+
+# Seconds to wait before committing agent-generated notes
+# (gives the background agent time to finish writing)
+agent_delay_seconds: 90

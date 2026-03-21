@@ -1,0 +1,555 @@
+#!/usr/bin/env python3
+"""
+Memento triage — runs on SessionEnd.
+Reads hook input from stdin, parses the transcript, scores the session,
+writes a fleeting note or spawns the memento agent.
+"""
+
+import json
+import sys
+import os
+import re
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+# --- Configuration ---
+
+DEFAULT_CONFIG = {
+    "vault_path": str(Path.home() / "memento"),
+    "exchange_threshold": 15,
+    "file_count_threshold": 3,
+    "notable_patterns": ["plan", "design", "MEMORY.md", "CLAUDE.md", "SKILL.md"],
+    "qmd_collection": "memento",
+    "extra_qmd_collections": [],
+    "project_rules": [],
+    "auto_commit": True,
+    "agent_model": "sonnet",
+    "agent_delay_seconds": 90,
+}
+
+
+def load_config():
+    """Load config from memento.yml, falling back to defaults."""
+    config = dict(DEFAULT_CONFIG)
+
+    # Check standard config locations
+    candidates = [
+        Path.home() / ".config" / "memento-vault" / "memento.yml",
+        Path.home() / ".memento-vault.yml",
+    ]
+
+    # Also check vault root
+    vault_path = Path(config["vault_path"])
+    if vault_path.exists():
+        candidates.insert(0, vault_path / "memento.yml")
+
+    for path in candidates:
+        if path.exists():
+            try:
+                # Use PyYAML if available, otherwise simple key: value parsing
+                try:
+                    import yaml
+                    with open(path) as f:
+                        user_config = yaml.safe_load(f) or {}
+                except ImportError:
+                    user_config = _parse_simple_yaml(path)
+
+                config.update({k: v for k, v in user_config.items() if v is not None})
+            except Exception:
+                pass
+            break
+
+    # Resolve vault path
+    config["vault_path"] = str(Path(config["vault_path"]).expanduser())
+    return config
+
+
+def _parse_simple_yaml(path):
+    """Minimal YAML parser for simple key: value configs. No nested structures."""
+    result = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" in line:
+                key, _, value = line.partition(":")
+                key = key.strip()
+                value = value.strip()
+                # Handle booleans
+                if value.lower() in ("true", "yes"):
+                    value = True
+                elif value.lower() in ("false", "no"):
+                    value = False
+                # Handle integers
+                elif value.isdigit():
+                    value = int(value)
+                # Handle lists (simple inline format: [a, b, c])
+                elif value.startswith("[") and value.endswith("]"):
+                    value = [v.strip().strip('"').strip("'") for v in value[1:-1].split(",")]
+                # Strip quotes
+                elif (value.startswith('"') and value.endswith('"')) or \
+                     (value.startswith("'") and value.endswith("'")):
+                    value = value[1:-1]
+                result[key] = value
+    return result
+
+
+CONFIG = None
+
+
+def get_config():
+    global CONFIG
+    if CONFIG is None:
+        CONFIG = load_config()
+    return CONFIG
+
+
+def get_vault():
+    return Path(get_config()["vault_path"])
+
+
+# --- Transcript parsing ---
+
+
+def read_hook_input():
+    """Read JSON from stdin (SessionEnd hook data)."""
+    raw = sys.stdin.read()
+    return json.loads(raw)
+
+
+def parse_transcript(transcript_path):
+    """Parse a Claude transcript JSONL file. Returns metadata dict."""
+    user_count = 0
+    assistant_count = 0
+    files_edited = set()
+    git_branch = None
+    cwd = None
+    first_user_prompt = None
+
+    with open(transcript_path) as f:
+        for line in f:
+            entry = json.loads(line)
+            msg_type = entry.get("type")
+            cwd = cwd or entry.get("cwd")
+            git_branch = git_branch or entry.get("gitBranch")
+
+            if msg_type == "user":
+                user_count += 1
+                msg = entry.get("message", {})
+                content = msg.get("content", "")
+                if isinstance(content, str) and not first_user_prompt:
+                    # Strip system tags from prompt text
+                    cleaned = re.sub(r"<[^>]+>.*?</[^>]+>", "", content, flags=re.DOTALL).strip()
+                    if cleaned:
+                        first_user_prompt = cleaned[:200]
+
+            elif msg_type == "assistant":
+                assistant_count += 1
+                msg = entry.get("message", {})
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            name = block.get("name", "")
+                            inp = block.get("input", {})
+                            if name in ("Edit", "Write"):
+                                fp = inp.get("file_path", "")
+                                if fp:
+                                    files_edited.add(fp)
+
+    exchange_count = min(user_count, assistant_count)
+    return {
+        "cwd": cwd,
+        "git_branch": git_branch,
+        "exchange_count": exchange_count,
+        "user_messages": user_count,
+        "files_edited": sorted(files_edited),
+        "first_prompt": first_user_prompt,
+    }
+
+
+# --- Substantiality scoring ---
+
+
+def is_substantial(meta):
+    """Score whether a session is substantial or trivial."""
+    config = get_config()
+
+    if meta["exchange_count"] > config["exchange_threshold"]:
+        return True
+    if len(meta["files_edited"]) > config["file_count_threshold"]:
+        return True
+
+    notable_patterns = config["notable_patterns"]
+    for f in meta["files_edited"]:
+        for pattern in notable_patterns:
+            if pattern in f:
+                return True
+    return False
+
+
+def has_new_insight(meta):
+    """Delta-check: query QMD for existing coverage of this session's topics.
+    Returns True if the session likely contains new information not already
+    in the vault. Falls back to True if QMD is unavailable."""
+    import shutil
+
+    if not shutil.which("qmd"):
+        return True
+
+    config = get_config()
+
+    # Build a search query from the session's key signals
+    query_parts = []
+    if meta["first_prompt"]:
+        query_parts.append(meta["first_prompt"][:120])
+    if meta["git_branch"] and meta["git_branch"] != "HEAD":
+        branch_words = re.sub(r"[^a-z0-9]", " ", meta["git_branch"].lower()).strip()
+        if branch_words:
+            query_parts.append(branch_words)
+
+    if not query_parts:
+        return True
+
+    query = " ".join(query_parts)
+
+    try:
+        result = subprocess.run(
+            ["qmd", "search", query, "-c", config["qmd_collection"], "-n", "5"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return True
+
+        lines = result.stdout.strip().splitlines()
+        hit_count = sum(1 for line in lines if line.strip() and not line.startswith("#"))
+
+        # Also check extra collections for broader coverage
+        for extra in config.get("extra_qmd_collections", []):
+            try:
+                extra_result = subprocess.run(
+                    ["qmd", "search", query, "-c", extra, "-n", "3"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if extra_result.returncode == 0:
+                    extra_lines = extra_result.stdout.strip().splitlines()
+                    hit_count += sum(1 for line in extra_lines if line.strip() and not line.startswith("#"))
+            except Exception:
+                pass
+
+        if hit_count < 3:
+            return True
+
+        # Even with good coverage, new files mean new work
+        if len(meta["files_edited"]) > 0:
+            vault_path = get_config()["vault_path"]
+            non_vault = [f for f in meta["files_edited"]
+                         if vault_path not in f]
+            if non_vault:
+                return True
+
+        return False
+
+    except (subprocess.TimeoutExpired, Exception):
+        return True
+
+
+# --- Helpers ---
+
+
+def slugify(text):
+    """Simple slug from text."""
+    text = text.lower().strip()
+    text = re.sub(r"[^a-z0-9\s-]", "", text)
+    text = re.sub(r"[\s-]+", "-", text)
+    return text[:80]
+
+
+def detect_project(cwd, git_branch):
+    """Derive a project slug and optional ticket from the working directory and branch.
+    Returns (project_slug, ticket_or_none).
+
+    Checks project_rules from config first. Each rule has:
+      path_contains: string to match in the cwd
+      slug: project slug to use
+      ticket_pattern: regex for extracting ticket from branch (optional)
+    Falls back to generic detection if no rule matches.
+    """
+    if not cwd:
+        return "unknown", None
+
+    config = get_config()
+    rules = config.get("project_rules", [])
+
+    for rule in rules:
+        if isinstance(rule, dict) and rule.get("path_contains") and rule["path_contains"] in cwd:
+            ticket = None
+            if git_branch and rule.get("ticket_pattern"):
+                match = re.search(rule["ticket_pattern"], git_branch, re.IGNORECASE)
+                if match:
+                    ticket = match.group(1).upper() if match.lastindex else match.group(0).upper()
+            return rule.get("slug", slugify(Path(cwd).name)), ticket
+
+    # Default: generic ticket detection and directory-based slug
+    ticket = None
+    if git_branch:
+        match = re.search(r"([a-z]+-\d+)", git_branch, re.IGNORECASE)
+        if match:
+            ticket = match.group(1).upper()
+
+    return slugify(Path(cwd).name) or "misc", ticket
+
+
+def ensure_project_index(project_slug, cwd, git_branch):
+    """Create or return path to project index file."""
+    project_file = get_vault() / "projects" / f"{project_slug}.md"
+    if not project_file.exists():
+        lines = [
+            "---",
+            f"title: {project_slug}",
+            f"project: {cwd or 'unknown'}",
+        ]
+        if git_branch and git_branch != "HEAD":
+            lines.append(f"branch: {git_branch}")
+        lines.extend(["---", "", "## Notes", "", "## Sessions", ""])
+        project_file.write_text("\n".join(lines))
+    return project_file
+
+
+def append_session_to_project(project_file, session_id, summary, ticket=None):
+    """Append a session line to the project index."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    line = f"- {today} `{session_id}` — {summary}\n"
+    content = project_file.read_text()
+
+    if ticket:
+        ticket_header = f"## {ticket}:"
+        if ticket_header in content:
+            idx = content.index(ticket_header)
+            next_section = content.find("\n## ", idx + len(ticket_header))
+            if next_section == -1:
+                content = content.rstrip("\n") + "\n" + line
+            else:
+                content = content[:next_section].rstrip("\n") + "\n" + line + "\n" + content[next_section:]
+        else:
+            content = content.rstrip("\n") + f"\n\n## {ticket}\n\n" + line
+    else:
+        if "## Sessions" in content:
+            content = content.rstrip("\n") + "\n" + line
+        else:
+            content += f"\n## Sessions\n{line}"
+
+    project_file.write_text(content)
+
+
+def write_fleeting(session_id, meta, project_slug):
+    """Write a one-liner to today's fleeting note."""
+    vault = get_vault()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now = datetime.now(timezone.utc).strftime("%H:%M")
+    fleeting_file = vault / "fleeting" / f"{today}.md"
+
+    if not fleeting_file.exists():
+        fleeting_file.write_text(f"# {today}\n\n")
+
+    branch_str = ""
+    if meta["git_branch"] and meta["git_branch"] != "HEAD":
+        branch_str = f" ({meta['git_branch']})"
+
+    files_str = ""
+    if meta["files_edited"]:
+        files_str = f", {len(meta['files_edited'])} files edited"
+
+    prompt_str = ""
+    if meta["first_prompt"]:
+        prompt_str = meta["first_prompt"][:100]
+        if len(meta["first_prompt"]) > 100:
+            prompt_str += "..."
+
+    line = (
+        f"- {now} `{session_id}` {meta['cwd'] or '?'}{branch_str}"
+        f" — {meta['exchange_count']} exchanges{files_str}"
+    )
+    if prompt_str:
+        line += f" — {prompt_str}"
+    line += "\n"
+
+    with open(fleeting_file, "a") as f:
+        f.write(line)
+
+
+def build_session_summary(meta):
+    """Build a short summary string for the project index."""
+    parts = []
+    if meta["first_prompt"]:
+        parts.append(meta["first_prompt"][:80])
+    else:
+        parts.append(f"{meta['exchange_count']} exchanges")
+    if meta["files_edited"]:
+        parts.append(f"{len(meta['files_edited'])} files")
+    return ", ".join(parts)
+
+
+# --- Vault operations ---
+
+
+VAULT_COMMIT = Path(__file__).parent / "vault-commit.sh"
+
+
+def vault_commit(message="auto: vault update", delay_seconds=0):
+    """Commit all vault changes. Runs detached. Optional delay for agent writes."""
+    commit_script = str(VAULT_COMMIT)
+    if not VAULT_COMMIT.exists():
+        # Fall back to looking in the install location
+        commit_script = str(Path.home() / ".claude" / "hooks" / "vault-commit.sh")
+
+    script = f"""
+import subprocess, time
+if {delay_seconds} > 0:
+    time.sleep({delay_seconds})
+subprocess.run(["{commit_script}", "{message}"], capture_output=True)
+"""
+    subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def reindex_qmd(delay_seconds=0):
+    """Reindex the memento collection in QMD. Runs detached. No-op if QMD is not installed."""
+    import shutil
+    if not shutil.which("qmd"):
+        return
+
+    config = get_config()
+    collection = config["qmd_collection"]
+
+    script = f"""
+import subprocess, time, shutil
+if {delay_seconds} > 0:
+    time.sleep({delay_seconds})
+if shutil.which("qmd"):
+    subprocess.run(["qmd", "update", "-c", "{collection}"], capture_output=True)
+    subprocess.run(["qmd", "embed"], capture_output=True)
+"""
+    subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
+    """Spawn a background Claude call to generate atomic notes."""
+    config = get_config()
+    vault = get_vault()
+
+    prompt = f"""You are the Memento agent. Read the transcript and create atomic Zettelkasten notes.
+
+Session ID: {session_id}
+Project: {meta['cwd']}
+Branch: {meta.get('git_branch', 'unknown')}
+Files edited: {json.dumps(meta['files_edited'])}
+
+Transcript path: {transcript_path}
+
+Instructions:
+1. Read the transcript at the path above
+2. Identify distinct decisions, discoveries, patterns, bugfixes, or tools from this session
+3. For each one, create an atomic note in {vault}/notes/
+4. Each note must have YAML frontmatter with: title, type (decision|discovery|pattern|bugfix|tool), tags, source: session, certainty (1-5), validity-context (optional), supersedes (optional wikilink), project (full cwd path), branch, date (ISO 8601 with time: YYYY-MM-DDTHH:MM), session_id
+   Certainty scale: 1=speculative, 2=observed once, 3=confirmed in code, 4=tested/shipped, 5=established pattern
+   validity-context: short phrase for what this note depends on. Omit if unconditionally true.
+   supersedes: if this note replaces an older one, add [[older-note-name]].
+5. Name files as slugified concept titles (e.g., redis-cache-requires-explicit-ttl.md)
+6. Search existing notes in {vault}/notes/ for related topics and add [[wikilinks]]
+7. Add a Related section at the bottom of each note linking to related existing notes
+8. Update the project index at {vault}/projects/{project_slug}.md — add [[note-name]] links under the Notes section
+9. Never overwrite or delete existing notes
+10. Never write to fleeting/
+"""
+
+    cmd = [
+        "claude",
+        "--print",
+        "--model", config["agent_model"],
+        "--dangerously-skip-permissions",
+        "--no-session-persistence",
+        "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep",
+        "--add-dir", str(vault),
+        "-p", prompt,
+    ]
+
+    subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+# --- Main ---
+
+
+def main():
+    try:
+        hook_input = read_hook_input()
+    except (json.JSONDecodeError, Exception):
+        sys.exit(0)
+
+    session_id = hook_input.get("session_id", "unknown")
+    transcript_path = hook_input.get("transcript_path")
+
+    if not transcript_path or not os.path.exists(transcript_path):
+        sys.exit(0)
+
+    try:
+        meta = parse_transcript(transcript_path)
+    except Exception:
+        sys.exit(0)
+
+    if not meta["cwd"]:
+        meta["cwd"] = hook_input.get("cwd")
+
+    if meta["exchange_count"] < 2:
+        sys.exit(0)
+
+    config = get_config()
+    vault = get_vault()
+
+    # Ensure vault directories exist
+    (vault / "fleeting").mkdir(parents=True, exist_ok=True)
+    (vault / "notes").mkdir(parents=True, exist_ok=True)
+    (vault / "projects").mkdir(parents=True, exist_ok=True)
+    (vault / "archive").mkdir(parents=True, exist_ok=True)
+
+    project_slug, ticket = detect_project(meta["cwd"], meta["git_branch"])
+
+    write_fleeting(session_id, meta, project_slug)
+
+    project_file = ensure_project_index(project_slug, meta["cwd"], meta["git_branch"])
+    summary = build_session_summary(meta)
+    append_session_to_project(project_file, session_id, summary, ticket=ticket)
+
+    if config["auto_commit"]:
+        vault_commit(f"auto: triage session {session_id[:8]}")
+
+    if is_substantial(meta) and has_new_insight(meta):
+        spawn_memento_agent(session_id, transcript_path, meta, project_slug)
+        delay = config["agent_delay_seconds"]
+        if config["auto_commit"]:
+            vault_commit(f"auto: notes from session {session_id[:8]}", delay_seconds=delay)
+        reindex_qmd(delay_seconds=delay + 5)
+    else:
+        reindex_qmd()
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

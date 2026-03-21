@@ -1,0 +1,23 @@
+filters:
+  and:
+    - type != null
+properties:
+  file.name:
+    displayName: Note
+  type:
+    displayName: Type
+  date:
+    displayName: Date
+  project:
+    displayName: Project
+views:
+  - type: table
+    name: By tag
+    groupBy:
+      property: tags
+      direction: ASC
+    order:
+      - file.name
+      - type
+      - date
+      - project

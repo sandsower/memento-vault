@@ -1,0 +1,17 @@
+# QMD collection config for memento vault
+# Merge this into your ~/.config/qmd/index.yml under the "collections:" key
+#
+# Example ~/.config/qmd/index.yml:
+#   collections:
+#     memento:
+#       path: ~/memento
+#       pattern: "**/*.md"
+#       context:
+#         "": Personal knowledge vault with session notes, decisions, discoveries, and project history from Claude Code sessions.
+
+collections:
+  memento:
+    path: ~/memento
+    pattern: "**/*.md"
+    context:
+      "": Personal knowledge vault with session notes, decisions, discoveries, and project history from Claude Code sessions. Contains fleeting daily logs, atomic permanent notes, and project indexes.

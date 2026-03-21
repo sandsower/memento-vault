@@ -1,0 +1,25 @@
+filters:
+  and:
+    - type == "decision"
+properties:
+  file.name:
+    displayName: Note
+  type:
+    displayName: Type
+  date:
+    displayName: Date
+  project:
+    displayName: Project
+  tags:
+    displayName: Tags
+views:
+  - type: table
+    name: Decisions
+    groupBy:
+      property: date
+      direction: DESC
+    order:
+      - file.name
+      - date
+      - project
+      - tags
