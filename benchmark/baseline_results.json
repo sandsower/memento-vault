@@ -1,0 +1,17 @@
+{
+  "run_date": "2026-03-22",
+  "dataset": "longmemeval_s",
+  "num_questions": 500,
+  "config": "default (BM25 + PRF, no reranker)",
+  "metrics": {
+    "recall@1": 0.550,
+    "recall@3": 0.859,
+    "recall@5": 0.909,
+    "recall@10": 0.942,
+    "mrr": 0.907,
+    "ndcg@1": 0.864,
+    "ndcg@3": 0.861,
+    "ndcg@5": 0.878,
+    "ndcg@10": 0.892
+  }
+}

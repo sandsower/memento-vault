@@ -59,15 +59,16 @@ All three hooks stay silent when they have nothing relevant. Zero tokens injecte
 
 ### Performance
 
-Benchmarked against 30 real sessions (341 prompts, 362 file reads, 16 projects):
+Benchmarked against 30 real sessions (410 prompts, 414 file reads, 16 projects):
 
 | Metric | Value |
 |---|---|
-| Avg injected per session | ~555 chars (~139 input units) |
+| Avg injected per session | ~505 chars (~126 input units) |
 | Effective hit rate | 100% (when hooks search, they find relevant notes) |
-| Avg recall latency | 792ms per prompt |
-| Avg tool-context latency | 141ms per file read |
-| Session briefing | <83ms (deferred QMD search is non-blocking) |
+| Avg recall latency | 443ms per prompt (adaptive pipeline) |
+| Avg tool-context latency | 215ms per file read |
+| Session briefing | <284ms (deferred QMD search is non-blocking) |
+| LongMemEval NDCG@10 | 0.892 (retrieval quality, 500 questions) |
 
 Full analysis with methodology, industry comparison, and optimization details in [docs/performance-analysis.md](docs/performance-analysis.md).
 
