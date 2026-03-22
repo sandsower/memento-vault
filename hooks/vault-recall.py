@@ -15,7 +15,7 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input
+from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm
 
 LAST_RECALL_PATH = "/tmp/memento-last-recall.json"
 DEFERRED_BRIEFING_PATH = "/tmp/memento-deferred-briefing.json"
@@ -170,6 +170,12 @@ def consume_deferred_briefing():
         note_lines = data.get("note_lines", [])
         os.unlink(DEFERRED_BRIEFING_PATH)
 
+        # Mark vsearch as warm for RRF hybrid search
+        try:
+            mark_vsearch_warm()
+        except Exception:
+            pass
+
         if not note_lines:
             return []
 
@@ -223,15 +229,47 @@ def run_recall():
             query = f"{prompt} {project_slug.replace('-', ' ')}"
 
     t0 = time.time()
-    results = qmd_search_with_extras(
-        query,
-        limit=max_notes + 4,  # overfetch for dedup + enhancement filtering
-        semantic=False,  # BM25 for speed — vsearch is too slow per-prompt
-        timeout=5,
-        min_score=min_score,
-    )
+
+    if config.get("rrf_enabled", True) and is_vsearch_warm():
+        # Warm path: BM25 + vsearch in parallel, fuse with RRF
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            bm25_future = pool.submit(
+                qmd_search_with_extras, query,
+                limit=max_notes + 4, semantic=False, timeout=5, min_score=min_score,
+            )
+            vec_future = pool.submit(
+                qmd_search_with_extras, query,
+                limit=max_notes + 4, semantic=True, timeout=5, min_score=min_score,
+            )
+            bm25_results = bm25_future.result()
+            vec_results = vec_future.result()
+
+        results = rrf_fuse([bm25_results, vec_results], k=config.get("rrf_k", 60))
+    else:
+        # Cold path: BM25 only (current behavior)
+        results = qmd_search_with_extras(
+            query, limit=max_notes + 4, semantic=False, timeout=5, min_score=min_score,
+        )
+
     latency_ms = int((time.time() - t0) * 1000)
     results_before = len(results)
+
+    # Supplement with concept index if enabled
+    if config.get("concept_index_enabled", True):
+        try:
+            from memento_utils import lookup_concepts
+            concept_hits = lookup_concepts(prompt)
+            if concept_hits:
+                existing_paths = {r.get("path", "") for r in results}
+                for hit in concept_hits:
+                    if hit["path"] not in existing_paths:
+                        hit["score"] = max(hit.get("score", 0), config.get("concept_index_score", 0.5))
+                        results.append(hit)
+                        existing_paths.add(hit["path"])
+        except Exception:
+            pass  # Non-fatal — concept index is supplementary
 
     if not results:
         bump_prompts_since()

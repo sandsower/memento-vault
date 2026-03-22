@@ -301,6 +301,36 @@ def main():
     if len(output_lines) > 1:
         print("\n".join(output_lines))
 
+    # --- Fast path: project maps (skip deferred vsearch if maps have enough results) ---
+    if config.get("project_maps_enabled", True) and has_qmd():
+        try:
+            from memento_utils import lookup_project_notes
+            max_notes = config.get("briefing_max_notes", 5)
+            map_notes = lookup_project_notes(project_slug, limit=max_notes)
+            if len(map_notes) >= max_notes:
+                # Project maps have enough context — format and write as ready
+                note_lines = []
+                for note in map_notes[:max_notes]:
+                    title = note.get("title", "")
+                    note_lines.append(f"  - {title}")
+
+                # Write directly as ready (skip deferred vsearch)
+                import json as _json
+                with open(DEFERRED_BRIEFING_PATH, "w") as f:
+                    _json.dump({
+                        "status": "ready",
+                        "note_lines": note_lines,
+                        "timestamp": time.time(),
+                        "source": "project-maps",
+                    }, f)
+
+                from memento_utils import log_retrieval
+                log_retrieval("briefing", "project-maps-fast-path",
+                              project=project_slug, injected_count=len(note_lines))
+                return  # Skip deferred vsearch
+        except Exception:
+            pass  # Fall through to deferred vsearch
+
     # --- Async: spawn background QMD search ---
 
     if has_qmd():

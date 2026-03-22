@@ -961,6 +961,19 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         if total_changes > 0 and not args.dry_run:
             _commit_and_reindex(total_changes, config)
 
+            try:
+                maps = build_project_maps(vault_path)
+                write_project_maps(maps)
+            except Exception:
+                pass  # Non-fatal
+
+            # Build retrieval indexes for Tenet
+            try:
+                index = build_concept_index(vault_path)
+                write_concept_index(index)
+            except Exception:
+                pass  # Non-fatal — retrieval degrades gracefully
+
         if args.verbose:
             parts = [f"{clusters_processed} clusters"]
             if notes_written:
@@ -992,6 +1005,164 @@ def _update_state(state, state_path, notes, clusters_processed, notes_written, d
         state.get("processed_notes", []) + [n.stem for n in notes]
     ))
     save_inception_state(state, state_path=state_path)
+
+
+def build_project_maps(vault_path):
+    """Scan all notes and group them by project field.
+
+    Returns:
+        dict mapping project_slug -> [{stem, title, certainty, date}, ...]
+        Ranked by certainty desc then date desc, capped at 20 per project.
+    """
+    notes_dir = Path(vault_path) / "notes"
+    if not notes_dir.exists():
+        return {}
+
+    projects = {}  # project_path -> list of dicts
+    for md_file in sorted(notes_dir.glob("*.md")):
+        if md_file.name.startswith("."):
+            continue
+        record = parse_note(md_file)
+        if record is None or not record.project:
+            continue
+        slug = slugify(Path(record.project).name)
+        if not slug:
+            continue
+        projects.setdefault(slug, []).append({
+            "stem": record.stem,
+            "title": record.title,
+            "certainty": record.certainty if record.certainty is not None else 2,
+            "date": record.date or "",
+        })
+
+    # Rank each project's notes: certainty desc, date desc
+    for slug in projects:
+        projects[slug].sort(key=lambda e: (e["certainty"], e["date"]), reverse=True)
+        projects[slug] = projects[slug][:20]
+
+    return projects
+
+
+def write_project_maps(maps, config_dir=None):
+    """Atomic write of project maps to config dir.
+
+    JSON format: {"version": 1, "built_at": ISO, "maps": {slug: [...]}}
+    """
+    if config_dir is None:
+        config_dir = os.path.join(
+            os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
+            "memento-vault",
+        )
+    config_dir = Path(config_dir)
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "version": 1,
+        "built_at": datetime.now().isoformat(timespec="seconds"),
+        "maps": maps,
+    }
+
+    target = config_dir / "project-maps.json"
+    tmp = config_dir / ".project-maps.json.tmp"
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(str(tmp), str(target))
+
+
+# Stopwords for concept index tokenization (same set used by retrieval)
+_CONCEPT_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+    "had", "has", "have", "he", "her", "his", "how", "if", "in", "into",
+    "is", "it", "its", "may", "no", "not", "of", "on", "or", "our", "out",
+    "per", "she", "so", "than", "that", "the", "their", "them", "then",
+    "there", "these", "they", "this", "to", "too", "use", "very", "was",
+    "we", "were", "what", "when", "which", "who", "why", "will", "with",
+    "you", "your",
+    "all", "also", "any", "been", "can", "could", "did", "do", "does",
+    "each", "get", "got", "just", "more", "most", "much", "must", "need",
+    "new", "now", "old", "one", "only", "other", "own", "same", "set",
+    "should", "some", "such", "take", "two", "way", "well", "would",
+    # common markdown / note words
+    "cross", "project", "patterns", "pattern", "notes", "note",
+})
+
+
+def _tokenize_keywords(text):
+    """Tokenize text into lowercase keywords, stripping punctuation."""
+    words = re.sub(r"[^a-zA-Z0-9\s-]", "", text.lower()).split()
+    return [w for w in words if len(w) >= 3 and w not in _CONCEPT_STOPWORDS]
+
+
+def build_concept_index(vault_path):
+    """Scan notes/*.md for inception pattern notes and build an inverted keyword index.
+
+    Returns:
+        dict mapping keyword -> [{stem, title, score}, ...]
+    """
+    notes_dir = Path(vault_path) / "notes"
+    if not notes_dir.exists():
+        return {}
+
+    index = {}  # keyword -> list of {stem, title, score}
+
+    for md_file in sorted(notes_dir.glob("*.md")):
+        if md_file.name.startswith("."):
+            continue
+        record = parse_note(md_file)
+        if record is None or record.source != "inception":
+            continue
+
+        # Score from certainty: certainty / 5, default 0.6
+        score = record.certainty / 5.0 if record.certainty is not None else 0.6
+
+        # Collect keywords from: title words, tags, synthesized_from stems
+        keywords = set()
+
+        # Title words
+        keywords.update(_tokenize_keywords(record.title))
+
+        # Tags (lowercased, as-is — already single words)
+        for tag in record.tags:
+            tag_lower = tag.lower().strip()
+            if len(tag_lower) >= 3 and tag_lower not in _CONCEPT_STOPWORDS:
+                keywords.add(tag_lower)
+
+        # synthesized_from stems: split on hyphens to get words
+        for stem in record.synthesized_from:
+            for word in stem.split("-"):
+                word = word.lower().strip()
+                if len(word) >= 3 and word not in _CONCEPT_STOPWORDS:
+                    keywords.add(word)
+
+        entry = {"stem": record.stem, "title": record.title, "score": score}
+        for kw in keywords:
+            index.setdefault(kw, []).append(entry)
+
+    return index
+
+
+def write_concept_index(index, config_dir=None):
+    """Atomic write of concept index to config dir.
+
+    JSON format: {"version": 1, "built_at": ISO, "index": {keyword: [{stem, title, score}]}}
+    """
+    if config_dir is None:
+        config_dir = os.path.join(
+            os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
+            "memento-vault",
+        )
+    config_dir = Path(config_dir)
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "version": 1,
+        "built_at": datetime.now().isoformat(timespec="seconds"),
+        "index": index,
+    }
+
+    target = config_dir / "concept-index.json"
+    tmp = config_dir / ".concept-index.json.tmp"
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(str(tmp), str(target))
 
 
 def _commit_and_reindex(notes_written, config):
