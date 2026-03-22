@@ -326,11 +326,19 @@ Instructions:
    validity-context: short phrase for what this note depends on. Omit if unconditionally true.
    supersedes: if this note replaces an older one, add [[older-note-name]].
 5. Name files as slugified concept titles (e.g., redis-cache-requires-explicit-ttl.md)
-6. Search existing notes in {vault}/notes/ for related topics and add [[wikilinks]]
-7. Add a Related section at the bottom of each note linking to related existing notes
-8. Update the project index at {vault}/projects/{project_slug}.md — add [[note-name]] links under the Notes section
-9. Never overwrite or delete existing notes
-10. Never write to fleeting/
+6. DEDUP CHECK: Before writing each note, search {vault}/notes/ for existing notes on the same topic.
+   Read the top 2-3 matches by filename/title similarity. Then decide:
+   - If an existing note covers the same ground with equal or higher certainty: SKIP this note entirely.
+   - If an existing note covers the same topic but this session has new evidence (higher certainty,
+     additional details, a correction): write the new note with supersedes: "[[existing-note-name]]"
+     in frontmatter. Set certainty >= the old note's certainty. Add a line in the body:
+     "Supersedes [[old-note]] — [what changed]."
+   - If no existing note matches: write normally.
+7. Search existing notes in {vault}/notes/ for related topics and add [[wikilinks]]
+8. Add a Related section at the bottom of each note linking to related existing notes
+9. Update the project index at {vault}/projects/{project_slug}.md — add [[note-name]] links under the Notes section
+10. Never overwrite or delete existing notes
+11. Never write to fleeting/
 """
 
     cmd = [

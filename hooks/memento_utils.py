@@ -559,6 +559,45 @@ def read_note_metadata(note_name):
     return {"date": date, "certainty": certainty, "type": note_type, "project": project, "links": links}
 
 
+def note_is_superseded(note_name):
+    """Check if a note has been superseded by a newer note.
+
+    Scans all notes in the vault for a `supersedes` frontmatter field
+    that references this note. Returns the superseding note name if found,
+    or None.
+
+    Args:
+        note_name: Note filename stem (e.g., 'redis-cache-ttl').
+    """
+    vault = get_vault()
+    notes_dir = vault / "notes"
+    if not notes_dir.exists():
+        return None
+
+    target = f"[[{note_name}]]"
+    for note_path in notes_dir.glob("*.md"):
+        if note_path.stem == note_name:
+            continue
+        try:
+            with open(note_path) as f:
+                in_frontmatter = False
+                for line in f:
+                    stripped = line.strip()
+                    if stripped == "---":
+                        if not in_frontmatter:
+                            in_frontmatter = True
+                            continue
+                        else:
+                            break  # end of frontmatter
+                    if in_frontmatter and stripped.startswith("supersedes:"):
+                        if target in stripped:
+                            return note_path.stem
+        except OSError:
+            continue
+
+    return None
+
+
 def apply_temporal_decay(results, config=None):
     """Apply temporal decay to search results based on note age and certainty.
 

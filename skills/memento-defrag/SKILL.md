@@ -21,7 +21,7 @@ The vault location is configured in `memento.yml` (default: `~/memento`). Check 
 
 2. **Identify archive candidates.** A note is a candidate if ANY of these are true:
    - `certainty` is 1 or 2 AND the note is older than 60 days
-   - The note has a `supersedes` field (the superseding note is the active one)
+   - The note is superseded: another note's `supersedes` field references this note AND the superseding note is older than 14 days (grace period in case the new note is wrong)
    - `validity-context` references a dependency or version that has since changed (check `package.json` or similar if accessible)
    - `type: bugfix` AND older than 90 days (bugfix context decays fast)
 
