@@ -469,6 +469,36 @@ if [ "$QMD_AVAILABLE" = true ]; then
     fi
 fi
 
+# --- Shell warmup (optional) ---
+
+if [ "$QMD_AVAILABLE" = true ]; then
+    # Detect shell rc file
+    SHELL_RC=""
+    case "$(basename "${SHELL:-/bin/bash}")" in
+        zsh)  SHELL_RC="$HOME/.zshrc" ;;
+        bash) SHELL_RC="$HOME/.bashrc" ;;
+        fish) SHELL_RC="$HOME/.config/fish/config.fish" ;;
+    esac
+
+    WARMUP_MARKER="qmd vsearch.*warmup"
+    if [ -n "$SHELL_RC" ] && [ -f "$SHELL_RC" ]; then
+        if grep -qE "$WARMUP_MARKER" "$SHELL_RC" 2>/dev/null; then
+            info "QMD model warmup already in $SHELL_RC"
+        else
+            echo ""
+            read -rp "Add QMD model warmup to $SHELL_RC? (faster session briefings) [Y/n] " warmup
+            if [[ ! "$warmup" =~ ^[Nn] ]]; then
+                cat >> "$SHELL_RC" << 'WARMUP_EOF'
+
+# Warm QMD embedding model on shell startup (background, silent)
+command -v qmd &>/dev/null && qmd vsearch "warmup" -c memento -n 1 &>/dev/null &
+WARMUP_EOF
+                info "Added QMD warmup to $SHELL_RC"
+            fi
+        fi
+    fi
+fi
+
 # --- Done ---
 
 step "Installation complete! (v${NEW_VERSION})"

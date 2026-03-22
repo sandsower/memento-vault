@@ -29,6 +29,15 @@ MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 - [QMD](https://github.com/tobi/qmd) (optional, semantic search)
 - [Obsidian](https://obsidian.md) (optional, browsing)
 
+## Retrieval
+
+Knowledge flows back into active sessions automatically via two hooks:
+
+- **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens
+- **Prompt recall** (UserPromptSubmit): runs BM25 keyword search on each prompt and surfaces matching notes before Claude processes it
+
+Both hooks are silent when they have nothing relevant — zero tokens injected on trivial prompts like "yes" or "git status". Requires QMD.
+
 ## What you get
 
 ```
@@ -72,9 +81,14 @@ Config lives at `~/.config/memento-vault/memento.yml`. All options in [docs/conf
 vault_path: ~/memento
 exchange_threshold: 15
 file_count_threshold: 3
-notable_patterns: [plan, design, MEMORY.md, CLAUDE.md, SKILL.md]
 qmd_collection: memento
 auto_commit: true
+
+# Retrieval hooks
+session_briefing: true      # inject vault notes at session start
+briefing_max_notes: 5
+prompt_recall: true          # inject vault notes per prompt
+recall_max_notes: 3
 ```
 
 ### Extension points
@@ -87,13 +101,22 @@ Three ways to layer project-specific behavior on top without forking:
 
 ## QMD (optional)
 
-QMD adds semantic search over your vault. Without it the concierge agent falls back to grep, which works for keyword searches but misses conceptual matches.
+QMD adds semantic search over your vault. Without it the concierge agent falls back to grep, which works for keyword searches but misses conceptual matches. QMD also powers the retrieval hooks (session briefing and prompt recall).
 
 ```bash
 qmd search "caching strategy" -c memento
 ```
 
 The concierge agent uses QMD automatically when you ask about past decisions.
+
+### Model warmup
+
+The session briefing hook uses vector search, which requires loading an embedding model. First call after a reboot takes 6-8s; subsequent calls are ~1.5s (model stays in OS page cache). The installer can add a background warmup to your shell rc file so the model is always cached:
+
+```bash
+# Added to .zshrc/.bashrc by the installer (optional)
+command -v qmd &>/dev/null && qmd vsearch "warmup" -c memento -n 1 &>/dev/null &
+```
 
 ## Obsidian (optional)
 
