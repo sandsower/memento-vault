@@ -5,6 +5,7 @@ Config loading, project detection, QMD queries.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -332,6 +333,7 @@ def read_note_metadata(note_name):
     date = None
     certainty = None
     note_type = None
+    project = None
     links = []
 
     try:
@@ -358,6 +360,8 @@ def read_note_metadata(note_name):
                             pass
                     elif stripped.startswith("type:"):
                         note_type = stripped[5:].strip()
+                    elif stripped.startswith("project:"):
+                        project = stripped[8:].strip().strip('"').strip("'")
                 if past_frontmatter:
                     # Extract wikilinks from body
                     for match in re.finditer(r"\[\[([^\]]+)\]\]", line):
@@ -365,7 +369,7 @@ def read_note_metadata(note_name):
     except OSError:
         return None
 
-    return {"date": date, "certainty": certainty, "type": note_type, "links": links}
+    return {"date": date, "certainty": certainty, "type": note_type, "project": project, "links": links}
 
 
 def apply_temporal_decay(results, config=None):
@@ -505,15 +509,64 @@ def expand_wikilinks(results, config=None):
     return all_results
 
 
-def enhance_results(results, config=None):
-    """Apply all retrieval enhancements: temporal decay + wikilink expansion.
+def filter_by_project(results, cwd):
+    """Filter results to notes matching the current project.
+
+    Notes with a `project` field that doesn't match cwd are excluded.
+    Notes without a `project` field (general knowledge) pass through.
+    """
+    if not cwd:
+        return results
+
+    # Normalize cwd: resolve symlinks, strip trailing slash
+    try:
+        cwd = os.path.realpath(cwd).rstrip("/")
+    except (OSError, ValueError):
+        return results
+
+    filtered = []
+    for r in results:
+        meta = r.get("_meta")
+        if meta is None:
+            note_name = Path(r.get("path", "")).stem
+            if note_name:
+                meta = read_note_metadata(note_name)
+                r["_meta"] = meta
+
+        if meta is None:
+            filtered.append(r)  # Can't read metadata — keep it
+            continue
+
+        note_project = meta.get("project")
+        if not note_project:
+            filtered.append(r)  # No project field — general knowledge
+            continue
+
+        # Match if cwd starts with (or equals) the note's project path
+        try:
+            note_project = os.path.realpath(note_project).rstrip("/")
+        except (OSError, ValueError):
+            pass
+
+        if cwd.startswith(note_project) or note_project.startswith(cwd):
+            filtered.append(r)
+
+    return filtered
+
+
+def enhance_results(results, config=None, cwd=None):
+    """Apply all retrieval enhancements: project filter, temporal decay,
+    wikilink expansion.
 
     Call this after qmd_search to improve result quality.
+    Pass cwd to filter out notes from unrelated projects.
     """
     if config is None:
         config = get_config()
 
     results = apply_temporal_decay(results, config)
+    if cwd:
+        results = filter_by_project(results, cwd)
     results = expand_wikilinks(results, config)
 
     # Clean internal metadata before returning

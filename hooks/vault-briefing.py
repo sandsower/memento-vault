@@ -155,6 +155,7 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
         "max_notes": max_notes,
         "min_score": min_score,
         "linked_notes": linked_notes,
+        "cwd": config.get("_cwd", ""),
         "timestamp": time.time(),
     }
 
@@ -203,7 +204,7 @@ def run_deferred_search():
             min_score=min_score,
         )
 
-        results = enhance_results(results)
+        results = enhance_results(results, cwd=params.get("cwd", ""))
 
         # Format results, dedup against linked notes
         seen = set()
@@ -294,6 +295,7 @@ def main():
     # --- Async: spawn background QMD search ---
 
     if has_qmd():
+        config["_cwd"] = cwd
         spawn_deferred_search(project_slug, git_branch, linked_notes, config)
 
 

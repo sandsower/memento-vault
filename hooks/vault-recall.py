@@ -189,6 +189,7 @@ def run_recall():
         return [], None
 
     prompt = hook_input.get("prompt", "")
+    cwd = hook_input.get("cwd", "")
     if not prompt:
         return [], None
 
@@ -212,7 +213,7 @@ def run_recall():
         bump_prompts_since()
         return [], None
 
-    results = enhance_results(results, config)
+    results = enhance_results(results, config, cwd=cwd)
 
     if not results:
         bump_prompts_since()

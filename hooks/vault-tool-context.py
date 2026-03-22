@@ -250,6 +250,7 @@ def main():
         sys.exit(0)
 
     file_path = hook_input.get("tool_input", {}).get("file_path", "")
+    cwd = hook_input.get("cwd", "")
     if not file_path:
         sys.exit(0)
 
@@ -307,7 +308,7 @@ def main():
             min_score=min_score,
         )
 
-        results = enhance_results(results, config)
+        results = enhance_results(results, config, cwd=cwd)
 
         # Cache results (even if empty)
         cache["last_qmd_call"] = time.time()
