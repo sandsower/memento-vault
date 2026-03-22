@@ -315,8 +315,8 @@ mkdir -p "$CLAUDE_DIR/hooks"
 HOOKS_UPDATED=0
 HOOKS_SKIPPED=0
 
-STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py memento-inception.py"
-EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py"
+STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py"
+EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py memento-inception.py"
 
 if [ "$EXPERIMENTAL" = true ]; then
     INSTALL_HOOKS="$STABLE_HOOKS $EXPERIMENTAL_HOOKS"
@@ -347,7 +347,12 @@ step "Installing Claude Code skills..."
 SKILLS_UPDATED=0
 SKILLS_SKIPPED=0
 
-for skill in memento memento-defrag start-fresh continue-work inception; do
+INSTALL_SKILLS="memento memento-defrag start-fresh continue-work"
+if [ "$EXPERIMENTAL" = true ]; then
+    INSTALL_SKILLS="$INSTALL_SKILLS inception"
+fi
+
+for skill in $INSTALL_SKILLS; do
     mkdir -p "$CLAUDE_DIR/skills/$skill"
     if safe_copy "$SCRIPT_DIR/skills/$skill/SKILL.md" "$CLAUDE_DIR/skills/$skill/SKILL.md" "skills/$skill"; then
         ((SKILLS_UPDATED++)) || true

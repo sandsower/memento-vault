@@ -30,7 +30,7 @@ The stable install captures knowledge. To also **inject knowledge back** into ac
 ./install.sh --experimental
 ```
 
-This adds three retrieval hooks (session briefing, prompt recall, file-read context injection) that require QMD. See [Retrieval (experimental)](#retrieval-experimental) for details and the [performance analysis](docs/performance-analysis.md) for benchmarks.
+This adds three retrieval hooks (session briefing, prompt recall, file-read context injection) and the Inception consolidation skill. Requires QMD. See [Retrieval (experimental)](#retrieval-experimental) and [Inception (experimental)](#inception-experimental) for details.
 
 ### Requirements
 
@@ -66,6 +66,32 @@ Benchmarked against 30 real sessions (341 prompts, 362 file reads, 16 projects):
 
 Full analysis with methodology, industry comparison, and optimization details in [docs/performance-analysis.md](docs/performance-analysis.md).
 
+## Inception (experimental)
+
+> Requires `./install.sh --experimental`, QMD, and `pip install numpy hdbscan scikit-learn`.
+
+Inception clusters your vault notes by embedding similarity and synthesizes pattern notes -- higher-order insights that span multiple sessions. It runs as a detached background process after triage, or on demand via `/inception`.
+
+```
+Session ends -> triage completes -> inception check
+  -> enough new notes? spawn background process
+  -> HDBSCAN clusters ALL notes (not just new ones)
+  -> only synthesizes clusters with new notes or refresh candidates
+  -> writes pattern notes with source: inception
+  -> backlinks source notes, commits, reindexes QMD
+```
+
+Opt-in via config:
+
+```yaml
+inception_enabled: true
+inception_backend: codex    # "codex" (subscription, $0) or "claude" (API, ~$1/month)
+inception_threshold: 5      # new notes before triggering
+inception_max_clusters: 10  # max patterns per run
+```
+
+Pattern notes start at certainty 3 (subject to temporal decay and defrag). Use `/inception --dry-run` to preview clusters before writing. Full architecture and limitations in [docs/how-it-works.md](docs/how-it-works.md#inception-background-consolidation).
+
 ## What you get
 
 ```
@@ -81,7 +107,7 @@ Full analysis with methodology, industry comparison, and optimization details in
 | Command | What it does |
 |---------|-------------|
 | `/memento` | Capture insights mid-session |
-| `/inception` | Find cross-session patterns, synthesize pattern notes |
+| `/inception` | Find cross-session patterns, synthesize pattern notes (experimental) |
 | `/memento-defrag` | Archive low-value notes, keep the vault focused |
 | `/start-fresh` | Capture + save pending work + clear context |
 | `/continue-work` | Recover context from local state and vault |
