@@ -10,6 +10,7 @@ Usage:
 
 import json
 import math
+import os
 import shutil
 import sys
 import tempfile
@@ -366,6 +367,231 @@ def run_retrieval_eval(dataset_path, config=None, max_questions=None):
     return aggregated
 
 
+def call_codex(prompt, timeout=120):
+    """Call codex exec for LLM generation/judging. Returns response text."""
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
+        out_path = tmp.name
+
+    try:
+        subprocess.run(
+            [
+                "codex", "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--ephemeral",
+                "-o", out_path,
+                prompt,
+            ],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return Path(out_path).read_text().strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return ""
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+def format_context(results, documents_by_id):
+    """Format retrieved results as context for the LLM."""
+    context_parts = []
+    for r in results:
+        doc_id = r.get("_doc_id", Path(r.get("path", "")).stem)
+        # For turn-level results, get the session id
+        session_id = doc_id.split(":")[0] if ":" in doc_id else doc_id
+        if session_id in documents_by_id:
+            doc = documents_by_id[session_id]
+            context_parts.append(f"--- Session ({doc.get('metadata', {}).get('date', 'unknown date')}) ---\n{doc['text']}")
+        elif r.get("snippet"):
+            context_parts.append(f"--- {r.get('title', 'Unknown')} ---\n{r['snippet']}")
+    return "\n\n".join(context_parts)
+
+
+def generate_answer(question_text, context, question_date):
+    """Generate an answer using codex exec."""
+    # Cap context to ~30k chars to stay within model limits
+    if len(context) > 30000:
+        context = context[:30000] + "\n\n[... truncated ...]"
+
+    prompt = (
+        "I will give you several history chats between you and a user. "
+        "Please answer the question based on the relevant chat history. "
+        "Give a short, direct answer.\n\n"
+        f"History Chats:\n\n{context}\n\n"
+        f"Current Date: {question_date}\n"
+        f"Question: {question_text}\n"
+        "Answer:"
+    )
+    answer = call_codex(prompt, timeout=90)
+    if not answer:
+        # Retry once with shorter context
+        short_context = context[:15000] if len(context) > 15000 else context
+        prompt = (
+            "Answer this question based on the chat history. Short, direct answer.\n\n"
+            f"Chat History:\n{short_context}\n\n"
+            f"Date: {question_date}\n"
+            f"Question: {question_text}\n"
+            "Answer:"
+        )
+        answer = call_codex(prompt, timeout=90)
+    return answer
+
+
+def judge_answer(question_text, gold_answer, hypothesis, question_type):
+    """Judge whether the hypothesis matches the gold answer using codex exec."""
+    if question_type == "temporal-reasoning":
+        prompt = (
+            "You are evaluating a memory system's answer to a temporal reasoning question.\n\n"
+            f"Question: {question_text}\n"
+            f"Gold answer: {gold_answer}\n"
+            f"System answer: {hypothesis}\n\n"
+            "Does the system answer match the gold answer? Minor date/time variations are acceptable. "
+            "Respond with exactly 'YES' or 'NO'."
+        )
+    elif "preference" in question_type:
+        prompt = (
+            "You are evaluating a memory system's answer about a user preference.\n\n"
+            f"Question: {question_text}\n"
+            f"Gold answer: {gold_answer}\n"
+            f"System answer: {hypothesis}\n\n"
+            "Does the system answer correctly capture the user's preference? "
+            "Respond with exactly 'YES' or 'NO'."
+        )
+    elif question_type == "knowledge-update":
+        prompt = (
+            "You are evaluating a memory system's answer about updated information.\n\n"
+            f"Question: {question_text}\n"
+            f"Gold answer (most recent): {gold_answer}\n"
+            f"System answer: {hypothesis}\n\n"
+            "Does the system answer reflect the most recent/updated information? "
+            "Respond with exactly 'YES' or 'NO'."
+        )
+    else:
+        prompt = (
+            "You are evaluating a memory system's answer.\n\n"
+            f"Question: {question_text}\n"
+            f"Gold answer: {gold_answer}\n"
+            f"System answer: {hypothesis}\n\n"
+            "Does the system answer correctly match the gold answer? "
+            "Respond with exactly 'YES' or 'NO'."
+        )
+    response = call_codex(prompt, timeout=60)
+    return response.strip().upper().startswith("YES")
+
+
+def run_full_eval(dataset_path, config=None, max_questions=None, output_path=None):
+    """Run full end-to-end evaluation: retrieval + generation + judging.
+
+    Uses codex exec for both generation and judging (zero API cost).
+
+    Returns:
+        dict with per-type accuracy and overall accuracy
+    """
+    import time as _time
+
+    if config is None:
+        config = get_default_config()
+
+    dataset = load_dataset(dataset_path)
+    if max_questions:
+        dataset = dataset[:max_questions]
+
+    results_log = []
+    correct_by_type = {}
+    total_by_type = {}
+
+    for i, question in enumerate(dataset):
+        q_id = question["question_id"]
+        q_type = question.get("question_type", "unknown")
+        q_text = question["question"]
+        q_date = question.get("question_date", "")
+        gold = question["answer"]
+
+        # Retrieval
+        retrieval_results = run_retrieval(question, config)
+
+        # Build document lookup for context formatting
+        documents = ingest_haystack(question, granularity=config.get("granularity", "session"))
+        docs_by_id = {doc["id"]: doc for doc in documents}
+
+        # Format context from retrieved results
+        context = format_context(retrieval_results, docs_by_id)
+
+        # Generate answer
+        t0 = _time.time()
+        hypothesis = generate_answer(q_text, context, q_date)
+        gen_ms = int((_time.time() - t0) * 1000)
+
+        # Judge
+        t0 = _time.time()
+        is_correct = judge_answer(q_text, gold, hypothesis, q_type)
+        judge_ms = int((_time.time() - t0) * 1000)
+
+        # Track
+        total_by_type.setdefault(q_type, 0)
+        correct_by_type.setdefault(q_type, 0)
+        total_by_type[q_type] += 1
+        if is_correct:
+            correct_by_type[q_type] += 1
+
+        entry = {
+            "question_id": q_id,
+            "question_type": q_type,
+            "hypothesis": hypothesis,
+            "gold": gold,
+            "correct": is_correct,
+            "gen_ms": gen_ms,
+            "judge_ms": judge_ms,
+        }
+        results_log.append(entry)
+
+        # Progress
+        total_correct = sum(correct_by_type.values())
+        total_done = sum(total_by_type.values())
+        acc = total_correct / total_done if total_done > 0 else 0
+        print(
+            f"  [{i+1}/{len(dataset)}] {q_type}: "
+            f"{'CORRECT' if is_correct else 'WRONG'} "
+            f"(running: {acc:.1%})",
+            file=sys.stderr,
+        )
+
+    # Save JSONL
+    if output_path:
+        with open(output_path, "w") as f:
+            for entry in results_log:
+                f.write(json.dumps(entry) + "\n")
+
+    # Compute accuracies
+    per_type = {}
+    for q_type in sorted(total_by_type):
+        per_type[q_type] = {
+            "correct": correct_by_type.get(q_type, 0),
+            "total": total_by_type[q_type],
+            "accuracy": correct_by_type.get(q_type, 0) / total_by_type[q_type],
+        }
+
+    total_correct = sum(correct_by_type.values())
+    total_questions = sum(total_by_type.values())
+    overall_accuracy = total_correct / total_questions if total_questions > 0 else 0
+
+    # Task-averaged accuracy (mean of per-type accuracies, LongMemEval standard)
+    type_accuracies = [v["accuracy"] for v in per_type.values()]
+    task_averaged = sum(type_accuracies) / len(type_accuracies) if type_accuracies else 0
+
+    return {
+        "overall_accuracy": overall_accuracy,
+        "task_averaged_accuracy": task_averaged,
+        "num_questions": total_questions,
+        "num_correct": total_correct,
+        "per_type": per_type,
+    }
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -391,4 +617,11 @@ if __name__ == "__main__":
             args.dataset, config, max_questions=args.max_questions
         )
         print(json.dumps(metrics, indent=2))
-    # "full" mode (with LLM generation) to be added later
+    elif args.mode == "full":
+        output = args.output or "longmemeval_full_results.jsonl"
+        results = run_full_eval(
+            args.dataset, config,
+            max_questions=args.max_questions, output_path=output,
+        )
+        print(json.dumps(results, indent=2))
+        print(f"\nDetailed results: {output}", file=sys.stderr)
