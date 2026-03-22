@@ -126,7 +126,9 @@ def consume_deferred_briefing():
     """Check for deferred briefing from SessionStart and consume it.
 
     Returns formatted lines to prepend, or empty list.
-    The file is deleted after consumption (one-shot).
+    If the background search is still pending, leaves the file intact
+    so the next prompt can pick it up. Only deletes on successful
+    consumption or if the file is stale (>60s).
     """
     try:
         if not os.path.exists(DEFERRED_BRIEFING_PATH):
@@ -135,13 +137,25 @@ def consume_deferred_briefing():
         with open(DEFERRED_BRIEFING_PATH) as f:
             data = json.load(f)
 
-        # Clean up regardless of status
-        os.unlink(DEFERRED_BRIEFING_PATH)
+        status = data.get("status", "")
 
-        if data.get("status") != "ready":
+        if status == "pending":
+            # Background worker still running — check staleness
+            ts = data.get("params", {}).get("timestamp", 0)
+            if ts and (time.time() - ts) > 60:
+                # Stale pending file — worker probably crashed
+                os.unlink(DEFERRED_BRIEFING_PATH)
+            # Either way, nothing to inject yet
             return []
 
+        if status != "ready":
+            os.unlink(DEFERRED_BRIEFING_PATH)
+            return []
+
+        # Got results — consume and clean up
         note_lines = data.get("note_lines", [])
+        os.unlink(DEFERRED_BRIEFING_PATH)
+
         if not note_lines:
             return []
 
