@@ -316,7 +316,7 @@ HOOKS_UPDATED=0
 HOOKS_SKIPPED=0
 
 STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py"
-EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py memento-inception.py"
+EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py memento-inception.py tenet_reranker.py"
 
 if [ "$EXPERIMENTAL" = true ]; then
     INSTALL_HOOKS="$STABLE_HOOKS $EXPERIMENTAL_HOOKS"
