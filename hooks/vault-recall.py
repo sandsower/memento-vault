@@ -278,6 +278,14 @@ def run_recall():
 
     results = enhance_results(results, config, cwd=cwd)
 
+    # Tier 2: cross-encoder reranking
+    if config.get("reranker_enabled", True) and len(results) > 1:
+        try:
+            from tenet_reranker import rerank
+            results = rerank(prompt, results, config)
+        except Exception:
+            pass  # Non-fatal — reranker is optional
+
     if not results:
         bump_prompts_since()
         log_retrieval("recall", "filtered-empty", query=query,

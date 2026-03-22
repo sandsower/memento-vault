@@ -81,6 +81,11 @@ DEFAULT_CONFIG = {
     # RRF (Reciprocal Rank Fusion) hybrid search
     "rrf_enabled": True,
     "rrf_k": 60,
+    # Cross-encoder reranking (Tier 2)
+    "reranker_enabled": True,
+    "reranker_top_k": 10,
+    "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "reranker_min_score": 0.01,
 }
 
 _CONFIG = None
