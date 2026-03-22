@@ -155,7 +155,7 @@ def main():
         prompt,
         limit=max_notes + 2,  # overfetch for dedup
         semantic=True,
-        timeout=4,
+        timeout=12,
         min_score=min_score,
     )
 

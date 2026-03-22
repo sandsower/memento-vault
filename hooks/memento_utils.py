@@ -28,9 +28,9 @@ DEFAULT_CONFIG = {
     # Retrieval hooks
     "session_briefing": True,
     "briefing_max_notes": 5,
-    "briefing_min_score": 0.3,
+    "briefing_min_score": 0.55,
     "prompt_recall": True,
-    "recall_min_score": 0.4,
+    "recall_min_score": 0.6,
     "recall_max_notes": 3,
     "recall_skip_patterns": [
         r"^(yes|no|ok|sure|thanks|y|n|yep|nope|looks good|lgtm|ship it|continue)$",
@@ -170,7 +170,28 @@ def has_qmd():
     return bool(shutil.which("qmd"))
 
 
-def qmd_search(query, collection=None, limit=5, semantic=False, timeout=5, min_score=0.0):
+def _clean_snippet(raw):
+    """Clean QMD snippet: strip chunk markers, frontmatter, and collapse whitespace."""
+    if not raw:
+        return ""
+    # Remove QMD chunk position markers like "@@ -3,4 @@ (2 before, 12 after)"
+    text = re.sub(r"@@ [^@]+ @@\s*\([^)]*\)\s*", "", raw)
+    # Remove YAML frontmatter lines (key: value at start)
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        # Skip frontmatter-like lines and empty/separator lines
+        if stripped == "---" or (": " in stripped and not stripped.startswith("-")):
+            continue
+        if stripped:
+            lines.append(stripped)
+    text = " ".join(lines)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:200]
+
+
+def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_score=0.0):
     """Run a QMD search and return parsed results.
 
     Args:
@@ -204,7 +225,14 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=5, min_s
         if result.returncode != 0:
             return []
 
-        data = json.loads(result.stdout)
+        # QMD prints diagnostic lines before JSON — find the JSON start
+        stdout = result.stdout
+        json_start = stdout.find("[")
+        if json_start == -1:
+            json_start = stdout.find("{")
+        if json_start == -1:
+            return []
+        data = json.loads(stdout[json_start:])
         results = []
 
         # QMD JSON output is a list of result objects
@@ -213,11 +241,28 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=5, min_s
             score = item.get("score", 0.0)
             if score < min_score:
                 continue
+            # Derive a usable title: prefer file basename over QMD's chunk title
+            raw_path = item.get("file", item.get("path", ""))
+            # Strip qmd:// URI prefix if present
+            if "://" in raw_path:
+                raw_path = raw_path.split("://", 1)[1]
+                # Remove collection prefix (e.g., "memento/notes/foo.md" -> "notes/foo.md")
+                parts = raw_path.split("/", 1)
+                if len(parts) > 1:
+                    raw_path = parts[1]
+            file_title = Path(raw_path).stem  # e.g., "local-auth-bypass-rejected-use-cognito"
+            # Use QMD title only if it looks real (not a section heading like "Related")
+            qmd_title = item.get("title", "")
+            if qmd_title and qmd_title not in ("Related", "Notes", "Sessions", ""):
+                title = qmd_title
+            else:
+                title = file_title
+
             results.append({
-                "path": item.get("path", ""),
-                "title": item.get("title", item.get("path", "").replace(".md", "")),
+                "path": raw_path,
+                "title": title,
                 "score": score,
-                "snippet": item.get("snippet", item.get("content", ""))[:200],
+                "snippet": _clean_snippet(item.get("snippet", item.get("content", ""))),
             })
 
         return results[:limit]

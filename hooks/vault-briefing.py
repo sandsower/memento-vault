@@ -171,7 +171,7 @@ def main():
         " ".join(query_parts),
         limit=max_notes,
         semantic=True,
-        timeout=5,
+        timeout=12,
         min_score=min_score,
     )
 
