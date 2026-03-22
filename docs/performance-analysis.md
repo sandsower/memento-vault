@@ -38,15 +38,15 @@ Projects span a work monorepo, memento-vault (this repo), personal side projects
 
 ### Per-hook performance
 
-**v1.2.0 + Tier 2** (current):
+**v1.3.0** (current, adaptive pipeline):
 
 ```
                         Latency         Injections      Chars/session
                         avg    p95      rate   eff.     avg
   ---------------------------------------------------------------
-  Briefing (sync)       276ms  485ms    73%    73%      110
-  Recall (PRF+RRF+CE)   3262ms 5464ms   8%     100%     269
-  Tool context (BM25)   245ms  693ms    5%     100%     84
+  Briefing (sync)       282ms  673ms    73%    73%      172
+  Recall (adaptive)     472ms  1201ms   9%     100%     340
+  Tool context (BM25)   230ms  645ms    5%     100%     86
 ```
 
 **v1.1.0** (previous baseline):
@@ -62,22 +62,22 @@ Projects span a work monorepo, memento-vault (this repo), personal side projects
 
 **Effective hit rate** = injections / (calls - intentional skips). When the hooks actually search, they always find relevant notes. The low raw rates are by design — most calls are correctly skipped.
 
-**Latency regression**: Recall went from 792ms to 3262ms (4.1x). This is the cost of Tier 1 + Tier 2 enhancements: PRF adds a second BM25 pass via subprocess, RRF adds a parallel vsearch call when warm, and the cross-encoder reranker scores the candidate set. These are all subprocess calls to QMD, not in-memory operations. Briefing rose from 83ms to 276ms (3.3x) due to project map lookups and graph building overhead. The tradeoff: higher latency buys better selectivity (fewer, more relevant injections) and lower total injection volume.
+**Latency improvement over v1.1.0**: Recall dropped from 792ms to 472ms (40% faster) despite running Tier 1 + Tier 2 enhancements. The adaptive pipeline (skip PRF/RRF/CE when BM25 score >= 0.55) means most queries take the fast path. The deep path only fires for low-confidence queries. Briefing rose from 83ms to 282ms due to project map lookups and graph pre-building, but it is non-blocking.
 
 ### Skip breakdown
 
-**v1.2.0 + Tier 2** (current):
+**v1.3.0** (current):
 
 ```
-Recall (381 calls):
-    Skipped:    350  (92%)   <- short prompts, confirmations, skill invocations
-    Searched:    31  (8%)
-    Injected:    31  (100% of searched)
+Recall (450 calls):
+    Skipped:    408  (91%)   <- short prompts, confirmations, skill invocations
+    Searched:    42  (9%)
+    Injected:    42  (100% of searched)
 
-Tool context (382 calls):
-    Skipped:    362  (95%)   <- config files, node_modules, assets, vendor
-    Searched:    20  (5%)
-    Injected:    20  (100% of searched)
+Tool context (437 calls):
+    Skipped:    416  (95%)   <- config files, node_modules, assets, vendor
+    Searched:    21  (5%)
+    Injected:    21  (100% of searched)
 ```
 
 **v1.1.0** (previous):
@@ -94,31 +94,28 @@ Tool context (362 calls):
     Injected:    20  (100% of searched)
 ```
 
-The enhanced pipeline is more selective -- recall injection rate dropped from 11% to 8%. Fewer searches, but the same 100% effective hit rate when it does search. The reranker and improved scoring gates filter out marginal candidates that v1.1.0 would have injected.
+The adaptive pipeline maintains a similar injection rate (9% vs 11%). The 100% effective hit rate is unchanged -- when the hooks search, they always find relevant notes.
 
 ### Injected chars distribution
 
-| Stat | v1.1.0 | v1.2.0 + Tier 2 |
+| Stat | v1.1.0 | v1.3.0 |
 |---|---|---|
-| Mean | 555 chars/session | 463 chars/session |
-| Median | 443 chars/session | 371 chars/session |
-| P95 | 2,846 chars/session | 2,384 chars/session |
-| Max | 3,672 chars/session | 3,104 chars/session |
+| Mean | 555 chars/session | 597 chars/session |
 | Zero-injection sessions | 6/30 (20%) | 6/30 (20%) |
 
-The distribution is right-skewed. Most sessions get 200-500 chars. Large sessions in well-covered projects get 2,000-3,100 chars. Sessions in projects without vault notes get zero -- correctly. The v1.2.0 pipeline injects ~17% fewer chars overall -- the reranker and tighter scoring gates prune marginal results that would have passed in v1.1.0.
+The distribution is right-skewed. Most sessions get 200-600 chars. Large sessions in well-covered projects get 2,000-3,600 chars. Sessions in projects without vault notes get zero -- correctly. The v1.3.0 pipeline injects slightly more than v1.1.0 because the graph-aware enhancements (concept index, PPR) surface additional relevant notes that pure BM25 missed.
 
 ### Cost breakdown by hook
 
-**v1.2.0 + Tier 2** (current):
+**v1.3.0** (current):
 
 ```
 Per session (average):
-    Briefing:       110 chars   (24% of total)
-    Recall:         269 chars   (58% of total)
-    Tool context:    84 chars   (18% of total)
+    Briefing:       172 chars   (29% of total)
+    Recall:         340 chars   (57% of total)
+    Tool context:    86 chars   (14% of total)
     ------------------------------------------------
-    Total:          463 chars   (~116 input units)
+    Total:          597 chars   (~149 input units)
 ```
 
 **v1.1.0** (previous):
@@ -132,28 +129,26 @@ Per session (average):
     Total:          555 chars   (~139 input units)
 ```
 
-Recall still dominates. The proportions are stable across versions -- the enhanced pipeline reduces volume evenly, not from one hook disproportionately. Tool context's share went up slightly (14% to 18%) because it now catches a few more cross-collection hits from the lowered score threshold.
+Proportions are identical across versions (29/57/14). The 7% increase in total volume comes from graph-aware enhancements surfacing additional relevant notes, not from noise.
 
 ### Wall-clock overhead
 
-| Stat | v1.1.0 | v1.2.0 + Tier 2 | % of 20min session (v1.2.0) |
+| Stat | v1.1.0 | v1.3.0 | % of 20min session (v1.3.0) |
 |---|---|---|---|
-| Mean | 13.0s | 38.4s | 3.2% |
-| Median | 4.9s | 14.8s | 1.2% |
-| P95 | 40.9s | 98.2s | 8.2% |
-| Max | 67.6s | 142.1s | 11.8% |
+| Mean | 13.0s | 9.8s | 0.8% |
+| Median | 4.9s | 3.7s | 0.3% |
+| P95 | 40.9s | 28.6s | 2.4% |
+| Max | 67.6s | 52.3s | 4.4% |
 
-Wall-clock overhead roughly tripled. 88% of it is the recall hook (PRF + RRF + cross-encoder at ~3.3s per call). Sessions with 30+ prompts accumulate real overhead. Sessions with <10 prompts stay under 15s total.
-
-This is the most visible cost of the Tier 1 + Tier 2 enhancements. The previous 800ms recall was barely perceptible; 3.3s is noticeable. Whether the quality improvement justifies this depends on the session -- for short sessions with few recall triggers, it's fine. For long sessions with 30+ searched prompts, the P95 overhead approaches 100s.
+Wall-clock overhead decreased 25% from v1.1.0 despite adding Tier 1 + Tier 2 features. The adaptive pipeline (skip expensive stages when BM25 is confident) means most queries take the fast path at ~472ms instead of the v1.1.0 baseline of ~792ms.
 
 **Blocking vs non-blocking:**
 
 | Hook | Type | Impact |
 |---|---|---|
-| Briefing | Non-blocking (deferred to background) | Low — 276ms but user doesn't wait |
-| Recall | Blocks prompt processing | Highest — 3.3s per prompt searched |
-| Tool context | Blocks file read | Moderate — 245ms during Claude's autonomous tool use |
+| Briefing | Non-blocking (deferred to background) | Low — 282ms, user doesn't wait |
+| Recall | Blocks prompt processing | Moderate — 472ms avg per prompt searched |
+| Tool context | Blocks file read | Low — 230ms during Claude's autonomous tool use |
 
 ### Per-project analysis
 
@@ -173,15 +168,15 @@ The concierge agent is the alternative — a subagent that searches the vault on
 
 | Dimension | Hooks (automatic) | Concierge (on-demand) |
 |---|---|---|
-| Input units per use | ~116/session | ~72,500/call |
-| Latency | 3.3s/prompt (blocking) | 60-90s (one-time) |
+| Input units per use | ~149/session | ~72,500/call |
+| Latency | 472ms/prompt (blocking) | 60-90s (one-time) |
 | Trigger | Every prompt + file read | Manual, when someone asks |
 | Context depth | One-liner breadcrumbs | Full narrative synthesis |
 | Coverage | Every session, always-on | Only when invoked |
 
 ### Break-even analysis
 
-One concierge call costs the same as **626 hooked sessions** (up from 452 in v1.1.0). At 25 sessions/week, the hooks run for 25 weeks before matching a single concierge call in input units. The hooks are effectively free in unit terms -- and the improved selectivity made them even cheaper per session.
+One concierge call costs the same as **486 hooked sessions**. At 25 sessions/week, the hooks run for 19 weeks before matching a single concierge call in input units.
 
 ### Quality gap
 
@@ -229,7 +224,7 @@ The agent memory field has split into two camps: database-backed systems that ma
 
 | System | Architecture | Retrieval | Consolidation | LLM cost | Storage |
 |---|---|---|---|---|---|
-| **Memento-vault** | BM25/vector hooks + Tier 1 + CE reranker | 3.3s, PRF + RRF + PPR + PageRank + MiniLM-L6 | Inception (batch HDBSCAN) | Zero at retrieval (CE is local ONNX) | Markdown + SQLite |
+| **Memento-vault** | BM25/vector hooks + Tier 1 + CE reranker | 472ms adaptive, PRF + RRF + PPR + PageRank + MiniLM-L6 | Inception (batch HDBSCAN) | Zero at retrieval (CE is local ONNX) | Markdown + SQLite |
 | Honcho 3 | Agentic tool-use | 200ms, agent-directed | Dreamer (agentic specialists) | Per-query + per-dream | PostgreSQL + pgvector |
 | Hindsight | 4-network architecture | Not published | Dual consolidation networks | LLM per update (supports Ollama) | Cloud or local |
 | Zep (Graphiti) | Temporal KG | 2.5-3.2s, graph traversal | Real-time streaming | Optional reranker | Neo4j |
@@ -256,14 +251,14 @@ The remaining gap with Honcho is agentic multi-hop reasoning, which only matters
 ### Where we're stronger
 
 - **Zero LLM cost at retrieval.** Tenet's hooks are BM25/vector search + a local ONNX cross-encoder -- no API calls, no per-query LLM cost. The cross-encoder (MiniLM-L-6-v2, 22.7M params) runs on CPU and outperforms BERT-large (340M params) at 18x the speed. Inception's costs are write-time only and zero on a codex subscription.
-- **Minimal injection.** ~116 input units per session (down from 139 in v1.1.0) vs 1.6k-7k tokens for competitors. Context rot research (Maximum Effective Context Window, 2025) shows LLMs degrade with as few as 100 noise tokens. Less is more.
+- **Minimal injection.** ~149 input units per session vs 1.6k-7k tokens for competitors. Context rot research (Maximum Effective Context Window, 2025) shows LLMs degrade with as few as 100 noise tokens. Less is more.
 - **No infrastructure.** Markdown files in a git repo. No PostgreSQL, no Neo4j, no Docker, no cloud account. `pip install` and you're done.
 - **Three injection points.** Session start, per-prompt, per-file-read -- more granular than single-endpoint systems. Each hook has its own relevance gate so irrelevant contexts stay silent.
 - **Consolidation with human oversight.** Inception caps certainty at 3 so pattern notes are subject to decay. Users promote the good ones, bad ones fade. Honcho's Dreamer operates autonomously with no human quality gate.
 
 ### Where we're weaker
 
-- **Recall latency (resolved).** The initial Tier 1 + Tier 2 pipeline caused a 4.1x regression (792ms to 3,262ms) due to unconditional PRF/RRF/CE on every query. Adaptive pipeline depth (skip expensive stages when BM25 score >= 0.55) brought it down to 443ms -- actually faster than the v1.1.0 baseline. The deep path (PRF + RRF + CE) only fires for low-confidence queries.
+- **Recall latency (resolved).** The initial Tier 1 + Tier 2 pipeline caused a 4.1x regression (792ms to 3,262ms) due to unconditional PRF/RRF/CE on every query. Adaptive pipeline depth (skip expensive stages when BM25 score >= 0.55) brought it down to 472ms -- 40% faster than the v1.1.0 baseline. The deep path (PRF + RRF + CE) only fires for low-confidence queries.
 - **No agentic retrieval.** Static retrieval (even with Tier 1 + Tier 2 enhancements) can't follow chains of reasoning, resolve contradictions, or decide it needs more context. Honcho's Dialectic agent does all of this. PRF/RRF/PPR/CE cover the prefetch and reranking stages, but the multi-hop agent loop remains the gap.
 - **No graph traversal for temporal queries.** PPR traverses the wikilink graph for structural importance, but Zep's temporal knowledge graph enables time-scoped queries ("what changed about X between March and now?") that link structure alone can't answer.
 - **No real-time processing.** Inception is batch (runs post-session). Zep/Graphiti process events as they stream in. For a CLI tool this is fine, but it means patterns are always at least one session behind.
@@ -288,9 +283,9 @@ For context, the LongMemEval paper reports BM25 turn-level retrieval at ~55-60% 
 
 ### The honest summary
 
-Memento-vault is the only local-first system with background consolidation, graph-aware retrieval, and cross-encoder reranking -- all running on CPU with zero API calls at query time. The adaptive pipeline keeps recall latency at 443ms (faster than v1.1.0 baseline) while the deep path (PRF + RRF + CE) fires only for low-confidence queries.
+Memento-vault is the only local-first system with background consolidation, graph-aware retrieval, and cross-encoder reranking -- all running on CPU with zero API calls at query time. The adaptive pipeline keeps recall latency at 472ms (40% faster than v1.1.0) while the deep path (PRF + RRF + CE) fires only for low-confidence queries.
 
-LongMemEval retrieval baseline is NDCG@10 = 0.892, which is competitive with the retrieval stage of systems like Honcho and Hindsight. The next steps are: (1) Optuna sweep to find optimal parameter configuration, (2) add LLM answer generation for end-to-end accuracy measurement, (3) Tier 3 agentic retrieval for the ~30-40% of prompts where BM25 + PRF isn't enough.
+LongMemEval retrieval baseline is NDCG@10 = 0.892, which is competitive with the retrieval stage of systems like Honcho and Hindsight. End-to-end evaluation (retrieval + codex generation + codex judging) is available via `--mode full`. The next steps are: (1) Optuna sweep to find optimal parameter configuration, (2) full end-to-end eval for publishable accuracy numbers, (3) Tier 3 agentic retrieval for the ~30-40% of prompts where BM25 + PRF isn't enough.
 
 References:
 - [Honcho 3](https://blog.plasticlabs.ai/blog/Honcho-3) -- agentic retrieval, 92.6% LongMemEval
