@@ -15,7 +15,7 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, read_hook_input
+from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, log_retrieval, read_hook_input
 
 CACHE_PATH = "/tmp/memento-tool-context-cache.json"
 RECALL_STATE_PATH = "/tmp/memento-last-recall.json"
@@ -277,11 +277,14 @@ def main():
     dir_key = str(Path(file_path).parent)
 
     # Check directory cache
+    search_query = None
+    latency_ms = 0
     if dir_key in cache.get("dirs", {}):
         cached = cache["dirs"][dir_key]
         results = cached.get("results", [])
         if not results:
             sys.exit(0)  # Negative cache — we looked and found nothing
+        log_retrieval("tool-context", "cache-hit", file_path=file_path, dir_key=dir_key)
     else:
         # Check cooldown
         cooldown = config.get("tool_context_cooldown", 3)
@@ -290,8 +293,8 @@ def main():
             sys.exit(0)
 
         # Extract keywords and search
-        query = extract_keywords(file_path)
-        if not query or len(query.split()) < 2:
+        search_query = extract_keywords(file_path)
+        if not search_query or len(search_query.split()) < 2:
             # Too few keywords — would match too broadly
             cache.setdefault("dirs", {})[dir_key] = {"results": []}
             save_cache(cache)
@@ -300,13 +303,15 @@ def main():
         min_score = config.get("tool_context_min_score", 0.75)
         max_notes = config.get("tool_context_max_notes", 2)
 
+        t0 = time.time()
         results = qmd_search_with_extras(
-            query,
+            search_query,
             limit=max_notes + 5,  # Overfetch for dedup + enhancement filtering
             semantic=False,  # BM25 for speed
             timeout=2,
             min_score=min_score,
         )
+        latency_ms = int((time.time() - t0) * 1000)
 
         results = enhance_results(results, config, cwd=cwd)
 
@@ -316,6 +321,8 @@ def main():
         save_cache(cache)
 
         if not results:
+            log_retrieval("tool-context", "no-results", query=search_query,
+                          file_path=file_path, latency_ms=latency_ms)
             sys.exit(0)
 
     # Dedup against recall hook
@@ -335,7 +342,14 @@ def main():
         lines.append(format_result(result))
         injected_paths.append(result.get("path", ""))
 
-    output_context("\n".join(lines))
+    injected_text = "\n".join(lines)
+    output_context(injected_text)
+
+    injected_titles = [r.get("title", "") for r in filtered[:max_notes]]
+    log_retrieval("tool-context", "inject", file_path=file_path,
+                  query=search_query or dir_key,
+                  injected_titles=injected_titles, injected_chars=len(injected_text),
+                  latency_ms=latency_ms)
 
     # Record injection
     record_injection(cache, session_id, injected_paths)

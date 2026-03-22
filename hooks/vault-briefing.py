@@ -181,7 +181,7 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
 
 def run_deferred_search():
     """Background worker: run QMD search and write results to the deferred file."""
-    from memento_utils import qmd_search, enhance_results
+    from memento_utils import qmd_search, enhance_results, log_retrieval
 
     try:
         with open(DEFERRED_BRIEFING_PATH) as f:
@@ -196,6 +196,8 @@ def run_deferred_search():
         min_score = params["min_score"]
         linked_notes = params.get("linked_notes", [])
 
+        import time as _time
+        t0 = _time.time()
         results = qmd_search(
             query,
             limit=max_notes + 3,
@@ -203,6 +205,7 @@ def run_deferred_search():
             timeout=12,
             min_score=min_score,
         )
+        latency_ms = int((_time.time() - t0) * 1000)
 
         results = enhance_results(results, cwd=params.get("cwd", ""))
 
@@ -225,12 +228,18 @@ def run_deferred_search():
             if oneliner:
                 note_lines.append(f"  - {oneliner}")
 
+        final_notes = note_lines[:max_notes]
         with open(DEFERRED_BRIEFING_PATH, "w") as f:
             json.dump({
                 "status": "ready",
-                "note_lines": note_lines[:max_notes],
+                "note_lines": final_notes,
                 "timestamp": time.time(),
             }, f)
+
+        injected_chars = sum(len(l) for l in final_notes)
+        log_retrieval("briefing", "deferred-ready", query=query,
+                      latency_ms=latency_ms, injected_count=len(final_notes),
+                      injected_chars=injected_chars)
 
     except Exception:
         # Clean up on failure

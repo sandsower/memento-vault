@@ -578,6 +578,53 @@ def enhance_results(results, config=None, cwd=None):
     return results
 
 
+# --- Retrieval logging ---
+
+RETRIEVAL_LOG_PATH = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
+    "memento-vault", "retrieval.jsonl",
+)
+
+
+def _should_log():
+    """Check if retrieval logging is enabled (config or env var)."""
+    if os.environ.get("MEMENTO_DEBUG"):
+        return True
+    return get_config().get("retrieval_log", False)
+
+
+def log_retrieval(hook, action, **kwargs):
+    """Append a structured log entry to the retrieval log.
+
+    Only writes when retrieval_log is enabled in config or MEMENTO_DEBUG is set.
+
+    Args:
+        hook: Hook name (briefing, recall, tool-context)
+        action: What happened (search, cache-hit, skip, inject, filter)
+        **kwargs: Additional fields (query, results_before, results_after,
+                  injected_titles, injected_chars, latency_ms, session_id, cwd)
+    """
+    if not _should_log():
+        return
+
+    import time as _time
+
+    entry = {
+        "ts": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "hook": hook,
+        "action": action,
+    }
+    entry.update(kwargs)
+
+    try:
+        log_dir = os.path.dirname(RETRIEVAL_LOG_PATH)
+        os.makedirs(log_dir, exist_ok=True)
+        with open(RETRIEVAL_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
 # --- Hook I/O helpers ---
 
 

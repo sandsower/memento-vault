@@ -15,7 +15,7 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, detect_project, read_hook_input
+from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input
 
 LAST_RECALL_PATH = "/tmp/memento-last-recall.json"
 DEFERRED_BRIEFING_PATH = "/tmp/memento-deferred-briefing.json"
@@ -208,6 +208,7 @@ def run_recall():
         if project_slug and project_slug != "unknown":
             query = f"{prompt} {project_slug.replace('-', ' ')}"
 
+    t0 = time.time()
     results = qmd_search_with_extras(
         query,
         limit=max_notes + 4,  # overfetch for dedup + enhancement filtering
@@ -215,24 +216,37 @@ def run_recall():
         timeout=5,
         min_score=min_score,
     )
+    latency_ms = int((time.time() - t0) * 1000)
+    results_before = len(results)
 
     if not results:
         bump_prompts_since()
+        log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms)
         return [], None
 
     results = enhance_results(results, config, cwd=cwd)
 
     if not results:
         bump_prompts_since()
+        log_retrieval("recall", "filtered-empty", query=query,
+                      results_before=results_before, latency_ms=latency_ms)
         return [], None
 
     top_path = results[0].get("path", "")
     if is_duplicate(top_path):
+        log_retrieval("recall", "dedup-skip", query=query)
         return [], None
 
     lines = ["[vault] Related memories:"]
+    injected = []
     for result in results[:max_notes]:
         lines.append(format_result(result))
+        injected.append(result.get("title", ""))
+
+    injected_text = "\n".join(lines)
+    log_retrieval("recall", "inject", query=query, latency_ms=latency_ms,
+                  results_before=results_before, results_after=len(results),
+                  injected_titles=injected, injected_chars=len(injected_text))
 
     return lines, top_path
 
