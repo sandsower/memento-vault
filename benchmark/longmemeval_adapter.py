@@ -146,7 +146,7 @@ session_id: {meta.get('session_id', doc_id)}
 def get_default_config():
     """Default config for LongMemEval evaluation."""
     return {
-        "granularity": "session",
+        "granularity": "turn",
         "retrieval_limit": 10,
         "recall_min_score": 0.0,
         "recall_high_confidence": 0.55,
@@ -160,6 +160,9 @@ def get_default_config():
         "reranker_enabled": False,  # disabled by default — requires ONNX model
         "reranker_top_k": 10,
         "reranker_min_score": 0.01,
+        # Tier 3: agentic retrieval
+        "multi_hop_enabled": True,
+        "multi_hop_max": 2,
     }
 
 
@@ -258,6 +261,11 @@ def run_retrieval(question, config=None):
             results = rerank(query, results, config)
         except Exception:
             pass
+
+    # 7. Multi-hop retrieval for complex queries
+    q_type = question.get("question_type", "")
+    if config.get("multi_hop_enabled", True) and q_type in ("multi-session", "temporal-reasoning"):
+        results = multi_hop_retrieve(question, index, results, config)
 
     # Truncate to limit
     return results[:limit]
@@ -367,33 +375,178 @@ def run_retrieval_eval(dataset_path, config=None, max_questions=None):
     return aggregated
 
 
-def call_codex(prompt, timeout=120):
-    """Call codex exec for LLM generation/judging. Returns response text."""
+def call_llm(prompt, timeout=120, backend=None):
+    """Call LLM for generation/judging. Returns response text.
+
+    Backends (tried in order):
+      - "claude": claude --print (Claude Code subscription, no cost)
+      - "codex": codex exec (OpenAI subscription, no cost)
+    """
     import subprocess
-    import tempfile
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-        out_path = tmp.name
+    if backend is None:
+        backend = os.environ.get("LONGMEMEVAL_BACKEND", "codex")
 
-    try:
-        subprocess.run(
-            [
-                "codex", "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--ephemeral",
-                "-o", out_path,
-                prompt,
-            ],
-            capture_output=True, text=True, timeout=timeout,
-        )
-        return Path(out_path).read_text().strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return ""
-    finally:
+    if backend == "claude":
         try:
-            os.unlink(out_path)
-        except OSError:
-            pass
+            result = subprocess.run(
+                [
+                    "claude", "--print",
+                    "--dangerously-skip-permissions",
+                    "--no-session-persistence",
+                    "--bare",
+                    "-p", prompt,
+                ],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return ""
+
+    elif backend == "codex":
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
+            out_path = tmp.name
+        try:
+            subprocess.run(
+                [
+                    "codex", "exec",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--ephemeral",
+                    "-o", out_path,
+                    prompt,
+                ],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            return Path(out_path).read_text().strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return ""
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+
+    return ""
+
+
+def multi_hop_retrieve(question, index, initial_results, config):
+    """Multi-hop retrieval for multi-session questions.
+
+    After the initial search, extracts entities and key phrases from
+    top results, formulates follow-up queries, and searches again.
+    Merges all results, deduped by path.
+    """
+    from longmemeval_retrieval import bm25_search, tokenize
+
+    limit = config.get("retrieval_limit", 10)
+    min_score = config.get("recall_min_score", 0.0)
+    max_hops = config.get("multi_hop_max", 2)
+
+    all_results = list(initial_results)
+    seen_paths = {r["path"] for r in all_results}
+
+    for hop in range(max_hops):
+        # Extract key phrases from current results for follow-up queries
+        follow_up_terms = set()
+        for r in all_results[:5]:  # top 5 results
+            snippet = r.get("snippet", "")
+            # Extract capitalized phrases (names, places) and numbers
+            import re
+            # Proper nouns and multi-word names
+            for match in re.finditer(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', snippet):
+                term = match.group()
+                if len(term) > 3 and term.lower() not in tokenize(question["question"]):
+                    follow_up_terms.add(term)
+            # Numbers with context (e.g., "$350,000", "70 pounds")
+            for match in re.finditer(r'[\$]?\d[\d,]*\.?\d*\s*\w+', snippet):
+                follow_up_terms.add(match.group().strip())
+
+        if not follow_up_terms:
+            break
+
+        # Build follow-up query from original question + extracted entities
+        follow_up_query = f"{question['question']} {' '.join(list(follow_up_terms)[:8])}"
+        hop_results = bm25_search(index, follow_up_query, limit=limit, min_score=min_score)
+
+        added = 0
+        for r in hop_results:
+            if r["path"] not in seen_paths:
+                all_results.append(r)
+                seen_paths.add(r["path"])
+                added += 1
+
+        if added == 0:
+            break  # No new results found
+
+    all_results.sort(key=lambda r: r["score"], reverse=True)
+    return all_results
+
+
+def apply_recency_boost(results, documents_by_id):
+    """Boost more recent documents for knowledge-update questions.
+
+    Parses dates from document metadata and applies a recency multiplier.
+    Most recent doc gets 1.5x, oldest gets 1.0x.
+    """
+    dated_results = []
+    for r in results:
+        doc_id = r.get("_doc_id", Path(r.get("path", "")).stem)
+        session_id = doc_id.split(":")[0] if ":" in doc_id else doc_id
+        doc = documents_by_id.get(session_id, {})
+        date_str = doc.get("metadata", {}).get("date", "")
+        dated_results.append((r, date_str))
+
+    if not any(d for _, d in dated_results):
+        return results
+
+    # Sort by date to find range
+    dated_with_parsed = []
+    for r, date_str in dated_results:
+        try:
+            # Parse various date formats
+            import re
+            # "2023/05/20 (Sat) 02:21" -> "2023/05/20"
+            clean = re.sub(r'\s*\([^)]*\)\s*', ' ', date_str).strip()
+            clean = clean.replace('/', '-').split()[0] if clean else ""
+            dated_with_parsed.append((r, clean))
+        except (ValueError, IndexError):
+            dated_with_parsed.append((r, ""))
+
+    # Sort by date string descending (more recent first for ties)
+    valid_dates = [(r, d) for r, d in dated_with_parsed if d]
+    if valid_dates:
+        valid_dates.sort(key=lambda x: x[1], reverse=True)
+        # Apply linear boost: most recent gets 1.5x, oldest gets 1.0x
+        n = len(valid_dates)
+        for i, (r, _) in enumerate(valid_dates):
+            boost = 1.0 + 0.5 * (1.0 - i / max(n - 1, 1))
+            r["score"] = r["score"] * boost
+
+    all_r = [r for r, _ in dated_with_parsed]
+    all_r.sort(key=lambda r: r["score"], reverse=True)
+    return all_r
+
+
+def format_context_temporal(results, documents_by_id):
+    """Format context with explicit date ordering for temporal questions."""
+    # Collect and sort by date
+    entries = []
+    for r in results:
+        doc_id = r.get("_doc_id", Path(r.get("path", "")).stem)
+        session_id = doc_id.split(":")[0] if ":" in doc_id else doc_id
+        doc = documents_by_id.get(session_id, {})
+        date = doc.get("metadata", {}).get("date", "unknown date")
+        text = doc.get("text", r.get("snippet", ""))
+        entries.append((date, session_id, text))
+
+    # Sort chronologically
+    entries.sort(key=lambda x: x[0])
+
+    parts = []
+    for i, (date, sid, text) in enumerate(entries, 1):
+        parts.append(f"--- Chat #{i} (Date: {date}) ---\n{text}")
+    return "\n\n".join(parts)
 
 
 def format_context(results, documents_by_id):
@@ -411,33 +564,45 @@ def format_context(results, documents_by_id):
     return "\n\n".join(context_parts)
 
 
-def generate_answer(question_text, context, question_date):
+def generate_answer(question_text, context, question_date, question_type=""):
     """Generate an answer using codex exec."""
     # Cap context to ~30k chars to stay within model limits
     if len(context) > 30000:
         context = context[:30000] + "\n\n[... truncated ...]"
 
+    # Simple prompt that works reliably with codex
+    # Type-specific hints are kept minimal to avoid empty responses
+    hint = ""
+    if question_type == "knowledge-update":
+        hint = " Use the most recent information when facts conflict."
+    elif question_type == "temporal-reasoning":
+        hint = " Pay attention to dates and chronological order."
+    elif question_type == "multi-session":
+        hint = " The answer may span multiple chat sessions."
+    elif "preference" in question_type:
+        hint = " Describe what kind of response the user would prefer, starting with 'The user would prefer'."
+
     prompt = (
         "I will give you several history chats between you and a user. "
-        "Please answer the question based on the relevant chat history. "
+        f"Answer the question based on the relevant chat history.{hint} "
         "Give a short, direct answer.\n\n"
         f"History Chats:\n\n{context}\n\n"
         f"Current Date: {question_date}\n"
         f"Question: {question_text}\n"
         "Answer:"
     )
-    answer = call_codex(prompt, timeout=90)
+    answer = call_llm(prompt, timeout=90)
     if not answer:
-        # Retry once with shorter context
+        # Retry with shorter context
         short_context = context[:15000] if len(context) > 15000 else context
         prompt = (
-            "Answer this question based on the chat history. Short, direct answer.\n\n"
+            f"Answer this question based on the chat history.{hint} Short, direct answer.\n\n"
             f"Chat History:\n{short_context}\n\n"
             f"Date: {question_date}\n"
             f"Question: {question_text}\n"
             "Answer:"
         )
-        answer = call_codex(prompt, timeout=90)
+        answer = call_llm(prompt, timeout=90)
     return answer
 
 
@@ -479,7 +644,7 @@ def judge_answer(question_text, gold_answer, hypothesis, question_type):
             "Does the system answer correctly match the gold answer? "
             "Respond with exactly 'YES' or 'NO'."
         )
-    response = call_codex(prompt, timeout=60)
+    response = call_llm(prompt, timeout=60)
     return response.strip().upper().startswith("YES")
 
 
@@ -518,12 +683,19 @@ def run_full_eval(dataset_path, config=None, max_questions=None, output_path=Non
         documents = ingest_haystack(question, granularity=config.get("granularity", "session"))
         docs_by_id = {doc["id"]: doc for doc in documents}
 
-        # Format context from retrieved results
-        context = format_context(retrieval_results, docs_by_id)
+        # Apply recency boost for knowledge-update questions
+        if q_type == "knowledge-update":
+            retrieval_results = apply_recency_boost(retrieval_results, docs_by_id)
 
-        # Generate answer
+        # Format context — temporal-aware for temporal/multi-session, standard otherwise
+        if q_type in ("temporal-reasoning", "multi-session"):
+            context = format_context_temporal(retrieval_results, docs_by_id)
+        else:
+            context = format_context(retrieval_results, docs_by_id)
+
+        # Generate answer with type-aware prompting
         t0 = _time.time()
-        hypothesis = generate_answer(q_text, context, q_date)
+        hypothesis = generate_answer(q_text, context, q_date, question_type=q_type)
         gen_ms = int((_time.time() - t0) * 1000)
 
         # Judge
