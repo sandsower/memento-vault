@@ -1,8 +1,8 @@
 # How It Works
 
-Memento Vault captures knowledge from your Claude Code sessions automatically and makes it searchable.
+Memento Vault captures knowledge from your Claude Code sessions automatically, makes it searchable, and injects relevant knowledge back into active sessions.
 
-## The flow
+## Capture flow (write path)
 
 ```
 Session ends
@@ -35,6 +35,36 @@ memento-triage.py reads the transcript
     |
     +---> QMD reindex (if installed)
 ```
+
+## Retrieval flow (read path)
+
+Knowledge flows back into active sessions via two hooks:
+
+```
+Session starts
+    |
+    v
+vault-briefing.py (SessionStart hook)
+    |
+    +---> detect project from cwd + git branch
+    +---> read projects/{slug}.md for recent sessions + linked notes
+    +---> QMD semantic search for project-relevant notes
+    +---> print [vault] briefing to stdout --> Claude sees it
+    |
+    v
+User types a prompt
+    |
+    v
+vault-recall.py (UserPromptSubmit hook)
+    |
+    +---> relevance gate: skip trivial prompts, confirmations, skill invocations
+    +---> QMD semantic search against the prompt text
+    +---> filter by minimum relevance score
+    +---> dedup: skip if same top result as last injection (within 3 prompts)
+    +---> print [vault] related memories to stdout --> Claude sees them
+```
+
+Both hooks are zero-cost when they have nothing relevant to say — they print nothing and Claude's context is unchanged. When they do inject, overhead is ~100-300 tokens per injection.
 
 ## What gets captured
 

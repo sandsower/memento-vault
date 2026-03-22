@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Memento Vault installer
 # Installs hooks, skills, and agents into Claude Code, then initializes the vault.
+# Version-aware: tracks installed file checksums so upgrades skip user-modified files.
 #
 # Usage:
 #   git clone https://github.com/sandsower/memento-vault.git
@@ -9,6 +10,9 @@
 #
 # Or with a custom vault path:
 #   MEMENTO_VAULT_PATH=~/my-vault ./install.sh
+#
+# Force overwrite all files (ignore local changes):
+#   ./install.sh --force
 
 set -euo pipefail
 
@@ -16,6 +20,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 VAULT_PATH="${MEMENTO_VAULT_PATH:-$HOME/memento}"
 CONFIG_DIR="$HOME/.config/memento-vault"
+MANIFEST="$CONFIG_DIR/manifest.json"
+NEW_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
+FORCE=false
+
+if [[ "${1:-}" == "--force" ]]; then
+    FORCE=true
+fi
 
 # Colors (if terminal supports them)
 if [ -t 1 ]; then
@@ -24,15 +35,150 @@ if [ -t 1 ]; then
     GREEN='\033[0;32m'
     YELLOW='\033[0;33m'
     RED='\033[0;31m'
+    CYAN='\033[0;36m'
     NC='\033[0m'
 else
-    BOLD='' DIM='' GREEN='' YELLOW='' RED='' NC=''
+    BOLD='' DIM='' GREEN='' YELLOW='' RED='' CYAN='' NC=''
 fi
 
 info()  { echo -e "${GREEN}[+]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[x]${NC} $1"; }
 step()  { echo -e "\n${BOLD}$1${NC}"; }
+skip()  { echo -e "${CYAN}[~]${NC} $1"; }
+
+# --- Manifest helpers ---
+# The manifest tracks what we installed and the checksum at install time.
+# On upgrade, we compare the installed file's current checksum against the
+# manifest checksum. If they differ, the user modified the file and we skip it.
+
+file_hash() {
+    # Portable checksum: sha256 on Linux, shasum on macOS
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+    elif command -v shasum &>/dev/null; then
+        shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+    else
+        # Fallback: md5
+        md5sum "$1" 2>/dev/null | cut -d' ' -f1
+    fi
+}
+
+load_manifest() {
+    # Read the installed version and file checksums from the manifest
+    INSTALLED_VERSION=""
+    if [ -f "$MANIFEST" ]; then
+        INSTALLED_VERSION=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('version',''))" 2>/dev/null || echo "")
+    fi
+}
+
+manifest_hash() {
+    # Get the checksum recorded for a file at last install
+    local key="$1"
+    if [ -f "$MANIFEST" ]; then
+        python3 -c "import json; m=json.load(open('$MANIFEST')); print(m.get('files',{}).get('$key',''))" 2>/dev/null || echo ""
+    else
+        echo ""
+    fi
+}
+
+save_manifest() {
+    # Write the manifest with current version and all file checksums
+    mkdir -p "$CONFIG_DIR"
+    python3 -c "
+import json, sys
+files = json.loads(sys.argv[1])
+manifest = {'version': sys.argv[2], 'vault_path': sys.argv[3], 'files': files}
+with open(sys.argv[4], 'w') as f:
+    json.dump(manifest, f, indent=2)
+" "$MANIFEST_FILES_JSON" "$NEW_VERSION" "$VAULT_PATH" "$MANIFEST"
+}
+
+# Accumulator for manifest file entries (built during install)
+MANIFEST_FILES_JSON="{}"
+record_file() {
+    local key="$1" path="$2"
+    local hash
+    hash=$(file_hash "$path")
+    MANIFEST_FILES_JSON=$(python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+d[sys.argv[2]] = sys.argv[3]
+print(json.dumps(d))
+" "$MANIFEST_FILES_JSON" "$key" "$hash")
+}
+
+# Safe copy: only overwrites if the user hasn't modified the installed copy.
+# Returns 0 if copied, 1 if skipped.
+safe_copy() {
+    local src="$1" dest="$2" key="$3"
+
+    if [ "$FORCE" = true ]; then
+        cp "$src" "$dest"
+        record_file "$key" "$dest"
+        return 0
+    fi
+
+    if [ ! -f "$dest" ]; then
+        # New file — always install
+        cp "$src" "$dest"
+        record_file "$key" "$dest"
+        return 0
+    fi
+
+    local manifest_checksum
+    manifest_checksum=$(manifest_hash "$key")
+
+    if [ -z "$manifest_checksum" ]; then
+        # File exists but no manifest entry (pre-manifest install or manual file).
+        # Don't overwrite — it's ambiguous.
+        local src_hash dest_hash
+        src_hash=$(file_hash "$src")
+        dest_hash=$(file_hash "$dest")
+        if [ "$src_hash" = "$dest_hash" ]; then
+            # Identical — record it but don't copy
+            record_file "$key" "$dest"
+            return 0
+        else
+            skip "Skipped $key (exists, may have local changes — use --force to overwrite)"
+            record_file "$key" "$dest"
+            return 1
+        fi
+    fi
+
+    local current_hash
+    current_hash=$(file_hash "$dest")
+
+    if [ "$current_hash" = "$manifest_checksum" ]; then
+        # File unchanged since last install — safe to overwrite
+        cp "$src" "$dest"
+        record_file "$key" "$dest"
+        return 0
+    else
+        # User modified the file — don't overwrite
+        skip "Skipped $key (locally modified — use --force to overwrite)"
+        record_file "$key" "$dest"
+        return 1
+    fi
+}
+
+# --- Load existing manifest ---
+
+load_manifest
+
+if [ -n "$INSTALLED_VERSION" ]; then
+    if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ] && [ "$FORCE" != true ]; then
+        info "Memento Vault v${NEW_VERSION} is already installed."
+        read -rp "Reinstall anyway? [y/N] " reinstall
+        if [[ ! "$reinstall" =~ ^[Yy] ]]; then
+            exit 0
+        fi
+    else
+        info "Upgrading Memento Vault: v${INSTALLED_VERSION} -> v${NEW_VERSION}"
+    fi
+else
+    info "Installing Memento Vault v${NEW_VERSION}"
+fi
 
 # --- Preflight checks ---
 
@@ -82,19 +228,16 @@ else
     info "Created $VAULT_PATH"
 fi
 
-# Create subdirectories
 for dir in fleeting notes projects archive; do
     mkdir -p "$VAULT_PATH/$dir"
 done
 info "Directory structure: fleeting/ notes/ projects/ archive/"
 
-# Copy .gitignore if not present
 if [ ! -f "$VAULT_PATH/.gitignore" ]; then
     cp "$SCRIPT_DIR/templates/vault/.gitignore" "$VAULT_PATH/.gitignore"
     info "Added .gitignore"
 fi
 
-# Initialize git repo if not present
 if [ ! -d "$VAULT_PATH/.git" ]; then
     git -C "$VAULT_PATH" init
     git -C "$VAULT_PATH" add -A
@@ -104,27 +247,29 @@ else
     info "Git repo already initialized"
 fi
 
-# --- Obsidian setup (optional) ---
+# --- Obsidian setup (optional, first install only) ---
 
-echo ""
-read -rp "Set up Obsidian views? (Base views for browsing notes) [Y/n] " obsidian
-if [[ ! "$obsidian" =~ ^[Nn] ]]; then
-    # Copy .obsidian config
-    if [ ! -d "$VAULT_PATH/.obsidian" ]; then
-        cp -r "$SCRIPT_DIR/templates/obsidian/.obsidian" "$VAULT_PATH/.obsidian"
-        info "Added Obsidian config (.obsidian/)"
-    else
-        info "Obsidian config already exists, skipping"
-    fi
-
-    # Copy base views
-    for base in "$SCRIPT_DIR"/templates/obsidian/*.base; do
-        basename=$(basename "$base")
-        if [ ! -f "$VAULT_PATH/$basename" ]; then
-            cp "$base" "$VAULT_PATH/$basename"
+if [ -z "$INSTALLED_VERSION" ]; then
+    echo ""
+    read -rp "Set up Obsidian views? (Base views for browsing notes) [Y/n] " obsidian
+    if [[ ! "$obsidian" =~ ^[Nn] ]]; then
+        if [ ! -d "$VAULT_PATH/.obsidian" ]; then
+            cp -r "$SCRIPT_DIR/templates/obsidian/.obsidian" "$VAULT_PATH/.obsidian"
+            info "Added Obsidian config (.obsidian/)"
+        else
+            info "Obsidian config already exists, skipping"
         fi
-    done
-    info "Added Base views (by-type, by-project, recent, decisions, bugfixes, by-source, by-tag)"
+
+        for base in "$SCRIPT_DIR"/templates/obsidian/*.base; do
+            basename=$(basename "$base")
+            if [ ! -f "$VAULT_PATH/$basename" ]; then
+                cp "$base" "$VAULT_PATH/$basename"
+            fi
+        done
+        info "Added Base views (by-type, by-project, recent, decisions, bugfixes, by-source, by-tag)"
+    fi
+else
+    obsidian="skip"
 fi
 
 # --- Config file ---
@@ -137,6 +282,17 @@ if [ ! -f "$CONFIG_DIR/memento.yml" ]; then
     info "Created $CONFIG_DIR/memento.yml"
 else
     info "Config already exists at $CONFIG_DIR/memento.yml"
+    # Check for new config keys the user might want to add
+    NEW_KEYS=()
+    for key in session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes recall_skip_patterns; do
+        if ! grep -q "^${key}:" "$CONFIG_DIR/memento.yml" 2>/dev/null; then
+            NEW_KEYS+=("$key")
+        fi
+    done
+    if [ ${#NEW_KEYS[@]} -gt 0 ]; then
+        warn "New config keys available: ${NEW_KEYS[*]}"
+        warn "See memento.yml.example for defaults. Your config is unchanged."
+    fi
 fi
 
 # --- Install hooks ---
@@ -144,29 +300,55 @@ fi
 step "Installing Claude Code hooks..."
 
 mkdir -p "$CLAUDE_DIR/hooks"
-cp "$SCRIPT_DIR/hooks/memento-triage.py" "$CLAUDE_DIR/hooks/memento-triage.py"
-cp "$SCRIPT_DIR/hooks/vault-commit.sh" "$CLAUDE_DIR/hooks/vault-commit.sh"
-cp "$SCRIPT_DIR/hooks/memento-sweeper.py" "$CLAUDE_DIR/hooks/memento-sweeper.py"
+
+HOOKS_UPDATED=0
+HOOKS_SKIPPED=0
+
+for hook in memento_utils.py memento-triage.py vault-commit.sh memento-sweeper.py vault-briefing.py vault-recall.py; do
+    if safe_copy "$SCRIPT_DIR/hooks/$hook" "$CLAUDE_DIR/hooks/$hook" "hooks/$hook"; then
+        ((HOOKS_UPDATED++)) || true
+    else
+        ((HOOKS_SKIPPED++)) || true
+    fi
+done
 chmod +x "$CLAUDE_DIR/hooks/vault-commit.sh"
-info "Copied hooks to $CLAUDE_DIR/hooks/"
+
+if [ "$HOOKS_SKIPPED" -gt 0 ]; then
+    info "Hooks: $HOOKS_UPDATED updated, $HOOKS_SKIPPED skipped (locally modified)"
+else
+    info "Hooks: $HOOKS_UPDATED installed to $CLAUDE_DIR/hooks/"
+fi
 
 # --- Install skills ---
 
 step "Installing Claude Code skills..."
 
+SKILLS_UPDATED=0
+SKILLS_SKIPPED=0
+
 for skill in memento memento-defrag start-fresh continue-work; do
     mkdir -p "$CLAUDE_DIR/skills/$skill"
-    cp "$SCRIPT_DIR/skills/$skill/SKILL.md" "$CLAUDE_DIR/skills/$skill/SKILL.md"
+    if safe_copy "$SCRIPT_DIR/skills/$skill/SKILL.md" "$CLAUDE_DIR/skills/$skill/SKILL.md" "skills/$skill"; then
+        ((SKILLS_UPDATED++)) || true
+    else
+        ((SKILLS_SKIPPED++)) || true
+    fi
 done
-info "Copied skills to $CLAUDE_DIR/skills/"
+
+if [ "$SKILLS_SKIPPED" -gt 0 ]; then
+    info "Skills: $SKILLS_UPDATED updated, $SKILLS_SKIPPED skipped (locally modified)"
+else
+    info "Skills: $SKILLS_UPDATED installed to $CLAUDE_DIR/skills/"
+fi
 
 # --- Install agents ---
 
 step "Installing Claude Code agents..."
 
 mkdir -p "$CLAUDE_DIR/agents"
-cp "$SCRIPT_DIR/agents/concierge.md" "$CLAUDE_DIR/agents/concierge.md"
-info "Copied concierge agent to $CLAUDE_DIR/agents/"
+if safe_copy "$SCRIPT_DIR/agents/concierge.md" "$CLAUDE_DIR/agents/concierge.md" "agents/concierge"; then
+    info "Concierge agent installed to $CLAUDE_DIR/agents/"
+fi
 
 # --- Merge settings.json ---
 
@@ -175,10 +357,23 @@ step "Updating Claude Code settings..."
 SETTINGS="$CLAUDE_DIR/settings.json"
 
 if [ ! -f "$SETTINGS" ]; then
-    # No existing settings — create from scratch
     cat > "$SETTINGS" << SETTINGS_EOF
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python3 $CLAUDE_DIR/hooks/vault-briefing.py",
+        "timeout": 8000
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "python3 $CLAUDE_DIR/hooks/vault-recall.py",
+        "timeout": 5000
+      }
+    ],
     "SessionEnd": [
       {
         "type": "command",
@@ -200,36 +395,43 @@ if [ ! -f "$SETTINGS" ]; then
 SETTINGS_EOF
     info "Created $SETTINGS with memento hooks and permissions"
 else
-    # Settings exist — check if our hook is already there
-    if grep -q "memento-triage" "$SETTINGS"; then
-        info "SessionEnd hook already configured"
-    else
-        warn "Existing settings.json found. You need to add the hook manually."
+    info "settings.json already exists, checking for missing hooks..."
+    MISSING_HOOKS=()
+    grep -q "vault-briefing" "$SETTINGS" || MISSING_HOOKS+=("SessionStart/vault-briefing")
+    grep -q "vault-recall" "$SETTINGS" || MISSING_HOOKS+=("UserPromptSubmit/vault-recall")
+    grep -q "memento-triage" "$SETTINGS" || MISSING_HOOKS+=("SessionEnd/memento-triage")
+
+    if [ ${#MISSING_HOOKS[@]} -gt 0 ]; then
+        warn "Missing hooks in settings.json: ${MISSING_HOOKS[*]}"
         echo ""
         echo -e "${DIM}Add to your settings.json under \"hooks\":${NC}"
         echo ""
-        cat << 'HOOK_EOF'
-  "SessionEnd": [
-    {
-      "type": "command",
-      "command": "python3 ~/.claude/hooks/memento-triage.py",
-      "timeout": 30000,
-      "async": true
-    }
-  ]
-HOOK_EOF
+
+        if [[ " ${MISSING_HOOKS[*]} " == *"vault-briefing"* ]]; then
+            echo '  "SessionStart": ['
+            echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/vault-briefing.py\", \"timeout\": 8000}"
+            echo '  ],'
+        fi
+        if [[ " ${MISSING_HOOKS[*]} " == *"vault-recall"* ]]; then
+            echo '  "UserPromptSubmit": ['
+            echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/vault-recall.py\", \"timeout\": 5000}"
+            echo '  ],'
+        fi
+        if [[ " ${MISSING_HOOKS[*]} " == *"memento-triage"* ]]; then
+            echo '  "SessionEnd": ['
+            echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/memento-triage.py\", \"timeout\": 30000, \"async\": true}"
+            echo '  ]'
+        fi
         echo ""
-        echo -e "${DIM}And under \"permissions\".\"allow\":${NC}"
-        echo ""
-        cat << PERM_EOF
-  "Read($VAULT_PATH/**)",
-  "Edit($VAULT_PATH/**)",
-  "Write($VAULT_PATH/**)",
-  "Bash($CLAUDE_DIR/hooks/vault-commit.sh:*)"
-PERM_EOF
-        echo ""
+    else
+        info "All hooks already configured"
     fi
 fi
+
+# --- Save manifest ---
+
+save_manifest
+info "Manifest saved to $MANIFEST (v${NEW_VERSION})"
 
 # --- QMD setup (optional) ---
 
@@ -256,23 +458,27 @@ if [ "$QMD_AVAILABLE" = true ]; then
         info "Created QMD config at $QMD_CONFIG"
     fi
 
-    # Initial index
-    echo ""
-    read -rp "Run initial QMD indexing now? [Y/n] " index_now
-    if [[ ! "$index_now" =~ ^[Nn] ]]; then
-        qmd update -c memento && qmd embed
-        info "QMD index built"
+    # Initial index (first install only)
+    if [ -z "$INSTALLED_VERSION" ]; then
+        echo ""
+        read -rp "Run initial QMD indexing now? [Y/n] " index_now
+        if [[ ! "$index_now" =~ ^[Nn] ]]; then
+            qmd update -c memento && qmd embed
+            info "QMD index built"
+        fi
     fi
 fi
 
 # --- Done ---
 
-step "Installation complete!"
+step "Installation complete! (v${NEW_VERSION})"
 echo ""
 echo "Your vault is at: $VAULT_PATH"
 echo ""
 echo "What happens now:"
-echo "  - Every time a Claude Code session ends, the triage hook captures it"
+echo "  - Sessions start with a vault briefing (relevant notes for your project)"
+echo "  - Each prompt triggers JIT recall (related vault notes injected automatically)"
+echo "  - Every session end, the triage hook captures knowledge to the vault"
 echo "  - Trivial sessions get a one-liner in fleeting/"
 echo "  - Substantial sessions spawn a background agent that writes atomic notes"
 echo "  - Use /memento to manually capture insights during a session"

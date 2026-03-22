@@ -48,3 +48,27 @@ agent_model: sonnet
 # Seconds to wait before committing agent-generated notes
 # (gives the background agent time to finish writing)
 agent_delay_seconds: 90
+
+# --- Session briefing (SessionStart hook) ---
+# Inject a project-aware vault briefing at the start of each session
+session_briefing: true
+
+# Maximum number of notes to include in the briefing
+briefing_max_notes: 5
+
+# Minimum QMD relevance score to include a note (0.0-1.0)
+briefing_min_score: 0.3
+
+# --- Prompt recall (UserPromptSubmit hook) ---
+# Inject relevant vault notes before each prompt is processed
+prompt_recall: true
+
+# Minimum QMD relevance score for recall results (0.0-1.0)
+recall_min_score: 0.4
+
+# Maximum number of notes to inject per prompt
+recall_max_notes: 3
+
+# Regex patterns for prompts that should skip recall
+# (matched case-insensitively against the full prompt)
+# recall_skip_patterns: ["^(yes|no|ok|sure|thanks)$", "^git\\s", "^run\\s"]

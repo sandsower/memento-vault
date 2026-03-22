@@ -44,6 +44,18 @@ agent_model: sonnet
 
 # Seconds to wait before committing agent-written notes
 agent_delay_seconds: 90
+
+# --- Retrieval hooks ---
+# Inject vault notes at session start
+session_briefing: true
+briefing_max_notes: 5
+briefing_min_score: 0.3
+
+# Inject vault notes before each prompt
+prompt_recall: true
+recall_min_score: 0.4
+recall_max_notes: 3
+recall_skip_patterns: ["^(yes|no|ok|sure|thanks)$", "^git\\s", "^run\\s"]
 ```
 
 ## Project rules
@@ -95,6 +107,43 @@ notable_patterns: [plan, design]
 
 The delta-check gate (QMD-powered) already prevents duplicate captures regardless of these thresholds. If QMD says the vault already covers a topic and no new files were edited, the agent is not spawned.
 
+## Session briefing
+
+At session start, the `vault-briefing` hook injects a compact summary of your project's vault state into Claude's context. This includes recent sessions and the most relevant notes.
+
+```yaml
+# Disable the session briefing
+session_briefing: false
+
+# Show more/fewer notes
+briefing_max_notes: 8
+
+# Lower the threshold to surface more notes (default 0.3)
+briefing_min_score: 0.2
+```
+
+Requires QMD. Falls back to project index notes if QMD is unavailable.
+
+## Prompt recall
+
+On every prompt, the `vault-recall` hook runs a semantic search against your prompt and injects matching vault notes. This is the just-in-time retrieval mechanism.
+
+```yaml
+# Disable prompt recall
+prompt_recall: false
+
+# Tighter relevance threshold (fewer, more relevant results)
+recall_min_score: 0.6
+
+# Show more results per prompt
+recall_max_notes: 5
+
+# Custom skip patterns (prompts matching these are never searched)
+recall_skip_patterns: ["^(yes|no|ok)$", "^git\\s", "^npm\\s"]
+```
+
+The hook automatically deduplicates — if the top result is the same as the last injection, it skips until 3 prompts have passed. Requires QMD.
+
 ## Disabling features
 
 **No auto-commit** (commit manually):
@@ -102,9 +151,15 @@ The delta-check gate (QMD-powered) already prevents duplicate captures regardles
 auto_commit: false
 ```
 
-**No QMD** (grep-only search):
+**No QMD** (grep-only search, no retrieval hooks):
 ```yaml
 qmd_collection: ""
+```
+
+**No retrieval hooks** (capture only, no injection):
+```yaml
+session_briefing: false
+prompt_recall: false
 ```
 
 **No background agent** (fleeting notes only):

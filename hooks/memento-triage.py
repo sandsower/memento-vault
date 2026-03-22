@@ -13,110 +13,12 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-# --- Configuration ---
-
-DEFAULT_CONFIG = {
-    "vault_path": str(Path.home() / "memento"),
-    "exchange_threshold": 15,
-    "file_count_threshold": 3,
-    "notable_patterns": ["plan", "design", "MEMORY.md", "CLAUDE.md", "SKILL.md"],
-    "qmd_collection": "memento",
-    "extra_qmd_collections": [],
-    "project_rules": [],
-    "auto_commit": True,
-    "agent_model": "sonnet",
-    "agent_delay_seconds": 90,
-}
-
-
-def load_config():
-    """Load config from memento.yml, falling back to defaults."""
-    config = dict(DEFAULT_CONFIG)
-
-    # Check standard config locations
-    candidates = [
-        Path.home() / ".config" / "memento-vault" / "memento.yml",
-        Path.home() / ".memento-vault.yml",
-    ]
-
-    # Also check vault root
-    vault_path = Path(config["vault_path"])
-    if vault_path.exists():
-        candidates.insert(0, vault_path / "memento.yml")
-
-    for path in candidates:
-        if path.exists():
-            try:
-                # Use PyYAML if available, otherwise simple key: value parsing
-                try:
-                    import yaml
-                    with open(path) as f:
-                        user_config = yaml.safe_load(f) or {}
-                except ImportError:
-                    user_config = _parse_simple_yaml(path)
-
-                config.update({k: v for k, v in user_config.items() if v is not None})
-            except Exception:
-                pass
-            break
-
-    # Resolve vault path
-    config["vault_path"] = str(Path(config["vault_path"]).expanduser())
-    return config
-
-
-def _parse_simple_yaml(path):
-    """Minimal YAML parser for simple key: value configs. No nested structures."""
-    result = {}
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" in line:
-                key, _, value = line.partition(":")
-                key = key.strip()
-                value = value.strip()
-                # Handle booleans
-                if value.lower() in ("true", "yes"):
-                    value = True
-                elif value.lower() in ("false", "no"):
-                    value = False
-                # Handle integers
-                elif value.isdigit():
-                    value = int(value)
-                # Handle lists (simple inline format: [a, b, c])
-                elif value.startswith("[") and value.endswith("]"):
-                    value = [v.strip().strip('"').strip("'") for v in value[1:-1].split(",")]
-                # Strip quotes
-                elif (value.startswith('"') and value.endswith('"')) or \
-                     (value.startswith("'") and value.endswith("'")):
-                    value = value[1:-1]
-                result[key] = value
-    return result
-
-
-CONFIG = None
-
-
-def get_config():
-    global CONFIG
-    if CONFIG is None:
-        CONFIG = load_config()
-    return CONFIG
-
-
-def get_vault():
-    return Path(get_config()["vault_path"])
+# Shared utilities
+sys.path.insert(0, str(Path(__file__).parent))
+from memento_utils import get_config, get_vault, detect_project, slugify, read_hook_input
 
 
 # --- Transcript parsing ---
-
-
-def read_hook_input():
-    """Read JSON from stdin (SessionEnd hook data)."""
-    raw = sys.stdin.read()
-    return json.loads(raw)
 
 
 def parse_transcript(transcript_path):
@@ -257,49 +159,6 @@ def has_new_insight(meta):
 
 
 # --- Helpers ---
-
-
-def slugify(text):
-    """Simple slug from text."""
-    text = text.lower().strip()
-    text = re.sub(r"[^a-z0-9\s-]", "", text)
-    text = re.sub(r"[\s-]+", "-", text)
-    return text[:80]
-
-
-def detect_project(cwd, git_branch):
-    """Derive a project slug and optional ticket from the working directory and branch.
-    Returns (project_slug, ticket_or_none).
-
-    Checks project_rules from config first. Each rule has:
-      path_contains: string to match in the cwd
-      slug: project slug to use
-      ticket_pattern: regex for extracting ticket from branch (optional)
-    Falls back to generic detection if no rule matches.
-    """
-    if not cwd:
-        return "unknown", None
-
-    config = get_config()
-    rules = config.get("project_rules", [])
-
-    for rule in rules:
-        if isinstance(rule, dict) and rule.get("path_contains") and rule["path_contains"] in cwd:
-            ticket = None
-            if git_branch and rule.get("ticket_pattern"):
-                match = re.search(rule["ticket_pattern"], git_branch, re.IGNORECASE)
-                if match:
-                    ticket = match.group(1).upper() if match.lastindex else match.group(0).upper()
-            return rule.get("slug", slugify(Path(cwd).name)), ticket
-
-    # Default: generic ticket detection and directory-based slug
-    ticket = None
-    if git_branch:
-        match = re.search(r"([a-z]+-\d+)", git_branch, re.IGNORECASE)
-        if match:
-            ticket = match.group(1).upper()
-
-    return slugify(Path(cwd).name) or "misc", ticket
 
 
 def ensure_project_index(project_slug, cwd, git_branch):
