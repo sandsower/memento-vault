@@ -11,6 +11,9 @@
 # Or with a custom vault path:
 #   MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 #
+# Install experimental retrieval hooks (session briefing, prompt recall, tool context):
+#   ./install.sh --experimental
+#
 # Force overwrite all files (ignore local changes):
 #   ./install.sh --force
 
@@ -23,10 +26,14 @@ CONFIG_DIR="$HOME/.config/memento-vault"
 MANIFEST="$CONFIG_DIR/manifest.json"
 NEW_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 FORCE=false
+EXPERIMENTAL=false
 
-if [[ "${1:-}" == "--force" ]]; then
-    FORCE=true
-fi
+for arg in "$@"; do
+    case "$arg" in
+        --force) FORCE=true ;;
+        --experimental) EXPERIMENTAL=true ;;
+    esac
+done
 
 # Colors (if terminal supports them)
 if [ -t 1 ]; then
@@ -284,7 +291,11 @@ else
     info "Config already exists at $CONFIG_DIR/memento.yml"
     # Check for new config keys the user might want to add
     NEW_KEYS=()
-    for key in session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes recall_skip_patterns tool_context tool_context_min_score tool_context_max_notes; do
+    EXPECTED_KEYS="exchange_threshold file_count_threshold"
+    if [ "$EXPERIMENTAL" = true ]; then
+        EXPECTED_KEYS="$EXPECTED_KEYS session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes tool_context tool_context_min_score tool_context_max_notes"
+    fi
+    for key in $EXPECTED_KEYS; do
         if ! grep -q "^${key}:" "$CONFIG_DIR/memento.yml" 2>/dev/null; then
             NEW_KEYS+=("$key")
         fi
@@ -304,7 +315,17 @@ mkdir -p "$CLAUDE_DIR/hooks"
 HOOKS_UPDATED=0
 HOOKS_SKIPPED=0
 
-for hook in memento_utils.py memento-triage.py vault-commit.sh memento-sweeper.py vault-briefing.py vault-recall.py vault-tool-context.py; do
+STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py"
+EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py"
+
+if [ "$EXPERIMENTAL" = true ]; then
+    INSTALL_HOOKS="$STABLE_HOOKS $EXPERIMENTAL_HOOKS"
+    info "Experimental mode: installing retrieval hooks"
+else
+    INSTALL_HOOKS="$STABLE_HOOKS"
+fi
+
+for hook in $INSTALL_HOOKS; do
     if safe_copy "$SCRIPT_DIR/hooks/$hook" "$CLAUDE_DIR/hooks/$hook" "hooks/$hook"; then
         ((HOOKS_UPDATED++)) || true
     else
@@ -357,7 +378,8 @@ step "Updating Claude Code settings..."
 SETTINGS="$CLAUDE_DIR/settings.json"
 
 if [ ! -f "$SETTINGS" ]; then
-    cat > "$SETTINGS" << SETTINGS_EOF
+    if [ "$EXPERIMENTAL" = true ]; then
+        cat > "$SETTINGS" << SETTINGS_EOF
 {
   "hooks": {
     "SessionStart": [
@@ -405,14 +427,42 @@ if [ ! -f "$SETTINGS" ]; then
   }
 }
 SETTINGS_EOF
-    info "Created $SETTINGS with memento hooks and permissions"
+        info "Created $SETTINGS with stable + experimental hooks"
+    else
+        cat > "$SETTINGS" << SETTINGS_EOF
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "type": "command",
+        "command": "python3 $CLAUDE_DIR/hooks/memento-triage.py",
+        "timeout": 30000,
+        "async": true
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read($VAULT_PATH/**)",
+      "Edit($VAULT_PATH/**)",
+      "Write($VAULT_PATH/**)",
+      "Bash($CLAUDE_DIR/hooks/vault-commit.sh:*)"
+    ]
+  }
+}
+SETTINGS_EOF
+        info "Created $SETTINGS with stable hooks"
+    fi
 else
     info "settings.json already exists, checking for missing hooks..."
     MISSING_HOOKS=()
-    grep -q "vault-briefing" "$SETTINGS" || MISSING_HOOKS+=("SessionStart/vault-briefing")
-    grep -q "vault-recall" "$SETTINGS" || MISSING_HOOKS+=("UserPromptSubmit/vault-recall")
     grep -q "memento-triage" "$SETTINGS" || MISSING_HOOKS+=("SessionEnd/memento-triage")
-    grep -q "vault-tool-context" "$SETTINGS" || MISSING_HOOKS+=("PreToolUse/vault-tool-context")
+
+    if [ "$EXPERIMENTAL" = true ]; then
+        grep -q "vault-briefing" "$SETTINGS" || MISSING_HOOKS+=("SessionStart/vault-briefing")
+        grep -q "vault-recall" "$SETTINGS" || MISSING_HOOKS+=("UserPromptSubmit/vault-recall")
+        grep -q "vault-tool-context" "$SETTINGS" || MISSING_HOOKS+=("PreToolUse/vault-tool-context")
+    fi
 
     if [ ${#MISSING_HOOKS[@]} -gt 0 ]; then
         warn "Missing hooks in settings.json: ${MISSING_HOOKS[*]}"
@@ -420,6 +470,11 @@ else
         echo -e "${DIM}Add to your settings.json under \"hooks\":${NC}"
         echo ""
 
+        if [[ " ${MISSING_HOOKS[*]} " == *"memento-triage"* ]]; then
+            echo '  "SessionEnd": ['
+            echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/memento-triage.py\", \"timeout\": 30000, \"async\": true}"
+            echo '  ],'
+        fi
         if [[ " ${MISSING_HOOKS[*]} " == *"vault-briefing"* ]]; then
             echo '  "SessionStart": ['
             echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/vault-briefing.py\", \"timeout\": 8000}"
@@ -428,11 +483,6 @@ else
         if [[ " ${MISSING_HOOKS[*]} " == *"vault-recall"* ]]; then
             echo '  "UserPromptSubmit": ['
             echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/vault-recall.py\", \"timeout\": 5000}"
-            echo '  ],'
-        fi
-        if [[ " ${MISSING_HOOKS[*]} " == *"memento-triage"* ]]; then
-            echo '  "SessionEnd": ['
-            echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/memento-triage.py\", \"timeout\": 30000, \"async\": true}"
             echo '  ],'
         fi
         if [[ " ${MISSING_HOOKS[*]} " == *"vault-tool-context"* ]]; then
@@ -487,9 +537,9 @@ if [ "$QMD_AVAILABLE" = true ]; then
     fi
 fi
 
-# --- Shell warmup (optional) ---
+# --- Shell warmup (optional, experimental only) ---
 
-if [ "$QMD_AVAILABLE" = true ]; then
+if [ "$QMD_AVAILABLE" = true ] && [ "$EXPERIMENTAL" = true ]; then
     # Detect shell rc file
     SHELL_RC=""
     case "$(basename "${SHELL:-/bin/bash}")" in
@@ -519,17 +569,23 @@ fi
 
 # --- Done ---
 
-step "Installation complete! (v${NEW_VERSION})"
+if [ "$EXPERIMENTAL" = true ]; then
+    step "Installation complete! (v${NEW_VERSION} + experimental retrieval)"
+else
+    step "Installation complete! (v${NEW_VERSION})"
+fi
 echo ""
 echo "Your vault is at: $VAULT_PATH"
 echo ""
 echo "What happens now:"
-echo "  - Sessions start with a vault briefing (relevant notes for your project)"
-echo "  - Each prompt triggers JIT recall (related vault notes injected automatically)"
-echo "  - File reads inject vault notes about known code areas (tool-aware context)"
 echo "  - Every session end, the triage hook captures knowledge to the vault"
 echo "  - Trivial sessions get a one-liner in fleeting/"
 echo "  - Substantial sessions spawn a background agent that writes atomic notes"
+if [ "$EXPERIMENTAL" = true ]; then
+    echo "  - Sessions start with a vault briefing (relevant notes for your project)"
+    echo "  - Each prompt triggers JIT recall (related vault notes injected automatically)"
+    echo "  - File reads inject vault notes about known code areas (tool-aware context)"
+fi
 echo "  - Use /memento to manually capture insights during a session"
 echo "  - Use /memento-defrag monthly to archive stale notes"
 echo "  - Use /continue-work to pick up where you left off"

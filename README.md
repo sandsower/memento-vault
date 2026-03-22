@@ -21,6 +21,16 @@ Custom vault path:
 MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 ```
 
+### Experimental retrieval hooks
+
+The stable install captures knowledge. To also **inject knowledge back** into active sessions automatically, install with the experimental flag:
+
+```bash
+./install.sh --experimental
+```
+
+This adds three retrieval hooks (session briefing, prompt recall, file-read context injection) that require QMD. See [Retrieval (experimental)](#retrieval-experimental) below for details and the [performance analysis](docs/performance-analysis.md) for benchmarks.
+
 ### Requirements
 
 - Python 3
@@ -29,14 +39,31 @@ MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 - [QMD](https://github.com/tobi/qmd) (optional, semantic search)
 - [Obsidian](https://obsidian.md) (optional, browsing)
 
-## Retrieval
+## Retrieval (experimental)
 
-Knowledge flows back into active sessions automatically via two hooks:
+> Requires `./install.sh --experimental` and QMD.
 
-- **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens
-- **Prompt recall** (UserPromptSubmit): runs BM25 keyword search on each prompt and surfaces matching notes before Claude processes it
+Knowledge flows back into active sessions automatically via three hooks:
 
-Both hooks are silent when they have nothing relevant — zero tokens injected on trivial prompts like "yes" or "git status". Requires QMD.
+- **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens. Fast sync output (<50ms), QMD search deferred to background.
+- **Prompt recall** (UserPromptSubmit): runs BM25 keyword search on each prompt and surfaces matching notes before Claude processes it. Project-scoped, with temporal decay and wikilink expansion.
+- **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. Directory-level BM25 with caching and rate limiting.
+
+All three hooks are silent when they have nothing relevant — zero tokens injected on trivial prompts, config files, and vendor directories.
+
+### Performance characteristics
+
+Benchmarked against 30 real sessions (341 prompts, 362 file reads, 16 projects):
+
+| Metric | Value |
+|---|---|
+| Avg injected per session | ~555 chars (~139 input units) |
+| Effective hit rate | 100% (when hooks search, they always find relevant notes) |
+| Avg recall latency | 792ms per prompt |
+| Avg tool-context latency | 141ms per file read |
+| Session briefing | <83ms (deferred QMD search is non-blocking) |
+
+Full analysis with methodology, industry comparison, and optimization details in [docs/performance-analysis.md](docs/performance-analysis.md).
 
 ## What you get
 
@@ -84,11 +111,13 @@ file_count_threshold: 3
 qmd_collection: memento
 auto_commit: true
 
-# Retrieval hooks
+# Retrieval hooks (experimental only)
 session_briefing: true      # inject vault notes at session start
 briefing_max_notes: 5
 prompt_recall: true          # inject vault notes per prompt
 recall_max_notes: 3
+tool_context: true           # inject vault notes on file reads
+tool_context_min_score: 0.65
 ```
 
 ### Extension points
@@ -101,7 +130,7 @@ Three ways to layer project-specific behavior on top without forking:
 
 ## QMD (optional)
 
-QMD adds semantic search over your vault. Without it the concierge agent falls back to grep, which works for keyword searches but misses conceptual matches. QMD also powers the retrieval hooks (session briefing and prompt recall).
+QMD adds semantic search over your vault. Without it the concierge agent falls back to grep, which works for keyword searches but misses conceptual matches. QMD is required for the experimental retrieval hooks.
 
 ```bash
 qmd search "caching strategy" -c memento
@@ -109,9 +138,9 @@ qmd search "caching strategy" -c memento
 
 The concierge agent uses QMD automatically when you ask about past decisions.
 
-### Model warmup
+### Model warmup (experimental)
 
-The session briefing hook uses vector search, which requires loading an embedding model. First call after a reboot takes 6-8s; subsequent calls are ~1.5s (model stays in OS page cache). The installer can add a background warmup to your shell rc file so the model is always cached:
+The session briefing hook's deferred search uses vector search, which requires loading an embedding model. First call after a reboot takes 6-8s; subsequent calls are ~1.5s (model stays in OS page cache). The `--experimental` installer can add a background warmup to your shell rc file so the model is always cached:
 
 ```bash
 # Added to .zshrc/.bashrc by the installer (optional)

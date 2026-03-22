@@ -36,9 +36,11 @@ memento-triage.py reads the transcript
     +---> QMD reindex (if installed)
 ```
 
-## Retrieval flow (read path)
+## Retrieval flow (read path) — experimental
 
-Knowledge flows back into active sessions via two hooks:
+> Requires `./install.sh --experimental` and QMD.
+
+Knowledge flows back into active sessions via three hooks:
 
 ```
 Session starts
@@ -47,9 +49,11 @@ Session starts
 vault-briefing.py (SessionStart hook)
     |
     +---> detect project from cwd + git branch
-    +---> read projects/{slug}.md for recent sessions + linked notes
-    +---> QMD semantic search for project-relevant notes
-    +---> print [vault] briefing to stdout --> Claude sees it
+    +---> SYNC: read projects/{slug}.md for recent sessions (<50ms)
+    +---> print [vault] project + sessions to stdout --> Claude sees it
+    +---> ASYNC: spawn background subprocess for QMD vsearch
+    |     writes results to /tmp/memento-deferred-briefing.json
+    |     picked up by vault-recall.py on the first prompt
     |
     v
 User types a prompt
@@ -57,14 +61,35 @@ User types a prompt
     v
 vault-recall.py (UserPromptSubmit hook)
     |
-    +---> relevance gate: skip trivial prompts, confirmations, skill invocations
-    +---> QMD semantic search against the prompt text
-    +---> filter by minimum relevance score
+    +---> consume deferred briefing results (if ready)
+    +---> relevance gate: skip short prompts, confirmations, skill invocations,
+    |     command messages, prompts >500 chars
+    +---> BM25 search against prompt + project slug
+    +---> enhance_results():
+    |       temporal decay (90-day half-life, certainty 4-5 immune)
+    |       project filter (exclude notes from other projects)
+    |       wikilink expansion (1-hop, 50% parent score, cap 3)
     +---> dedup: skip if same top result as last injection (within 3 prompts)
     +---> print [vault] related memories to stdout --> Claude sees them
+    |
+    v
+Claude reads a file
+    |
+    v
+vault-tool-context.py (PreToolUse hook, Read matcher)
+    |
+    +---> skip check: system paths, vendor dirs, config files, assets
+    +---> session injection cap (max 5)
+    +---> directory cache check (hit = use cached, miss = continue)
+    +---> cooldown check (1s between QMD calls)
+    +---> extract keywords from file path (split camelCase, filter stop segments)
+    +---> BM25 search against keywords
+    +---> enhance_results() pipeline
+    +---> dedup against recall + prior tool-context injections
+    +---> return JSON with additionalContext --> Claude sees it before the file
 ```
 
-Both hooks are zero-cost when they have nothing relevant to say — they print nothing and Claude's context is unchanged. When they do inject, overhead is ~100-300 tokens per injection.
+All three hooks are zero-cost when they have nothing relevant to say — they produce no output and Claude's context is unchanged. When they do inject, overhead is ~139 input units per session on average. See [performance-analysis.md](performance-analysis.md) for detailed benchmarks.
 
 ## What gets captured
 
