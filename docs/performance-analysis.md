@@ -292,7 +292,7 @@ References:
 - [Benchmarking Honcho](https://blog.plasticlabs.ai/research/Benchmarking-Honcho) -- LongMem/LoCoMo/BEAM results
 - [Hindsight (Vectorize.io)](https://vectorize.io/hindsight/) -- 91.4% LongMemEval, 4-network architecture, Ollama support
 - [Letta V1](https://docs.letta.com/) -- 42.5% Terminal-Bench, 74% LoCoMo with filesystem memory
-- [Google Always On Memory Agent](https://github.com/google/always-on-memory-agent) -- SQLite, 30-min consolidation, zero vector DB
+- [Google Always On Memory Agent](https://github.com/GoogleCloudPlatform/generative-ai/tree/main/gemini/agents/always-on-memory-agent) -- SQLite, 30-min consolidation, zero vector DB
 - [MemOS 2.0 "Stardust"](https://github.com/MemTensor/MemOS) -- OpenClaw plugin, hybrid FTS5+vector in SQLite
 - [Generative Agents](https://arxiv.org/abs/2304.03442) -- reflection ablation study (Park et al.)
 - [Zep/Graphiti](https://arxiv.org/abs/2501.13956) -- temporal knowledge graph

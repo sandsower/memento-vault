@@ -73,6 +73,22 @@ recall_max_notes: 3
 # (matched case-insensitively against the full prompt)
 # recall_skip_patterns: ["^(yes|no|ok|sure|thanks)$", "^git\\s", "^run\\s"]
 
+# --- Tool context (PreToolUse hook) ---
+# Inject vault notes when Claude reads files in known code areas
+tool_context: true
+
+# Minimum QMD relevance score for tool context results (0.0-1.0)
+tool_context_min_score: 0.75
+
+# Maximum number of notes to inject per file read
+tool_context_max_notes: 2
+
+# Maximum total injections per session
+tool_context_max_injections: 5
+
+# Seconds between QMD calls (rate limiting)
+tool_context_cooldown: 3
+
 # --- Inception (background consolidation) ---
 # Clusters vault notes by embedding similarity and produces pattern notes.
 # Requires: numpy, hdbscan, scikit-learn (pip install numpy hdbscan scikit-learn)

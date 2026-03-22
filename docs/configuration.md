@@ -56,6 +56,11 @@ prompt_recall: true
 recall_min_score: 0.4
 recall_max_notes: 3
 recall_skip_patterns: ["^(yes|no|ok|sure|thanks)$", "^git\\s", "^run\\s"]
+
+# Inject vault notes on file reads
+tool_context: true
+tool_context_min_score: 0.75
+tool_context_max_notes: 2
 ```
 
 ## Project rules
@@ -148,6 +153,29 @@ recall_skip_patterns: ["^(yes|no|ok)$", "^git\\s", "^npm\\s"]
 
 Deduplication is automatic -- if the top result matches the last injection, it skips until 3 prompts have passed. Requires QMD.
 
+### Tool context
+
+When Claude reads a file, `vault-tool-context` extracts keywords from the file path and injects matching vault notes. Scoped to directories you've worked in before, skips vendor dirs, config files, and system paths.
+
+```yaml
+# Disable tool context
+tool_context: false
+
+# Tighter relevance threshold (default 0.75)
+tool_context_min_score: 0.85
+
+# More notes per file read (default 2)
+tool_context_max_notes: 3
+
+# Max total injections per session (default 5)
+tool_context_max_injections: 8
+
+# Rate limit between QMD calls in seconds (default 3)
+tool_context_cooldown: 3
+```
+
+Deduplicates against recall and prior tool-context injections. Requires QMD.
+
 ### Tier 1 retrieval enhancements (v1.2.0)
 
 These features improve recall quality with zero per-query LLM cost. All default to enabled and degrade gracefully if dependencies are missing.
@@ -201,6 +229,7 @@ qmd_collection: ""
 ```yaml
 session_briefing: false
 prompt_recall: false
+tool_context: false
 ```
 
 **No background agent** (fleeting notes only):

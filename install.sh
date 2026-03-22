@@ -153,8 +153,15 @@ safe_copy() {
         fi
     fi
 
-    local current_hash
+    local current_hash src_hash
     current_hash=$(file_hash "$dest")
+    src_hash=$(file_hash "$src")
+
+    if [ "$current_hash" = "$src_hash" ]; then
+        # Already up to date (possibly updated outside the installer)
+        record_file "$key" "$dest"
+        return 0
+    fi
 
     if [ "$current_hash" = "$manifest_checksum" ]; then
         # File unchanged since last install — safe to overwrite
