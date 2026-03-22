@@ -37,6 +37,13 @@ DEFAULT_CONFIG = {
         r"^git\s",
         r"^run\s",
     ],
+    # Retrieval enhancements
+    "temporal_decay": True,
+    "temporal_decay_half_life": 90,  # days
+    "temporal_decay_certainty_floor": 4,  # certainty >= this: no decay
+    "wikilink_expansion": True,
+    "wikilink_max_hops": 1,
+    "wikilink_score_factor": 0.5,
     # Tool context hook (PreToolUse)
     "tool_context": True,
     "tool_context_min_score": 0.75,
@@ -296,6 +303,226 @@ def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=
 
     results.sort(key=lambda r: r["score"], reverse=True)
     return results[:limit]
+
+
+# --- Retrieval enhancements ---
+
+
+def read_note_metadata(note_name):
+    """Read frontmatter metadata and wikilinks from a vault note.
+
+    Args:
+        note_name: Note filename stem (e.g., 'some-note') or relative path.
+
+    Returns:
+        Dict with: date (str|None), certainty (int|None), type (str|None),
+        links (list of wikilink target names).
+        Returns None if the note file doesn't exist.
+    """
+    vault = get_vault()
+    # Normalize: accept both 'some-note' and 'notes/some-note.md'
+    if note_name.endswith(".md"):
+        note_path = vault / note_name
+    else:
+        note_path = vault / "notes" / f"{note_name}.md"
+
+    if not note_path.exists():
+        return None
+
+    date = None
+    certainty = None
+    note_type = None
+    links = []
+
+    try:
+        with open(note_path) as f:
+            in_frontmatter = False
+            past_frontmatter = False
+            for line in f:
+                stripped = line.strip()
+                if stripped == "---":
+                    if not in_frontmatter and not past_frontmatter:
+                        in_frontmatter = True
+                        continue
+                    elif in_frontmatter:
+                        in_frontmatter = False
+                        past_frontmatter = True
+                        continue
+                if in_frontmatter:
+                    if stripped.startswith("date:"):
+                        date = stripped[5:].strip().strip('"').strip("'")
+                    elif stripped.startswith("certainty:"):
+                        try:
+                            certainty = int(stripped[10:].strip())
+                        except ValueError:
+                            pass
+                    elif stripped.startswith("type:"):
+                        note_type = stripped[5:].strip()
+                if past_frontmatter:
+                    # Extract wikilinks from body
+                    for match in re.finditer(r"\[\[([^\]]+)\]\]", line):
+                        links.append(match.group(1))
+    except OSError:
+        return None
+
+    return {"date": date, "certainty": certainty, "type": note_type, "links": links}
+
+
+def apply_temporal_decay(results, config=None):
+    """Apply temporal decay to search results based on note age and certainty.
+
+    High-certainty notes (>= certainty_floor) are immune to decay.
+    Others decay exponentially with a configurable half-life.
+
+    Modifies results in-place and re-sorts by adjusted score.
+    """
+    import math
+    from datetime import datetime
+
+    if config is None:
+        config = get_config()
+
+    if not config.get("temporal_decay", True):
+        return results
+
+    half_life = config.get("temporal_decay_half_life", 90)
+    certainty_floor = config.get("temporal_decay_certainty_floor", 4)
+    decay_lambda = math.log(2) / max(half_life, 1)
+
+    now = datetime.now()
+
+    for result in results:
+        path = result.get("path", "")
+        # Derive note name from path
+        note_name = Path(path).stem if path else ""
+        if not note_name:
+            continue
+
+        meta = read_note_metadata(note_name)
+        if meta is None:
+            continue
+
+        # Store metadata for later use by wikilink expansion
+        result["_meta"] = meta
+
+        certainty = meta.get("certainty")
+        if certainty is not None and certainty >= certainty_floor:
+            continue  # No decay for high-certainty notes
+
+        date_str = meta.get("date")
+        if not date_str:
+            continue
+
+        try:
+            # Parse ISO date (with or without time)
+            note_date = datetime.fromisoformat(date_str)
+            age_days = (now - note_date).days
+            if age_days <= 0:
+                continue
+
+            # Slower decay for certainty 3
+            effective_lambda = decay_lambda
+            if certainty == 3:
+                effective_lambda = decay_lambda / 2
+
+            decay_factor = math.exp(-effective_lambda * age_days)
+            result["_original_score"] = result["score"]
+            result["score"] = result["score"] * decay_factor
+        except (ValueError, TypeError):
+            continue
+
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results
+
+
+def expand_wikilinks(results, config=None):
+    """Expand search results with wikilinked notes (1 hop).
+
+    For each result that has wikilinks, add linked notes as lower-scored
+    entries. Deduplicates against existing results.
+
+    Returns a new list with expanded results.
+    """
+    if config is None:
+        config = get_config()
+
+    if not config.get("wikilink_expansion", True):
+        return results
+
+    score_factor = config.get("wikilink_score_factor", 0.5)
+    max_hops = config.get("wikilink_max_hops", 1)
+
+    if max_hops < 1:
+        return results
+
+    # Track existing paths to avoid duplicates
+    seen_paths = set()
+    for r in results:
+        path = r.get("path", "")
+        seen_paths.add(path)
+        # Also add by note name for matching
+        seen_paths.add(Path(path).stem if path else "")
+
+    expanded = []
+
+    for result in results:
+        # Use cached metadata if available (from temporal_decay), otherwise read
+        meta = result.get("_meta")
+        if meta is None:
+            note_name = Path(result.get("path", "")).stem
+            if note_name:
+                meta = read_note_metadata(note_name)
+
+        if not meta or not meta.get("links"):
+            continue
+
+        parent_score = result.get("_original_score", result.get("score", 0))
+
+        for link_name in meta["links"]:
+            if link_name in seen_paths:
+                continue
+
+            link_meta = read_note_metadata(link_name)
+            if link_meta is None:
+                continue
+
+            seen_paths.add(link_name)
+            link_path = f"notes/{link_name}.md"
+            seen_paths.add(link_path)
+
+            expanded.append({
+                "path": link_path,
+                "title": link_name,
+                "score": parent_score * score_factor,
+                "snippet": "",
+                "_meta": link_meta,
+                "_hop": 1,
+            })
+
+    # Merge and sort
+    all_results = results + expanded
+    all_results.sort(key=lambda r: r["score"], reverse=True)
+    return all_results
+
+
+def enhance_results(results, config=None):
+    """Apply all retrieval enhancements: temporal decay + wikilink expansion.
+
+    Call this after qmd_search to improve result quality.
+    """
+    if config is None:
+        config = get_config()
+
+    results = apply_temporal_decay(results, config)
+    results = expand_wikilinks(results, config)
+
+    # Clean internal metadata before returning
+    for r in results:
+        r.pop("_meta", None)
+        r.pop("_original_score", None)
+        r.pop("_hop", None)
+
+    return results
 
 
 # --- Hook I/O helpers ---

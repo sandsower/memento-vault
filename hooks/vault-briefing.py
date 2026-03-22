@@ -180,7 +180,7 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
 
 def run_deferred_search():
     """Background worker: run QMD search and write results to the deferred file."""
-    from memento_utils import qmd_search
+    from memento_utils import qmd_search, enhance_results
 
     try:
         with open(DEFERRED_BRIEFING_PATH) as f:
@@ -197,11 +197,13 @@ def run_deferred_search():
 
         results = qmd_search(
             query,
-            limit=max_notes,
+            limit=max_notes + 3,
             semantic=True,
             timeout=12,
             min_score=min_score,
         )
+
+        results = enhance_results(results)
 
         # Format results, dedup against linked notes
         seen = set()

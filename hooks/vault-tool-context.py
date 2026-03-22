@@ -15,7 +15,7 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, read_hook_input
+from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, read_hook_input
 
 CACHE_PATH = "/tmp/memento-tool-context-cache.json"
 RECALL_STATE_PATH = "/tmp/memento-last-recall.json"
@@ -301,11 +301,13 @@ def main():
 
         results = qmd_search_with_extras(
             query,
-            limit=max_notes + 3,  # Overfetch for dedup filtering
+            limit=max_notes + 5,  # Overfetch for dedup + enhancement filtering
             semantic=False,  # BM25 for speed
             timeout=2,
             min_score=min_score,
         )
+
+        results = enhance_results(results, config)
 
         # Cache results (even if empty)
         cache["last_qmd_call"] = time.time()
@@ -326,7 +328,7 @@ def main():
 
     # Format and output
     max_notes = config.get("tool_context_max_notes", 2)
-    lines = ["[vault] Notes on this area:"]
+    lines = ["[connected-to-vault]"]
     injected_paths = []
     for result in filtered[:max_notes]:
         lines.append(format_result(result))
