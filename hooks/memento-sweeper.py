@@ -18,7 +18,9 @@ from pathlib import Path
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 CLAUDE_SESSIONS = Path.home() / ".claude" / "sessions"
 TRIAGE_SCRIPT = Path(__file__).parent / "memento-triage.py"
-LOCK_FILE = Path("/tmp") / "memento-sweeper.lock"
+_RUNTIME = os.environ.get("XDG_RUNTIME_DIR", os.path.join(str(Path.home()), ".cache", "memento-vault"))
+os.makedirs(_RUNTIME, mode=0o700, exist_ok=True)
+LOCK_FILE = Path(_RUNTIME) / "sweeper.lock"
 MAX_AGE_HOURS = 24
 
 
@@ -48,13 +50,26 @@ FLEETING = VAULT / "fleeting"
 
 
 def acquire_lock():
-    """Simple file-based lock to prevent concurrent sweeps."""
+    """Atomic file-based lock to prevent concurrent sweeps."""
     if LOCK_FILE.exists():
-        age = time.time() - LOCK_FILE.stat().st_mtime
-        if age < 300:
-            return False
-    LOCK_FILE.write_text(str(os.getpid()))
-    return True
+        try:
+            age = time.time() - LOCK_FILE.stat().st_mtime
+            if age < 300:
+                return False
+        except OSError:
+            pass
+        try:
+            LOCK_FILE.unlink()
+        except FileNotFoundError:
+            pass
+
+    try:
+        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
 
 
 def release_lock():

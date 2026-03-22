@@ -173,6 +173,65 @@ def get_vault():
     return Path(get_config()["vault_path"])
 
 
+# --- Runtime directory (private temp files) ---
+
+def get_runtime_dir():
+    """Get a user-private directory for temp files.
+
+    Uses $XDG_RUNTIME_DIR (typically /run/user/$UID, mode 0700) with
+    fallback to ~/.cache/memento-vault/. Never uses /tmp to avoid
+    symlink attacks and information disclosure on multi-user systems.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        d = os.path.join(runtime, "memento-vault")
+    else:
+        d = os.path.join(str(Path.home()), ".cache", "memento-vault")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    return d
+
+
+RUNTIME_DIR = get_runtime_dir()
+
+
+# --- Secret sanitization ---
+
+# Patterns that match common secret formats
+_SECRET_PATTERNS = [
+    # API keys and tokens
+    (r'(sk-[a-zA-Z0-9]{20,})', '[REDACTED_API_KEY]'),
+    (r'(sk-proj-[a-zA-Z0-9_-]{20,})', '[REDACTED_API_KEY]'),
+    (r'(ghp_[a-zA-Z0-9]{36,})', '[REDACTED_GITHUB_TOKEN]'),
+    (r'(gho_[a-zA-Z0-9]{36,})', '[REDACTED_GITHUB_TOKEN]'),
+    (r'(github_pat_[a-zA-Z0-9_]{20,})', '[REDACTED_GITHUB_TOKEN]'),
+    (r'(xoxb-[a-zA-Z0-9\-]+)', '[REDACTED_SLACK_TOKEN]'),
+    (r'(xoxp-[a-zA-Z0-9\-]+)', '[REDACTED_SLACK_TOKEN]'),
+    (r'(AKIA[0-9A-Z]{16})', '[REDACTED_AWS_KEY]'),
+    (r'(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,})', '[REDACTED_JWT]'),
+    # Connection strings
+    (r'((?:postgres|mysql|mongodb|redis)://[^\s"\'`]+)', '[REDACTED_CONNECTION_STRING]'),
+    # Bearer tokens
+    (r'(Bearer\s+[a-zA-Z0-9_\-.]{20,})', 'Bearer [REDACTED_TOKEN]'),
+    # Generic high-entropy secrets (env var assignments)
+    (r'(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_PASS)\s*[=:]\s*["\']?([a-zA-Z0-9_\-/.]{20,})["\']?',
+     '[REDACTED_SECRET]'),
+]
+_COMPILED_SECRET_PATTERNS = [(re.compile(p, re.IGNORECASE), r) for p, r in _SECRET_PATTERNS]
+
+
+def sanitize_secrets(text):
+    """Redact common secret patterns from text.
+
+    Returns the sanitized text. Applied to fleeting notes, project indexes,
+    and injected into the agent prompt for atomic note generation.
+    """
+    if not text:
+        return text
+    for pattern, replacement in _COMPILED_SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 # --- Project detection ---
 
 
@@ -439,7 +498,7 @@ def prf_expand_query(query, collection=None, config=None, initial_results=None):
 
 # --- RRF hybrid search ---
 
-VSEARCH_WARM_PATH = "/tmp/memento-vsearch-warm"
+VSEARCH_WARM_PATH = os.path.join(RUNTIME_DIR, "vsearch-warm")
 
 
 def rrf_fuse(result_lists, k=60):
@@ -927,7 +986,7 @@ except ImportError:
     _HAS_NETWORKX = False
 
 _GRAPH_CACHE = [None]  # mutable container for in-process caching
-_GRAPH_CACHE_PATH = "/tmp/memento-wikilink-graph.json"
+_GRAPH_CACHE_PATH = os.path.join(RUNTIME_DIR, "wikilink-graph.json")
 _GRAPH_CACHE_MAX_AGE = 3600  # 1 hour
 
 
@@ -1367,21 +1426,23 @@ def save_inception_state(state, state_path=None):
 
 # --- Inception (lock management) ---
 
-INCEPTION_LOCK_PATH = "/tmp/memento-inception.lock"
+INCEPTION_LOCK_PATH = os.path.join(RUNTIME_DIR, "inception.lock")
 
 
 def acquire_inception_lock(lock_path=None):
     """File-based lock for Inception. Returns True if acquired.
 
-    Stale locks older than 10 minutes are broken.
+    Uses O_CREAT|O_EXCL for atomic creation. Stale locks older than
+    10 minutes with dead PIDs are broken and re-acquired.
     """
     import time as _time
     path = Path(lock_path or INCEPTION_LOCK_PATH)
+
+    # Check for stale lock before attempting atomic create
     if path.exists():
         try:
             age = _time.time() - path.stat().st_mtime
             if age < 600:  # 10 minutes
-                # Check if PID is still alive
                 try:
                     pid = int(path.read_text().strip())
                     os.kill(pid, 0)  # signal 0 = check existence
@@ -1390,8 +1451,20 @@ def acquire_inception_lock(lock_path=None):
                     pass  # PID invalid or dead, break lock
         except OSError:
             pass  # stat failed, break lock
-    path.write_text(str(os.getpid()))
-    return True
+        # Stale lock -- remove it
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+    # Atomic lock creation
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False  # another process won the race
 
 
 def release_inception_lock(lock_path=None):

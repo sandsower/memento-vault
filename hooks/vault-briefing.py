@@ -20,9 +20,9 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, detect_project, has_qmd, read_hook_input
+from memento_utils import get_config, get_vault, detect_project, has_qmd, read_hook_input, RUNTIME_DIR
 
-DEFERRED_BRIEFING_PATH = "/tmp/memento-deferred-briefing.json"
+DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
 
 
 def get_git_branch(cwd):
@@ -118,11 +118,22 @@ def read_note_oneliner(note_name):
     return f"{title}{meta}"
 
 
+def _strip_injection(text):
+    """Strip instruction-like patterns from injected content (defense-in-depth)."""
+    if not text:
+        return text
+    text = re.sub(r"(?i)(ignore\s+(all\s+)?previous\s+instructions)", "[filtered]", text)
+    text = re.sub(r"(?i)(you\s+are\s+now\s+|you\s+must\s+now\s+)", "[filtered]", text)
+    text = re.sub(r"(?i)^(system|assistant)\s*:", "[filtered]:", text)
+    text = re.sub(r"</?s>", "", text)
+    return text
+
+
 def format_qmd_result(result):
     """Format a QMD search result as a one-liner."""
-    title = result.get("title", "")
+    title = _strip_injection(result.get("title", ""))
     score = result.get("score", 0)
-    snippet = result.get("snippet", "").strip()
+    snippet = _strip_injection(result.get("snippet", "").strip())
 
     # Truncate snippet to first sentence or 100 chars
     if snippet:

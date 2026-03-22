@@ -787,7 +787,8 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         return 2
 
     # Acquire lock
-    _lock_path = lock_path or "/tmp/memento-inception.lock"
+    from memento_utils import RUNTIME_DIR as _rtdir
+    _lock_path = lock_path or os.path.join(_rtdir, "inception.lock")
     if not acquire_inception_lock(lock_path=_lock_path):
         if args.verbose:
             print("Another Inception instance is running", file=sys.stderr)

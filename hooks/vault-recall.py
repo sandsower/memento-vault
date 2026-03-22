@@ -15,10 +15,10 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm, prf_expand_query
+from memento_utils import get_config, get_vault, has_qmd, qmd_search, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm, prf_expand_query, RUNTIME_DIR
 
-LAST_RECALL_PATH = "/tmp/memento-last-recall.json"
-DEFERRED_BRIEFING_PATH = "/tmp/memento-deferred-briefing.json"
+LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
+DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
 
 
 def should_skip(prompt, config):
@@ -117,10 +117,22 @@ def bump_prompts_since():
         pass
 
 
+def _strip_injection(text):
+    """Strip instruction-like patterns from injected content (defense-in-depth)."""
+    if not text:
+        return text
+    # Remove patterns that could be interpreted as system instructions
+    text = re.sub(r"(?i)(ignore\s+(all\s+)?previous\s+instructions)", "[filtered]", text)
+    text = re.sub(r"(?i)(you\s+are\s+now\s+|you\s+must\s+now\s+)", "[filtered]", text)
+    text = re.sub(r"(?i)^(system|assistant)\s*:", "[filtered]:", text)
+    text = re.sub(r"</?s>", "", text)
+    return text
+
+
 def format_result(result):
     """Format a QMD result as a compact one-liner."""
-    title = result.get("title", "")
-    snippet = result.get("snippet", "").strip()
+    title = _strip_injection(result.get("title", ""))
+    snippet = _strip_injection(result.get("snippet", "").strip())
 
     # Truncate snippet to first sentence or 120 chars
     if snippet:

@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from memento_utils import get_config, get_vault, detect_project, slugify, read_hook_input
+from memento_utils import get_config, get_vault, detect_project, slugify, read_hook_input, sanitize_secrets
 
 
 # --- Transcript parsing ---
@@ -45,7 +45,7 @@ def parse_transcript(transcript_path):
                     # Strip system tags from prompt text
                     cleaned = re.sub(r"<[^>]+>.*?</[^>]+>", "", content, flags=re.DOTALL).strip()
                     if cleaned:
-                        first_user_prompt = cleaned[:200]
+                        first_user_prompt = sanitize_secrets(cleaned[:200])
 
             elif msg_type == "assistant":
                 assistant_count += 1
@@ -264,14 +264,11 @@ def vault_commit(message="auto: vault update", delay_seconds=0):
         # Fall back to looking in the install location
         commit_script = str(Path.home() / ".claude" / "hooks" / "vault-commit.sh")
 
-    script = f"""
-import subprocess, time
-if {delay_seconds} > 0:
-    time.sleep({delay_seconds})
-subprocess.run(["{commit_script}", "{message}"], capture_output=True)
-"""
+    # Pass arguments via sys.argv to avoid shell injection from message/path content
     subprocess.Popen(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c",
+         "import subprocess,time,sys; time.sleep(int(sys.argv[1])); subprocess.run([sys.argv[2], sys.argv[3]], capture_output=True)",
+         str(delay_seconds), commit_script, message],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -287,16 +284,13 @@ def reindex_qmd(delay_seconds=0):
     config = get_config()
     collection = config["qmd_collection"]
 
-    script = f"""
-import subprocess, time, shutil
-if {delay_seconds} > 0:
-    time.sleep({delay_seconds})
-if shutil.which("qmd"):
-    subprocess.run(["qmd", "update", "-c", "{collection}"], capture_output=True)
-    subprocess.run(["qmd", "embed"], capture_output=True)
-"""
+    # Pass collection name via sys.argv to avoid injection
     subprocess.Popen(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c",
+         "import subprocess,time,shutil,sys; time.sleep(int(sys.argv[1])); qmd=shutil.which('qmd');"
+         " qmd and subprocess.run([qmd,'update','-c',sys.argv[2]], capture_output=True);"
+         " qmd and subprocess.run([qmd,'embed'], capture_output=True)",
+         str(delay_seconds), collection],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -339,6 +333,9 @@ Instructions:
 9. Update the project index at {vault}/projects/{project_slug}.md — add [[note-name]] links under the Notes section
 10. Never overwrite or delete existing notes
 11. Never write to fleeting/
+12. SECURITY: Never include secrets, API keys, tokens, passwords, or connection strings in notes.
+    Redact any sensitive values you find in the transcript. Replace them with [REDACTED].
+    Common patterns: sk-*, ghp_*, xoxb-*, AKIA*, Bearer tokens, postgres:// URLs, JWT tokens.
 """
 
     cmd = [

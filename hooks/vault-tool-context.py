@@ -15,10 +15,10 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, log_retrieval, read_hook_input
+from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, log_retrieval, read_hook_input, RUNTIME_DIR
 
-CACHE_PATH = "/tmp/memento-tool-context-cache.json"
-RECALL_STATE_PATH = "/tmp/memento-last-recall.json"
+CACHE_PATH = os.path.join(RUNTIME_DIR, "tool-context-cache.json")
+RECALL_STATE_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 
 # Paths that never have vault knowledge
 SKIP_PREFIXES = (
@@ -201,10 +201,21 @@ def record_injection(cache, session_id, note_paths):
     entry["paths"].extend(note_paths)
 
 
+def _strip_injection(text):
+    """Strip instruction-like patterns from injected content (defense-in-depth)."""
+    if not text:
+        return text
+    text = re.sub(r"(?i)(ignore\s+(all\s+)?previous\s+instructions)", "[filtered]", text)
+    text = re.sub(r"(?i)(you\s+are\s+now\s+|you\s+must\s+now\s+)", "[filtered]", text)
+    text = re.sub(r"(?i)^(system|assistant)\s*:", "[filtered]:", text)
+    text = re.sub(r"</?s>", "", text)
+    return text
+
+
 def format_result(result):
     """Format a QMD result as a compact one-liner."""
-    title = result.get("title", "")
-    snippet = result.get("snippet", "").strip()
+    title = _strip_injection(result.get("title", ""))
+    snippet = _strip_injection(result.get("snippet", "").strip())
 
     if snippet:
         dot = snippet.find(".")
