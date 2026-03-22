@@ -33,6 +33,20 @@ def should_skip(prompt, config):
     if prompt.startswith("/"):
         return True
 
+    # Skill expansions and command messages (XML tags from hook system)
+    if "<command-message>" in prompt or "<command-name>" in prompt:
+        return True
+    if "<task-notification>" in prompt:
+        return True
+
+    # Skill content dumps (headers from expanded skills)
+    if prompt.startswith("# ") and len(prompt) > 300:
+        return True
+
+    # Very long prompts are almost always skill expansions, not user input
+    if len(prompt) > 500:
+        return True
+
     # Match skip patterns
     skip_patterns = config.get("recall_skip_patterns", [])
     prompt_lower = prompt.lower().strip()

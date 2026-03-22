@@ -45,12 +45,13 @@ DEFAULT_CONFIG = {
     "wikilink_expansion": True,
     "wikilink_max_hops": 1,
     "wikilink_score_factor": 0.5,
+    "wikilink_max_expanded": 3,
     # Tool context hook (PreToolUse)
     "tool_context": True,
-    "tool_context_min_score": 0.75,
+    "tool_context_min_score": 0.65,
     "tool_context_max_notes": 2,
     "tool_context_max_injections": 5,
-    "tool_context_cooldown": 3,
+    "tool_context_cooldown": 1,
 }
 
 _CONFIG = None
@@ -285,22 +286,43 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_
 
 
 def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=0.0):
-    """Search primary collection + any extra_qmd_collections.
+    """Search primary collection + any extra_qmd_collections in parallel.
 
     Returns combined results sorted by score descending.
     """
     config = get_config()
-    results = qmd_search(
-        query, collection=config["qmd_collection"],
-        limit=limit, semantic=semantic, timeout=timeout, min_score=min_score,
-    )
+    extras = config.get("extra_qmd_collections", [])
 
-    for extra in config.get("extra_qmd_collections", []):
-        extra_results = qmd_search(
-            query, collection=extra,
-            limit=max(3, limit // 2), semantic=semantic, timeout=timeout, min_score=min_score,
+    if not extras:
+        # No extra collections — skip threading overhead
+        results = qmd_search(
+            query, collection=config["qmd_collection"],
+            limit=limit, semantic=semantic, timeout=timeout, min_score=min_score,
         )
-        results.extend(extra_results)
+        return results[:limit]
+
+    # Run primary + extras in parallel
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    futures = {}
+    with ThreadPoolExecutor(max_workers=len(extras) + 1) as pool:
+        futures[pool.submit(
+            qmd_search, query, config["qmd_collection"],
+            limit, semantic, timeout, min_score,
+        )] = "primary"
+
+        for extra in extras:
+            futures[pool.submit(
+                qmd_search, query, extra,
+                max(3, limit // 2), semantic, timeout, min_score,
+            )] = extra
+
+        results = []
+        for future in as_completed(futures):
+            try:
+                results.extend(future.result())
+            except Exception:
+                pass
 
     results.sort(key=lambda r: r["score"], reverse=True)
     return results[:limit]
@@ -467,9 +489,13 @@ def expand_wikilinks(results, config=None):
         # Also add by note name for matching
         seen_paths.add(Path(path).stem if path else "")
 
+    max_expanded = config.get("wikilink_max_expanded", 3)
     expanded = []
 
     for result in results:
+        if len(expanded) >= max_expanded:
+            break
+
         # Use cached metadata if available (from temporal_decay), otherwise read
         meta = result.get("_meta")
         if meta is None:
@@ -483,6 +509,9 @@ def expand_wikilinks(results, config=None):
         parent_score = result.get("_original_score", result.get("score", 0))
 
         for link_name in meta["links"]:
+            if len(expanded) >= max_expanded:
+                break
+
             if link_name in seen_paths:
                 continue
 
