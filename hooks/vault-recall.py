@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, read_hook_input
 
 LAST_RECALL_PATH = "/tmp/memento-last-recall.json"
+DEFERRED_BRIEFING_PATH = "/tmp/memento-deferred-briefing.json"
 
 
 def should_skip(prompt, config):
@@ -121,33 +122,67 @@ def format_result(result):
     return line
 
 
-def main():
+def consume_deferred_briefing():
+    """Check for deferred briefing from SessionStart and consume it.
+
+    Returns formatted lines to prepend, or empty list.
+    The file is deleted after consumption (one-shot).
+    """
+    try:
+        if not os.path.exists(DEFERRED_BRIEFING_PATH):
+            return []
+
+        with open(DEFERRED_BRIEFING_PATH) as f:
+            data = json.load(f)
+
+        # Clean up regardless of status
+        os.unlink(DEFERRED_BRIEFING_PATH)
+
+        if data.get("status") != "ready":
+            return []
+
+        note_lines = data.get("note_lines", [])
+        if not note_lines:
+            return []
+
+        return ["[vault] Relevant notes:"] + note_lines
+
+    except (json.JSONDecodeError, OSError, KeyError):
+        try:
+            os.unlink(DEFERRED_BRIEFING_PATH)
+        except OSError:
+            pass
+        return []
+
+
+def run_recall():
+    """Run the recall search. Returns (lines, top_path) or ([], None)."""
     config = get_config()
 
     if not config.get("prompt_recall", True):
-        sys.exit(0)
+        return [], None
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        sys.exit(0)
+        return [], None
 
     if not has_qmd():
-        sys.exit(0)
+        return [], None
 
     try:
         hook_input = read_hook_input()
     except Exception:
-        sys.exit(0)
+        return [], None
 
     prompt = hook_input.get("prompt", "")
     if not prompt:
-        sys.exit(0)
+        return [], None
 
     if should_skip(prompt, config):
         bump_prompts_since()
-        sys.exit(0)
+        return [], None
 
-    # Semantic search against the prompt
+    # BM25 search against the prompt
     min_score = config.get("recall_min_score", 0.4)
     max_notes = config.get("recall_max_notes", 3)
 
@@ -161,22 +196,30 @@ def main():
 
     if not results:
         bump_prompts_since()
-        sys.exit(0)
+        return [], None
 
-    # Dedup check against last recall
     top_path = results[0].get("path", "")
     if is_duplicate(top_path):
-        sys.exit(0)
+        return [], None
 
-    # Format and print
     lines = ["[vault] Related memories:"]
     for result in results[:max_notes]:
         lines.append(format_result(result))
 
-    print("\n".join(lines))
+    return lines, top_path
 
-    # Record for dedup
-    record_recall(top_path)
+
+def main():
+    # Always check for deferred briefing, even if recall is disabled
+    deferred_lines = consume_deferred_briefing()
+    recall_lines, top_path = run_recall()
+
+    output = deferred_lines + recall_lines
+    if output:
+        print("\n".join(output))
+
+    if top_path:
+        record_recall(top_path)
 
 
 if __name__ == "__main__":

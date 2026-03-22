@@ -284,7 +284,7 @@ else
     info "Config already exists at $CONFIG_DIR/memento.yml"
     # Check for new config keys the user might want to add
     NEW_KEYS=()
-    for key in session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes recall_skip_patterns; do
+    for key in session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes recall_skip_patterns tool_context tool_context_min_score tool_context_max_notes; do
         if ! grep -q "^${key}:" "$CONFIG_DIR/memento.yml" 2>/dev/null; then
             NEW_KEYS+=("$key")
         fi
@@ -304,7 +304,7 @@ mkdir -p "$CLAUDE_DIR/hooks"
 HOOKS_UPDATED=0
 HOOKS_SKIPPED=0
 
-for hook in memento_utils.py memento-triage.py vault-commit.sh memento-sweeper.py vault-briefing.py vault-recall.py; do
+for hook in memento_utils.py memento-triage.py vault-commit.sh memento-sweeper.py vault-briefing.py vault-recall.py vault-tool-context.py; do
     if safe_copy "$SCRIPT_DIR/hooks/$hook" "$CLAUDE_DIR/hooks/$hook" "hooks/$hook"; then
         ((HOOKS_UPDATED++)) || true
     else
@@ -381,6 +381,18 @@ if [ ! -f "$SETTINGS" ]; then
         "timeout": 30000,
         "async": true
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_DIR/hooks/vault-tool-context.py",
+            "timeout": 2000
+          }
+        ]
+      }
     ]
   },
   "permissions": {
@@ -400,6 +412,7 @@ else
     grep -q "vault-briefing" "$SETTINGS" || MISSING_HOOKS+=("SessionStart/vault-briefing")
     grep -q "vault-recall" "$SETTINGS" || MISSING_HOOKS+=("UserPromptSubmit/vault-recall")
     grep -q "memento-triage" "$SETTINGS" || MISSING_HOOKS+=("SessionEnd/memento-triage")
+    grep -q "vault-tool-context" "$SETTINGS" || MISSING_HOOKS+=("PreToolUse/vault-tool-context")
 
     if [ ${#MISSING_HOOKS[@]} -gt 0 ]; then
         warn "Missing hooks in settings.json: ${MISSING_HOOKS[*]}"
@@ -420,6 +433,11 @@ else
         if [[ " ${MISSING_HOOKS[*]} " == *"memento-triage"* ]]; then
             echo '  "SessionEnd": ['
             echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/memento-triage.py\", \"timeout\": 30000, \"async\": true}"
+            echo '  ],'
+        fi
+        if [[ " ${MISSING_HOOKS[*]} " == *"vault-tool-context"* ]]; then
+            echo '  "PreToolUse": ['
+            echo "    {\"matcher\": \"Read\", \"hooks\": [{\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/vault-tool-context.py\", \"timeout\": 2000}]}"
             echo '  ]'
         fi
         echo ""
@@ -508,6 +526,7 @@ echo ""
 echo "What happens now:"
 echo "  - Sessions start with a vault briefing (relevant notes for your project)"
 echo "  - Each prompt triggers JIT recall (related vault notes injected automatically)"
+echo "  - File reads inject vault notes about known code areas (tool-aware context)"
 echo "  - Every session end, the triage hook captures knowledge to the vault"
 echo "  - Trivial sessions get a one-liner in fleeting/"
 echo "  - Substantial sessions spawn a background agent that writes atomic notes"

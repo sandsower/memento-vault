@@ -3,15 +3,26 @@
 Vault briefing — SessionStart hook.
 Prints a compact project-aware vault briefing to stdout so Claude
 sees relevant notes at the start of every session.
+
+Fast path: project line + recent sessions from index (file I/O only, <50ms).
+QMD search is deferred to a background subprocess — results are picked up
+by vault-recall.py on the first UserPromptSubmit.
 """
 
+import json
+import os
+import re
+import subprocess as _subprocess
 import sys
+import time
 from pathlib import Path
 
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, detect_project, read_hook_input, qmd_search
+from memento_utils import get_config, get_vault, detect_project, has_qmd, read_hook_input
+
+DEFERRED_BRIEFING_PATH = "/tmp/memento-deferred-briefing.json"
 
 
 def get_git_branch(cwd):
@@ -62,8 +73,6 @@ def read_project_index(project_slug):
         if in_sessions and stripped.startswith("- "):
             sessions.append(stripped[2:])
         elif in_notes and "[[" in stripped:
-            # Extract wikilink names
-            import re
             for match in re.finditer(r"\[\[([^\]]+)\]\]", stripped):
                 notes.append(match.group(1))
 
@@ -129,7 +138,111 @@ def format_qmd_result(result):
     return parts[0]
 
 
+def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
+    """Spawn a background subprocess to run QMD search and write results."""
+    max_notes = config.get("briefing_max_notes", 5)
+    min_score = config.get("briefing_min_score", 0.3)
+
+    # Build search query
+    query_parts = [project_slug.replace("-", " ")]
+    if git_branch and git_branch not in ("main", "master", "HEAD"):
+        branch_words = git_branch.replace("-", " ").replace("/", " ")
+        query_parts.append(branch_words)
+
+    # Write the search params for the background worker
+    params = {
+        "query": " ".join(query_parts),
+        "max_notes": max_notes,
+        "min_score": min_score,
+        "linked_notes": linked_notes,
+        "timestamp": time.time(),
+    }
+
+    try:
+        with open(DEFERRED_BRIEFING_PATH, "w") as f:
+            json.dump({"status": "pending", "params": params}, f)
+
+        # Spawn background worker — the same script with --deferred flag
+        _subprocess.Popen(
+            [sys.executable, __file__, "--deferred"],
+            stdin=_subprocess.DEVNULL,
+            stdout=_subprocess.DEVNULL,
+            stderr=_subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        # If spawn fails, clean up so recall doesn't wait for stale pending
+        try:
+            os.unlink(DEFERRED_BRIEFING_PATH)
+        except OSError:
+            pass
+
+
+def run_deferred_search():
+    """Background worker: run QMD search and write results to the deferred file."""
+    from memento_utils import qmd_search
+
+    try:
+        with open(DEFERRED_BRIEFING_PATH) as f:
+            data = json.load(f)
+
+        if data.get("status") != "pending":
+            sys.exit(0)
+
+        params = data["params"]
+        query = params["query"]
+        max_notes = params["max_notes"]
+        min_score = params["min_score"]
+        linked_notes = params.get("linked_notes", [])
+
+        results = qmd_search(
+            query,
+            limit=max_notes,
+            semantic=True,
+            timeout=12,
+            min_score=min_score,
+        )
+
+        # Format results, dedup against linked notes
+        seen = set()
+        note_lines = []
+
+        for result in results:
+            title = result.get("title", "")
+            if title in seen:
+                continue
+            seen.add(title)
+            note_lines.append(format_qmd_result(result))
+
+        for note_name in linked_notes:
+            if note_name in seen or len(note_lines) >= max_notes:
+                break
+            seen.add(note_name)
+            oneliner = read_note_oneliner(note_name)
+            if oneliner:
+                note_lines.append(f"  - {oneliner}")
+
+        with open(DEFERRED_BRIEFING_PATH, "w") as f:
+            json.dump({
+                "status": "ready",
+                "note_lines": note_lines[:max_notes],
+                "timestamp": time.time(),
+            }, f)
+
+    except Exception:
+        # Clean up on failure
+        try:
+            os.unlink(DEFERRED_BRIEFING_PATH)
+        except OSError:
+            pass
+
+
 def main():
+    # Handle background worker mode
+    if "--deferred" in sys.argv:
+        run_deferred_search()
+        sys.exit(0)
+
     config = get_config()
 
     if not config.get("session_briefing", True):
@@ -154,64 +267,32 @@ def main():
     if project_slug == "unknown":
         sys.exit(0)
 
-    # Read project index for recent sessions and linked notes
+    # --- Sync: fast project + sessions output (file I/O only) ---
+
     recent_sessions, linked_notes = read_project_index(project_slug)
 
-    # Query QMD for relevant notes
-    max_notes = config.get("briefing_max_notes", 5)
-    min_score = config.get("briefing_min_score", 0.3)
-
-    # Build search query from project context
-    query_parts = [project_slug.replace("-", " ")]
-    if git_branch and git_branch not in ("main", "master", "HEAD"):
-        branch_words = git_branch.replace("-", " ").replace("/", " ")
-        query_parts.append(branch_words)
-
-    qmd_results = qmd_search(
-        " ".join(query_parts),
-        limit=max_notes,
-        semantic=True,
-        timeout=12,
-        min_score=min_score,
-    )
-
-    # Build output
     output_lines = []
 
     branch_str = f" (branch: {git_branch})" if git_branch else ""
     output_lines.append(f"[vault] Project: {project_slug}{branch_str}")
 
     if recent_sessions:
-        sessions_str = "; ".join(s[:60] for s in recent_sessions[-3:])
-        output_lines.append(f"[vault] Last sessions: {sessions_str}")
+        output_lines.append("[vault] Last sessions:")
+        for s in recent_sessions[-3:]:
+            abbreviated = re.sub(
+                r'`([0-9a-f]{8})[0-9a-f-]{28}`',
+                r'`\1`',
+                s,
+            )
+            output_lines.append(f"  - {abbreviated[:120]}")
 
-    # Combine linked notes from project index + QMD results, deduplicated
-    seen = set()
-    note_lines = []
-
-    # QMD results first (more relevant)
-    for result in qmd_results:
-        title = result.get("title", "")
-        if title in seen:
-            continue
-        seen.add(title)
-        note_lines.append(format_qmd_result(result))
-
-    # Then linked notes from project index (if not already shown)
-    for note_name in linked_notes:
-        if note_name in seen or len(note_lines) >= max_notes:
-            break
-        seen.add(note_name)
-        oneliner = read_note_oneliner(note_name)
-        if oneliner:
-            note_lines.append(f"  - {oneliner}")
-
-    if note_lines:
-        output_lines.append("[vault] Relevant notes:")
-        output_lines.extend(note_lines[:max_notes])
-
-    if len(output_lines) > 1:  # More than just the project line
+    if len(output_lines) > 1:
         print("\n".join(output_lines))
+
+    # --- Async: spawn background QMD search ---
+
+    if has_qmd():
+        spawn_deferred_search(project_slug, git_branch, linked_notes, config)
 
 
 if __name__ == "__main__":

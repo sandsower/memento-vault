@@ -37,6 +37,12 @@ DEFAULT_CONFIG = {
         r"^git\s",
         r"^run\s",
     ],
+    # Tool context hook (PreToolUse)
+    "tool_context": True,
+    "tool_context_min_score": 0.75,
+    "tool_context_max_notes": 2,
+    "tool_context_max_injections": 5,
+    "tool_context_cooldown": 3,
 }
 
 _CONFIG = None
