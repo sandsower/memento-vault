@@ -52,6 +52,15 @@ DEFAULT_CONFIG = {
     "tool_context_max_notes": 2,
     "tool_context_max_injections": 5,
     "tool_context_cooldown": 1,
+    # Inception (background consolidation)
+    "inception_enabled": False,
+    "inception_backend": "codex",
+    "inception_threshold": 5,
+    "inception_min_cluster_size": 3,
+    "inception_max_clusters": 10,
+    "inception_cluster_threshold": 0.7,
+    "inception_exclude_tags": [],
+    "inception_dry_run": False,
 }
 
 _CONFIG = None
@@ -88,7 +97,7 @@ def load_config():
     config["vault_path"] = str(Path(config["vault_path"]).expanduser())
 
     # Handle floats that simple YAML parser returns as strings
-    for key in ("briefing_min_score", "recall_min_score"):
+    for key in ("briefing_min_score", "recall_min_score", "inception_cluster_threshold"):
         if isinstance(config.get(key), str):
             try:
                 config[key] = float(config[key])
@@ -661,3 +670,87 @@ def read_hook_input():
     """Read JSON from stdin (hook event data)."""
     raw = sys.stdin.read()
     return json.loads(raw)
+
+
+# --- Inception (state management) ---
+
+INCEPTION_STATE_PATH = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
+    "memento-vault", "inception-state.json",
+)
+
+
+def load_inception_state(state_path=None):
+    """Load Inception state from disk. Returns defaults if missing/corrupt."""
+    path = state_path or INCEPTION_STATE_PATH
+    defaults = {
+        "last_run_iso": None,
+        "last_run_note_count": 0,
+        "runs": [],
+        "processed_notes": [],
+    }
+    try:
+        with open(path) as f:
+            state = json.load(f)
+        for k, v in defaults.items():
+            state.setdefault(k, v)
+        return state
+    except FileNotFoundError:
+        return dict(defaults)
+    except (json.JSONDecodeError, KeyError):
+        # Corrupt — rename to .bak and start fresh
+        bak = path + ".bak"
+        try:
+            os.rename(path, bak)
+        except OSError:
+            pass
+        return dict(defaults)
+
+
+def save_inception_state(state, state_path=None):
+    """Persist Inception state. Keeps only last 10 runs."""
+    path = state_path or INCEPTION_STATE_PATH
+    state["runs"] = state.get("runs", [])[-10:]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, path)
+
+
+# --- Inception (lock management) ---
+
+INCEPTION_LOCK_PATH = "/tmp/memento-inception.lock"
+
+
+def acquire_inception_lock(lock_path=None):
+    """File-based lock for Inception. Returns True if acquired.
+
+    Stale locks older than 10 minutes are broken.
+    """
+    import time as _time
+    path = Path(lock_path or INCEPTION_LOCK_PATH)
+    if path.exists():
+        try:
+            age = _time.time() - path.stat().st_mtime
+            if age < 600:  # 10 minutes
+                # Check if PID is still alive
+                try:
+                    pid = int(path.read_text().strip())
+                    os.kill(pid, 0)  # signal 0 = check existence
+                    return False  # process alive, lock valid
+                except (ValueError, OSError):
+                    pass  # PID invalid or dead, break lock
+        except OSError:
+            pass  # stat failed, break lock
+    path.write_text(str(os.getpid()))
+    return True
+
+
+def release_inception_lock(lock_path=None):
+    """Release the Inception lock file."""
+    path = Path(lock_path or INCEPTION_LOCK_PATH)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass

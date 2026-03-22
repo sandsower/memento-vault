@@ -1,6 +1,6 @@
 # Configuration
 
-Memento Vault is configured via a YAML file. The installer creates it at `~/.config/memento-vault/memento.yml`.
+Config file: `~/.config/memento-vault/memento.yml` (created by the installer).
 
 ## Config file locations (checked in order)
 
@@ -8,7 +8,7 @@ Memento Vault is configured via a YAML file. The installer creates it at `~/.con
 2. `~/.config/memento-vault/memento.yml`
 3. `~/.memento-vault.yml` (home directory)
 
-The first file found wins. If none exist, defaults are used.
+First file found wins. If none exist, defaults apply.
 
 ## Options
 
@@ -71,11 +71,11 @@ project_rules:
     slug: "side-project"
 ```
 
-Rules are checked in order. First match wins. `ticket_pattern` is optional.
+Checked in order. First match wins. `ticket_pattern` is optional.
 
 ## Extra QMD collections
 
-Search additional QMD collections alongside the main memento vault. The concierge agent and the delta-check gate both use these.
+Search additional QMD collections alongside the main vault. The concierge agent and the delta-check gate both use these.
 
 ```yaml
 extra_qmd_collections: [team-knowledge, shared-docs]
@@ -85,13 +85,14 @@ Each collection must be configured in your `~/.config/qmd/index.yml`.
 
 ## Post-capture extensions
 
-The `/memento` skill checks for `~/.claude/skills/memento-post/SKILL.md` after creating notes. If the file exists, its instructions run as an extra step. Use this for project-specific workflows like promoting notes to a team vault or tagging with domain-specific labels.
+The `/memento` skill checks for `~/.claude/skills/memento-post/SKILL.md` after creating notes. If the file exists, its instructions run as an extra step. Use this for things like promoting notes to a team vault or applying domain-specific tags.
 
 ## Tuning the triage
 
-The triage decides which sessions are worth capturing as atomic notes vs just fleeting one-liners.
+The triage decides which sessions get atomic notes vs fleeting one-liners.
 
 **More aggressive capture** (capture more sessions):
+
 ```yaml
 exchange_threshold: 8
 file_count_threshold: 2
@@ -99,17 +100,18 @@ notable_patterns: [plan, design, MEMORY.md, CLAUDE.md, SKILL.md, test, spec, con
 ```
 
 **Less aggressive capture** (fewer notes, less noise):
+
 ```yaml
 exchange_threshold: 25
 file_count_threshold: 5
 notable_patterns: [plan, design]
 ```
 
-The delta-check gate (QMD-powered) already prevents duplicate captures regardless of these thresholds. If QMD says the vault already covers a topic and no new files were edited, the agent is not spawned.
+The delta-check gate (QMD-powered) prevents duplicate captures regardless of these thresholds. If QMD says the vault already covers a topic and no new files were edited, the agent is not spawned.
 
 ## Session briefing
 
-At session start, the `vault-briefing` hook injects a compact summary of your project's vault state into Claude's context. This includes recent sessions and the most relevant notes.
+At session start, `vault-briefing` injects a compact summary of your project's vault state into Claude's context. Includes recent sessions and the most relevant notes.
 
 ```yaml
 # Disable the session briefing
@@ -126,7 +128,7 @@ Requires QMD. Falls back to project index notes if QMD is unavailable.
 
 ## Prompt recall
 
-On every prompt, the `vault-recall` hook runs a semantic search against your prompt and injects matching vault notes. This is the just-in-time retrieval mechanism.
+On every prompt, `vault-recall` runs a semantic search and injects matching vault notes. This is the just-in-time retrieval mechanism.
 
 ```yaml
 # Disable prompt recall
@@ -142,28 +144,31 @@ recall_max_notes: 5
 recall_skip_patterns: ["^(yes|no|ok)$", "^git\\s", "^npm\\s"]
 ```
 
-The hook automatically deduplicates — if the top result is the same as the last injection, it skips until 3 prompts have passed. Requires QMD.
+Deduplication is automatic -- if the top result matches the last injection, it skips until 3 prompts have passed. Requires QMD.
 
 ## Disabling features
 
 **No auto-commit** (commit manually):
+
 ```yaml
 auto_commit: false
 ```
 
 **No QMD** (grep-only search, no retrieval hooks):
+
 ```yaml
 qmd_collection: ""
 ```
 
 **No retrieval hooks** (capture only, no injection):
+
 ```yaml
 session_briefing: false
 prompt_recall: false
 ```
 
 **No background agent** (fleeting notes only):
-Set `exchange_threshold` and `file_count_threshold` to very high numbers:
+
 ```yaml
 exchange_threshold: 9999
 file_count_threshold: 9999

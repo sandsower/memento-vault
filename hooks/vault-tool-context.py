@@ -119,7 +119,7 @@ def extract_keywords(file_path):
         # Skip dot-prefixed dirs and stop segments
         if part.startswith(".") or part in STOP_SEGMENTS:
             continue
-        # Strip .git suffix from repo dirs like care.git
+        # Strip .git suffix from bare repo dirs (e.g., myproject.git)
         if part.endswith(".git"):
             part = part[:-4]
         # Strip file extension

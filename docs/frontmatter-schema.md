@@ -1,6 +1,6 @@
 # Frontmatter Schema
 
-Every atomic note in `notes/` has YAML frontmatter. This is the schema.
+Every atomic note in `notes/` has YAML frontmatter. Here's the schema.
 
 ## Required fields
 
@@ -15,10 +15,11 @@ Every atomic note in `notes/` has YAML frontmatter. This is the schema.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `source` | enum | `manual` (user invoked /memento) or `session` (auto-captured by triage) |
+| `source` | enum | `manual` (/memento), `session` (auto-captured), or `inception` (pattern consolidation) |
 | `certainty` | int 1-5 | Epistemic confidence level |
 | `validity-context` | string | What makes this note true or false |
 | `supersedes` | wikilink | `[[older-note-name]]` if this replaces an older note |
+| `synthesized_from` | list | Source note slugs (inception pattern notes only) |
 | `project` | string | Full path to the working directory |
 | `branch` | string | Git branch name |
 | `session_id` | uuid | Claude Code session ID |
@@ -28,7 +29,7 @@ Every atomic note in `notes/` has YAML frontmatter. This is the schema.
 | Level | Label | Meaning |
 |-------|-------|---------|
 | 1 | speculative | Untested idea, hypothesis |
-| 2 | observed | Seen once in a single session, needs validation |
+| 2 | observed | Seen once, needs validation |
 | 3 | confirmed | Read the code, verified it's true |
 | 4 | shipped | PR merged, tested in production |
 | 5 | established | Seen across multiple tickets, reliable pattern |

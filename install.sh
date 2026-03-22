@@ -291,7 +291,7 @@ else
     info "Config already exists at $CONFIG_DIR/memento.yml"
     # Check for new config keys the user might want to add
     NEW_KEYS=()
-    EXPECTED_KEYS="exchange_threshold file_count_threshold"
+    EXPECTED_KEYS="exchange_threshold file_count_threshold inception_enabled"
     if [ "$EXPERIMENTAL" = true ]; then
         EXPECTED_KEYS="$EXPECTED_KEYS session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes tool_context tool_context_min_score tool_context_max_notes"
     fi
@@ -315,7 +315,7 @@ mkdir -p "$CLAUDE_DIR/hooks"
 HOOKS_UPDATED=0
 HOOKS_SKIPPED=0
 
-STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py"
+STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py memento-inception.py"
 EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py"
 
 if [ "$EXPERIMENTAL" = true ]; then
@@ -347,7 +347,7 @@ step "Installing Claude Code skills..."
 SKILLS_UPDATED=0
 SKILLS_SKIPPED=0
 
-for skill in memento memento-defrag start-fresh continue-work; do
+for skill in memento memento-defrag start-fresh continue-work inception; do
     mkdir -p "$CLAUDE_DIR/skills/$skill"
     if safe_copy "$SCRIPT_DIR/skills/$skill/SKILL.md" "$CLAUDE_DIR/skills/$skill/SKILL.md" "skills/$skill"; then
         ((SKILLS_UPDATED++)) || true
@@ -587,10 +587,27 @@ if [ "$EXPERIMENTAL" = true ]; then
     echo "  - File reads inject vault notes about known code areas (tool-aware context)"
 fi
 echo "  - Use /memento to manually capture insights during a session"
+echo "  - Use /inception to find cross-session patterns (Inception)"
 echo "  - Use /memento-defrag monthly to archive stale notes"
 echo "  - Use /continue-work to pick up where you left off"
 echo "  - Use /start-fresh to checkpoint and clear context"
 echo ""
+# Check Inception dependencies if enabled
+if grep -q "^inception_enabled: true" "$CONFIG_DIR/memento.yml" 2>/dev/null; then
+    INCEPTION_DEPS_OK=true
+    for pkg in numpy hdbscan sklearn; do
+        if ! python3 -c "import $pkg" 2>/dev/null; then
+            INCEPTION_DEPS_OK=false
+            break
+        fi
+    done
+    if [ "$INCEPTION_DEPS_OK" = false ]; then
+        warn "Inception is enabled but dependencies are missing."
+        echo "  pip install numpy hdbscan scikit-learn"
+        echo ""
+    fi
+fi
+
 if [ "$QMD_AVAILABLE" = true ]; then
     echo "Search: qmd search \"your query\" -c memento"
 else

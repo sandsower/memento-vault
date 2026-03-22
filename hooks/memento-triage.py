@@ -407,7 +407,55 @@ def main():
     else:
         reindex_qmd()
 
+    # Inception: background consolidation (gated)
+    if config.get("inception_enabled", False):
+        maybe_trigger_inception(config)
+
     sys.exit(0)
+
+
+def maybe_trigger_inception(config):
+    """Spawn the Inception if enough new notes have accumulated."""
+    from memento_utils import load_inception_state
+
+    state = load_inception_state()
+    vault = Path(config["vault_path"])
+    notes_dir = vault / "notes"
+
+    if not notes_dir.exists():
+        return
+
+    last_run = state.get("last_run_iso")
+    threshold = config.get("inception_threshold", 5)
+
+    if last_run:
+        try:
+            cutoff = datetime.fromisoformat(last_run)
+            new_count = sum(
+                1 for f in notes_dir.glob("*.md")
+                if datetime.fromtimestamp(f.stat().st_mtime) > cutoff
+            )
+        except (ValueError, OSError):
+            new_count = 0
+    else:
+        new_count = len(list(notes_dir.glob("*.md")))
+
+    if new_count < threshold:
+        return
+
+    inception_script = Path(__file__).parent / "memento-inception.py"
+    if not inception_script.exists():
+        inception_script = Path.home() / ".claude" / "hooks" / "memento-inception.py"
+
+    if not inception_script.exists():
+        return
+
+    subprocess.Popen(
+        [sys.executable, str(inception_script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 if __name__ == "__main__":

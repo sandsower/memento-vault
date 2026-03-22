@@ -32,7 +32,7 @@ Source: `benchmark/replay_benchmark.py`
 | Session sizes | 1-146 actions (median: 12) |
 | Transcript source | Real sessions from 2026-03-09 to 2026-03-22 |
 
-Projects span dala-care (work), memento-vault (this repo), personal projects (diet tracker, Signex), dotfiles, and infrastructure.
+Projects span a work monorepo, memento-vault (this repo), personal side projects, dotfiles, and infrastructure.
 
 ## Results
 
@@ -73,7 +73,7 @@ Tool context (362 calls):
 | Max | 3,672 chars/session |
 | Zero-injection sessions | 6/30 (20%) |
 
-The distribution is right-skewed. Most sessions get 200-500 chars. Large sessions in well-covered projects (dala-care, memento-vault) get 2,000-3,600 chars. Sessions in projects without vault notes (Signex, home dir) get zero — correctly.
+The distribution is right-skewed. Most sessions get 200-500 chars. Large sessions in well-covered projects get 2,000-3,600 chars. Sessions in projects without vault notes get zero -- correctly.
 
 ### Cost breakdown by hook
 
@@ -113,11 +113,11 @@ Projects with the most vault benefit (highest chars injected per action):
 
 | Project | Actions | Chars/action | Why |
 |---|---|---|---|
-| dala-care (DC-* branches) | 4-12 | 107-221 | Specific ticket branches with dense vault coverage |
+| work monorepo (ticket branches) | 4-12 | 107-221 | Specific ticket branches with dense vault coverage |
 | memento-vault | 157 | 18 | Deep coverage, large sessions |
 | .claude | 72 | 37 | Tooling/config knowledge |
 
-Projects with zero benefit: Signex (no vault notes), home dir (not a project), dalacare parent (not a worktree).
+Projects with zero benefit: side projects without vault notes, home dir (not a project), parent dirs (not a worktree).
 
 ## Comparison: hooks vs concierge
 
@@ -144,32 +144,67 @@ The hooks inject breadcrumbs: `"- Auth middleware: Guards all API endpoints with
 
 They are complementary. The hooks' main value is **preventing concierge calls** — each time a one-liner jogs memory, that's a 72,500-unit search avoided.
 
+## Inception pipeline performance
+
+Inception is a background consolidation agent that clusters vault notes by embedding similarity and produces pattern notes. It runs at `SessionEnd` (fully detached) and never blocks the user.
+
+### Trigger overhead
+
+The `SessionEnd` hook checks whether new notes exist since the last Inception run. This adds 10-20ms and is non-blocking.
+
+### Full pipeline timing (550 notes)
+
+| Phase | Time |
+|---|---|
+| Note collection + frontmatter parsing | 200-500ms |
+| QMD embedding extraction (SQLite) | 100-300ms |
+| HDBSCAN clustering (550 x 768-dim) | 200-800ms |
+| Scoring + dedup | 10-50ms |
+| LLM synthesis (10 clusters, sequential) | 100-300s **(dominates)** |
+| File writes + backlinks | 50-200ms |
+| **Total** | **~2-6 minutes, fully detached** |
+
+LLM synthesis is the bottleneck. Each cluster requires a separate `codex exec` or `claude --print` call (10-30s each, sequential). Everything else completes in under 2 seconds combined.
+
+### Resource usage
+
+| Metric | Value |
+|---|---|
+| Memory overhead | <50MB (embedding matrix + HDBSCAN) |
+| Pattern notes per run | Up to `inception_max_clusters` (default 10) |
+| LLM cost | Zero with Codex subscription; per-call with Claude backend |
+| Disk writes | 1 pattern note per cluster (~500 bytes each) + backlink appends |
+
 ## Comparison: industry systems
 
 How memento-vault compares to other agent memory systems:
 
-| System | Injected volume | Retrieval latency | LLM cost at retrieval | Accuracy (LoCoMo/DMR) |
-|---|---|---|---|---|
-| **Memento-vault** | ~200-500 chars | 530ms (BM25) | Zero | Not benchmarked |
-| Honcho | Unbounded (agentic) | 200ms (fast path) | Per-query LLM | 90.4% (LongMem S) |
-| Zep (Graphiti) | ~1.6k tokens | 2.5-3.2s | Optional reranker | 94.8% (DMR) |
-| Mem0 | ~7k tokens | 148ms-1.4s | LLM for updates | F1: 38.72 (single-hop) |
-| A-MEM | 1.2-2.5k tokens | Not published | LLM for linking | 2x MemGPT (LoCoMo) |
-| MemGPT/Letta | Core blocks + retrieval | Inline (slow) or async | LLM per tool call | 74.0% (filesystem) |
+| System | Architecture | Retrieval latency | LLM cost | Background consolidation | Storage |
+|---|---|---|---|---|---|
+| **Memento-vault** | BM25/vector + hooks | 530ms (BM25) | Zero at retrieval; write-time only (Inception) | Yes (Inception) | Local markdown + SQLite |
+| Honcho | Agentic retrieval | 200ms (fast path) | Per-query LLM | Yes (Dreamer) | PostgreSQL + pgvector |
+| Zep (Graphiti) | Temporal knowledge graph | 2.5-3.2s | Optional reranker | No (real-time streaming) | Neo4j |
+| Mem0 | Hybrid vector + graph | 148ms-1.4s | LLM for updates | No | Cloud or local |
+| A-MEM | Zettelkasten-inspired | Not published | LLM for linking | No | In-memory |
+| MemGPT/Letta | Core blocks + retrieval | Inline or async | LLM per tool call | No | Filesystem/DB |
+| Cognee | Graph + vector pipeline | Not published | LLM for extraction | No | Neo4j / NetworkX |
 
 ### Memento-vault's position
 
 **Advantages:**
 - Zero LLM cost at retrieval (pure BM25/vector search, no reranking agent)
 - Minimal injected tokens (~139 units/session vs 1.6k-7k for competitors)
-- No cloud dependency, no database, no API costs
+- Background consolidation via Inception (comparable to Honcho's Dreamer, but local-first)
+- No cloud dependency, no database, no API costs — local markdown files and SQLite
+- LLM costs are write-time only (Inception synthesis), zero with a Codex subscription
 - Three injection points (session start, per-prompt, per-file-read) — more granular than single-endpoint systems
 - Research on context rot validates the "minimal, high-signal" approach: LLMs degrade with as little as 100 tokens of noise context
 
 **Gaps:**
 - No agentic retrieval (Honcho's biggest win was switching from static top-k to agent-directed search)
 - No graph traversal for multi-hop queries (Zep's temporal graph improves multi-hop reasoning)
-- No background consolidation (Honcho's "Dreamer" pre-computes insights during idle time)
+- No real-time streaming (Zep/Graphiti process events as they happen; Inception is batch)
+- No graph database (Cognee, Zep use Neo4j for entity relationships)
 - No reranking stage (Zep's search/rerank/construct pipeline improves precision)
 - BM25 fails on conceptual queries ("how does X work") where exact terms don't appear in vault notes
 
@@ -197,7 +232,7 @@ Expected: ~47% fewer QMD calls on recall.
 
 ### 2. Parallel collection search
 
-`qmd_search_with_extras()` searched primary + extra collections sequentially. Switched to `concurrent.futures.ThreadPoolExecutor`. With `dala-knowledge` as an extra collection, saves ~1,200ms per call.
+`qmd_search_with_extras()` searched primary + extra collections sequentially. Switched to `concurrent.futures.ThreadPoolExecutor`. With a second collection configured, saves ~1,200ms per call.
 
 ### 3. Tool context cooldown: 3s -> 1s
 
@@ -219,9 +254,12 @@ python3 benchmark/replay_benchmark.py --max-sessions 30 --max-per-project 2
 
 # Quick run
 python3 benchmark/replay_benchmark.py --max-sessions 10 --max-per-project 1 --quiet
+
+# Include Inception pipeline benchmark (runs dry-run, no notes written)
+python3 benchmark/replay_benchmark.py --max-sessions 30 --inception
 ```
 
-Results are printed to stdout and saved as JSONL for further analysis.
+Results are printed to stdout and saved as JSONL for further analysis. The `--inception` flag runs `memento-inception.py --dry-run --full --verbose` and reports pipeline timing, cluster count, and per-phase breakdown.
 
 ### Enabling retrieval logs
 
@@ -235,7 +273,7 @@ retrieval_log: true
 Or set `MEMENTO_DEBUG=1` in your shell. Logs go to `~/.config/memento-vault/retrieval.jsonl`:
 
 ```json
-{"ts":"2026-03-22T10:29:53","hook":"recall","action":"inject","query":"how does the resolver work","latency_ms":425,"injected_titles":["billable-item-resolved-entity-fields"],"injected_chars":324}
+{"ts":"2026-03-22T10:29:53","hook":"recall","action":"inject","query":"how does the cache work","latency_ms":425,"injected_titles":["redis-cache-requires-explicit-ttl"],"injected_chars":324}
 ```
 
 Analyze with:

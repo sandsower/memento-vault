@@ -72,3 +72,31 @@ recall_max_notes: 3
 # Regex patterns for prompts that should skip recall
 # (matched case-insensitively against the full prompt)
 # recall_skip_patterns: ["^(yes|no|ok|sure|thanks)$", "^git\\s", "^run\\s"]
+
+# --- Inception (background consolidation) ---
+# Clusters vault notes by embedding similarity and produces pattern notes.
+# Requires: numpy, hdbscan, scikit-learn (pip install numpy hdbscan scikit-learn)
+
+# Enable Inception (default: false)
+inception_enabled: false
+
+# LLM backend for synthesis: "codex" (subscription) or "claude" (API)
+inception_backend: codex
+
+# Minimum new notes since last run before triggering (default: 5)
+inception_threshold: 5
+
+# HDBSCAN minimum cluster size (default: 3)
+inception_min_cluster_size: 3
+
+# Maximum clusters to synthesize per run (default: 10)
+inception_max_clusters: 10
+
+# HDBSCAN cluster selection epsilon — higher = fewer, tighter clusters (default: 0.7)
+inception_cluster_threshold: 0.7
+
+# Tags to exclude from clustering (default: [])
+# inception_exclude_tags: [fleeting, wip]
+
+# Log clusters without writing notes (default: false)
+inception_dry_run: false

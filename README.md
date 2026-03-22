@@ -1,6 +1,6 @@
 # Memento Vault
 
-Persistent knowledge capture for Claude Code. Every session you close gets triaged, scored, and filed as searchable Zettelkasten notes. No cloud services, no databases. Just markdown and git.
+Persistent knowledge capture for Claude Code. Sessions get triaged, scored, and filed as searchable Zettelkasten notes. No cloud services, no databases. Markdown and git.
 
 ## What it does
 
@@ -17,19 +17,20 @@ cd memento-vault
 Creates the vault at `~/memento`, copies hooks and skills into `~/.claude/`, optionally sets up Obsidian views and QMD search. Works on Linux and macOS.
 
 Custom vault path:
+
 ```bash
 MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 ```
 
 ### Experimental retrieval hooks
 
-The stable install captures knowledge. To also **inject knowledge back** into active sessions automatically, install with the experimental flag:
+The stable install captures knowledge. To also **inject knowledge back** into active sessions, install with the experimental flag:
 
 ```bash
 ./install.sh --experimental
 ```
 
-This adds three retrieval hooks (session briefing, prompt recall, file-read context injection) that require QMD. See [Retrieval (experimental)](#retrieval-experimental) below for details and the [performance analysis](docs/performance-analysis.md) for benchmarks.
+This adds three retrieval hooks (session briefing, prompt recall, file-read context injection) that require QMD. See [Retrieval (experimental)](#retrieval-experimental) for details and the [performance analysis](docs/performance-analysis.md) for benchmarks.
 
 ### Requirements
 
@@ -43,22 +44,22 @@ This adds three retrieval hooks (session briefing, prompt recall, file-read cont
 
 > Requires `./install.sh --experimental` and QMD.
 
-Knowledge flows back into active sessions automatically via three hooks:
+Knowledge flows back into active sessions via three hooks:
 
 - **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens. Fast sync output (<50ms), QMD search deferred to background.
-- **Prompt recall** (UserPromptSubmit): runs BM25 keyword search on each prompt and surfaces matching notes before Claude processes it. Project-scoped, with temporal decay and wikilink expansion.
+- **Prompt recall** (UserPromptSubmit): BM25 keyword search on each prompt, surfaces matching notes before Claude processes it. Project-scoped, with temporal decay and wikilink expansion.
 - **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. Directory-level BM25 with caching and rate limiting.
 
-All three hooks are silent when they have nothing relevant — zero tokens injected on trivial prompts, config files, and vendor directories.
+All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, and vendor directories.
 
-### Performance characteristics
+### Performance
 
 Benchmarked against 30 real sessions (341 prompts, 362 file reads, 16 projects):
 
 | Metric | Value |
 |---|---|
 | Avg injected per session | ~555 chars (~139 input units) |
-| Effective hit rate | 100% (when hooks search, they always find relevant notes) |
+| Effective hit rate | 100% (when hooks search, they find relevant notes) |
 | Avg recall latency | 792ms per prompt |
 | Avg tool-context latency | 141ms per file read |
 | Session briefing | <83ms (deferred QMD search is non-blocking) |
@@ -80,6 +81,7 @@ Full analysis with methodology, industry comparison, and optimization details in
 | Command | What it does |
 |---------|-------------|
 | `/memento` | Capture insights mid-session |
+| `/inception` | Find cross-session patterns, synthesize pattern notes |
 | `/memento-defrag` | Archive low-value notes, keep the vault focused |
 | `/start-fresh` | Capture + save pending work + clear context |
 | `/continue-work` | Recover context from local state and vault |
@@ -130,7 +132,7 @@ Three ways to layer project-specific behavior on top without forking:
 
 ## QMD (optional)
 
-QMD adds semantic search over your vault. Without it the concierge agent falls back to grep, which works for keyword searches but misses conceptual matches. QMD is required for the experimental retrieval hooks.
+QMD adds semantic search over your vault. Without it the concierge agent falls back to grep, which handles keyword searches but misses conceptual matches. QMD is required for the experimental retrieval hooks.
 
 ```bash
 qmd search "caching strategy" -c memento
@@ -149,7 +151,7 @@ command -v qmd &>/dev/null && qmd vsearch "warmup" -c memento -n 1 &>/dev/null &
 
 ## Obsidian (optional)
 
-The installer copies Obsidian config and Base views into the vault if you want them. Open `~/memento` as a vault and you get:
+The installer copies Obsidian config and Base views into the vault. Open `~/memento` as a vault and you get:
 
 - Graph view showing how notes connect
 - Base views: by type, by project, recent, decisions, bugfixes

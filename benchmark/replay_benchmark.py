@@ -355,11 +355,113 @@ def print_report(all_stats):
     print(f"{'='*65}\n")
 
 
+def run_inception_benchmark(quiet=False):
+    """Run Inception pipeline in dry-run mode and report timing.
+
+    Executes memento-inception.py --dry-run --full --verbose and parses
+    stderr for phase timing and cluster information.
+
+    Returns dict with timing and cluster stats, or None on failure.
+    """
+    inception_script = HOOKS_DIR / "memento-inception.py"
+    if not inception_script.exists():
+        print("  Inception script not found, skipping")
+        return None
+
+    if not quiet:
+        print("\n  Running Inception pipeline (dry-run)...", flush=True)
+
+    t0 = time.time()
+    try:
+        result = subprocess.run(
+            [sys.executable, str(inception_script), "--dry-run", "--full", "--verbose"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        total_ms = int((time.time() - t0) * 1000)
+    except subprocess.TimeoutExpired:
+        total_ms = int((time.time() - t0) * 1000)
+        print(f"  Inception timed out after {total_ms}ms")
+        return None
+    except FileNotFoundError:
+        print("  Python interpreter not found")
+        return None
+
+    stderr = result.stderr or ""
+    stdout = result.stdout or ""
+
+    # Parse stderr lines for metrics
+    stats = {
+        "total_ms": total_ms,
+        "exit_code": result.returncode,
+        "notes_collected": 0,
+        "notes_with_embeddings": 0,
+        "total_clusters": 0,
+        "clusters_with_new": 0,
+    }
+
+    for line in stderr.splitlines():
+        line = line.strip()
+        if line.startswith("New notes since last run:"):
+            try:
+                stats["notes_collected"] = int(line.split(":")[-1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("Total clusterable notes:"):
+            try:
+                stats["notes_with_embeddings"] = int(line.split(":")[-1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("Found") and "total clusters" in line:
+            try:
+                stats["total_clusters"] = int(line.split()[1])
+            except (ValueError, IndexError):
+                pass
+        elif line.startswith("Clusters with new notes"):
+            try:
+                stats["clusters_with_new"] = int(line.split(":")[-1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("Only") and "notes have embeddings" in line:
+            try:
+                stats["notes_with_embeddings"] = int(line.split()[1])
+            except (ValueError, IndexError):
+                pass
+
+    return stats
+
+
+def print_inception_report(stats):
+    """Print Inception benchmark results."""
+    if stats is None:
+        return
+
+    print(f"\n  {'='*55}")
+    print(f"  INCEPTION PIPELINE (dry-run)")
+    print(f"  {'='*55}")
+    print(f"  {'Exit code:':<28} {stats['exit_code']}")
+    print(f"  {'Total pipeline time:':<28} {stats['total_ms']}ms")
+    print(f"  {'Notes collected:':<28} {stats['notes_collected']}")
+    print(f"  {'Notes with embeddings:':<28} {stats['notes_with_embeddings']}")
+    print(f"  {'Total clusters found:':<28} {stats['total_clusters']}")
+    print(f"  {'Clusters with new notes:':<28} {stats['clusters_with_new']}")
+
+    if stats["exit_code"] == 2:
+        print(f"  {'Note:':<28} Missing ML dependencies (numpy, hdbscan, scikit-learn)")
+    elif stats["exit_code"] == 3:
+        print(f"  {'Note:':<28} No embeddings found — QMD may not be indexed")
+    elif stats["exit_code"] == 1:
+        print(f"  {'Note:':<28} Another Inception instance was running (locked)")
+    print(f"  {'='*55}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Replay real sessions through memento hooks")
     parser.add_argument("--max-sessions", type=int, default=30, help="Max total sessions to replay")
     parser.add_argument("--max-per-project", type=int, default=2, help="Max sessions per project")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--inception", action="store_true", help="Also benchmark the Inception pipeline (dry-run)")
     args = parser.parse_args()
 
     print("Finding transcripts...")
@@ -393,6 +495,12 @@ def main():
 
     print_report(all_stats)
 
+    # Inception benchmark (optional)
+    inception_stats = None
+    if args.inception:
+        inception_stats = run_inception_benchmark(quiet=args.quiet)
+        print_inception_report(inception_stats)
+
     # Save raw data
     out_path = Path(__file__).parent / "replay_results.jsonl"
     with open(out_path, "w") as f:
@@ -402,6 +510,8 @@ def main():
             s2["recall"] = {k: v for k, v in s["recall"].items() if k != "latencies"}
             s2["tool_context"] = {k: v for k, v in s["tool_context"].items() if k != "latencies"}
             f.write(json.dumps(s2) + "\n")
+        if inception_stats:
+            f.write(json.dumps({"inception": inception_stats}) + "\n")
     print(f"Raw data: {out_path}")
 
 
