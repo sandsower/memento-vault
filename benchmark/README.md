@@ -123,6 +123,28 @@ git add -p  # stage the config changes
 git commit -m "Apply sweep results: NDCG@10 X.XXX → Y.YYY"
 ```
 
+## Full end-to-end eval (generation + judging)
+
+Runs retrieval + LLM answer generation + LLM judging via codex. Requires codex quota.
+
+```bash
+# Quick test (5 questions, ~1 min)
+python benchmark/longmemeval_adapter.py --dataset data/longmemeval/longmemeval_s --mode full --max-questions 5
+
+# Full run (500 questions, ~2 hours)
+python benchmark/longmemeval_adapter.py --dataset data/longmemeval/longmemeval_s --mode full --output full_results.jsonl
+```
+
+Uses turn-level granularity by default (each conversation turn is a separate document). This keeps context small (~2-5k chars) so the LLM can process it reliably.
+
+Tier 3 features are active by default:
+- Multi-hop retrieval for multi-session and temporal questions
+- Recency boost for knowledge-update questions
+- Chronological context formatting for temporal questions
+- Type-aware generation hints
+
+Set `LONGMEMEVAL_BACKEND=claude` to use Claude instead of codex (requires active login).
+
 ## Quick sweep (for testing the setup)
 
 ```bash
@@ -148,7 +170,7 @@ The sweep optimizes these parameters:
 
 | Parameter | Range | Default | What it controls |
 |-----------|-------|---------|-----------------|
-| granularity | session, turn | session | Document chunking level |
+| granularity | session, turn | turn | Document chunking level |
 | retrieval_limit | 3-20 | 10 | Max results from BM25 |
 | recall_min_score | 0.0-0.3 | 0.0 | BM25 score floor |
 | recall_high_confidence | 0.3-0.8 | 0.55 | Threshold for skipping deep path |
