@@ -154,8 +154,8 @@ def main():
     results = qmd_search_with_extras(
         prompt,
         limit=max_notes + 2,  # overfetch for dedup
-        semantic=True,
-        timeout=12,
+        semantic=False,  # BM25 for speed — vsearch is too slow per-prompt
+        timeout=5,
         min_score=min_score,
     )
 
