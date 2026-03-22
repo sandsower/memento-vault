@@ -37,7 +37,6 @@ DEFAULT_CONFIG = {
         r"^git\s",
         r"^run\s",
     ],
-    "qmd_http_url": "http://localhost:8181/mcp",
 }
 
 _CONFIG = None
@@ -192,126 +191,15 @@ def _clean_snippet(raw):
     return text[:200]
 
 
-_QMD_HTTP_URL = None  # set from config on first use
-_QMD_SESSION_ID = None
-
-
-def _qmd_http_search(query, collection, limit, semantic, timeout, min_score):
-    """Query QMD via its HTTP MCP daemon. Returns parsed results or None if unavailable."""
-    global _QMD_SESSION_ID
-    import urllib.request
-    import urllib.error
-
-    # Initialize session if needed
-    if _QMD_SESSION_ID is None:
-        try:
-            init_body = json.dumps({
-                "jsonrpc": "2.0", "id": 0, "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "memento-vault", "version": "1.0"},
-                },
-            }).encode()
-            req = urllib.request.Request(
-                _QMD_HTTP_URL, data=init_body,
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                data = json.loads(resp.read())
-                session_id = resp.headers.get("Mcp-Session-Id", "")
-                if session_id:
-                    _QMD_SESSION_ID = session_id
-                else:
-                    return None
-        except Exception:
-            return None
-
-    # Build MCP query tool call
-    search_type = "vec" if semantic else "lex"
-    tool_args = {
-        "searches": [{"type": search_type, "query": query}],
-        "intent": query,
-        "collection": collection,
-        "maxResults": limit,
-    }
-    if min_score > 0:
-        tool_args["minScore"] = min_score
-
-    body = json.dumps({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "query", "arguments": tool_args},
-    }).encode()
-
-    try:
-        req = urllib.request.Request(
-            _QMD_HTTP_URL, data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Mcp-Session-Id": _QMD_SESSION_ID,
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
-
-        content = data.get("result", {}).get("content", [])
-        if not content:
-            return []
-
-        # Parse the text content — QMD MCP returns formatted text
-        text = content[0].get("text", "") if content else ""
-        if not text:
-            return []
-
-        return _parse_qmd_mcp_text(text, min_score)
-
-    except Exception:
-        return None
-
-
-def _parse_qmd_mcp_text(text, min_score):
-    """Parse QMD MCP tool response text into result dicts."""
-    results = []
-    current = None
-
-    for line in text.splitlines():
-        line = line.rstrip()
-        # Result headers look like: "## title (score: 0.67) — collection/path.md"
-        # or similar formats — parse flexibly
-        if line.startswith("## ") or (line.startswith("#") and "score:" in line):
-            if current:
-                results.append(current)
-            # Extract score
-            score = 0.0
-            score_match = re.search(r"score:\s*([\d.]+)", line)
-            if score_match:
-                score = float(score_match.group(1))
-            # Extract path
-            path_match = re.search(r"[—–-]\s*\S+/(.+\.md)", line)
-            path = path_match.group(1) if path_match else ""
-            title = Path(path).stem if path else line.lstrip("#").strip()
-
-            current = {"path": path, "title": title, "score": score, "snippet": ""}
-        elif current and line.strip():
-            if not current["snippet"]:
-                current["snippet"] = _clean_snippet(line)
-
-    if current:
-        results.append(current)
-
-    return [r for r in results if r["score"] >= min_score]
-
-
 def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_score=0.0):
-    """Run a QMD search. Tries HTTP daemon first, falls back to CLI.
+    """Run a QMD search via CLI.
 
     Args:
         query: Search query string
         collection: QMD collection name (default: from config)
         limit: Max results
-        semantic: If True, use vector search; otherwise BM25
-        timeout: Timeout in seconds
+        semantic: If True, use vsearch (vector); otherwise search (BM25)
+        timeout: Subprocess timeout in seconds
         min_score: Minimum relevance score (0.0-1.0)
 
     Returns:
@@ -324,15 +212,6 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_
     config = get_config()
     collection = collection or config["qmd_collection"]
 
-    # Try HTTP daemon first (fast — model stays warm)
-    global _QMD_HTTP_URL
-    if _QMD_HTTP_URL is None:
-        _QMD_HTTP_URL = config.get("qmd_http_url", "http://localhost:8181/mcp")
-    http_results = _qmd_http_search(query, collection, limit, semantic, timeout, min_score)
-    if http_results is not None:
-        return http_results[:limit]
-
-    # Fall back to CLI
     if not has_qmd():
         return []
 
