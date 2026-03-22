@@ -177,44 +177,55 @@ LLM synthesis is the bottleneck. Each cluster requires a separate `codex exec` o
 
 ## Comparison: industry systems
 
-How memento-vault compares to other agent memory systems:
+The agent memory field has split into two camps: database-backed systems that maximize recall (Honcho, Zep, Cognee) and lightweight systems that minimize overhead (memento-vault, A-MEM, MemGPT). With Inception, memento-vault borrows the key technique from the database camp -- background consolidation -- without adopting the infrastructure.
 
-| System | Architecture | Retrieval latency | LLM cost | Background consolidation | Storage |
+| System | Architecture | Retrieval | Consolidation | LLM cost | Storage |
 |---|---|---|---|---|---|
-| **Memento-vault** | BM25/vector + hooks | 530ms (BM25) | Zero at retrieval; write-time only (Inception) | Yes (Inception) | Local markdown + SQLite |
-| Honcho | Agentic retrieval | 200ms (fast path) | Per-query LLM | Yes (Dreamer) | PostgreSQL + pgvector |
-| Zep (Graphiti) | Temporal knowledge graph | 2.5-3.2s | Optional reranker | No (real-time streaming) | Neo4j |
-| Mem0 | Hybrid vector + graph | 148ms-1.4s | LLM for updates | No | Cloud or local |
-| A-MEM | Zettelkasten-inspired | Not published | LLM for linking | No | In-memory |
-| MemGPT/Letta | Core blocks + retrieval | Inline or async | LLM per tool call | No | Filesystem/DB |
-| Cognee | Graph + vector pipeline | Not published | LLM for extraction | No | Neo4j / NetworkX |
+| **Memento-vault** | BM25/vector hooks | 530ms, static top-k | Inception (batch HDBSCAN) | Zero at retrieval | Markdown + SQLite |
+| Honcho | Agentic tool-use | 200ms, agent-directed | Dreamer (agentic specialists) | Per-query + per-dream | PostgreSQL + pgvector |
+| Zep (Graphiti) | Temporal KG | 2.5-3.2s, graph traversal | Real-time streaming | Optional reranker | Neo4j |
+| Mem0 | Hybrid vector + graph | 148ms-1.4s | Per-write updates | LLM per update | Cloud or local |
+| Cognee | Graph + vector pipeline | Not published | On-demand `cognify()` | LLM per extraction | Neo4j / NetworkX |
+| MemGPT/Letta | Tiered self-managed | Inline or async | Agent-driven paging | LLM per tool call | Filesystem/DB |
 
-### Memento-vault's position
+### What Inception changes
 
-**Advantages:**
-- Zero LLM cost at retrieval (pure BM25/vector search, no reranking agent)
-- Minimal injected tokens (~139 units/session vs 1.6k-7k for competitors)
-- Background consolidation via Inception (comparable to Honcho's Dreamer, but local-first)
-- No cloud dependency, no database, no API costs — local markdown files and SQLite
-- LLM costs are write-time only (Inception synthesis), zero with a Codex subscription
-- Three injection points (session start, per-prompt, per-file-read) — more granular than single-endpoint systems
-- Research on context rot validates the "minimal, high-signal" approach: LLMs degrade with as little as 100 tokens of noise context
+Before Inception, the gap with Honcho was two features wide: no background consolidation (their Dreamer) and no agentic retrieval (their Dialectic). Honcho's 90.4% on LongMem S comes from both working together -- the Dreamer front-loads synthesis so the Dialectic has richer material to search.
 
-**Gaps:**
-- No agentic retrieval (Honcho's biggest win was switching from static top-k to agent-directed search)
-- No graph traversal for multi-hop queries (Zep's temporal graph improves multi-hop reasoning)
-- No real-time streaming (Zep/Graphiti process events as they happen; Inception is batch)
-- No graph database (Cognee, Zep use Neo4j for entity relationships)
-- No reranking stage (Zep's search/rerank/construct pipeline improves precision)
-- BM25 fails on conceptual queries ("how does X work") where exact terms don't appear in vault notes
+Inception closes the first gap. Pattern notes serve as retrieval anchors the same way Honcho's deductive/inductive observations do -- higher-level abstractions that match broader queries and carry links to specifics. Park et al. showed this matters: removing reflections from their Generative Agents architecture degraded performance by ~10%.
+
+The remaining gap is retrieval strategy. Tenet uses static BM25/vector top-k -- it returns whatever scores highest and hopes it's relevant. Honcho's Dialectic is an agent with tools: it decides what to search, follows up with multi-hop queries, and resolves contradictions before responding. That's why Honcho maintains <2% accuracy drop even with 1M+ distractor tokens. Static retrieval can't do that.
+
+### Where we're stronger
+
+- **Zero LLM cost at retrieval.** Tenet's hooks are pure BM25/vector search, no reranking agent, no per-query API call. Inception's costs are write-time only and zero on a codex subscription. Every other system with comparable features has per-query LLM costs.
+- **Minimal injection.** ~139 input units per session vs 1.6k-7k tokens for competitors. Context rot research (Maximum Effective Context Window, 2025) shows LLMs degrade with as few as 100 noise tokens. Less is more.
+- **No infrastructure.** Markdown files in a git repo. No PostgreSQL, no Neo4j, no Docker, no cloud account. `pip install` and you're done.
+- **Three injection points.** Session start, per-prompt, per-file-read -- more granular than single-endpoint systems. Each hook has its own relevance gate so irrelevant contexts stay silent.
+- **Consolidation with human oversight.** Inception caps certainty at 3 so pattern notes are subject to decay. Users promote the good ones, bad ones fade. Honcho's Dreamer operates autonomously with no human quality gate.
+
+### Where we're weaker
+
+- **No agentic retrieval.** This is the big one. Static top-k retrieval can't follow chains of reasoning, resolve contradictions, or decide it needs more context. Honcho's Dialectic agent does all of this. We have no equivalent.
+- **No graph traversal.** Wikilinks give us 1-hop expansion, but Zep's temporal knowledge graph enables multi-hop queries ("what changed about X between March and now?") that flat search can't answer.
+- **No real-time processing.** Inception is batch (runs post-session). Zep/Graphiti process events as they stream in. For a CLI tool this is fine, but it means patterns are always at least one session behind.
+- **BM25 misses conceptual queries.** "How does the caching layer work" won't match a note titled "redis-cache-requires-explicit-ttl" unless the exact terms overlap. Vector search helps but isn't used on the hot prompt path (too slow).
+- **No benchmarking parity.** Honcho publishes LongMem and LoCoMo scores. We have no equivalent benchmark. The replay benchmark measures latency and injection volume, not retrieval accuracy. Until we run comparable evals, the quality comparison is qualitative.
+
+### The honest summary
+
+Memento-vault is the only local-first, zero-retrieval-cost system with background consolidation. That's a real niche -- if you want memory for a CLI coding tool without cloud dependencies or per-query API bills, nothing else does this. But on raw retrieval quality, Honcho is ahead because agentic retrieval is fundamentally more capable than static top-k. Closing that gap is the next frontier.
 
 References:
-- [Honcho 3](https://blog.plasticlabs.ai/blog/Honcho-3) — agentic retrieval benchmarks
-- [Zep/Graphiti](https://arxiv.org/abs/2501.13956) — temporal knowledge graph
-- [Mem0](https://arxiv.org/abs/2504.19413) — scalable long-term memory
-- [A-MEM](https://arxiv.org/abs/2502.12110) — Zettelkasten-inspired agent memory
-- [Maximum Effective Context Window](https://arxiv.org/abs/2509.21361) — context rot research
-- [JetBrains: Efficient Context Management](https://blog.jetbrains.com/research/2025/12/efficient-context-management/) — agent context budgets
+- [Honcho 3](https://blog.plasticlabs.ai/blog/Honcho-3) -- agentic retrieval, 90.4% LongMem S
+- [Benchmarking Honcho](https://blog.plasticlabs.ai/research/Benchmarking-Honcho) -- LongMem/LoCoMo/BEAM results
+- [Generative Agents](https://arxiv.org/abs/2304.03442) -- reflection ablation study (Park et al.)
+- [Zep/Graphiti](https://arxiv.org/abs/2501.13956) -- temporal knowledge graph
+- [Mem0](https://arxiv.org/abs/2504.19413) -- scalable long-term memory
+- [A-MEM](https://arxiv.org/abs/2502.12110) -- Zettelkasten-inspired agent memory
+- [CraniMem](https://arxiv.org/abs/2603.15642) -- bounded memory with consolidation
+- [Context Rot](https://research.trychroma.com/context-rot) -- retrieval noise degradation
+- [JetBrains: Efficient Context Management](https://blog.jetbrains.com/research/2025/12/efficient-context-management/) -- agent context budgets
 
 ## Optimizations applied
 
