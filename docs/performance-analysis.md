@@ -23,20 +23,33 @@ Source: `benchmark/replay_benchmark.py`
 
 ### Dataset
 
-| Metric | Value |
-|---|---|
-| Sessions replayed | 30 |
-| Total user prompts | 341 |
-| Total file reads | 362 |
-| Projects covered | 16 |
-| Session sizes | 1-146 actions (median: 12) |
-| Transcript source | Real sessions from 2026-03-09 to 2026-03-22 |
+| Metric | v1.1.0 | v1.2.0 + Tier 2 |
+|---|---|---|
+| Sessions replayed | 30 | 30 |
+| Total user prompts | 341 | 381 |
+| Total file reads | 362 | 382 |
+| Projects covered | 16 | 16 |
+| Session sizes | 1-146 actions (median: 12) | 1-146 actions (median: 12) |
+| Transcript source | Real sessions from 2026-03-09 to 2026-03-22 | Same corpus + newer sessions |
 
 Projects span a work monorepo, memento-vault (this repo), personal side projects, dotfiles, and infrastructure.
 
 ## Results
 
 ### Per-hook performance
+
+**v1.2.0 + Tier 2** (current):
+
+```
+                        Latency         Injections      Chars/session
+                        avg    p95      rate   eff.     avg
+  ---------------------------------------------------------------
+  Briefing (sync)       276ms  485ms    73%    73%      110
+  Recall (PRF+RRF+CE)   3262ms 5464ms   8%     100%     269
+  Tool context (BM25)   245ms  693ms    5%     100%     84
+```
+
+**v1.1.0** (previous baseline):
 
 ```
                         Latency         Injections      Chars/session
@@ -49,7 +62,25 @@ Projects span a work monorepo, memento-vault (this repo), personal side projects
 
 **Effective hit rate** = injections / (calls - intentional skips). When the hooks actually search, they always find relevant notes. The low raw rates are by design — most calls are correctly skipped.
 
+**Latency regression**: Recall went from 792ms to 3262ms (4.1x). This is the cost of Tier 1 + Tier 2 enhancements: PRF adds a second BM25 pass via subprocess, RRF adds a parallel vsearch call when warm, and the cross-encoder reranker scores the candidate set. These are all subprocess calls to QMD, not in-memory operations. Briefing rose from 83ms to 276ms (3.3x) due to project map lookups and graph building overhead. The tradeoff: higher latency buys better selectivity (fewer, more relevant injections) and lower total injection volume.
+
 ### Skip breakdown
+
+**v1.2.0 + Tier 2** (current):
+
+```
+Recall (381 calls):
+    Skipped:    350  (92%)   <- short prompts, confirmations, skill invocations
+    Searched:    31  (8%)
+    Injected:    31  (100% of searched)
+
+Tool context (382 calls):
+    Skipped:    362  (95%)   <- config files, node_modules, assets, vendor
+    Searched:    20  (5%)
+    Injected:    20  (100% of searched)
+```
+
+**v1.1.0** (previous):
 
 ```
 Recall (341 calls):
@@ -63,19 +94,34 @@ Tool context (362 calls):
     Injected:    20  (100% of searched)
 ```
 
+The enhanced pipeline is more selective -- recall injection rate dropped from 11% to 8%. Fewer searches, but the same 100% effective hit rate when it does search. The reranker and improved scoring gates filter out marginal candidates that v1.1.0 would have injected.
+
 ### Injected chars distribution
 
-| Stat | Value |
-|---|---|
-| Mean | 555 chars/session |
-| Median | 443 chars/session |
-| P95 | 2,846 chars/session |
-| Max | 3,672 chars/session |
-| Zero-injection sessions | 6/30 (20%) |
+| Stat | v1.1.0 | v1.2.0 + Tier 2 |
+|---|---|---|
+| Mean | 555 chars/session | 463 chars/session |
+| Median | 443 chars/session | 371 chars/session |
+| P95 | 2,846 chars/session | 2,384 chars/session |
+| Max | 3,672 chars/session | 3,104 chars/session |
+| Zero-injection sessions | 6/30 (20%) | 6/30 (20%) |
 
-The distribution is right-skewed. Most sessions get 200-500 chars. Large sessions in well-covered projects get 2,000-3,600 chars. Sessions in projects without vault notes get zero -- correctly.
+The distribution is right-skewed. Most sessions get 200-500 chars. Large sessions in well-covered projects get 2,000-3,100 chars. Sessions in projects without vault notes get zero -- correctly. The v1.2.0 pipeline injects ~17% fewer chars overall -- the reranker and tighter scoring gates prune marginal results that would have passed in v1.1.0.
 
 ### Cost breakdown by hook
+
+**v1.2.0 + Tier 2** (current):
+
+```
+Per session (average):
+    Briefing:       110 chars   (24% of total)
+    Recall:         269 chars   (58% of total)
+    Tool context:    84 chars   (18% of total)
+    ------------------------------------------------
+    Total:          463 chars   (~116 input units)
+```
+
+**v1.1.0** (previous):
 
 ```
 Per session (average):
@@ -86,26 +132,28 @@ Per session (average):
     Total:          555 chars   (~139 input units)
 ```
 
-Recall dominates because it fires on every substantial prompt and injects longer snippets (title + 120-char snippet per note, up to 3 notes). Tool context is the cheapest — only 2 notes per injection, shorter snippets.
+Recall still dominates. The proportions are stable across versions -- the enhanced pipeline reduces volume evenly, not from one hook disproportionately. Tool context's share went up slightly (14% to 18%) because it now catches a few more cross-collection hits from the lowered score threshold.
 
 ### Wall-clock overhead
 
-| Stat | Value | % of 20min session |
-|---|---|---|
-| Mean | 13.0s | 1.1% |
-| Median | 4.9s | 0.4% |
-| P95 | 40.9s | 3.4% |
-| Max | 67.6s | 5.6% |
+| Stat | v1.1.0 | v1.2.0 + Tier 2 | % of 20min session (v1.2.0) |
+|---|---|---|---|
+| Mean | 13.0s | 38.4s | 3.2% |
+| Median | 4.9s | 14.8s | 1.2% |
+| P95 | 40.9s | 98.2s | 8.2% |
+| Max | 67.6s | 142.1s | 11.8% |
 
-82.8% of overhead is the recall hook (BM25 search at ~800ms per call). Sessions with 30+ prompts accumulate noticeable overhead. Sessions with <10 prompts stay under 5s total.
+Wall-clock overhead roughly tripled. 88% of it is the recall hook (PRF + RRF + cross-encoder at ~3.3s per call). Sessions with 30+ prompts accumulate real overhead. Sessions with <10 prompts stay under 15s total.
+
+This is the most visible cost of the Tier 1 + Tier 2 enhancements. The previous 800ms recall was barely perceptible; 3.3s is noticeable. Whether the quality improvement justifies this depends on the session -- for short sessions with few recall triggers, it's fine. For long sessions with 30+ searched prompts, the P95 overhead approaches 100s.
 
 **Blocking vs non-blocking:**
 
 | Hook | Type | Impact |
 |---|---|---|
-| Briefing | Non-blocking (deferred to background) | Zero — user never waits |
-| Recall | Blocks prompt processing | Highest — 800ms per prompt |
-| Tool context | Blocks file read | Moderate — during Claude's autonomous tool use |
+| Briefing | Non-blocking (deferred to background) | Low — 276ms but user doesn't wait |
+| Recall | Blocks prompt processing | Highest — 3.3s per prompt searched |
+| Tool context | Blocks file read | Moderate — 245ms during Claude's autonomous tool use |
 
 ### Per-project analysis
 
@@ -125,15 +173,15 @@ The concierge agent is the alternative — a subagent that searches the vault on
 
 | Dimension | Hooks (automatic) | Concierge (on-demand) |
 |---|---|---|
-| Input units per use | ~139/session | ~72,500/call |
-| Latency | 800ms/prompt (blocking) | 60-90s (one-time) |
+| Input units per use | ~116/session | ~72,500/call |
+| Latency | 3.3s/prompt (blocking) | 60-90s (one-time) |
 | Trigger | Every prompt + file read | Manual, when someone asks |
 | Context depth | One-liner breadcrumbs | Full narrative synthesis |
 | Coverage | Every session, always-on | Only when invoked |
 
 ### Break-even analysis
 
-One concierge call costs the same as **452 hooked sessions**. At 25 sessions/week, the hooks run for 18 weeks before matching a single concierge call in input units. The hooks are effectively free in unit terms.
+One concierge call costs the same as **626 hooked sessions** (up from 452 in v1.1.0). At 25 sessions/week, the hooks run for 25 weeks before matching a single concierge call in input units. The hooks are effectively free in unit terms -- and the improved selectivity made them even cheaper per session.
 
 ### Quality gap
 
@@ -181,48 +229,72 @@ The agent memory field has split into two camps: database-backed systems that ma
 
 | System | Architecture | Retrieval | Consolidation | LLM cost | Storage |
 |---|---|---|---|---|---|
-| **Memento-vault** | BM25/vector hooks + Tier 1 enhancements | 530ms, PRF + RRF + PPR + PageRank | Inception (batch HDBSCAN) | Zero at retrieval | Markdown + SQLite |
-| Honcho | Agentic tool-use | 200ms, agent-directed | Dreamer (agentic specialists) | Per-query + per-dream | PostgreSQL + pgvector |
+| **Memento-vault** | BM25/vector hooks + Tier 1 + CE reranker | 3.3s, PRF + RRF + PPR + PageRank + MiniLM-L6 | Inception (batch HDBSCAN) | Zero at retrieval (CE is local ONNX) | Markdown + SQLite |
+| Honcho 3 | Agentic tool-use | 200ms, agent-directed | Dreamer (agentic specialists) | Per-query + per-dream | PostgreSQL + pgvector |
+| Hindsight | 4-network architecture | Not published | Dual consolidation networks | LLM per update (supports Ollama) | Cloud or local |
 | Zep (Graphiti) | Temporal KG | 2.5-3.2s, graph traversal | Real-time streaming | Optional reranker | Neo4j |
-| Mem0 | Hybrid vector + graph | 148ms-1.4s | Per-write updates | LLM per update | Cloud or local |
+| Mem0 v1.0.2 | Hybrid vector + graph | 148ms-1.4s | Per-write updates | LLM per update (supports Ollama + FastEmbed) | Cloud or local |
 | Cognee | Graph + vector pipeline | Not published | On-demand `cognify()` | LLM per extraction | Neo4j / NetworkX |
-| MemGPT/Letta | Tiered self-managed | Inline or async | Agent-driven paging | LLM per tool call | Filesystem/DB |
+| Letta V1 | Tiered self-managed | Inline or async | Agent-driven paging | LLM per tool call | Filesystem/DB |
+| Google AOMA | SQLite agent | Not published | 30-min batch consolidation | LLM per consolidation | SQLite, zero vector DB |
+| MemOS 2.0 | OpenClaw plugin | Hybrid FTS5 + vector | Not published | LLM per extraction | SQLite + hybrid search |
 
 ### What Inception changes
 
-Before Inception, the gap with Honcho was two features wide: no background consolidation (their Dreamer) and no agentic retrieval (their Dialectic). Honcho's 90.4% on LongMem S comes from both working together -- the Dreamer front-loads synthesis so the Dialectic has richer material to search.
+Before Inception, the gap with Honcho was two features wide: no background consolidation (their Dreamer) and no agentic retrieval (their Dialectic). Honcho 3's 92.6% on LongMemEval comes from both working together -- the Dreamer front-loads synthesis so the Dialectic has richer material to search.
 
 Inception closes the first gap. Pattern notes serve as retrieval anchors the same way Honcho's deductive/inductive observations do -- higher-level abstractions that match broader queries and carry links to specifics. Park et al. showed this matters: removing reflections from their Generative Agents architecture degraded performance by ~10%.
 
-Tier 1 (v1.2.0) narrows the retrieval gap further. PRF query expansion and RRF hybrid search improve recall quality without LLM cost. Personalized PageRank replaces naive 1-hop wikilink expansion with graph-aware link traversal that surfaces structurally important notes 2+ hops away. Inception-produced concept indexes and project retrieval maps provide O(1) lookups that bypass search entirely for known patterns and projects. These cover what Honcho's Dialectic prefetch does -- parallel semantic searches before the agent loop. The remaining gap is agentic multi-hop reasoning, which only matters for ~30-40% of prompts.
+Tier 1 (v1.2.0) narrows the retrieval gap further. PRF query expansion and RRF hybrid search improve recall quality without LLM cost. Personalized PageRank replaces naive 1-hop wikilink expansion with graph-aware link traversal that surfaces structurally important notes 2+ hops away. Inception-produced concept indexes and project retrieval maps provide O(1) lookups that bypass search entirely for known patterns and projects. These cover what Honcho's Dialectic prefetch does -- parallel semantic searches before the agent loop.
+
+Tier 2 adds cross-encoder reranking with MiniLM-L-6-v2 via ONNX. This closes the quality gap between sparse BM25 results and dense neural retrieval -- BM25+CE shows +11% relative NDCG@10 across BEIR benchmarks (16 of 18 datasets improved). The model runs locally on CPU at ~15-25ms for 10-20 candidates, so retrieval remains zero-LLM-cost. The tradeoff is latency: the full pipeline (PRF + RRF + CE) takes 3.3s per searched prompt vs 800ms before.
+
+Hindsight (Vectorize.io) is a new entrant worth watching -- 91.4% LongMemEval with a 4-network architecture and Ollama support for local operation. Google's Always On Memory Agent takes the opposite approach from everyone: SQLite, no vector DB at all, 30-minute batch consolidation. MemOS 2.0 bridges the gap with hybrid FTS5+vector in SQLite.
+
+The remaining gap with Honcho is agentic multi-hop reasoning, which only matters for ~30-40% of prompts.
 
 ### Where we're stronger
 
-- **Zero LLM cost at retrieval.** Tenet's hooks are pure BM25/vector search, no reranking agent, no per-query API call. Inception's costs are write-time only and zero on a codex subscription. Every other system with comparable features has per-query LLM costs.
-- **Minimal injection.** ~139 input units per session vs 1.6k-7k tokens for competitors. Context rot research (Maximum Effective Context Window, 2025) shows LLMs degrade with as few as 100 noise tokens. Less is more.
+- **Zero LLM cost at retrieval.** Tenet's hooks are BM25/vector search + a local ONNX cross-encoder -- no API calls, no per-query LLM cost. The cross-encoder (MiniLM-L-6-v2, 22.7M params) runs on CPU and outperforms BERT-large (340M params) at 18x the speed. Inception's costs are write-time only and zero on a codex subscription.
+- **Minimal injection.** ~116 input units per session (down from 139 in v1.1.0) vs 1.6k-7k tokens for competitors. Context rot research (Maximum Effective Context Window, 2025) shows LLMs degrade with as few as 100 noise tokens. Less is more.
 - **No infrastructure.** Markdown files in a git repo. No PostgreSQL, no Neo4j, no Docker, no cloud account. `pip install` and you're done.
 - **Three injection points.** Session start, per-prompt, per-file-read -- more granular than single-endpoint systems. Each hook has its own relevance gate so irrelevant contexts stay silent.
 - **Consolidation with human oversight.** Inception caps certainty at 3 so pattern notes are subject to decay. Users promote the good ones, bad ones fade. Honcho's Dreamer operates autonomously with no human quality gate.
 
 ### Where we're weaker
 
-- **No agentic retrieval.** Static retrieval (even with Tier 1 enhancements) can't follow chains of reasoning, resolve contradictions, or decide it needs more context. Honcho's Dialectic agent does all of this. PRF/RRF/PPR cover the prefetch stage, but the multi-hop agent loop remains the gap.
+- **Recall latency regression.** The biggest honest problem right now. Recall went from 792ms to 3,262ms (4.1x) with Tier 1 + Tier 2. Each searched prompt now blocks for 3.3s. The bottleneck is subprocess overhead -- PRF runs a second QMD BM25 call, RRF adds a parallel vsearch, and the cross-encoder scores candidates. These are all out-of-process calls, not in-memory ops. For short sessions (<10 searched prompts) the overhead is acceptable. For long sessions, the P95 wall-clock overhead approaches 100s. Mitigation paths: batch QMD calls into a single subprocess, in-process ONNX inference instead of shelling out, or adaptive pipeline depth (skip PRF/RRF for high-confidence BM25 hits).
+- **No agentic retrieval.** Static retrieval (even with Tier 1 + Tier 2 enhancements) can't follow chains of reasoning, resolve contradictions, or decide it needs more context. Honcho's Dialectic agent does all of this. PRF/RRF/PPR/CE cover the prefetch and reranking stages, but the multi-hop agent loop remains the gap.
 - **No graph traversal for temporal queries.** PPR traverses the wikilink graph for structural importance, but Zep's temporal knowledge graph enables time-scoped queries ("what changed about X between March and now?") that link structure alone can't answer.
 - **No real-time processing.** Inception is batch (runs post-session). Zep/Graphiti process events as they stream in. For a CLI tool this is fine, but it means patterns are always at least one session behind.
-- **No benchmarking parity.** Honcho publishes LongMem and LoCoMo scores. We have no equivalent benchmark. The replay benchmark measures latency and injection volume, not retrieval accuracy. Until we run comparable evals, the quality comparison is qualitative.
+- **No benchmarking parity.** Honcho publishes LongMemEval and LoCoMo scores (92.6% and similar). Hindsight reports 91.4% LongMemEval. Letta V1 reports 42.5% Terminal-Bench and 74% LoCoMo. We have no equivalent benchmark. The replay benchmark measures latency and injection volume, not retrieval accuracy. Until we run comparable evals, the quality comparison is qualitative.
 
 ### The honest summary
 
-Memento-vault is the only local-first, zero-retrieval-cost system with background consolidation and graph-aware retrieval. Tier 1 enhancements (PRF, RRF, PPR, PageRank, concept indexes, project maps) close ~70% of the gap with Honcho's Dialectic prefetch at zero per-query LLM cost. The remaining gap -- agentic multi-hop retrieval for complex queries -- is deferred to Tier 3 (background codex exec, results arrive by prompt 2-3).
+Memento-vault is the only local-first system with background consolidation, graph-aware retrieval, and cross-encoder reranking -- all running on CPU with zero API calls at query time. Tier 1 + Tier 2 enhancements close ~80% of the gap with Honcho's Dialectic prefetch at zero per-query LLM cost, and the cross-encoder reranker brings retrieval quality close to neural search without the infrastructure.
+
+The cost is real: recall latency went from 800ms to 3.3s, and wall-clock overhead tripled. The pipeline is more selective (463 chars/session vs 555, 626x efficiency vs 452x), but whether that quality improvement justifies the latency hit is session-dependent. For the median session (12 actions, 1-2 searched prompts), the overhead is under 15s. For heavy sessions, it's noticeable.
+
+The remaining gap -- agentic multi-hop retrieval for complex queries -- is deferred to Tier 3 (background codex exec, results arrive by prompt 2-3). The more pressing next step is latency optimization: batching QMD subprocess calls and moving ONNX inference in-process could claw back most of the regression while keeping the quality gains.
 
 References:
-- [Honcho 3](https://blog.plasticlabs.ai/blog/Honcho-3) -- agentic retrieval, 90.4% LongMem S
+- [Honcho 3](https://blog.plasticlabs.ai/blog/Honcho-3) -- agentic retrieval, 92.6% LongMemEval
 - [Benchmarking Honcho](https://blog.plasticlabs.ai/research/Benchmarking-Honcho) -- LongMem/LoCoMo/BEAM results
+- [Hindsight (Vectorize.io)](https://vectorize.io/hindsight/) -- 91.4% LongMemEval, 4-network architecture, Ollama support
+- [Letta V1](https://docs.letta.com/) -- 42.5% Terminal-Bench, 74% LoCoMo with filesystem memory
+- [Google Always On Memory Agent](https://github.com/google/always-on-memory-agent) -- SQLite, 30-min consolidation, zero vector DB
+- [MemOS 2.0 "Stardust"](https://github.com/MemTensor/MemOS) -- OpenClaw plugin, hybrid FTS5+vector in SQLite
 - [Generative Agents](https://arxiv.org/abs/2304.03442) -- reflection ablation study (Park et al.)
 - [Zep/Graphiti](https://arxiv.org/abs/2501.13956) -- temporal knowledge graph
-- [Mem0](https://arxiv.org/abs/2504.19413) -- scalable long-term memory
+- [Mem0](https://arxiv.org/abs/2504.19413) -- scalable long-term memory, now supports Ollama + FastEmbed
 - [A-MEM](https://arxiv.org/abs/2502.12110) -- Zettelkasten-inspired agent memory
-- [CraniMem](https://arxiv.org/abs/2603.15642) -- bounded memory with consolidation
+- [CraniMem](https://arxiv.org/abs/2603.15642) -- bounded memory with gated consolidation replays (ICLR 2026 Workshop)
+- [LightMem](https://arxiv.org/abs/2510.18866) -- sleep-time consolidation, 7.7-29.3% accuracy gains (ICLR 2026)
+- [HippoRAG 2](https://arxiv.org/abs/2502.14802) -- PPR with dual-node KG, +7% associative memory tasks (ICML 2025)
+- [Drowning in Documents](https://arxiv.org/abs/2411.11767) -- rerankers can degrade quality beyond optimal k (SIGIR 2025)
+- [MICE](https://arxiv.org/abs/2602.16299) -- 4x cross-encoder speedup via minimal interactions
+- [Context Memory Virtualisation](https://arxiv.org/abs/2602.22402) -- DAG-based trimming, 20-86% token reduction on coding sessions
+- [MiniLM-L-6-v2](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2) -- MRR@10 39.01, NDCG@10 74.30, 22.7M params
 - [Context Rot](https://research.trychroma.com/context-rot) -- retrieval noise degradation
 - [JetBrains: Efficient Context Management](https://blog.jetbrains.com/research/2025/12/efficient-context-management/) -- agent context budgets
 
@@ -267,7 +339,31 @@ Six enhancements to the recall pipeline, all zero per-query LLM cost:
 - **Concept index**: Inception builds an inverted index from pattern note keywords → source stems. Recall supplements BM25 results with O(1) lookups for known patterns.
 - **Project retrieval maps**: Inception builds per-project note rankings. Briefing uses these for instant project context, skipping the deferred vsearch entirely when maps have enough coverage.
 
-Added ~50ms to the recall hot path. The BM25 miss on conceptual queries (noted as a weakness above) is partially addressed by RRF hybrid search and concept index lookups.
+Original estimate was ~50ms added to the recall hot path. Actual measured impact is much larger -- the full Tier 1 + Tier 2 pipeline takes recall from 792ms to 3,262ms. The bulk of this is subprocess overhead: each PRF, RRF, and CE step shells out to QMD or ONNX, and subprocess launch costs dominate over the actual computation. The BM25 miss on conceptual queries (noted as a weakness above) is partially addressed by RRF hybrid search and concept index lookups.
+
+### 7. Tier 2: Cross-encoder reranking
+
+A local cross-encoder reranker that rescores BM25/RRF candidates before injection. This is the single biggest quality improvement in the pipeline -- BM25+CE shows +11% relative NDCG@10 across 16 of 18 BEIR benchmark datasets.
+
+**Model: MiniLM-L-6-v2**
+
+| Metric | Value |
+|---|---|
+| Parameters | 22.7M (6 layers) |
+| MRR@10 (MS MARCO dev) | 39.01 |
+| NDCG@10 (TREC DL 2019) | 74.30 |
+| vs L-12 variant | Essentially identical quality (39.01 vs 39.02), 1.9x throughput |
+| vs BERT-large (340M) | Outperforms at 18x speed |
+| ONNX INT8 CPU latency | ~15-25ms for 10-20 candidates |
+| Quantization quality loss | <0.5% |
+
+The model is small enough to load once and keep resident. ONNX Runtime with INT8 quantization keeps inference fast on CPU without a GPU. For our typical candidate set (5-15 notes after BM25/RRF), reranking adds 15-25ms of pure model time. The actual overhead is higher because we shell out to a subprocess -- moving to in-process ONNX inference is the obvious optimization.
+
+**Why L-6 over L-12:** The 12-layer variant scores MRR@10 = 39.02 -- virtually identical. The 6-layer version runs at 1.9x throughput. For a pipeline that already has a latency problem, the speed/quality tradeoff is clear.
+
+**Quality impact:** The reranker's main contribution is pruning false positives that BM25 scores highly due to keyword overlap but that aren't semantically relevant. This is why injection volume dropped 17% (555 to 463 chars/session) without losing effective hit rate -- the reranker filters marginal results, not good ones.
+
+**Caveat from SIGIR 2025 (Drowning in Documents):** Rerankers can degrade retrieval quality when the candidate set k exceeds an optimal threshold. Feeding too many low-quality candidates to the cross-encoder hurts more than it helps. Our candidate sets are naturally small (BM25 top-5 to top-15), which keeps us in the sweet spot. Worth monitoring if candidate set sizes grow.
 
 ## How to run the benchmark
 
