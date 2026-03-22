@@ -109,7 +109,9 @@ notable_patterns: [plan, design]
 
 The delta-check gate (QMD-powered) prevents duplicate captures regardless of these thresholds. If QMD says the vault already covers a topic and no new files were edited, the agent is not spawned.
 
-## Session briefing
+## Tenet — retrieval hooks
+
+### Session briefing
 
 At session start, `vault-briefing` injects a compact summary of your project's vault state into Claude's context. Includes recent sessions and the most relevant notes.
 
@@ -126,9 +128,9 @@ briefing_min_score: 0.2
 
 Requires QMD. Falls back to project index notes if QMD is unavailable.
 
-## Prompt recall
+### Prompt recall
 
-On every prompt, `vault-recall` runs a semantic search and injects matching vault notes. This is the just-in-time retrieval mechanism.
+On every prompt, `vault-recall` runs a semantic search and injects matching vault notes. This is Tenet's just-in-time retrieval mechanism.
 
 ```yaml
 # Disable prompt recall
@@ -154,13 +156,13 @@ Deduplication is automatic -- if the top result matches the last injection, it s
 auto_commit: false
 ```
 
-**No QMD** (grep-only search, no retrieval hooks):
+**No QMD** (grep-only search, no Tenet):
 
 ```yaml
 qmd_collection: ""
 ```
 
-**No retrieval hooks** (capture only, no injection):
+**No Tenet** (capture only, no retrieval):
 
 ```yaml
 session_briefing: false

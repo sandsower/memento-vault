@@ -1,6 +1,6 @@
 # Performance Analysis
 
-Comprehensive evaluation of the memento-vault retrieval system: what it costs, what it saves, and how it compares to alternatives.
+Performance evaluation of Tenet (retrieval) and Inception (consolidation): what they cost, what they save, and how they compare to alternatives.
 
 ## Methodology
 

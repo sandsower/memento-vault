@@ -11,7 +11,7 @@
 # Or with a custom vault path:
 #   MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 #
-# Install experimental retrieval hooks (session briefing, prompt recall, tool context):
+# Install experimental modules (Tenet retrieval + Inception consolidation):
 #   ./install.sh --experimental
 #
 # Force overwrite all files (ignore local changes):
@@ -320,7 +320,7 @@ EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-too
 
 if [ "$EXPERIMENTAL" = true ]; then
     INSTALL_HOOKS="$STABLE_HOOKS $EXPERIMENTAL_HOOKS"
-    info "Experimental mode: installing retrieval hooks"
+    info "Experimental mode: installing Tenet + Inception"
 else
     INSTALL_HOOKS="$STABLE_HOOKS"
 fi
@@ -575,7 +575,7 @@ fi
 # --- Done ---
 
 if [ "$EXPERIMENTAL" = true ]; then
-    step "Installation complete! (v${NEW_VERSION} + experimental retrieval)"
+    step "Installation complete! (v${NEW_VERSION} + Tenet + Inception)"
 else
     step "Installation complete! (v${NEW_VERSION})"
 fi

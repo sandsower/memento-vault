@@ -36,11 +36,11 @@ memento-triage.py reads the transcript
     +---> QMD reindex (if installed)
 ```
 
-## Retrieval flow (read path) -- experimental
+## Tenet (retrieval) -- experimental
 
 > Requires `./install.sh --experimental` and QMD.
 
-Knowledge flows back into active sessions via three hooks:
+Past knowledge flows back into active sessions via three hooks:
 
 ```
 Session starts
@@ -240,12 +240,12 @@ Pattern notes follow the same lifecycle as all vault notes:
 - **Hybrid incremental clustering.** Each run clusters ALL notes (not just new ones) so cross-temporal patterns get detected. A new note that completes a cluster with two older notes produces a pattern. Only clusters containing at least 1 new note or flagged for refresh get synthesized -- the rest are skipped.
 - **Pattern refresh.** When new notes join an existing pattern's cluster (superset of `synthesized_from`), the pattern is re-synthesized with the full evidence. Stale conclusions get updated as new evidence arrives.
 - **Three-layer dedup.** Before writing: (1) check the `synthesized_from` ledger to skip already-covered clusters, (2) check title overlap against all existing notes, (3) the LLM itself responds SKIP for trivial connections. These layers prevent the vault from filling with redundant patterns.
-- **Retrieval filtering.** The existing retrieval hooks apply `min_score` thresholds, project filtering, temporal decay, and slot caps. Low-quality pattern notes get the same treatment as low-quality atomic notes -- they fade from injections over time and eventually get archived by defrag.
+- **Tenet filtering.** The retrieval hooks apply `min_score` thresholds, project filtering, temporal decay, and slot caps. Low-quality pattern notes get the same treatment as low-quality atomic notes -- they fade from injections over time and eventually get archived by defrag.
 
 ### Limitations
 
 - **No invalidation of wrong patterns.** Inception can refresh a pattern when new evidence extends it, but it can't detect when a pattern's conclusion has been contradicted. If the source notes are archived or superseded by newer work, the pattern note persists until you delete it. Periodic `--full` runs re-cluster everything and may produce updated patterns, but there's no automated "this is now wrong" signal. This would require the LLM to evaluate its own past output against new evidence -- an open research problem.
-- **No cross-system dedup.** The triage agent and Inception are independent pipelines. Both can write notes covering similar ground -- an atomic note "Redis TTL matters" and a pattern note "Cache TTL is the recurring footgun" may coexist. The retrieval hooks resolve this at query time (higher-scoring note wins the injection slot), but both consume index space.
+- **No cross-system dedup.** The triage agent and Inception are independent pipelines. Both can write notes covering similar ground -- an atomic note "Redis TTL matters" and a pattern note "Cache TTL is the recurring footgun" may coexist. The Tenet hooks resolve this at query time (higher-scoring note wins the injection slot), but both consume index space.
 - **Clustering depends on QMD embeddings.** Semantically similar notes using different vocabulary may not cluster together. The 768-dim model captures meaning reasonably well but isn't perfect.
 - **HDBSCAN has tuning parameters.** `min_cluster_size=3` and `leaf` selection work well for ~550 notes but may need adjustment past 1000+.
 - **Sequential LLM calls.** Clusters are synthesized one at a time. Parallelizing would cut runtime from minutes to under a minute but adds complexity.

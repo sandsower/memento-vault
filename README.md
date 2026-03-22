@@ -22,15 +22,20 @@ Custom vault path:
 MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 ```
 
-### Experimental retrieval hooks
+### Experimental modules
 
-The stable install captures knowledge. To also **inject knowledge back** into active sessions, install with the experimental flag:
+The stable install captures knowledge. To also **inject knowledge back** into active sessions and enable background consolidation, install with the experimental flag:
 
 ```bash
 ./install.sh --experimental
 ```
 
-This adds three retrieval hooks (session briefing, prompt recall, file-read context injection) and the Inception consolidation skill. Requires QMD. See [Retrieval (experimental)](#retrieval-experimental) and [Inception (experimental)](#inception-experimental) for details.
+This adds two modules:
+
+- **Tenet** — three retrieval hooks that inject vault notes into active sessions (briefing, recall, tool context)
+- **Inception** — background consolidation that clusters notes and synthesizes cross-session patterns
+
+Both require QMD. Inception also needs `pip install numpy hdbscan scikit-learn`. See [Tenet](#tenet-experimental) and [Inception](#inception-experimental) for details.
 
 ### Requirements
 
@@ -40,11 +45,11 @@ This adds three retrieval hooks (session briefing, prompt recall, file-read cont
 - [QMD](https://github.com/tobi/qmd) (optional, semantic search)
 - [Obsidian](https://obsidian.md) (optional, browsing)
 
-## Retrieval (experimental)
+## Tenet (experimental)
 
 > Requires `./install.sh --experimental` and QMD.
 
-Knowledge flows back into active sessions via three hooks:
+Past knowledge flows back into active sessions via three hooks:
 
 - **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens. Fast sync output (<50ms), QMD search deferred to background.
 - **Prompt recall** (UserPromptSubmit): BM25 keyword search on each prompt, surfaces matching notes before Claude processes it. Project-scoped, with temporal decay and wikilink expansion.
@@ -139,7 +144,7 @@ file_count_threshold: 3
 qmd_collection: memento
 auto_commit: true
 
-# Retrieval hooks (experimental only)
+# Tenet retrieval hooks (experimental)
 session_briefing: true      # inject vault notes at session start
 briefing_max_notes: 5
 prompt_recall: true          # inject vault notes per prompt
@@ -158,7 +163,7 @@ Three ways to layer project-specific behavior on top without forking:
 
 ## QMD (optional)
 
-QMD adds semantic search over your vault. Without it the concierge agent falls back to grep, which handles keyword searches but misses conceptual matches. QMD is required for the experimental retrieval hooks.
+QMD adds semantic search over your vault. Without it the concierge agent falls back to grep, which handles keyword searches but misses conceptual matches. QMD is required for Tenet and Inception.
 
 ```bash
 qmd search "caching strategy" -c memento
@@ -166,9 +171,9 @@ qmd search "caching strategy" -c memento
 
 The concierge agent uses QMD automatically when you ask about past decisions.
 
-### Model warmup (experimental)
+### Model warmup
 
-The session briefing hook's deferred search uses vector search, which requires loading an embedding model. First call after a reboot takes 6-8s; subsequent calls are ~1.5s (model stays in OS page cache). The `--experimental` installer can add a background warmup to your shell rc file so the model is always cached:
+Tenet's deferred briefing search uses vector search, which requires loading an embedding model. First call after a reboot takes 6-8s; subsequent calls are ~1.5s (model stays in OS page cache). The installer can add a background warmup to your shell rc file so the model is always cached:
 
 ```bash
 # Added to .zshrc/.bashrc by the installer (optional)
