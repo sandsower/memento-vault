@@ -15,7 +15,7 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, read_hook_input
+from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, detect_project, read_hook_input
 
 LAST_RECALL_PATH = "/tmp/memento-last-recall.json"
 DEFERRED_BRIEFING_PATH = "/tmp/memento-deferred-briefing.json"
@@ -197,12 +197,19 @@ def run_recall():
         bump_prompts_since()
         return [], None
 
-    # BM25 search against the prompt
+    # BM25 search against the prompt, augmented with project context
     min_score = config.get("recall_min_score", 0.4)
     max_notes = config.get("recall_max_notes", 3)
 
+    # Bias toward current project by appending project slug to query
+    query = prompt
+    if cwd:
+        project_slug, _ = detect_project(cwd, None)
+        if project_slug and project_slug != "unknown":
+            query = f"{prompt} {project_slug.replace('-', ' ')}"
+
     results = qmd_search_with_extras(
-        prompt,
+        query,
         limit=max_notes + 4,  # overfetch for dedup + enhancement filtering
         semantic=False,  # BM25 for speed — vsearch is too slow per-prompt
         timeout=5,
