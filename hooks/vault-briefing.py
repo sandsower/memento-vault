@@ -331,6 +331,13 @@ def main():
         except Exception:
             pass  # Fall through to deferred vsearch
 
+    # --- Pre-build wikilink graph for recall (non-blocking) ---
+    try:
+        from memento_utils import load_or_build_graph
+        load_or_build_graph(get_vault())
+    except Exception:
+        pass  # Non-fatal — graph will be built on first recall if needed
+
     # --- Async: spawn background QMD search ---
 
     if has_qmd():

@@ -15,7 +15,7 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm
+from memento_utils import get_config, get_vault, has_qmd, qmd_search, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm, prf_expand_query
 
 LAST_RECALL_PATH = "/tmp/memento-last-recall.json"
 DEFERRED_BRIEFING_PATH = "/tmp/memento-deferred-briefing.json"
@@ -230,33 +230,64 @@ def run_recall():
 
     t0 = time.time()
 
-    if config.get("rrf_enabled", True) and is_vsearch_warm():
-        # Warm path: BM25 + vsearch in parallel, fuse with RRF
-        from concurrent.futures import ThreadPoolExecutor
+    # Adaptive pipeline: BM25 first, decide depth based on confidence.
+    #
+    # Fast path (BM25 score >= threshold): BM25 + enhance_results only.
+    #   This is the v1.1.0 path. ~800ms.
+    #
+    # Deep path (BM25 score < threshold): PRF expand + RRF fuse + CE rerank.
+    #   PRF reuses initial results (no extra QMD call for term extraction).
+    #   PRF expanded query runs one additional BM25 call.
+    #   RRF adds one vsearch call (only when warm).
+    #   CE reranks the fused results.
+    #
+    # The threshold is intentionally low (0.55) because BM25 scores for
+    # natural language prompts against vault notes typically range 0.4-0.8.
+    # At 0.55+, BM25 has found a reasonable match and the extra stages
+    # add latency without much quality gain.
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            bm25_future = pool.submit(
-                qmd_search_with_extras, query,
-                limit=max_notes + 4, semantic=False, timeout=5, min_score=min_score,
-            )
-            vec_future = pool.submit(
-                qmd_search_with_extras, query,
-                limit=max_notes + 4, semantic=True, timeout=5, min_score=min_score,
-            )
-            bm25_results = bm25_future.result()
-            vec_results = vec_future.result()
+    high_conf = config.get("recall_high_confidence", 0.55)
+    search_limit = max_notes + 4
 
-        results = rrf_fuse([bm25_results, vec_results], k=config.get("rrf_k", 60))
-    else:
-        # Cold path: BM25 only (current behavior)
-        results = qmd_search_with_extras(
-            query, limit=max_notes + 4, semantic=False, timeout=5, min_score=min_score,
-        )
+    results = qmd_search_with_extras(
+        query, limit=search_limit, semantic=False, timeout=5, min_score=min_score,
+    )
+    top_score = results[0]["score"] if results else 0
+    pipeline_depth = "bm25"
+
+    if top_score < high_conf and results:
+        # Low confidence — try harder with PRF + RRF
+
+        # PRF: expand query using terms from the results we already have (zero extra QMD calls)
+        expanded_query = prf_expand_query(query, config=config, initial_results=results)
+        if expanded_query != query:
+            prf_results = qmd_search_with_extras(
+                expanded_query, limit=search_limit,
+                semantic=False, timeout=5, min_score=min_score,
+            )
+            if prf_results:
+                existing = {r["path"] for r in results}
+                for r in prf_results:
+                    if r["path"] not in existing:
+                        results.append(r)
+                        existing.add(r["path"])
+                results.sort(key=lambda r: r["score"], reverse=True)
+                pipeline_depth = "prf"
+
+        # RRF: fuse with vsearch when warm
+        if config.get("rrf_enabled", True) and is_vsearch_warm():
+            vec_results = qmd_search_with_extras(
+                query, limit=search_limit,
+                semantic=True, timeout=5, min_score=min_score,
+            )
+            if vec_results:
+                results = rrf_fuse([results, vec_results], k=config.get("rrf_k", 60))
+                pipeline_depth = "rrf"
 
     latency_ms = int((time.time() - t0) * 1000)
     results_before = len(results)
 
-    # Supplement with concept index if enabled
+    # Concept index supplement (always, O(1) lookup)
     if config.get("concept_index_enabled", True):
         try:
             from memento_utils import lookup_concepts
@@ -269,22 +300,24 @@ def run_recall():
                         results.append(hit)
                         existing_paths.add(hit["path"])
         except Exception:
-            pass  # Non-fatal — concept index is supplementary
+            pass
 
     if not results:
         bump_prompts_since()
-        log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms)
+        log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms,
+                      pipeline=pipeline_depth)
         return [], None
 
     results = enhance_results(results, config, cwd=cwd)
 
-    # Tier 2: cross-encoder reranking
-    if config.get("reranker_enabled", True) and len(results) > 1:
+    # CE reranking (only on deep path)
+    if top_score < high_conf and config.get("reranker_enabled", True) and len(results) > 1:
         try:
             from tenet_reranker import rerank
             results = rerank(prompt, results, config)
+            pipeline_depth += "+ce"
         except Exception:
-            pass  # Non-fatal — reranker is optional
+            pass
 
     if not results:
         bump_prompts_since()
@@ -306,7 +339,8 @@ def run_recall():
     injected_text = "\n".join(lines)
     log_retrieval("recall", "inject", query=query, latency_ms=latency_ms,
                   results_before=results_before, results_after=len(results),
-                  injected_titles=injected, injected_chars=len(injected_text))
+                  injected_titles=injected, injected_chars=len(injected_text),
+                  pipeline=pipeline_depth)
 
     return lines, top_path
 

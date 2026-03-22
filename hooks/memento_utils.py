@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "prompt_recall": True,
     "recall_min_score": 0.6,
     "recall_max_notes": 3,
+    "recall_high_confidence": 0.55,  # BM25 score above this skips PRF/RRF/CE
     "recall_skip_patterns": [
         r"^(yes|no|ok|sure|thanks|y|n|yep|nope|looks good|lgtm|ship it|continue)$",
         r"^git\s",
@@ -406,11 +407,12 @@ def _extract_expansion_terms(results, original_query, max_terms=5):
     return ranked[:max_terms]
 
 
-def prf_expand_query(query, collection=None, config=None):
+def prf_expand_query(query, collection=None, config=None, initial_results=None):
     """Expand a query using Pseudo-Relevance Feedback.
 
-    Runs an initial BM25 search, extracts top terms from results,
-    and appends them to the original query.
+    Extracts top terms from initial search results and appends them
+    to the original query. Pass initial_results to avoid a redundant
+    BM25 call when you already have results from a prior search.
 
     Returns the expanded query string, or the original if PRF is
     disabled or no results are found.
@@ -424,7 +426,7 @@ def prf_expand_query(query, collection=None, config=None):
     top_docs = config.get("prf_top_docs", 3)
     max_terms = config.get("prf_max_terms", 5)
 
-    results = qmd_search(query, collection, limit=top_docs, timeout=3)
+    results = initial_results[:top_docs] if initial_results else qmd_search(query, collection, limit=top_docs, timeout=3)
     if not results:
         return query
 
