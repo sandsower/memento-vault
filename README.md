@@ -52,10 +52,10 @@ Both require QMD. Inception also needs `pip install numpy hdbscan scikit-learn`.
 Past knowledge flows back into active sessions via three hooks:
 
 - **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens. Fast sync output (<50ms), QMD search deferred to background.
-- **Prompt recall** (UserPromptSubmit): BM25 keyword search on each prompt, surfaces matching notes before Claude processes it. Project-scoped, with temporal decay and wikilink expansion.
+- **Prompt recall** (UserPromptSubmit): searches each prompt against the vault and surfaces matching notes before Claude processes it. Uses a multi-stage pipeline: PRF query expansion, RRF hybrid search (BM25 + vsearch when warm), concept index lookups, temporal decay, PageRank centrality boost, and Personalized PageRank link traversal.
 - **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. Directory-level BM25 with caching and rate limiting.
 
-All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, and vendor directories.
+All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, and vendor directories. Inception produces pre-computed concept indexes and project retrieval maps that feed back into the recall and briefing hooks for instant lookups.
 
 ### Performance
 
@@ -151,6 +151,13 @@ prompt_recall: true          # inject vault notes per prompt
 recall_max_notes: 3
 tool_context: true           # inject vault notes on file reads
 tool_context_min_score: 0.65
+
+# Tier 1 retrieval enhancements (v1.2.0)
+prf_enabled: true            # pseudo-relevance feedback query expansion
+rrf_enabled: true            # reciprocal rank fusion (BM25 + vsearch)
+ppr_enabled: true            # personalized pagerank link expansion
+concept_index_enabled: true  # inception concept index lookups
+project_maps_enabled: true   # instant project context from inception
 ```
 
 ### Extension points

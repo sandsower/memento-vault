@@ -148,6 +148,40 @@ recall_skip_patterns: ["^(yes|no|ok)$", "^git\\s", "^npm\\s"]
 
 Deduplication is automatic -- if the top result matches the last injection, it skips until 3 prompts have passed. Requires QMD.
 
+### Tier 1 retrieval enhancements (v1.2.0)
+
+These features improve recall quality with zero per-query LLM cost. All default to enabled and degrade gracefully if dependencies are missing.
+
+```yaml
+# PRF query expansion (two-pass BM25 with term extraction)
+prf_enabled: true
+prf_max_terms: 5       # max expansion terms extracted from initial results
+prf_top_docs: 3        # initial results used for term extraction
+
+# RRF hybrid search (fuses BM25 + vsearch when warm)
+rrf_enabled: true
+rrf_k: 60              # RRF constant (higher = more weight to top ranks)
+
+# PageRank centrality boost
+pagerank_alpha: 0.85          # PageRank damping factor
+pagerank_boost_weight: 0.3    # score multiplier: score *= (1 + weight * pagerank)
+
+# Personalized PageRank expansion (replaces 1-hop wikilinks)
+ppr_enabled: true
+ppr_max_expanded: 5    # max notes added via PPR
+ppr_alpha: 0.85        # PPR damping factor
+ppr_min_score: 0.01    # minimum PPR score to include
+
+# Concept index (inception-produced keyword -> pattern note lookup)
+concept_index_enabled: true
+concept_index_score: 0.5      # score floor for concept index hits
+
+# Project retrieval maps (instant project context from inception)
+project_maps_enabled: true
+```
+
+PPR and PageRank require `networkx`. If not installed, recall falls back to 1-hop wikilink expansion (pre-v1.2.0 behavior). Concept index and project maps require Inception to have run at least once.
+
 ## Disabling features
 
 **No auto-commit** (commit manually):

@@ -51,6 +51,9 @@ vault-briefing.py (SessionStart hook)
     +---> detect project from cwd + git branch
     +---> SYNC: read projects/{slug}.md for recent sessions (<50ms)
     +---> print [vault] project + sessions to stdout --> Claude sees it
+    +---> project maps fast path (if inception has built maps):
+    |       if maps have enough notes for this project: write ready immediately
+    |       else: fall through to async vsearch
     +---> ASYNC: spawn background subprocess for QMD vsearch
     |     writes results to /tmp/memento-deferred-briefing.json
     |     picked up by vault-recall.py on the first prompt
@@ -62,13 +65,20 @@ User types a prompt
 vault-recall.py (UserPromptSubmit hook)
     |
     +---> consume deferred briefing results (if ready)
+    +---> mark vsearch as warm (for RRF hybrid search)
     +---> relevance gate: skip short prompts, confirmations, skill invocations,
     |     command messages, prompts >500 chars
-    +---> BM25 search against prompt + project slug
+    +---> PRF query expansion (extract terms from initial BM25 top-3, re-query)
+    +---> search:
+    |       if vsearch warm: BM25 + vsearch in parallel, fuse with RRF
+    |       if cold: BM25 only
+    +---> supplement with concept index lookups (inception-produced)
     +---> enhance_results():
     |       temporal decay (90-day half-life, certainty 4-5 immune)
+    |       PageRank centrality boost (well-connected notes rank higher)
     |       project filter (exclude notes from other projects)
-    |       wikilink expansion (1-hop, 50% parent score, cap 3)
+    |       Personalized PageRank expansion (replaces naive 1-hop wikilinks)
+    |       fallback: 1-hop wikilink expansion if networkx unavailable
     +---> dedup: skip if same top result as last injection (within 3 prompts)
     +---> print [vault] related memories to stdout --> Claude sees them
     |
