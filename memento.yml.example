@@ -89,6 +89,15 @@ tool_context_max_injections: 5
 # Seconds between QMD calls (rate limiting)
 tool_context_cooldown: 3
 
+# --- Multi-hop retrieval (experimental) ---
+# Chain follow-up searches when a prompt references past decisions or other projects.
+# Extracts entities from initial results and searches again.
+# Only fires on the deep path (low BM25 confidence).
+multi_hop_enabled: false
+
+# Maximum follow-up search passes
+multi_hop_max: 2
+
 # --- Inception (background consolidation) ---
 # Clusters vault notes by embedding similarity and produces pattern notes.
 # Requires: numpy, hdbscan, scikit-learn (pip install numpy hdbscan scikit-learn)

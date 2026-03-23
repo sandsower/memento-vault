@@ -176,6 +176,20 @@ tool_context_cooldown: 3
 
 Deduplicates against recall and prior tool-context injections. Requires QMD.
 
+### Multi-hop retrieval (experimental)
+
+When a prompt references past decisions ("last time we tried this") or other projects ("same approach as the billing service"), `vault-recall` chains a follow-up search. It extracts entities from the initial results (proper nouns, project names, numbers) and searches again with an expanded query. Only fires on the deep path (low BM25 confidence).
+
+```yaml
+# Enable multi-hop (default false, requires --experimental install)
+multi_hop_enabled: true
+
+# Maximum follow-up search passes (default 2)
+multi_hop_max: 2
+```
+
+Adds one extra QMD call per hop. Typical overhead is 200-400ms when triggered. Most prompts don't trigger it.
+
 ### Tier 1 retrieval enhancements (v1.2.0)
 
 These features improve recall quality with zero per-query LLM cost. All default to enabled and degrade gracefully if dependencies are missing.

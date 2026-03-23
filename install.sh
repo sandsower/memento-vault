@@ -300,7 +300,7 @@ else
     NEW_KEYS=()
     EXPECTED_KEYS="exchange_threshold file_count_threshold inception_enabled"
     if [ "$EXPERIMENTAL" = true ]; then
-        EXPECTED_KEYS="$EXPECTED_KEYS session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes tool_context tool_context_min_score tool_context_max_notes"
+        EXPECTED_KEYS="$EXPECTED_KEYS session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes tool_context tool_context_min_score tool_context_max_notes multi_hop_enabled multi_hop_max"
     fi
     for key in $EXPECTED_KEYS; do
         if ! grep -q "^${key}:" "$CONFIG_DIR/memento.yml" 2>/dev/null; then

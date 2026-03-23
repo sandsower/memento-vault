@@ -15,7 +15,7 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm, prf_expand_query, RUNTIME_DIR
+from memento_utils import get_config, get_vault, has_qmd, qmd_search, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm, prf_expand_query, needs_multi_hop, multi_hop_search, RUNTIME_DIR
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
@@ -314,6 +314,20 @@ def run_recall():
         except Exception:
             pass
 
+    # Multi-hop retrieval (experimental, deep path only)
+    multi_hop_gate = (top_score < high_conf
+                      and config.get("multi_hop_enabled", False)
+                      and needs_multi_hop(prompt))
+    multi_hop_added = 0
+    if multi_hop_gate and results:
+        try:
+            pre_hop_count = len(results)
+            results = multi_hop_search(prompt, results, config=config)
+            multi_hop_added = len(results) - pre_hop_count
+            pipeline_depth += "+hop"
+        except Exception:
+            pass
+
     if not results:
         bump_prompts_since()
         log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms,
@@ -352,7 +366,8 @@ def run_recall():
     log_retrieval("recall", "inject", query=query, latency_ms=latency_ms,
                   results_before=results_before, results_after=len(results),
                   injected_titles=injected, injected_chars=len(injected_text),
-                  pipeline=pipeline_depth)
+                  pipeline=pipeline_depth,
+                  multi_hop_gate=multi_hop_gate, multi_hop_added=multi_hop_added)
 
     return lines, top_path
 

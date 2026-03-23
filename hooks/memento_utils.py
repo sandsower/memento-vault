@@ -87,6 +87,9 @@ DEFAULT_CONFIG = {
     "reranker_top_k": 10,
     "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     "reranker_min_score": 0.01,
+    # Multi-hop retrieval (experimental)
+    "multi_hop_enabled": False,
+    "multi_hop_max": 2,
 }
 
 _CONFIG = None
@@ -655,6 +658,110 @@ def note_is_superseded(note_name):
             continue
 
     return None
+
+
+# --- Multi-hop retrieval ---
+
+_MULTI_HOP_TEMPORAL = re.compile(
+    r'\b(last\s+time|before\s+we|previous(ly)?|used\s+to|when\s+did|what\s+changed|'
+    r'changed\s+(about|since|from)|how\s+did\s+we\s+(used?\s+to|handle|do)\s+.*(before|previously)|'
+    r'went\s+back\s+to|switched\s+(from|back)|reverted|rolled\s+back|'
+    r'earlier\s+(approach|version|implementation|decision))\b',
+    re.IGNORECASE,
+)
+
+_MULTI_HOP_CROSS_REF = re.compile(
+    r'\b(same\s+(as|approach|pattern|way|thing|problem)|'
+    r'like\s+we\s+did|that\s+other\s+(project|repo|service|module)|'
+    r'across\s+(projects?|repos?|services?)|'
+    r'in\s+(the|a)\s+different\s+(project|repo|codebase))\b',
+    re.IGNORECASE,
+)
+
+
+def needs_multi_hop(prompt):
+    """Detect whether a prompt likely needs multi-hop retrieval.
+
+    Returns True for prompts with temporal references (what changed, last time,
+    previous approach) or cross-project references (same as, that other project).
+    Cheap regex check, no LLM calls.
+    """
+    if not prompt or len(prompt) < 15:
+        return False
+
+    if _MULTI_HOP_TEMPORAL.search(prompt):
+        return True
+
+    if _MULTI_HOP_CROSS_REF.search(prompt):
+        return True
+
+    return False
+
+
+def multi_hop_search(query, initial_results, config=None):
+    """Run follow-up searches using entities extracted from initial results.
+
+    Extracts capitalized phrases (proper nouns, project names) and numbers
+    from top result snippets, builds a follow-up query, and searches again.
+    Merges results deduplicated by path, sorted by score descending.
+
+    Args:
+        query: original user prompt
+        initial_results: results from the first search pass
+        config: dict with multi_hop_max (default 2)
+
+    Returns:
+        merged result list, sorted by score descending
+    """
+    if not initial_results:
+        return []
+
+    if config is None:
+        config = get_config()
+
+    max_hops = config.get("multi_hop_max", 2)
+    all_results = list(initial_results)
+    seen_paths = {r["path"] for r in all_results}
+
+    # Tokenize original query for filtering
+    query_words = set(query.lower().split())
+
+    for _hop in range(max_hops):
+        follow_up_terms = set()
+        for r in all_results[:5]:
+            snippet = r.get("snippet", "")
+            # Capitalized phrases (proper nouns, project names)
+            for match in re.finditer(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', snippet):
+                term = match.group()
+                if len(term) > 3 and term.lower() not in query_words:
+                    follow_up_terms.add(term)
+            # Numbers with context (e.g., "$350,000", "70 pounds")
+            for match in re.finditer(r'[\$]?\d[\d,]*\.?\d*\s*\w+', snippet):
+                follow_up_terms.add(match.group().strip())
+
+        if not follow_up_terms:
+            break
+
+        follow_up_query = f"{query} {' '.join(list(follow_up_terms)[:8])}"
+        try:
+            hop_results = qmd_search_with_extras(
+                follow_up_query, limit=10, semantic=False, timeout=5, min_score=0.0,
+            )
+        except Exception:
+            break
+
+        added = 0
+        for r in hop_results:
+            if r["path"] not in seen_paths:
+                all_results.append(r)
+                seen_paths.add(r["path"])
+                added += 1
+
+        if added == 0:
+            break
+
+    all_results.sort(key=lambda r: r["score"], reverse=True)
+    return all_results
 
 
 def apply_temporal_decay(results, config=None):

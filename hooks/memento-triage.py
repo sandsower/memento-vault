@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from memento_utils import get_config, get_vault, detect_project, slugify, read_hook_input, sanitize_secrets
+from memento_utils import get_config, get_vault, detect_project, slugify, read_hook_input, sanitize_secrets, log_retrieval
 
 
 # --- Transcript parsing ---
@@ -403,7 +403,17 @@ def main():
     if config["auto_commit"]:
         vault_commit(f"auto: triage session {session_id[:8]}")
 
-    if is_substantial(meta) and has_new_insight(meta):
+    substantial = is_substantial(meta)
+    new_insight = has_new_insight(meta) if substantial else False
+
+    log_retrieval("triage", "decision",
+                  session_id=session_id[:8], project=project_slug,
+                  exchanges=meta["exchange_count"],
+                  files_edited=len(meta["files_edited"]),
+                  substantial=substantial, new_insight=new_insight,
+                  agent_spawned=substantial and new_insight)
+
+    if substantial and new_insight:
         spawn_memento_agent(session_id, transcript_path, meta, project_slug)
         delay = config["agent_delay_seconds"]
         if config["auto_commit"]:
@@ -446,6 +456,8 @@ def maybe_trigger_inception(config):
         new_count = len(list(notes_dir.glob("*.md")))
 
     if new_count < threshold:
+        log_retrieval("inception", "skip",
+                      new_notes=new_count, threshold=threshold)
         return
 
     inception_script = Path(__file__).parent / "memento-inception.py"
@@ -454,6 +466,10 @@ def maybe_trigger_inception(config):
 
     if not inception_script.exists():
         return
+
+    log_retrieval("inception", "trigger",
+                  new_notes=new_count, threshold=threshold,
+                  last_run=last_run)
 
     subprocess.Popen(
         [sys.executable, str(inception_script)],
