@@ -1,0 +1,35 @@
+{
+  "current_vault_size": 599,
+  "projections": [
+    {
+      "notes": 500,
+      "bm25_avg_ms": 420,
+      "bm25_p95_ms": 655
+    },
+    {
+      "notes": 1000,
+      "bm25_avg_ms": 328,
+      "bm25_p95_ms": 366
+    },
+    {
+      "notes": 1500,
+      "bm25_avg_ms": 368,
+      "bm25_p95_ms": 548
+    },
+    {
+      "notes": 2000,
+      "bm25_avg_ms": 363,
+      "bm25_p95_ms": 496
+    },
+    {
+      "notes": 2500,
+      "bm25_avg_ms": 330,
+      "bm25_p95_ms": 354
+    },
+    {
+      "notes": 3000,
+      "bm25_avg_ms": 362,
+      "bm25_p95_ms": 509
+    }
+  ]
+}
