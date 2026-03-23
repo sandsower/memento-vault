@@ -43,11 +43,22 @@ def should_skip(prompt, config):
         return True
 
     # Skill content dumps (headers from expanded skills)
-    if prompt.startswith("# ") and len(prompt) > 300:
+    if prompt.startswith("# ") and len(prompt) > 200:
         return True
 
-    # Very long prompts are almost always skill expansions, not user input
-    if len(prompt) > 500:
+    # Ticket context injections from start-ticket and similar skills
+    if "You are working on" in prompt:
+        return True
+    if prompt.startswith("Continuation guidance:"):
+        return True
+
+    # Local command caveats
+    if "<local-command-caveat>" in prompt:
+        return True
+
+    # Long prompts are almost always skill expansions, not user input
+    # Real user prompts rarely exceed 200 chars
+    if len(prompt) > 200:
         return True
 
     # Match skip patterns
