@@ -294,15 +294,15 @@ class TestDeepRecallGate:
     def _mock_hook_input(self, prompt, cwd=""):
         return {"prompt": prompt, "cwd": cwd}
 
-    def test_normal_prompt_no_deep_recall(self, runtime_dir, tmp_path):
-        """Simple prompts should not trigger deep recall."""
+    def test_high_confidence_no_deep_recall(self, runtime_dir, tmp_path):
+        """High-confidence results should not trigger deep recall."""
         _, pending_path = runtime_dir
         config = self._make_config()
         vault = tmp_path / "vault"
         (vault / "notes").mkdir(parents=True)
         config["vault_path"] = str(vault)
 
-        results = [{"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.4}]
+        results = [{"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.8}]
 
         with patch("vault_recall.get_config", return_value=config), \
              patch("vault_recall.get_vault", return_value=vault), \

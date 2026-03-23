@@ -17,7 +17,7 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm, prf_expand_query, needs_multi_hop, multi_hop_search, RUNTIME_DIR
+from memento_utils import get_config, get_vault, has_qmd, qmd_search, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm, prf_expand_query, multi_hop_search, RUNTIME_DIR
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
@@ -575,10 +575,9 @@ def run_recall():
         except Exception:
             pass
 
-    # Multi-hop retrieval (experimental, deep path only)
+    # Multi-hop retrieval: follow wikilinks from top results
     multi_hop_gate = (top_score < high_conf
-                      and config.get("multi_hop_enabled", False)
-                      and needs_multi_hop(prompt))
+                      and config.get("multi_hop_enabled", False))
     multi_hop_added = 0
     if multi_hop_gate and results:
         try:
@@ -590,10 +589,9 @@ def run_recall():
             pass
 
     # Deep recall: spawn background codex for complex prompts
-    # Gate: multi-hop triggered AND low confidence AND feature enabled
+    # Gate: low confidence AND feature enabled
     deep_recall_spawned = False
-    if (needs_multi_hop(prompt)
-            and top_score < high_conf
+    if (top_score < high_conf
             and config.get("deep_recall_enabled", False)
             and results
             and not os.path.exists(DEEP_RECALL_PENDING_PATH)):

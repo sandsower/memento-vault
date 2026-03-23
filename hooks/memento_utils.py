@@ -665,53 +665,96 @@ def note_is_superseded(note_name):
     return None
 
 
-# --- Multi-hop retrieval ---
+# --- Multi-hop retrieval (wikilink-following) ---
 
-_MULTI_HOP_TEMPORAL = re.compile(
-    r'\b(last\s+time|before\s+we|previous(ly)?|used\s+to|when\s+did|what\s+changed|'
-    r'changed\s+(about|since|from)|how\s+did\s+we\s+(used?\s+to|handle|do)\s+.*(before|previously)|'
-    r'went\s+back\s+to|switched\s+(from|back)|reverted|rolled\s+back|'
-    r'earlier\s+(approach|version|implementation|decision))\b',
-    re.IGNORECASE,
-)
-
-_MULTI_HOP_CROSS_REF = re.compile(
-    r'\b(same\s+(as|approach|pattern|way|thing|problem)|'
-    r'like\s+we\s+did|that\s+other\s+(project|repo|service|module)|'
-    r'across\s+(projects?|repos?|services?)|'
-    r'in\s+(the|a)\s+different\s+(project|repo|codebase))\b',
-    re.IGNORECASE,
-)
+_WIKILINK_RE = re.compile(r'\[\[([^\]|]+)(?:\|[^\]]+)?\]\]')
+_CODE_BLOCK_RE = re.compile(r'```.*?```', re.DOTALL)
 
 
-def needs_multi_hop(prompt):
-    """Detect whether a prompt likely needs multi-hop retrieval.
+def extract_wikilinks(text):
+    """Extract [[wikilink]] targets from markdown text.
 
-    Returns True for prompts with temporal references (what changed, last time,
-    previous approach) or cross-project references (same as, that other project).
-    Cheap regex check, no LLM calls.
+    Handles [[slug]] and [[slug|alias]] syntax. Ignores links inside
+    code blocks. Deduplicates while preserving order. Normalizes spaces
+    to hyphens.
+
+    Returns:
+        list of slug strings (e.g. ["redis-config", "note-b"])
     """
-    if not prompt or len(prompt) < 15:
-        return False
+    if not text:
+        return []
 
-    if _MULTI_HOP_TEMPORAL.search(prompt):
-        return True
+    # Strip code blocks to avoid false matches
+    cleaned = _CODE_BLOCK_RE.sub("", text)
 
-    if _MULTI_HOP_CROSS_REF.search(prompt):
-        return True
+    seen = set()
+    slugs = []
+    for match in _WIKILINK_RE.finditer(cleaned):
+        slug = match.group(1).strip().replace(" ", "-")
+        if slug and slug not in seen:
+            seen.add(slug)
+            slugs.append(slug)
 
-    return False
+    return slugs
+
+
+def qmd_get(path, collection=None, timeout=5):
+    """Fetch a single note by path via qmd get.
+
+    Args:
+        path: note path relative to collection (e.g. "notes/foo.md")
+        collection: QMD collection name (default: from config)
+        timeout: subprocess timeout in seconds
+
+    Returns:
+        dict with path, title, content keys, or None if not found.
+    """
+    config = get_config()
+    collection = collection or config.get("qmd_collection", "memento")
+
+    if not has_qmd():
+        return None
+
+    cmd = ["qmd", "get", path, "-c", collection, "--json"]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            return None
+
+        stdout = result.stdout
+        json_start = stdout.find("{")
+        if json_start == -1:
+            return None
+
+        data = json.loads(stdout[json_start:])
+        raw_path = data.get("file", data.get("path", path))
+        if "://" in raw_path:
+            raw_path = raw_path.split("://", 1)[1]
+            parts = raw_path.split("/", 1)
+            if len(parts) > 1:
+                raw_path = parts[1]
+
+        return {
+            "path": raw_path,
+            "title": data.get("title", Path(raw_path).stem),
+            "content": data.get("content", ""),
+            "score": 0.0,
+        }
+
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
+        return None
 
 
 def multi_hop_search(query, initial_results, config=None):
-    """Run follow-up searches using entities extracted from initial results.
+    """Follow wikilinks from top results to pull in connected notes.
 
-    Extracts capitalized phrases (proper nouns, project names) and numbers
-    from top result snippets, builds a follow-up query, and searches again.
-    Merges results deduplicated by path, sorted by score descending.
+    Fetches full content of top results, extracts [[wikilinks]], then
+    directly fetches linked notes via qmd get. Merges results deduplicated
+    by path, sorted by score descending.
 
     Args:
-        query: original user prompt
+        query: original user prompt (unused, kept for API compat)
         initial_results: results from the first search pass
         config: dict with multi_hop_max (default 2)
 
@@ -724,46 +767,37 @@ def multi_hop_search(query, initial_results, config=None):
     if config is None:
         config = get_config()
 
-    max_hops = config.get("multi_hop_max", 2)
+    max_added = config.get("multi_hop_max", 2)
     all_results = list(initial_results)
     seen_paths = {r["path"] for r in all_results}
+    # Also track by stem for wikilink matching (links use stem, not full path)
+    seen_stems = {Path(r["path"]).stem for r in all_results}
 
-    # Tokenize original query for filtering
-    query_words = set(query.lower().split())
-
-    for _hop in range(max_hops):
-        follow_up_terms = set()
-        for r in all_results[:5]:
-            snippet = r.get("snippet", "")
-            # Capitalized phrases (proper nouns, project names)
-            for match in re.finditer(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', snippet):
-                term = match.group()
-                if len(term) > 3 and term.lower() not in query_words:
-                    follow_up_terms.add(term)
-            # Numbers with context (e.g., "$350,000", "70 pounds")
-            for match in re.finditer(r'[\$]?\d[\d,]*\.?\d*\s*\w+', snippet):
-                follow_up_terms.add(match.group().strip())
-
-        if not follow_up_terms:
+    added = 0
+    # Only inspect top 3 results for wikilinks
+    for r in initial_results[:3]:
+        if added >= max_added:
             break
 
-        follow_up_query = f"{query} {' '.join(list(follow_up_terms)[:8])}"
-        try:
-            hop_results = qmd_search_with_extras(
-                follow_up_query, limit=10, semantic=False, timeout=5, min_score=0.0,
-            )
-        except Exception:
-            break
+        # Fetch full note content to extract wikilinks
+        note = qmd_get(r["path"])
+        if not note:
+            continue
 
-        added = 0
-        for r in hop_results:
-            if r["path"] not in seen_paths:
-                all_results.append(r)
-                seen_paths.add(r["path"])
+        links = extract_wikilinks(note.get("content", ""))
+        for slug in links:
+            if added >= max_added:
+                break
+            if slug in seen_stems:
+                continue
+
+            # Try to fetch the linked note
+            linked = qmd_get(f"notes/{slug}.md")
+            if linked and linked["path"] not in seen_paths:
+                all_results.append(linked)
+                seen_paths.add(linked["path"])
+                seen_stems.add(slug)
                 added += 1
-
-        if added == 0:
-            break
 
     all_results.sort(key=lambda r: r["score"], reverse=True)
     return all_results
