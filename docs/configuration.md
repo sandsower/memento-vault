@@ -49,18 +49,24 @@ agent_delay_seconds: 90
 # Inject vault notes at session start
 session_briefing: true
 briefing_max_notes: 5
-briefing_min_score: 0.3
+briefing_min_score: 0.55
 
 # Inject vault notes before each prompt
 prompt_recall: true
-recall_min_score: 0.4
+recall_min_score: 0.6
 recall_max_notes: 3
-recall_skip_patterns: ["^(yes|no|ok|sure|thanks)$", "^git\\s", "^run\\s"]
+recall_high_confidence: 0.55   # BM25 score above this skips deep path
+recall_skip_patterns:
+  - "^(yes|no|ok|sure|thanks|y|n|yep|nope|looks good|lgtm|ship it|continue)$"
+  - "^git\\s"
+  - "^run\\s"
 
 # Inject vault notes on file reads
 tool_context: true
-tool_context_min_score: 0.75
+tool_context_min_score: 0.65
 tool_context_max_notes: 2
+tool_context_max_injections: 5
+tool_context_cooldown: 1       # seconds between QMD calls
 ```
 
 ## Project rules
@@ -161,7 +167,7 @@ When Claude reads a file, `vault-tool-context` extracts keywords from the file p
 # Disable tool context
 tool_context: false
 
-# Tighter relevance threshold (default 0.75)
+# Tighter relevance threshold (default 0.65)
 tool_context_min_score: 0.85
 
 # More notes per file read (default 2)
@@ -170,25 +176,34 @@ tool_context_max_notes: 3
 # Max total injections per session (default 5)
 tool_context_max_injections: 8
 
-# Rate limit between QMD calls in seconds (default 3)
+# Rate limit between QMD calls in seconds (default 1)
 tool_context_cooldown: 3
 ```
 
 Deduplicates against recall and prior tool-context injections. Requires QMD.
 
-### Multi-hop retrieval (experimental)
+### Multi-hop retrieval (wikilink-following)
 
-When a prompt references past decisions ("last time we tried this") or other projects ("same approach as the billing service"), `vault-recall` chains a follow-up search. It extracts entities from the initial results (proper nouns, project names, numbers) and searches again with an expanded query. Only fires on the deep path (low BM25 confidence).
+When the initial BM25 score is below the confidence threshold, `vault-recall` follows `[[wikilinks]]` from top results to pull in connected notes. It fetches the full content of the top 3 results, extracts wikilink targets, and retrieves linked notes directly via `qmd get`. Only fires on the deep path (low BM25 confidence).
 
 ```yaml
-# Enable multi-hop (default false, requires --experimental install)
+# Enable multi-hop (default false)
 multi_hop_enabled: true
 
-# Maximum follow-up search passes (default 2)
+# Maximum linked notes to add per recall (default 2)
 multi_hop_max: 2
 ```
 
-Adds one extra QMD call per hop. Typical overhead is 200-400ms when triggered. Most prompts don't trigger it.
+Uses direct note lookups (not re-search), so overhead is 1-3 `qmd get` calls. 98% of vault notes have wikilinks, and 80% of recalls have followable links in their result set.
+
+### Deep recall (experimental)
+
+When confidence is low, spawns a background codex process for deeper analysis. Results are available by the next prompt.
+
+```yaml
+deep_recall_enabled: false
+deep_recall_backend: codex     # "codex" or "claude"
+```
 
 ### Tier 1 retrieval enhancements (v1.2.0)
 
@@ -223,6 +238,19 @@ project_maps_enabled: true
 ```
 
 PPR and PageRank require `networkx`. If not installed, recall falls back to 1-hop wikilink expansion (pre-v1.2.0 behavior). Concept index and project maps require Inception to have run at least once.
+
+### Tier 2: Cross-encoder reranking
+
+A local cross-encoder that rescores BM25/RRF candidates before injection. Runs on CPU via ONNX, no API calls.
+
+```yaml
+reranker_enabled: true
+reranker_top_k: 10                                    # candidates to rerank
+reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2  # ONNX model
+reranker_min_score: 0.01                               # minimum reranker score
+```
+
+Only fires on the deep path (BM25 score below `recall_high_confidence`). Adds ~15-25ms for 10-20 candidates.
 
 ## Disabling features
 

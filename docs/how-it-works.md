@@ -36,9 +36,9 @@ memento-triage.py reads the transcript
     +---> QMD reindex (if installed)
 ```
 
-## Tenet (retrieval) -- experimental
+## Tenet (retrieval)
 
-> Requires `./install.sh --experimental` and QMD.
+> Requires QMD.
 
 Past knowledge flows back into active sessions via three hooks:
 
@@ -79,6 +79,9 @@ vault-recall.py (UserPromptSubmit hook)
     |       project filter (exclude notes from other projects)
     |       Personalized PageRank expansion (replaces naive 1-hop wikilinks)
     |       fallback: 1-hop wikilink expansion if networkx unavailable
+    +---> multi-hop: if low confidence + multi_hop_enabled,
+    |       follow [[wikilinks]] from top results via qmd get
+    |       add linked notes (up to multi_hop_max)
     +---> dedup: skip if same top result as last injection (within 3 prompts)
     +---> print [vault] related memories to stdout --> Claude sees them
     |
@@ -99,7 +102,7 @@ vault-tool-context.py (PreToolUse hook, Read matcher)
     +---> return JSON with additionalContext --> Claude sees it before the file
 ```
 
-All three hooks are zero-cost when they have nothing relevant to say -- no output, no context overhead. When they do inject, overhead is ~139 input units per session on average. See [performance-analysis.md](performance-analysis.md) for benchmarks.
+All three hooks are zero-cost when they have nothing relevant to say -- no output, no context overhead. When they do inject, overhead is ~150 input units per session on average. See [performance-analysis.md](performance-analysis.md) for benchmarks.
 
 ## What gets captured
 
@@ -258,7 +261,7 @@ Pattern notes follow the same lifecycle as all vault notes:
 - **No cross-system dedup.** The triage agent and Inception are independent pipelines. Both can write notes covering similar ground -- an atomic note "Redis TTL matters" and a pattern note "Cache TTL is the recurring footgun" may coexist. The Tenet hooks resolve this at query time (higher-scoring note wins the injection slot), but both consume index space.
 - **Clustering depends on QMD embeddings.** Semantically similar notes using different vocabulary may not cluster together. The 768-dim model captures meaning reasonably well but isn't perfect.
 - **HDBSCAN has tuning parameters.** `min_cluster_size=3` and `leaf` selection work well for ~550 notes but may need adjustment past 1000+.
-- **Sequential LLM calls.** Clusters are synthesized one at a time. Parallelizing would cut runtime from minutes to under a minute but adds complexity.
+- **LLM synthesis dominates runtime.** Clusters are synthesized in parallel (4 workers by default via `inception_parallel`), but each call still takes 10-30s. Typical run: 30-90s for 10 clusters.
 - **First-run bias.** On a full backfill, the LLM sees all clusters at once and may over-synthesize. Incremental runs (5+ new notes) produce more focused patterns.
 - **Cost scales with cluster count, not vault size.** A 5000-note vault with 10 clusters costs the same as a 500-note vault with 10 clusters. But more notes may produce more clusters, increasing cost per run.
 

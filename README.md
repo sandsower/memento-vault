@@ -22,9 +22,9 @@ Custom vault path:
 MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 ```
 
-### Experimental modules
+### Full install
 
-The stable install captures knowledge. To also **inject knowledge back** into active sessions and enable background consolidation, install with the experimental flag:
+The base install captures knowledge. To also **inject knowledge back** into active sessions and enable background consolidation:
 
 ```bash
 ./install.sh --experimental
@@ -35,7 +35,7 @@ This adds two modules:
 - **Tenet** — three retrieval hooks that inject vault notes into active sessions (briefing, recall, tool context)
 - **Inception** — background consolidation that clusters notes and synthesizes cross-session patterns
 
-Both require QMD. Inception also needs `pip install numpy hdbscan scikit-learn`. See [Tenet](#tenet-experimental) and [Inception](#inception-experimental) for details.
+Both require QMD. Inception also needs `pip install numpy hdbscan scikit-learn`. See [Tenet](#tenet) and [Inception](#inception) for details.
 
 ### Requirements
 
@@ -45,36 +45,36 @@ Both require QMD. Inception also needs `pip install numpy hdbscan scikit-learn`.
 - [QMD](https://github.com/tobi/qmd) (optional, semantic search)
 - [Obsidian](https://obsidian.md) (optional, browsing)
 
-## Tenet (experimental)
+## Tenet
 
-> Requires `./install.sh --experimental` and QMD.
+> Requires QMD.
 
 Past knowledge flows back into active sessions via three hooks:
 
 - **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens. Fast sync output (<50ms), QMD search deferred to background.
-- **Prompt recall** (UserPromptSubmit): searches each prompt against the vault and surfaces matching notes before Claude processes it. Uses a multi-stage pipeline: PRF query expansion, RRF hybrid search (BM25 + vsearch when warm), concept index lookups, temporal decay, PageRank centrality boost, and Personalized PageRank link traversal.
+- **Prompt recall** (UserPromptSubmit): searches each prompt against the vault and surfaces matching notes before Claude processes it. Adaptive pipeline: fast BM25 path for confident matches, deep path (PRF, RRF, multi-hop wikilink-following, cross-encoder reranking) for low-confidence queries.
 - **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. Directory-level BM25 with caching and rate limiting.
 
-All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, and vendor directories. Inception produces pre-computed concept indexes and project retrieval maps that feed back into the recall and briefing hooks for instant lookups.
+All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, and vendor directories.
 
 ### Performance
 
-Benchmarked against 30 real sessions (410 prompts, 414 file reads, 16 projects):
+Benchmarked against 30 real sessions (381 prompts, 382 file reads, 16 projects):
 
 | Metric | Value |
 |---|---|
-| Avg injected per session | ~505 chars (~126 input units) |
+| Avg injected per session | ~597 chars (~149 input units) |
 | Effective hit rate | 100% (when hooks search, they find relevant notes) |
-| Avg recall latency | 443ms per prompt (adaptive pipeline) |
-| Avg tool-context latency | 215ms per file read |
-| Session briefing | <284ms (deferred QMD search is non-blocking) |
+| Avg recall latency | 472ms per prompt (adaptive pipeline) |
+| Avg tool-context latency | 230ms per file read |
+| Session briefing | <282ms (deferred QMD search is non-blocking) |
 | LongMemEval NDCG@10 | 0.892 (retrieval quality, 500 questions) |
 
-Full analysis with methodology, industry comparison, and optimization details in [docs/performance-analysis.md](docs/performance-analysis.md).
+Full analysis in [docs/performance-analysis.md](docs/performance-analysis.md).
 
-## Inception (experimental)
+## Inception
 
-> Requires `./install.sh --experimental`, QMD, and `pip install numpy hdbscan scikit-learn`.
+> Requires QMD and `pip install numpy hdbscan scikit-learn`.
 
 Inception clusters your vault notes by embedding similarity and synthesizes pattern notes -- higher-order insights that span multiple sessions. It runs as a detached background process after triage, or on demand via `/inception`.
 
@@ -145,20 +145,17 @@ file_count_threshold: 3
 qmd_collection: memento
 auto_commit: true
 
-# Tenet retrieval hooks (experimental)
-session_briefing: true      # inject vault notes at session start
-briefing_max_notes: 5
-prompt_recall: true          # inject vault notes per prompt
-recall_max_notes: 3
-tool_context: true           # inject vault notes on file reads
-tool_context_min_score: 0.65
+# Tenet retrieval hooks
+session_briefing: true
+prompt_recall: true
+tool_context: true
 
-# Tier 1 retrieval enhancements (v1.2.0)
+# Retrieval pipeline
 prf_enabled: true            # pseudo-relevance feedback query expansion
 rrf_enabled: true            # reciprocal rank fusion (BM25 + vsearch)
 ppr_enabled: true            # personalized pagerank link expansion
-concept_index_enabled: true  # inception concept index lookups
-project_maps_enabled: true   # instant project context from inception
+reranker_enabled: true       # cross-encoder reranking (local ONNX)
+multi_hop_enabled: false     # follow wikilinks from top results
 ```
 
 ### Extension points
