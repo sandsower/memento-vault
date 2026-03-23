@@ -10,3 +10,4 @@ data/
 plans/
 sweep*.db
 sweep_results*.json
+.env
