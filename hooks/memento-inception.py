@@ -11,6 +11,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -389,7 +390,7 @@ def build_synthesis_prompt(cluster_stems, notes_dict, merge_target=None):
         '  - body: string (the 2-5 sentence synthesis)\n'
         '  - tags: list of strings (union of relevant source tags, plus any new cross-cutting tags)\n'
         '  - certainty: int 1-5 (your confidence this is a real pattern)\n'
-        '  - related: list of strings (source note stems)\n'
+        '  - related: list of strings (ONLY use the exact source note stems provided below, never invent note names)\n'
     )
 
     source_blocks = []
@@ -578,10 +579,18 @@ date: {now}
 ## Related
 
 """
-    # Add wikilinks to related notes
+    # Add wikilinks to related notes (only existing notes, never hallucinated names)
+    existing_stems = {f.stem for f in notes_dir.glob("*.md")}
     related = synthesis.get("related", cluster_stems)
+    seen_links = set()
     for r in related:
-        content += f"- [[{r}]]\n"
+        if r in existing_stems and r not in seen_links:
+            content += f"- [[{r}]]\n"
+            seen_links.add(r)
+    # Always include source stems even if LLM forgot them
+    for s in cluster_stems:
+        if s not in seen_links:
+            content += f"- [[{s}]]\n"
 
     # Atomic write: temp file then rename
     target = notes_dir / f"{slug}.md"
@@ -896,6 +905,10 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         notes_written = 0
         notes_refreshed = 0
         clusters_processed = 0
+        written_pattern_paths = []
+
+        # --- Phase 1: collect clusters that need LLM synthesis ---
+        synthesis_queue = []  # (cid, stems, score, prompt, action, merge_target)
 
         for cid, stems, score in scored:
             clusters_processed += 1
@@ -909,7 +922,6 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
 
             if args.dry_run:
                 label = " [refresh]" if action == "merge" else ""
-                new_in_cluster = [s for s in stems if s in new_stems]
                 print(f"Cluster {cid} (score={score:.2f}){label}:", file=sys.stderr)
                 for s in stems:
                     marker = " *NEW*" if s in new_stems else ""
@@ -917,9 +929,29 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
                     print(f"  - {title}{marker}", file=sys.stderr)
                 continue
 
-            # Synthesize
             prompt = build_synthesis_prompt(stems, notes_dict, merge_target=merge_target)
-            raw = call_llm(prompt, config)
+            synthesis_queue.append((cid, stems, score, prompt, action, merge_target))
+
+        # --- Phase 2: parallel LLM synthesis ---
+        max_workers = config.get("inception_parallel", 4)
+        llm_results = {}  # cid -> raw LLM response
+
+        if synthesis_queue:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_cid = {
+                    executor.submit(call_llm, item[3], config): item[0]
+                    for item in synthesis_queue
+                }
+                for future in as_completed(future_to_cid):
+                    cid = future_to_cid[future]
+                    try:
+                        llm_results[cid] = future.result()
+                    except Exception:
+                        llm_results[cid] = ""
+
+        # --- Phase 3: sequential post-processing ---
+        for cid, stems, score, prompt, action, merge_target in synthesis_queue:
+            raw = llm_results.get(cid, "")
             synthesis = parse_synthesis(raw)
 
             if synthesis is None:
@@ -953,6 +985,24 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
 
                 # Backlink
                 backlink_sources(note_path.stem, stems, vault_path)
+
+                # Track for pre-reasoning
+                written_pattern_paths.append(note_path)
+
+        # Sleep-time pre-reasoning
+        if not args.dry_run and written_pattern_paths:
+            pattern_records = []
+            for pp in written_pattern_paths:
+                rec = parse_note(pp)
+                if rec:
+                    pattern_records.append(rec)
+            if pattern_records:
+                try:
+                    qp, cp = pre_reason(pattern_records, notes_dict, config)
+                    if args.verbose and qp:
+                        print(f"Pre-reason: wrote {qp.name} and {cp.name}", file=sys.stderr)
+                except Exception:
+                    pass  # Non-fatal
 
         # Update state (only mark new notes as processed)
         _update_state(state, _state_path, new_notes, clusters_processed, notes_written, args.dry_run)
@@ -1164,6 +1214,159 @@ def write_concept_index(index, config_dir=None):
     tmp = config_dir / ".concept-index.json.tmp"
     tmp.write_text(json.dumps(payload, indent=2))
     os.replace(str(tmp), str(target))
+
+
+# --- Sleep-time pre-reasoning ---
+
+_FILE_PATH_RE = re.compile(
+    r"(?:^|[\s`\"'(])"          # boundary before path
+    r"((?:/[\w.+-]+){2,})"      # at least 2 slash-separated segments
+    r"(?:[\s`\"').,;:]|$)",     # boundary after path
+)
+
+
+def _predict_queries(pattern_record, source_records):
+    """Generate predicted search queries for a pattern note.
+
+    Uses title variants, tags, and source note titles — no LLM call.
+
+    Returns:
+        list of query strings (3-5 items)
+    """
+    queries = set()
+
+    # 1. Title as-is (lowercased)
+    title = pattern_record.title.strip()
+    if title:
+        queries.add(title.lower())
+
+    # 2. Individual tags
+    for tag in pattern_record.tags:
+        tag = tag.strip()
+        if len(tag) >= 3:
+            queries.add(tag.lower())
+
+    # 3. Tag pairs (if 2+ tags)
+    tags = [t.strip().lower() for t in pattern_record.tags if len(t.strip()) >= 3]
+    for i in range(len(tags)):
+        for j in range(i + 1, len(tags)):
+            queries.add(f"{tags[i]} {tags[j]}")
+
+    # 4. Source note title keywords (skip short/stop words)
+    for src in source_records:
+        words = _tokenize_keywords(src.title)
+        if words:
+            queries.add(" ".join(words[:4]))
+
+    # 5. Title keywords only (without stopwords)
+    title_kw = _tokenize_keywords(title)
+    if title_kw:
+        queries.add(" ".join(title_kw))
+
+    # Deduplicate and cap at 5
+    return sorted(queries)[:5]
+
+
+def _extract_connections(pattern_record, source_records):
+    """Extract projects and code areas from source notes.
+
+    Projects come from frontmatter `project` fields.
+    Code areas come from file paths found in note bodies.
+
+    Returns:
+        dict with keys: projects (list[str]), code_areas (list[str])
+    """
+    projects = set()
+    code_areas = set()
+
+    for src in source_records:
+        if src.project:
+            projects.add(src.project)
+
+        # Extract file paths from body
+        for match in _FILE_PATH_RE.finditer(src.body):
+            path = match.group(1)
+            # Only keep paths that look like code (have a file extension or known dir)
+            if "." in path.split("/")[-1] or any(
+                seg in path for seg in ("src", "lib", "pkg", "cmd", "hooks", "tests")
+            ):
+                code_areas.add(path)
+
+    return {
+        "projects": sorted(projects),
+        "code_areas": sorted(code_areas),
+    }
+
+
+def pre_reason(pattern_notes, notes_dict, config):
+    """Sleep-time pre-reasoning: build retrieval artifacts from pattern notes.
+
+    Generates two JSON files in {vault}/notes/:
+    - .inception-queries.json: maps pattern note stems to predicted search queries
+    - .inception-connections.json: maps pattern note stems to related projects/code areas
+
+    Args:
+        pattern_notes: list of NoteRecord for newly written pattern notes
+        notes_dict: dict mapping stem -> NoteRecord for all notes
+        config: dict with vault_path and inception_pre_reason
+
+    Returns:
+        tuple (queries_path, connections_path) or (None, None) if disabled/empty
+    """
+    if not config.get("inception_pre_reason", True):
+        return None, None
+
+    if not pattern_notes:
+        return None, None
+
+    vault_path = Path(config["vault_path"])
+    notes_dir = vault_path / "notes"
+
+    queries_map = {}
+    connections_map = {}
+
+    for pattern in pattern_notes:
+        # Gather source records for this pattern
+        source_records = []
+        for stem in pattern.synthesized_from:
+            src = notes_dict.get(stem)
+            if src:
+                source_records.append(src)
+
+        queries_map[pattern.stem] = _predict_queries(pattern, source_records)
+        connections_map[pattern.stem] = _extract_connections(pattern, source_records)
+
+    # Merge with existing files (don't clobber previous runs' data)
+    queries_path = notes_dir / ".inception-queries.json"
+    connections_path = notes_dir / ".inception-connections.json"
+
+    existing_queries = {}
+    if queries_path.exists():
+        try:
+            existing_queries = json.loads(queries_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    existing_connections = {}
+    if connections_path.exists():
+        try:
+            existing_connections = json.loads(connections_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    existing_queries.update(queries_map)
+    existing_connections.update(connections_map)
+
+    # Atomic writes
+    tmp_q = notes_dir / ".inception-queries.json.tmp"
+    tmp_q.write_text(json.dumps(existing_queries, indent=2))
+    os.replace(str(tmp_q), str(queries_path))
+
+    tmp_c = notes_dir / ".inception-connections.json.tmp"
+    tmp_c.write_text(json.dumps(existing_connections, indent=2))
+    os.replace(str(tmp_c), str(connections_path))
+
+    return queries_path, connections_path
 
 
 def _commit_and_reindex(notes_written, config):

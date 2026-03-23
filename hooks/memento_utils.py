@@ -66,6 +66,8 @@ DEFAULT_CONFIG = {
     "inception_cluster_threshold": 0.7,
     "inception_exclude_tags": [],
     "inception_dry_run": False,
+    "inception_pre_reason": True,
+    "inception_parallel": 4,
     # Personalized PageRank expansion
     "ppr_enabled": True,
     "ppr_max_expanded": 5,
@@ -90,6 +92,9 @@ DEFAULT_CONFIG = {
     # Multi-hop retrieval (experimental)
     "multi_hop_enabled": False,
     "multi_hop_max": 2,
+    # Deep recall — background codex analysis (experimental)
+    "deep_recall_enabled": False,
+    "deep_recall_backend": "codex",
 }
 
 _CONFIG = None

@@ -8,7 +8,9 @@ relevant vault notes to stdout so Claude sees them before processing.
 import json
 import os
 import re
+import subprocess as _subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from memento_utils import get_config, get_vault, has_qmd, qmd_search, qmd_search
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
+DEEP_RECALL_PENDING_PATH = os.path.join(RUNTIME_DIR, "deep-recall-pending.json")
 
 
 def should_skip(prompt, config):
@@ -201,6 +204,253 @@ def consume_deferred_briefing():
         return []
 
 
+def spawn_deep_recall(prompt, initial_results, config):
+    """Spawn a background codex process for deeper vault analysis.
+
+    Writes the prompt + initial results to a temp input file, then spawns
+    a detached process that calls codex and writes structured output to
+    DEEP_RECALL_PENDING_PATH.
+
+    Only called when the prompt is complex (multi-hop gate + low confidence).
+    """
+    backend = config.get("deep_recall_backend", "codex")
+
+    # Build context from initial results
+    context_lines = []
+    for r in initial_results[:5]:
+        title = r.get("title", "")
+        snippet = r.get("snippet", "").strip()
+        path = r.get("path", "")
+        context_lines.append(f"- {title} ({path}): {snippet[:200]}")
+
+    input_data = {
+        "prompt": prompt,
+        "initial_results": context_lines,
+        "timestamp": time.time(),
+    }
+
+    try:
+        # Write input for the background worker
+        input_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", prefix="deep-recall-input-",
+            dir=RUNTIME_DIR, delete=False,
+        )
+        json.dump(input_data, input_file)
+        input_file.close()
+
+        # Mark as pending
+        with open(DEEP_RECALL_PENDING_PATH, "w") as f:
+            json.dump({"status": "pending", "timestamp": time.time()}, f)
+
+        # Spawn background worker
+        _subprocess.Popen(
+            [sys.executable, __file__, "--deep-recall", input_file.name, backend],
+            stdin=_subprocess.DEVNULL,
+            stdout=_subprocess.DEVNULL,
+            stderr=_subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        # Clean up on spawn failure
+        try:
+            os.unlink(DEEP_RECALL_PENDING_PATH)
+        except OSError:
+            pass
+        try:
+            os.unlink(input_file.name)
+        except (OSError, UnboundLocalError):
+            pass
+
+
+def run_deep_recall_worker(input_path, backend):
+    """Background worker: run codex analysis and write results.
+
+    Called as a detached subprocess via --deep-recall flag.
+    """
+    try:
+        with open(input_path) as f:
+            input_data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        _cleanup_deep_recall_pending()
+        return
+    finally:
+        try:
+            os.unlink(input_path)
+        except OSError:
+            pass
+
+    prompt = input_data.get("prompt", "")
+    context_lines = input_data.get("initial_results", [])
+
+    if not prompt:
+        _cleanup_deep_recall_pending()
+        return
+
+    context_block = "\n".join(context_lines) if context_lines else "(no initial results)"
+
+    codex_prompt = (
+        "You are a vault recall assistant. The user asked:\n\n"
+        f"{prompt}\n\n"
+        "Initial search found these vault notes:\n"
+        f"{context_block}\n\n"
+        "Based on the user's question and the notes above, identify what "
+        "additional vault notes would be relevant. Think about:\n"
+        "- Related decisions or patterns from other projects\n"
+        "- Temporal context (what changed, previous approaches)\n"
+        "- Cross-references between the found notes\n\n"
+        "Return a JSON array of objects with 'title' and 'reason' keys. "
+        "Each title should be the likely title of a vault note that would help. "
+        "Return at most 3 suggestions. If nothing additional is needed, return []."
+    )
+
+    out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="deep-recall-out-",
+            dir=RUNTIME_DIR, delete=False,
+        ) as tmp:
+            out_path = tmp.name
+
+        if backend == "codex":
+            cmd = [
+                "codex", "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--ephemeral",
+                "-o", out_path,
+                codex_prompt,
+            ]
+        else:
+            cmd = [
+                "claude", "--print",
+                "--dangerously-skip-permissions",
+                "--no-session-persistence",
+                "-p", codex_prompt,
+            ]
+
+        result = _subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+        if backend == "codex":
+            raw = Path(out_path).read_text().strip()
+        else:
+            raw = result.stdout.strip()
+
+        # Parse the LLM response — extract JSON array
+        suggestions = _parse_deep_recall_response(raw)
+
+        with open(DEEP_RECALL_PENDING_PATH, "w") as f:
+            json.dump({
+                "status": "ready",
+                "suggestions": suggestions,
+                "prompt": prompt,
+                "timestamp": time.time(),
+            }, f)
+
+    except (_subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        _cleanup_deep_recall_pending()
+    finally:
+        if out_path:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+
+
+def _parse_deep_recall_response(raw):
+    """Extract a JSON array of suggestions from the LLM response."""
+    if not raw:
+        return []
+
+    # Try direct JSON parse first
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [s for s in parsed if isinstance(s, dict) and "title" in s][:3]
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting JSON from markdown code blocks
+    match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', raw, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(1))
+            if isinstance(parsed, list):
+                return [s for s in parsed if isinstance(s, dict) and "title" in s][:3]
+        except json.JSONDecodeError:
+            pass
+
+    # Try finding a bare JSON array in the text
+    match = re.search(r'\[.*?\]', raw, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, list):
+                return [s for s in parsed if isinstance(s, dict) and "title" in s][:3]
+        except json.JSONDecodeError:
+            pass
+
+    return []
+
+
+def _cleanup_deep_recall_pending():
+    """Remove the pending file on worker failure."""
+    try:
+        os.unlink(DEEP_RECALL_PENDING_PATH)
+    except OSError:
+        pass
+
+
+def consume_deep_recall():
+    """Check for pending deep recall results and consume them.
+
+    Returns formatted lines to inject, or empty list.
+    Same pattern as consume_deferred_briefing: pending = wait,
+    ready = consume, stale (>60s) = discard.
+    """
+    try:
+        if not os.path.exists(DEEP_RECALL_PENDING_PATH):
+            return []
+
+        with open(DEEP_RECALL_PENDING_PATH) as f:
+            data = json.load(f)
+
+        status = data.get("status", "")
+
+        if status == "pending":
+            ts = data.get("timestamp", 0)
+            if ts and (time.time() - ts) > 60:
+                os.unlink(DEEP_RECALL_PENDING_PATH)
+            return []
+
+        if status != "ready":
+            os.unlink(DEEP_RECALL_PENDING_PATH)
+            return []
+
+        suggestions = data.get("suggestions", [])
+        os.unlink(DEEP_RECALL_PENDING_PATH)
+
+        if not suggestions:
+            return []
+
+        lines = ["[vault] Deep analysis suggests also reviewing:"]
+        for s in suggestions[:3]:
+            title = _strip_injection(s.get("title", ""))
+            reason = _strip_injection(s.get("reason", ""))
+            if title:
+                line = f"  - {title}"
+                if reason:
+                    line += f": {reason}"
+                lines.append(line)
+
+        return lines if len(lines) > 1 else []
+
+    except (json.JSONDecodeError, OSError, KeyError):
+        try:
+            os.unlink(DEEP_RECALL_PENDING_PATH)
+        except OSError:
+            pass
+        return []
+
+
 def run_recall():
     """Run the recall search. Returns (lines, top_path) or ([], None)."""
     config = get_config()
@@ -328,6 +578,21 @@ def run_recall():
         except Exception:
             pass
 
+    # Deep recall: spawn background codex for complex prompts
+    # Gate: multi-hop triggered AND low confidence AND feature enabled
+    deep_recall_spawned = False
+    if (needs_multi_hop(prompt)
+            and top_score < high_conf
+            and config.get("deep_recall_enabled", False)
+            and results
+            and not os.path.exists(DEEP_RECALL_PENDING_PATH)):
+        try:
+            spawn_deep_recall(prompt, results, config)
+            deep_recall_spawned = True
+            pipeline_depth += "+deep"
+        except Exception:
+            pass
+
     if not results:
         bump_prompts_since()
         log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms,
@@ -367,17 +632,27 @@ def run_recall():
                   results_before=results_before, results_after=len(results),
                   injected_titles=injected, injected_chars=len(injected_text),
                   pipeline=pipeline_depth,
-                  multi_hop_gate=multi_hop_gate, multi_hop_added=multi_hop_added)
+                  multi_hop_gate=multi_hop_gate, multi_hop_added=multi_hop_added,
+                  deep_recall_spawned=deep_recall_spawned)
 
     return lines, top_path
 
 
 def main():
+    # Handle background worker mode
+    if len(sys.argv) >= 4 and sys.argv[1] == "--deep-recall":
+        run_deep_recall_worker(sys.argv[2], sys.argv[3])
+        return
+
     # Always check for deferred briefing, even if recall is disabled
     deferred_lines = consume_deferred_briefing()
+
+    # Check for deep recall results from a previous prompt's background run
+    deep_recall_lines = consume_deep_recall()
+
     recall_lines, top_path = run_recall()
 
-    output = deferred_lines + recall_lines
+    output = deferred_lines + deep_recall_lines + recall_lines
     if output:
         print("\n".join(output))
 
