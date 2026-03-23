@@ -121,6 +121,15 @@ def analyze_recall(entries):
             print(f"  Example hop queries:")
             for e in hop_fired[:3]:
                 print(f"    [{e.get('multi_hop_added', 0)} new] {e.get('query', '')[:70]}")
+
+    # Scaling alerts
+    if latencies:
+        avg_lat = avg(latencies)
+        p95_lat = p95(latencies)
+        if avg_lat > 700:
+            print(f"  !! AVG LATENCY {avg_lat}ms EXCEEDS 700ms THRESHOLD — consider moving recall to async")
+        if p95_lat > 1500:
+            print(f"  !! P95 LATENCY {p95_lat}ms EXCEEDS 1.5s THRESHOLD — async recall recommended")
     print()
 
 
