@@ -164,6 +164,73 @@ Replays real Claude Code sessions through the hooks. Measures latency, injection
 python benchmark/replay_benchmark.py --max-sessions 30 --max-per-project 2
 ```
 
+## Scale lifecycle benchmark
+
+Tests the full recall pipeline (BM25 + vsearch + PRF) at increasing vault sizes by cloning your real vault and scaling it with synthetic notes.
+
+```bash
+# Default: 1x, 5x, 10x, 50x your current vault
+python benchmark/scale_lifecycle.py
+
+# Custom multipliers
+python benchmark/scale_lifecycle.py --multipliers 1,10,100
+```
+
+Creates temporary QMD collections for each tier, measures real search latency, cleans up after. Results saved to `benchmark/scale_lifecycle_results.json`.
+
+Current results (2026-03-23, 609 base notes):
+
+| Scale | Notes | BM25 avg | Vec avg | Full pipeline |
+|---|---|---|---|---|
+| 1x | 609 | 309ms | 314ms | 911ms |
+| 5x | 3,045 | 306ms | 292ms | 883ms |
+| 10x | 6,090 | 307ms | 302ms | 917ms |
+| 50x | 30,450 | 284ms | 330ms | 938ms |
+
+BM25 and vector search are flat through 30k notes. The full pipeline cost (~900ms) is dominated by subprocess overhead (3 QMD calls), not search time.
+
+## Latency projection benchmark
+
+Projects BM25 search latency at synthetic vault sizes without the full pipeline.
+
+```bash
+# Default: 500 to 3000 notes, step 500
+python benchmark/latency_projection.py
+
+# Custom range
+python benchmark/latency_projection.py --max-notes 5000 --step 1000
+```
+
+Results saved to `benchmark/latency_projection.json`.
+
+## E2E lifecycle benchmark
+
+Validates the full session lifecycle chain: triage, briefing, recall, inception. Uses mock LLM with configurable delay for best/typical/worst scenarios.
+
+```bash
+# All three scenarios
+python benchmark/e2e_lifecycle.py
+
+# Single scenario
+python benchmark/e2e_lifecycle.py --scenario typical
+```
+
+Runs 6 validation checks per scenario: fleeting note written, agent notes created, recall searches relevant prompts, recall skips short prompts, multi-hop gate detects temporal queries, inception triggers.
+
+## Retrieval analysis (dogfooding)
+
+Analyzes the retrieval log from real usage. Covers triage decisions, recall pipeline depth, multi-hop stats, inception triggers, and latency breakdowns.
+
+```bash
+# All time
+python tools/analyze-retrieval.py
+
+# Last 7 days
+python tools/analyze-retrieval.py --since 7
+```
+
+Alerts when avg recall latency crosses 700ms or P95 crosses 1.5s.
+
 ## Parameter space
 
 The sweep optimizes these parameters:
