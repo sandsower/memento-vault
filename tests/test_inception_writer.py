@@ -94,8 +94,8 @@ class TestWritePatternNote:
         temp_files = list(notes_dir.glob(".inception-tmp-*"))
         assert temp_files == []
 
-    def test_slug_collision(self, tmp_vault):
-        """Second note with same title gets -2 suffix."""
+    def test_slug_collision_skips_duplicate(self, tmp_vault):
+        """Second note with same title is skipped (returns None) instead of creating -2."""
         from memento_inception import write_pattern_note
 
         synthesis = self._make_synthesis()
@@ -105,9 +105,52 @@ class TestWritePatternNote:
         second = write_pattern_note(synthesis, cluster_stems, tmp_vault)
 
         assert first is not None
-        assert second is not None
-        assert first != second
-        assert "-2" in second.stem
+        assert second is None
+        # No -2 file should exist
+        assert not (tmp_vault / "notes" / f"{first.stem}-2.md").exists()
+
+    def test_refresh_overwrites_existing(self, tmp_vault):
+        """When merge_target is set, overwrites the existing file instead of creating -2."""
+        from memento_inception import write_pattern_note
+
+        synthesis = self._make_synthesis()
+        cluster_stems = ["redis-cache-ttl", "redis-eviction-policy"]
+
+        # Write the original
+        first = write_pattern_note(synthesis, cluster_stems, tmp_vault)
+        assert first is not None
+        original_stem = first.stem
+
+        # Refresh with new sources and a different title from the LLM
+        updated = self._make_synthesis(
+            title="Updated Redis caching strategies",
+            body="Updated body with new evidence.",
+        )
+        new_stems = ["redis-cache-ttl", "redis-eviction-policy", "redis-cache-invalidation"]
+
+        refreshed = write_pattern_note(updated, new_stems, tmp_vault, merge_target=original_stem)
+
+        assert refreshed is not None
+        # Should overwrite the original path, not create a new file
+        assert refreshed.stem == original_stem
+        assert refreshed.read_text().count("Updated body with new evidence.") == 1
+        # The -2 file should NOT exist
+        assert not (tmp_vault / "notes" / f"{original_stem}-2.md").exists()
+
+    def test_refresh_updates_synthesized_from(self, tmp_vault):
+        """Refreshed note has the new synthesized_from list."""
+        from memento_inception import write_pattern_note
+
+        synthesis = self._make_synthesis()
+        cluster_stems = ["redis-cache-ttl"]
+
+        first = write_pattern_note(synthesis, cluster_stems, tmp_vault)
+
+        new_stems = ["redis-cache-ttl", "redis-cache-invalidation"]
+        refreshed = write_pattern_note(synthesis, new_stems, tmp_vault, merge_target=first.stem)
+
+        text = refreshed.read_text()
+        assert "  - redis-cache-invalidation" in text
 
     def test_body_and_related(self, tmp_vault):
         """Note body text and ## Related section with wikilinks are present."""

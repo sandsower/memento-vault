@@ -172,7 +172,7 @@ class TestCheckTitleOverlap:
     """Tests for check_title_overlap."""
 
     def test_title_overlap_high(self):
-        """High token overlap (>0.80) returns True."""
+        """High token overlap (>0.60) returns True."""
         from memento_inception import check_title_overlap
 
         slug = "redis-cache-ttl-patterns"
@@ -188,6 +188,17 @@ class TestCheckTitleOverlap:
         existing_stems = ["redis-cache-ttl"]
 
         assert check_title_overlap(slug, existing_stems) is False
+
+    def test_title_overlap_rephrased(self):
+        """Rephrased title with 70% overlap is caught at 0.60 threshold."""
+        from memento_inception import check_title_overlap
+
+        # Real case: "prefer-the-tightest-real-constraint-over-the-convenient-proxy"
+        # vs "prefer-the-real-governing-constraint-over-the-convenient-proxy"
+        slug = "prefer-the-real-governing-constraint-over-the-convenient-proxy"
+        existing_stems = ["prefer-the-tightest-real-constraint-over-the-convenient-proxy"]
+
+        assert check_title_overlap(slug, existing_stems) is True
 
     def test_title_overlap_empty(self):
         """Empty slug returns False."""

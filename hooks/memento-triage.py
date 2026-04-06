@@ -416,6 +416,8 @@ def main():
     if substantial and new_insight:
         spawn_memento_agent(session_id, transcript_path, meta, project_slug)
         delay = config["agent_delay_seconds"]
+        # Backfill certainty on any notes the agent missed
+        backfill_certainty(delay_seconds=delay - 5)
         if config["auto_commit"]:
             vault_commit(f"auto: notes from session {session_id[:8]}", delay_seconds=delay)
         reindex_qmd(delay_seconds=delay + 5)
@@ -427,6 +429,38 @@ def main():
         maybe_trigger_inception(config)
 
     sys.exit(0)
+
+
+def backfill_certainty(delay_seconds=0):
+    """Scan vault notes for missing certainty and backfill from type/source.
+
+    Runs detached after a delay so the memento agent has time to write first.
+    """
+    vault = get_vault()
+    backfill_script = str(Path(__file__).parent / "memento-sweeper.py")
+
+    # Use the sweeper's backfill subcommand if available, otherwise inline
+    if Path(backfill_script).exists():
+        subprocess.Popen(
+            [sys.executable, "-c",
+             "import time,subprocess,sys; time.sleep(int(sys.argv[1])); "
+             "subprocess.run([sys.argv[2], sys.argv[3], 'backfill-certainty', sys.argv[4]], capture_output=True)",
+             str(max(delay_seconds, 0)), sys.executable, backfill_script, str(vault / "notes")],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return
+
+    # Inline fallback: scan notes and patch missing certainty
+    notes_dir = str(vault / "notes")
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).parent / "_backfill_certainty.py"),
+         notes_dir, str(max(delay_seconds, 0))],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def maybe_trigger_inception(config):

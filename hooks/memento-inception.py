@@ -466,19 +466,33 @@ def check_ledger_dedup(cluster_stems, ledger):
 def check_title_overlap(slug, existing_stems):
     """Check if a slugified title overlaps too much with existing note stems.
 
-    Returns True if overlap > 0.80 with any existing stem.
+    Returns True if overlap > 0.70 with any existing stem (token Jaccard),
+    or if one slug is a substring of the other (catches prefix dupes like
+    "decouple-safety-controls" vs "decouple-safety-controls-and-trust-boundaries").
     """
+    if not slug:
+        return False
+
     slug_tokens = set(slug.split("-"))
     if not slug_tokens:
         return False
 
     for existing in existing_stems:
+        if not existing:
+            continue
+        # Substring containment: catches "foo-bar" vs "foo-bar-baz-qux"
+        if slug in existing or existing in slug:
+            return True
+
         existing_tokens = set(existing.split("-"))
         if not existing_tokens:
             continue
         intersection = slug_tokens & existing_tokens
-        overlap = len(intersection) / min(len(slug_tokens), len(existing_tokens))
-        if overlap > 0.80:
+        # Jaccard similarity (union-based) instead of min-based overlap.
+        # More robust for slugs of different lengths.
+        union = slug_tokens | existing_tokens
+        jaccard = len(intersection) / len(union)
+        if jaccard > 0.70:
             return True
 
     return False
@@ -537,13 +551,14 @@ def cluster_notes(embedding_matrix, stem_index, config):
     return sorted_clusters
 
 
-def write_pattern_note(synthesis, cluster_stems, vault_path):
+def write_pattern_note(synthesis, cluster_stems, vault_path, merge_target=None):
     """Write a pattern note to the vault using atomic write.
 
     Args:
         synthesis: dict with keys: title, body, tags, certainty, related
         cluster_stems: list of source note stems
         vault_path: Path to vault root
+        merge_target: if set, overwrite this existing note stem instead of creating new
 
     Returns:
         Path to the written note, or None if write failed
@@ -551,13 +566,19 @@ def write_pattern_note(synthesis, cluster_stems, vault_path):
     notes_dir = Path(vault_path) / "notes"
     now = datetime.now().strftime("%Y-%m-%dT%H:%M")
 
-    # Build slug, handle collisions
-    base_slug = slugify(synthesis["title"])
-    slug = base_slug
-    counter = 2
-    while (notes_dir / f"{slug}.md").exists():
-        slug = f"{base_slug}-{counter}"
-        counter += 1
+    if merge_target:
+        # Refresh: overwrite the existing note with updated content
+        slug = merge_target
+    else:
+        # Build slug, detect duplicates vs genuine collisions
+        base_slug = slugify(synthesis["title"])
+        slug = base_slug
+
+        if (notes_dir / f"{slug}.md").exists():
+            # An existing note has the exact same slug. This is almost certainly
+            # a duplicate synthesis, not a genuine collision. Return None to skip
+            # rather than creating a -2 suffixed duplicate.
+            return None
 
     # Build frontmatter
     tags_str = "[" + ", ".join(synthesis.get("tags", [])) + "]"
@@ -971,7 +992,8 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
             synthesis["related"] = list(set(synthesis.get("related", []) + stems))
 
             # Write (or refresh existing)
-            note_path = write_pattern_note(synthesis, stems, vault_path)
+            note_path = write_pattern_note(synthesis, stems, vault_path,
+                                           merge_target=merge_target if action == "merge" else None)
             if note_path:
                 if action == "merge":
                     notes_refreshed += 1
