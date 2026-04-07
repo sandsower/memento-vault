@@ -293,13 +293,21 @@ def normalize_note_tags(note_path):
     if not content.startswith("---"):
         return False
 
-    # Find frontmatter boundaries
-    end = content.find("---", 3)
-    if end == -1:
+    # Find frontmatter closing fence: must be a standalone "---" line
+    lines = content.split("\n")
+    end_line = None
+    for i, line in enumerate(lines):
+        if i == 0:
+            continue  # skip opening fence
+        if line.strip() == "---":
+            end_line = i
+            break
+    if end_line is None:
         return False
-    end += 3
+    # Reconstruct byte offset: everything up to and including the closing fence line
+    end = sum(len(l) + 1 for l in lines[: end_line + 1])
 
-    frontmatter = content[:end]
+    frontmatter = content[:end].rstrip("\n")
     body = content[end:]
 
     # Extract tags line

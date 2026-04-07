@@ -82,6 +82,50 @@ class TestNormalizeNoteTags:
         changed = normalize_note_tags(tmp_path / "nope.md")
         assert changed is False
 
+    def test_title_containing_triple_dash(self, tmp_path):
+        """Frontmatter with --- in a value must not corrupt the note."""
+        note = tmp_path / "dash-title.md"
+        note.write_text(
+            "---\n"
+            "title: foo --- bar\n"
+            "tags: [k8s, redis]\n"
+            "date: 2026-01-01\n"
+            "---\n\n"
+            "Body text."
+        )
+        with patch("memento_utils.get_config", return_value=_TEST_CONFIG):
+            changed = normalize_note_tags(note)
+        assert changed is True
+        content = note.read_text()
+        # Title must survive intact
+        assert "foo --- bar" in content
+        # Tags normalized
+        assert "kubernetes" in content
+        # Body preserved
+        assert "Body text." in content
+        # Frontmatter structure intact (exactly two --- fences)
+        parts = content.split("---")
+        assert len(parts) >= 3
+
+    def test_body_containing_triple_dash(self, tmp_path):
+        """--- in the body must not confuse the parser."""
+        note = tmp_path / "body-dash.md"
+        note.write_text(
+            "---\n"
+            "title: Normal title\n"
+            "tags: [k8s]\n"
+            "date: 2026-01-01\n"
+            "---\n\n"
+            "Some text\n---\nMore text."
+        )
+        with patch("memento_utils.get_config", return_value=_TEST_CONFIG):
+            changed = normalize_note_tags(note)
+        assert changed is True
+        content = note.read_text()
+        assert "kubernetes" in content
+        # Body --- preserved
+        assert "Some text\n---\nMore text." in content
+
     def test_no_frontmatter(self, tmp_path):
         note = tmp_path / "plain.md"
         note.write_text("Just a plain file.")

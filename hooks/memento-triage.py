@@ -308,6 +308,7 @@ def build_session_summary(meta):
 
 
 VAULT_COMMIT = Path(__file__).parent / "vault-commit.sh"
+AGENT_WRAPPER = Path(__file__).parent / "agent-wrapper.py"
 
 
 def normalize_all_notes():
@@ -320,28 +321,29 @@ def normalize_all_notes():
         normalize_note_tags(note_path)
 
 
-def vault_commit(message="auto: vault update", delay_seconds=0, normalize_before=False):
-    """Commit all vault changes. Runs detached. Optional delay for agent writes."""
+def vault_commit(message="auto: vault update", delay_seconds=0, sentinel=None):
+    """Commit all vault changes. Runs detached.
+
+    If sentinel is provided, waits for that file to appear (agent completion)
+    before normalizing tags and committing. Falls back to delay_seconds as a
+    hard timeout if the sentinel never appears.
+    """
     commit_script = str(VAULT_COMMIT)
     if not VAULT_COMMIT.exists():
         # Fall back to looking in the install location
         commit_script = str(Path.home() / ".claude" / "hooks" / "vault-commit.sh")
 
-    if normalize_before:
-        # Normalize tags before committing — runs in the delayed subprocess
+    if sentinel:
+        # Wait for agent completion, then normalize and commit
         hooks_dir = str(Path(__file__).parent)
+        max_wait = max(delay_seconds, 120)
         subprocess.Popen(
             [
                 sys.executable,
-                "-c",
-                "import time,sys,subprocess; sys.path.insert(0,sys.argv[1]);"
-                " time.sleep(int(sys.argv[2]));"
-                " from memento_utils import normalize_note_tags; from pathlib import Path;"
-                " from memento_utils import get_vault;"
-                " [normalize_note_tags(p) for p in (get_vault()/'notes').glob('*.md')];"
-                " subprocess.run([sys.argv[3], sys.argv[4]], capture_output=True)",
+                str(Path(__file__).parent / "wait-and-commit.py"),
+                str(sentinel),
+                str(max_wait),
                 hooks_dir,
-                str(delay_seconds),
                 commit_script,
                 message,
             ],
@@ -393,8 +395,17 @@ def reindex_qmd(delay_seconds=0):
     )
 
 
+def _sentinel_path(session_id):
+    """Return the sentinel path for a session's note-writing run."""
+    vault = get_vault()
+    return vault / ".agent-done" / f"{session_id[:8]}.done"
+
+
 def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
-    """Spawn a background Claude call to generate atomic notes."""
+    """Spawn a background Claude call to generate atomic notes.
+
+    Returns the sentinel Path that is touched when the process finishes.
+    """
     config = get_config()
     vault = get_vault()
 
@@ -453,12 +464,18 @@ Instructions:
         prompt,
     ]
 
+    sentinel = _sentinel_path(session_id)
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.unlink(missing_ok=True)
+
+    wrapper_cmd = [sys.executable, str(AGENT_WRAPPER), str(sentinel)] + cmd
     subprocess.Popen(
-        cmd,
+        wrapper_cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    return sentinel
 
 
 # --- Main ---
@@ -523,10 +540,10 @@ def main():
     )
 
     if substantial and new_insight:
-        spawn_memento_agent(session_id, transcript_path, meta, project_slug)
+        sentinel = spawn_memento_agent(session_id, transcript_path, meta, project_slug)
         delay = config["agent_delay_seconds"]
         if config["auto_commit"]:
-            vault_commit(f"auto: notes from session {session_id[:8]}", delay_seconds=delay, normalize_before=True)
+            vault_commit(f"auto: notes from session {session_id[:8]}", delay_seconds=delay, sentinel=sentinel)
         reindex_qmd(delay_seconds=delay + 5)
     else:
         # Always reindex so fleeting notes become searchable
