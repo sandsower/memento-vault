@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
-from memento_utils import sanitize_secrets
+from memento.utils import sanitize_secrets
 
 
 class TestSanitizeSecrets:

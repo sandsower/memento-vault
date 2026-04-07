@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
-from memento_utils import note_is_superseded
+from memento.graph import note_is_superseded
 
 
 @pytest.fixture
@@ -56,37 +56,37 @@ def vault_with_supersedes(tmp_path):
 
 class TestNoteIsSuperseded:
     def test_superseded_note_found(self, vault_with_supersedes):
-        with patch("memento_utils.get_vault", return_value=vault_with_supersedes):
+        with patch("memento.graph.get_vault", return_value=vault_with_supersedes):
             result = note_is_superseded("redis-cache-v1")
             assert result == "redis-cache-v2"
 
     def test_non_superseded_note(self, vault_with_supersedes):
-        with patch("memento_utils.get_vault", return_value=vault_with_supersedes):
+        with patch("memento.graph.get_vault", return_value=vault_with_supersedes):
             result = note_is_superseded("zustand-reset")
             assert result is None
 
     def test_superseding_note_not_flagged(self, vault_with_supersedes):
         """The newer note itself is not superseded."""
-        with patch("memento_utils.get_vault", return_value=vault_with_supersedes):
+        with patch("memento.graph.get_vault", return_value=vault_with_supersedes):
             result = note_is_superseded("redis-cache-v2")
             assert result is None
 
     def test_nonexistent_note(self, vault_with_supersedes):
-        with patch("memento_utils.get_vault", return_value=vault_with_supersedes):
+        with patch("memento.graph.get_vault", return_value=vault_with_supersedes):
             result = note_is_superseded("does-not-exist")
             assert result is None
 
     def test_empty_vault(self, tmp_path):
         vault = tmp_path / "empty-vault"
         (vault / "notes").mkdir(parents=True)
-        with patch("memento_utils.get_vault", return_value=vault):
+        with patch("memento.graph.get_vault", return_value=vault):
             result = note_is_superseded("anything")
             assert result is None
 
     def test_no_notes_dir(self, tmp_path):
         vault = tmp_path / "no-notes"
         vault.mkdir()
-        with patch("memento_utils.get_vault", return_value=vault):
+        with patch("memento.graph.get_vault", return_value=vault):
             result = note_is_superseded("anything")
             assert result is None
 
@@ -100,6 +100,6 @@ class TestNoteIsSuperseded:
             "---\ntitle: New\ntype: discovery\nsupersedes: [[old-note]]\n---\n\nNew content.\n"
         )
 
-        with patch("memento_utils.get_vault", return_value=vault):
+        with patch("memento.graph.get_vault", return_value=vault):
             result = note_is_superseded("old-note")
             assert result == "new-note"

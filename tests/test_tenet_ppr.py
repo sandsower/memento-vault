@@ -3,7 +3,7 @@
 import networkx as nx
 import pytest
 
-from memento_utils import ppr_expand
+from memento.graph import ppr_expand
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-from memento_utils import rrf_fuse, is_vsearch_warm, mark_vsearch_warm
+from memento.search import is_vsearch_warm, mark_vsearch_warm, rrf_fuse
 
 
 class TestRrfFuse:
@@ -57,7 +57,7 @@ class TestVsearchWarm:
     def test_warm_flag(self, tmp_path, monkeypatch):
         """mark_vsearch_warm creates flag, is_vsearch_warm detects it."""
         flag_path = str(tmp_path / "memento-vsearch-warm")
-        monkeypatch.setattr("memento_utils.VSEARCH_WARM_PATH", flag_path)
+        monkeypatch.setattr("memento.search.VSEARCH_WARM_PATH", flag_path)
         assert not is_vsearch_warm()
         mark_vsearch_warm()
         assert is_vsearch_warm()

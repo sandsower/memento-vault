@@ -1,5 +1,6 @@
 """Tests for memento.config module."""
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,6 +8,7 @@ from memento.config import (
     DEFAULT_CONFIG,
     detect_project,
     get_config,
+    get_runtime_dir,
     get_vault,
     load_config,
     reset_config,
@@ -73,6 +75,21 @@ class TestLoadConfig:
         assert "llm_backend" in DEFAULT_CONFIG
         assert DEFAULT_CONFIG["llm_backend"] == "claude"
         assert DEFAULT_CONFIG["llm_model"] is None
+
+
+class TestRuntimeDir:
+    def test_falls_back_to_temp_when_primary_locations_are_not_writable(self, tmp_path):
+        xdg_runtime = tmp_path / "xdg-runtime"
+        fallback_tmp = tmp_path / "tmp"
+
+        with (
+            patch.dict("memento.config.os.environ", {"XDG_RUNTIME_DIR": str(xdg_runtime)}, clear=False),
+            patch("memento.config.tempfile.gettempdir", return_value=str(fallback_tmp)),
+            patch("memento.config._runtime_dir_is_usable", side_effect=[False, False, True]),
+        ):
+            runtime_dir = get_runtime_dir()
+
+        assert runtime_dir == str(fallback_tmp / f"memento-vault-{os.getuid()}")
 
 
 class TestSlugify:

@@ -3,7 +3,7 @@
 import pytest
 
 from memento_inception import build_concept_index, write_concept_index
-from memento_utils import load_concept_index, lookup_concepts
+from memento.graph import load_concept_index, lookup_concepts
 
 
 # --- build_concept_index ---

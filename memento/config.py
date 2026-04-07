@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 
 
@@ -207,20 +208,38 @@ def get_vault():
 # --- Runtime directory (private temp files) ---
 
 
+def _runtime_dir_is_usable(path):
+    """Return True when a runtime directory is writable by this process."""
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        probe = os.path.join(path, ".memento-write-test")
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
+
+
 def get_runtime_dir():
     """Get a user-private directory for temp files.
 
     Uses $XDG_RUNTIME_DIR (typically /run/user/$UID, mode 0700) with
-    fallback to ~/.cache/memento-vault/. Never uses /tmp to avoid
-    symlink attacks and information disclosure on multi-user systems.
+    fallback to ~/.cache/memento-vault/. If neither location is writable,
+    falls back to a per-user temp dir with mode 0700.
     """
+    candidates = []
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if runtime:
-        d = os.path.join(runtime, "memento-vault")
-    else:
-        d = os.path.join(str(Path.home()), ".cache", "memento-vault")
-    os.makedirs(d, mode=0o700, exist_ok=True)
-    return d
+        candidates.append(os.path.join(runtime, "memento-vault"))
+    candidates.append(os.path.join(str(Path.home()), ".cache", "memento-vault"))
+    candidates.append(os.path.join(tempfile.gettempdir(), f"memento-vault-{os.getuid()}"))
+
+    for candidate in candidates:
+        if _runtime_dir_is_usable(candidate):
+            return candidate
+
+    raise OSError("No writable runtime directory available for memento-vault")
 
 
 RUNTIME_DIR = get_runtime_dir()

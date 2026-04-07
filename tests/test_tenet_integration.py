@@ -12,14 +12,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
-from memento_utils import (
-    enhance_results,
+from memento.config import DEFAULT_CONFIG
+from memento.graph import (
+    apply_pagerank_boost,
     build_wikilink_graph,
     compute_pagerank,
-    apply_pagerank_boost,
     ppr_expand,
-    DEFAULT_CONFIG,
 )
+from memento.search import enhance_results
+
 
 
 @pytest.fixture
@@ -158,7 +159,7 @@ class TestEnhanceResultsPipeline:
         graph = build_wikilink_graph(linked_vault)
         pagerank = compute_pagerank(graph)
 
-        with patch("memento_utils.load_or_build_graph", return_value=(graph, pagerank)):
+        with patch("memento.search.load_or_build_graph", return_value=(graph, pagerank)):
             enhanced = enhance_results(
                 results,
                 config=integration_config,
@@ -185,7 +186,7 @@ class TestEnhanceResultsPipeline:
         ]
 
         # Patch load_or_build_graph to fail
-        with patch("memento_utils.load_or_build_graph", side_effect=ImportError("no networkx")):
+        with patch("memento.search.load_or_build_graph", side_effect=ImportError("no networkx")):
             enhanced = enhance_results(results, config=integration_config)
 
         # Should still return results (fallback to wikilinks, which may not expand
@@ -218,8 +219,8 @@ Body of other note.
         pagerank = compute_pagerank(graph)
 
         with (
-            patch("memento_utils.load_or_build_graph", return_value=(graph, pagerank)),
-            patch("memento_utils.get_vault", return_value=linked_vault),
+            patch("memento.search.load_or_build_graph", return_value=(graph, pagerank)),
+            patch("memento.graph.get_vault", return_value=linked_vault),
         ):
             enhanced = enhance_results(
                 results,
