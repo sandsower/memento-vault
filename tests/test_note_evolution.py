@@ -1,6 +1,5 @@
 """Tests for note evolution (supersedes detection)."""
 
-import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -96,9 +95,7 @@ class TestNoteIsSuperseded:
         vault = tmp_path / "vault"
         (vault / "notes").mkdir(parents=True)
 
-        (vault / "notes" / "old-note.md").write_text(
-            "---\ntitle: Old\ntype: discovery\n---\n\nOld content.\n"
-        )
+        (vault / "notes" / "old-note.md").write_text("---\ntitle: Old\ntype: discovery\n---\n\nOld content.\n")
         (vault / "notes" / "new-note.md").write_text(
             "---\ntitle: New\ntype: discovery\nsupersedes: [[old-note]]\n---\n\nNew content.\n"
         )

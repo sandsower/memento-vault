@@ -3,7 +3,6 @@
 import os
 import time
 
-import pytest
 
 from memento_utils import acquire_inception_lock, release_inception_lock
 

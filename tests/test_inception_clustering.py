@@ -1,7 +1,6 @@
 """Tests for Inception HDBSCAN clustering wrapper."""
 
 import numpy as np
-import pytest
 
 from memento_inception import cluster_notes
 
@@ -108,9 +107,7 @@ def test_respects_min_cluster_size():
 
     # The group of 3 should not appear because min_cluster_size=4
     for cid, cluster_stems in result.items():
-        assert len(cluster_stems) >= 4, (
-            f"Cluster {cid} has {len(cluster_stems)} members, expected >= 4"
-        )
+        assert len(cluster_stems) >= 4, f"Cluster {cid} has {len(cluster_stems)} members, expected >= 4"
 
 
 # -- test_max_clusters_limit -----------------------------------------------

@@ -5,7 +5,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "benchmark"))
 
-import pytest
 from longmemeval_retrieval import BM25Index, tokenize, build_bm25_index, bm25_search
 
 
@@ -24,13 +23,23 @@ DOCS_FIVE = [
 ]
 
 DOCS_THREE_TOPICS = [
-    {"id": "cooking", "text": "The recipe calls for garlic, olive oil, and fresh basil. Simmer the tomato sauce for thirty minutes."},
-    {"id": "astronomy", "text": "The telescope captured images of Jupiter's moons. Ganymede is the largest moon in the solar system."},
-    {"id": "gardening", "text": "Plant the tomatoes in full sun. Water deeply once a week and mulch to retain moisture."},
+    {
+        "id": "cooking",
+        "text": "The recipe calls for garlic, olive oil, and fresh basil. Simmer the tomato sauce for thirty minutes.",
+    },
+    {
+        "id": "astronomy",
+        "text": "The telescope captured images of Jupiter's moons. Ganymede is the largest moon in the solar system.",
+    },
+    {
+        "id": "gardening",
+        "text": "Plant the tomatoes in full sun. Water deeply once a week and mulch to retain moisture.",
+    },
 ]
 
 
 # ---- tokenize ----
+
 
 class TestTokenize:
     def test_tokenize_basic(self):
@@ -53,6 +62,7 @@ class TestTokenize:
 
 # ---- build_bm25_index ----
 
+
 class TestBuildBm25Index:
     def test_build_bm25_index(self):
         """Build index from 5 docs, returns BM25Index with correct fields."""
@@ -64,6 +74,7 @@ class TestBuildBm25Index:
 
 
 # ---- bm25_search ----
+
 
 class TestBm25Search:
     def test_bm25_search_basic(self):

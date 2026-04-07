@@ -1,11 +1,19 @@
 """Tests for the three-layer dedup system in Inception."""
 
-from pathlib import Path
 
-
-def _write_note(path, *, title, note_type="discovery", tags=None, date="",
-                certainty=None, project=None, source=None,
-                synthesized_from=None, body=""):
+def _write_note(
+    path,
+    *,
+    title,
+    note_type="discovery",
+    tags=None,
+    date="",
+    certainty=None,
+    project=None,
+    source=None,
+    synthesized_from=None,
+    body="",
+):
     """Helper: write a markdown note with YAML frontmatter."""
     lines = ["---"]
     lines.append(f"title: {title}")
@@ -72,13 +80,9 @@ class TestBuildSynthesizedFromLedger:
         result = build_synthesized_from_ledger(str(notes_dir))
 
         assert "cross-project-redis-patterns" in result
-        assert result["cross-project-redis-patterns"] == {
-            "redis-cache-ttl", "redis-eviction-policy"
-        }
+        assert result["cross-project-redis-patterns"] == {"redis-cache-ttl", "redis-eviction-policy"}
         assert "frontend-testing-patterns" in result
-        assert result["frontend-testing-patterns"] == {
-            "zustand-state-reset", "react-query-wrapper"
-        }
+        assert result["frontend-testing-patterns"] == {"zustand-state-reset", "react-query-wrapper"}
 
     def test_ledger_ignores_non_inception(self, tmp_path):
         """Notes without source:inception are not included in the ledger."""

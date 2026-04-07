@@ -15,7 +15,15 @@ from pathlib import Path
 
 # Shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from memento_utils import get_config, get_vault, detect_project, slugify, read_hook_input, sanitize_secrets, log_retrieval
+from memento_utils import (
+    get_config,
+    get_vault,
+    detect_project,
+    read_hook_input,
+    sanitize_secrets,
+    log_retrieval,
+    normalize_note_tags,
+)
 
 
 # --- Transcript parsing ---
@@ -26,9 +34,11 @@ def parse_transcript(transcript_path):
     user_count = 0
     assistant_count = 0
     files_edited = set()
+    files_read = set()
     git_branch = None
     cwd = None
     first_user_prompt = None
+    last_assistant_text = None
 
     with open(transcript_path) as f:
         for line in f:
@@ -53,13 +63,35 @@ def parse_transcript(transcript_path):
                 content = msg.get("content", [])
                 if isinstance(content, list):
                     for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "text":
+                            text = block.get("text", "").strip()
+                            if text:
+                                last_assistant_text = text
+                        elif block.get("type") == "tool_use":
                             name = block.get("name", "")
                             inp = block.get("input", {})
                             if name in ("Edit", "Write"):
                                 fp = inp.get("file_path", "")
                                 if fp:
                                     files_edited.add(fp)
+                            elif name == "Read":
+                                fp = inp.get("file_path", "")
+                                if fp:
+                                    files_read.add(fp)
+
+    # Extract first sentence of last assistant text as session outcome
+    last_outcome = None
+    if last_assistant_text:
+        last_assistant_text = sanitize_secrets(last_assistant_text)
+        dot = last_assistant_text.find(".")
+        if 0 < dot < 150:
+            last_outcome = last_assistant_text[: dot + 1]
+        else:
+            last_outcome = last_assistant_text[:100]
+            if len(last_assistant_text) > 100:
+                last_outcome += "..."
 
     exchange_count = min(user_count, assistant_count)
     return {
@@ -68,11 +100,20 @@ def parse_transcript(transcript_path):
         "exchange_count": exchange_count,
         "user_messages": user_count,
         "files_edited": sorted(files_edited),
+        "files_read": sorted(files_read),
         "first_prompt": first_user_prompt,
+        "last_outcome": last_outcome,
     }
 
 
 # --- Substantiality scoring ---
+
+
+# Keywords that signal a high-value session even with few exchanges
+_INSIGHT_KEYWORDS = re.compile(
+    r"\b(bug|fix|broke|error|issue|debug|crash|regression|root cause|why does|how to)\b",
+    re.IGNORECASE,
+)
 
 
 def is_substantial(meta):
@@ -89,6 +130,16 @@ def is_substantial(meta):
         for pattern in notable_patterns:
             if pattern in f:
                 return True
+
+    # Short but meaty: keyword match in first prompt + at least 5 exchanges
+    if meta["exchange_count"] >= 5 and meta.get("first_prompt"):
+        if _INSIGHT_KEYWORDS.search(meta["first_prompt"]):
+            return True
+
+    # Read-heavy investigation sessions (deep dives)
+    if len(meta.get("files_read", [])) >= 6:
+        return True
+
     return False
 
 
@@ -120,7 +171,9 @@ def has_new_insight(meta):
     try:
         result = subprocess.run(
             ["qmd", "search", query, "-c", config["qmd_collection"], "-n", "5"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode != 0:
             return True
@@ -133,7 +186,9 @@ def has_new_insight(meta):
             try:
                 extra_result = subprocess.run(
                     ["qmd", "search", query, "-c", extra, "-n", "3"],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 if extra_result.returncode == 0:
                     extra_lines = extra_result.stdout.strip().splitlines()
@@ -147,8 +202,7 @@ def has_new_insight(meta):
         # Even with good coverage, new files mean new work
         if len(meta["files_edited"]) > 0:
             vault_path = get_config()["vault_path"]
-            non_vault = [f for f in meta["files_edited"]
-                         if vault_path not in f]
+            non_vault = [f for f in meta["files_edited"] if vault_path not in f]
             if non_vault:
                 return True
 
@@ -227,12 +281,11 @@ def write_fleeting(session_id, meta, project_slug):
         if len(meta["first_prompt"]) > 100:
             prompt_str += "..."
 
-    line = (
-        f"- {now} `{session_id}` {meta['cwd'] or '?'}{branch_str}"
-        f" — {meta['exchange_count']} exchanges{files_str}"
-    )
+    line = f"- {now} `{session_id}` {meta['cwd'] or '?'}{branch_str} — {meta['exchange_count']} exchanges{files_str}"
     if prompt_str:
         line += f" — {prompt_str}"
+    if meta.get("last_outcome"):
+        line += f" → {meta['last_outcome']}"
     line += "\n"
 
     with open(fleeting_file, "a") as f:
@@ -255,29 +308,70 @@ def build_session_summary(meta):
 
 
 VAULT_COMMIT = Path(__file__).parent / "vault-commit.sh"
+AGENT_WRAPPER = Path(__file__).parent / "agent-wrapper.py"
 
 
-def vault_commit(message="auto: vault update", delay_seconds=0):
-    """Commit all vault changes. Runs detached. Optional delay for agent writes."""
+def normalize_all_notes():
+    """Normalize tags on all notes in the vault. Safe to call multiple times."""
+    vault = get_vault()
+    notes_dir = vault / "notes"
+    if not notes_dir.exists():
+        return
+    for note_path in notes_dir.glob("*.md"):
+        normalize_note_tags(note_path)
+
+
+def vault_commit(message="auto: vault update", delay_seconds=0, sentinel=None):
+    """Commit all vault changes. Runs detached.
+
+    If sentinel is provided, waits for that file to appear (agent completion)
+    before normalizing tags and committing. Falls back to delay_seconds as a
+    hard timeout if the sentinel never appears.
+    """
     commit_script = str(VAULT_COMMIT)
     if not VAULT_COMMIT.exists():
         # Fall back to looking in the install location
         commit_script = str(Path.home() / ".claude" / "hooks" / "vault-commit.sh")
 
-    # Pass arguments via sys.argv to avoid shell injection from message/path content
-    subprocess.Popen(
-        [sys.executable, "-c",
-         "import subprocess,time,sys; time.sleep(int(sys.argv[1])); subprocess.run([sys.argv[2], sys.argv[3]], capture_output=True)",
-         str(delay_seconds), commit_script, message],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    if sentinel:
+        # Wait for agent completion, then normalize and commit
+        hooks_dir = str(Path(__file__).parent)
+        max_wait = max(delay_seconds, 120)
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).parent / "wait-and-commit.py"),
+                str(sentinel),
+                str(max_wait),
+                hooks_dir,
+                commit_script,
+                message,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    else:
+        # Pass arguments via sys.argv to avoid shell injection from message/path content
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess,time,sys; time.sleep(int(sys.argv[1])); subprocess.run([sys.argv[2], sys.argv[3]], capture_output=True)",
+                str(delay_seconds),
+                commit_script,
+                message,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
 
 def reindex_qmd(delay_seconds=0):
     """Reindex the memento collection in QMD. Runs detached. No-op if QMD is not installed."""
     import shutil
+
     if not shutil.which("qmd"):
         return
 
@@ -286,28 +380,41 @@ def reindex_qmd(delay_seconds=0):
 
     # Pass collection name via sys.argv to avoid injection
     subprocess.Popen(
-        [sys.executable, "-c",
-         "import subprocess,time,shutil,sys; time.sleep(int(sys.argv[1])); qmd=shutil.which('qmd');"
-         " qmd and subprocess.run([qmd,'update','-c',sys.argv[2]], capture_output=True);"
-         " qmd and subprocess.run([qmd,'embed'], capture_output=True)",
-         str(delay_seconds), collection],
+        [
+            sys.executable,
+            "-c",
+            "import subprocess,time,shutil,sys; time.sleep(int(sys.argv[1])); qmd=shutil.which('qmd');"
+            " qmd and subprocess.run([qmd,'update','-c',sys.argv[2]], capture_output=True);"
+            " qmd and subprocess.run([qmd,'embed'], capture_output=True)",
+            str(delay_seconds),
+            collection,
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
 
 
+def _sentinel_path(session_id):
+    """Return the sentinel path for a session's note-writing run."""
+    vault = get_vault()
+    return vault / ".agent-done" / f"{session_id[:8]}.done"
+
+
 def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
-    """Spawn a background Claude call to generate atomic notes."""
+    """Spawn a background Claude call to generate atomic notes.
+
+    Returns the sentinel Path that is touched when the process finishes.
+    """
     config = get_config()
     vault = get_vault()
 
     prompt = f"""You are the Memento agent. Read the transcript and create atomic Zettelkasten notes.
 
 Session ID: {session_id}
-Project: {meta['cwd']}
-Branch: {meta.get('git_branch', 'unknown')}
-Files edited: {json.dumps(meta['files_edited'])}
+Project: {meta["cwd"]}
+Branch: {meta.get("git_branch", "unknown")}
+Files edited: {json.dumps(meta["files_edited"])}
 
 Transcript path: {transcript_path}
 
@@ -341,20 +448,34 @@ Instructions:
     cmd = [
         "claude",
         "--print",
-        "--model", config["agent_model"],
+        "--model",
+        config["agent_model"],
         "--dangerously-skip-permissions",
         "--no-session-persistence",
-        "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep",
-        "--add-dir", str(vault),
-        "-p", prompt,
+        "--allowedTools",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "--add-dir",
+        str(vault),
+        "-p",
+        prompt,
     ]
 
+    sentinel = _sentinel_path(session_id)
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.unlink(missing_ok=True)
+
+    wrapper_cmd = [sys.executable, str(AGENT_WRAPPER), str(sentinel)] + cmd
     subprocess.Popen(
-        cmd,
+        wrapper_cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    return sentinel
 
 
 # --- Main ---
@@ -406,22 +527,28 @@ def main():
     substantial = is_substantial(meta)
     new_insight = has_new_insight(meta) if substantial else False
 
-    log_retrieval("triage", "decision",
-                  session_id=session_id[:8], project=project_slug,
-                  exchanges=meta["exchange_count"],
-                  files_edited=len(meta["files_edited"]),
-                  substantial=substantial, new_insight=new_insight,
-                  agent_spawned=substantial and new_insight)
+    log_retrieval(
+        "triage",
+        "decision",
+        session_id=session_id[:8],
+        project=project_slug,
+        exchanges=meta["exchange_count"],
+        files_edited=len(meta["files_edited"]),
+        substantial=substantial,
+        new_insight=new_insight,
+        agent_spawned=substantial and new_insight,
+    )
 
     if substantial and new_insight:
-        spawn_memento_agent(session_id, transcript_path, meta, project_slug)
+        sentinel = spawn_memento_agent(session_id, transcript_path, meta, project_slug)
         delay = config["agent_delay_seconds"]
         # Backfill certainty on any notes the agent missed
         backfill_certainty(delay_seconds=delay - 5)
         if config["auto_commit"]:
-            vault_commit(f"auto: notes from session {session_id[:8]}", delay_seconds=delay)
+            vault_commit(f"auto: notes from session {session_id[:8]}", delay_seconds=delay, sentinel=sentinel)
         reindex_qmd(delay_seconds=delay + 5)
     else:
+        # Always reindex so fleeting notes become searchable
         reindex_qmd()
 
     # Inception: background consolidation (gated)
@@ -480,18 +607,14 @@ def maybe_trigger_inception(config):
     if last_run:
         try:
             cutoff = datetime.fromisoformat(last_run)
-            new_count = sum(
-                1 for f in notes_dir.glob("*.md")
-                if datetime.fromtimestamp(f.stat().st_mtime) > cutoff
-            )
+            new_count = sum(1 for f in notes_dir.glob("*.md") if datetime.fromtimestamp(f.stat().st_mtime) > cutoff)
         except (ValueError, OSError):
             new_count = 0
     else:
         new_count = len(list(notes_dir.glob("*.md")))
 
     if new_count < threshold:
-        log_retrieval("inception", "skip",
-                      new_notes=new_count, threshold=threshold)
+        log_retrieval("inception", "skip", new_notes=new_count, threshold=threshold)
         return
 
     inception_script = Path(__file__).parent / "memento-inception.py"
@@ -501,9 +624,7 @@ def maybe_trigger_inception(config):
     if not inception_script.exists():
         return
 
-    log_retrieval("inception", "trigger",
-                  new_notes=new_count, threshold=threshold,
-                  last_run=last_run)
+    log_retrieval("inception", "trigger", new_notes=new_count, threshold=threshold, last_run=last_run)
 
     subprocess.Popen(
         [sys.executable, str(inception_script)],

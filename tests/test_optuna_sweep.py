@@ -1,10 +1,8 @@
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-import json
+from unittest.mock import patch
 
 import optuna
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "benchmark"))
 
@@ -32,9 +30,15 @@ class TestDefineSearchSpace:
         config = define_search_space(trial)
 
         expected_keys = [
-            "granularity", "retrieval_limit", "recall_min_score",
-            "recall_high_confidence", "prf_enabled", "prf_max_terms",
-            "prf_top_docs", "reranker_top_k", "reranker_min_score",
+            "granularity",
+            "retrieval_limit",
+            "recall_min_score",
+            "recall_high_confidence",
+            "prf_enabled",
+            "prf_max_terms",
+            "prf_top_docs",
+            "reranker_top_k",
+            "reranker_min_score",
         ]
         for key in expected_keys:
             assert key in config, f"Missing key: {key}"

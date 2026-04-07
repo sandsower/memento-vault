@@ -3,9 +3,19 @@
 import struct
 
 
-def _write_note(path, *, title, note_type="discovery", tags=None, date="",
-                certainty=None, project=None, source=None,
-                synthesized_from=None, body=""):
+def _write_note(
+    path,
+    *,
+    title,
+    note_type="discovery",
+    tags=None,
+    date="",
+    certainty=None,
+    project=None,
+    source=None,
+    synthesized_from=None,
+    body="",
+):
     """Helper: write a markdown note with YAML frontmatter."""
     lines = ["---"]
     lines.append(f"title: {title}")
@@ -53,10 +63,13 @@ class TestCollectEligibleNotes:
         """Notes with source: inception are excluded to prevent recursion."""
         from memento_inception import collect_eligible_notes
 
-        _write_note(tmp_vault / "notes" / "human-note.md", title="Human note",
-                     date="2026-03-20T10:00")
-        _write_note(tmp_vault / "notes" / "inception-generated.md", title="Inception output",
-                     date="2026-03-20T10:00", source="inception")
+        _write_note(tmp_vault / "notes" / "human-note.md", title="Human note", date="2026-03-20T10:00")
+        _write_note(
+            tmp_vault / "notes" / "inception-generated.md",
+            title="Inception output",
+            date="2026-03-20T10:00",
+            source="inception",
+        )
 
         state = {"processed_notes": [], "last_run_iso": None}
         result = collect_eligible_notes(mock_config, state)
@@ -70,12 +83,11 @@ class TestCollectEligibleNotes:
         from memento_inception import collect_eligible_notes
 
         mock_config["inception_exclude_tags"] = ["private", "draft"]
-        _write_note(tmp_vault / "notes" / "public.md", title="Public",
-                     tags=["redis"], date="2026-03-20T10:00")
-        _write_note(tmp_vault / "notes" / "secret.md", title="Secret",
-                     tags=["private", "redis"], date="2026-03-20T10:00")
-        _write_note(tmp_vault / "notes" / "wip.md", title="WIP",
-                     tags=["draft"], date="2026-03-20T10:00")
+        _write_note(tmp_vault / "notes" / "public.md", title="Public", tags=["redis"], date="2026-03-20T10:00")
+        _write_note(
+            tmp_vault / "notes" / "secret.md", title="Secret", tags=["private", "redis"], date="2026-03-20T10:00"
+        )
+        _write_note(tmp_vault / "notes" / "wip.md", title="WIP", tags=["draft"], date="2026-03-20T10:00")
 
         state = {"processed_notes": [], "last_run_iso": None}
         result = collect_eligible_notes(mock_config, state)
@@ -89,10 +101,8 @@ class TestCollectEligibleNotes:
         """Already-processed notes are skipped in incremental mode."""
         from memento_inception import collect_eligible_notes
 
-        _write_note(tmp_vault / "notes" / "done.md", title="Done",
-                     date="2026-03-20T10:00")
-        _write_note(tmp_vault / "notes" / "fresh.md", title="Fresh",
-                     date="2026-03-20T10:00")
+        _write_note(tmp_vault / "notes" / "done.md", title="Done", date="2026-03-20T10:00")
+        _write_note(tmp_vault / "notes" / "fresh.md", title="Fresh", date="2026-03-20T10:00")
 
         state = {"processed_notes": ["done"], "last_run_iso": None}
         result = collect_eligible_notes(mock_config, state)
@@ -105,8 +115,7 @@ class TestCollectEligibleNotes:
         """With full=True, processed notes are still included."""
         from memento_inception import collect_eligible_notes
 
-        _write_note(tmp_vault / "notes" / "done.md", title="Done",
-                     date="2026-03-20T10:00")
+        _write_note(tmp_vault / "notes" / "done.md", title="Done", date="2026-03-20T10:00")
 
         state = {"processed_notes": ["done"], "last_run_iso": None}
         result = collect_eligible_notes(mock_config, state, full=True)
@@ -118,10 +127,8 @@ class TestCollectEligibleNotes:
         """Only notes newer than last_run_iso are included in incremental runs."""
         from memento_inception import collect_eligible_notes
 
-        _write_note(tmp_vault / "notes" / "old-note.md", title="Old",
-                     date="2026-03-10T08:00")
-        _write_note(tmp_vault / "notes" / "new-note.md", title="New",
-                     date="2026-03-20T14:00")
+        _write_note(tmp_vault / "notes" / "old-note.md", title="Old", date="2026-03-10T08:00")
+        _write_note(tmp_vault / "notes" / "new-note.md", title="New", date="2026-03-20T14:00")
 
         state = {"processed_notes": [], "last_run_iso": "2026-03-15T00:00"}
         result = collect_eligible_notes(mock_config, state)
@@ -135,8 +142,7 @@ class TestCollectEligibleNotes:
         from memento_inception import collect_eligible_notes
 
         _write_note(tmp_vault / "notes" / ".tmp-write.md", title="Temp")
-        _write_note(tmp_vault / "notes" / "visible.md", title="Visible",
-                     date="2026-03-20T10:00")
+        _write_note(tmp_vault / "notes" / "visible.md", title="Visible", date="2026-03-20T10:00")
 
         state = {"processed_notes": [], "last_run_iso": None}
         result = collect_eligible_notes(mock_config, state)
@@ -154,10 +160,16 @@ class TestParseNote:
         from memento_inception import parse_note
 
         path = tmp_vault / "notes" / "test-note.md"
-        _write_note(path, title="Test Title", note_type="discovery",
-                     tags=["redis", "caching"], date="2026-03-15T09:00",
-                     certainty=4, project="/home/vic/Projects/api",
-                     body="Body text with [[wikilink-target]] inside.")
+        _write_note(
+            path,
+            title="Test Title",
+            note_type="discovery",
+            tags=["redis", "caching"],
+            date="2026-03-15T09:00",
+            certainty=4,
+            project="/home/vic/Projects/api",
+            body="Body text with [[wikilink-target]] inside.",
+        )
 
         record = parse_note(path)
 

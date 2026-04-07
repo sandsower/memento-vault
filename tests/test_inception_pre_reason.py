@@ -11,9 +11,18 @@ from memento_inception import (
 )
 
 
-def _make_note(stem, title="Untitled", note_type="discovery", tags=None,
-               date="2026-03-10T14:00", certainty=4, project=None,
-               body="Some body text.", source=None, synthesized_from=None):
+def _make_note(
+    stem,
+    title="Untitled",
+    note_type="discovery",
+    tags=None,
+    date="2026-03-10T14:00",
+    certainty=4,
+    project=None,
+    body="Some body text.",
+    source=None,
+    synthesized_from=None,
+):
     """Helper to build a NoteRecord without touching the filesystem."""
     return NoteRecord(
         stem=stem,
@@ -34,11 +43,14 @@ class TestPredictQueries:
     """Tests for query prediction from pattern note metadata."""
 
     def test_includes_title(self):
-        pattern = _make_note("redis-patterns", title="Redis caching patterns across services",
-                             tags=["redis", "caching"], source="inception",
-                             synthesized_from=["redis-cache-ttl"])
-        sources = [_make_note("redis-cache-ttl", title="Redis cache requires explicit TTL",
-                              tags=["redis"])]
+        pattern = _make_note(
+            "redis-patterns",
+            title="Redis caching patterns across services",
+            tags=["redis", "caching"],
+            source="inception",
+            synthesized_from=["redis-cache-ttl"],
+        )
+        sources = [_make_note("redis-cache-ttl", title="Redis cache requires explicit TTL", tags=["redis"])]
 
         queries = _predict_queries(pattern, sources)
 
@@ -46,32 +58,33 @@ class TestPredictQueries:
         assert any("redis caching" in q for q in queries)
 
     def test_includes_tags(self):
-        pattern = _make_note("redis-patterns", title="Redis patterns",
-                             tags=["redis", "caching"], source="inception",
-                             synthesized_from=[])
+        pattern = _make_note(
+            "redis-patterns", title="Redis patterns", tags=["redis", "caching"], source="inception", synthesized_from=[]
+        )
         queries = _predict_queries(pattern, [])
 
         assert any("redis" in q for q in queries)
         assert any("caching" in q for q in queries)
 
     def test_includes_tag_pairs(self):
-        pattern = _make_note("test-patterns", title="Test patterns",
-                             tags=["redis", "caching", "api"], source="inception",
-                             synthesized_from=[])
+        pattern = _make_note(
+            "test-patterns",
+            title="Test patterns",
+            tags=["redis", "caching", "api"],
+            source="inception",
+            synthesized_from=[],
+        )
         queries = _predict_queries(pattern, [])
 
         # Should have at least one tag pair
-        tag_pairs = [q for q in queries if " " in q and all(
-            t in q for t in ("redis", "caching")
-        )]
+        tag_pairs = [q for q in queries if " " in q and all(t in q for t in ("redis", "caching"))]
         assert len(tag_pairs) >= 1 or len(queries) > 0
 
     def test_includes_source_title_keywords(self):
-        pattern = _make_note("patterns", title="Patterns",
-                             tags=[], source="inception",
-                             synthesized_from=["redis-cache-ttl"])
-        sources = [_make_note("redis-cache-ttl",
-                              title="Redis cache requires explicit TTL")]
+        pattern = _make_note(
+            "patterns", title="Patterns", tags=[], source="inception", synthesized_from=["redis-cache-ttl"]
+        )
+        sources = [_make_note("redis-cache-ttl", title="Redis cache requires explicit TTL")]
 
         queries = _predict_queries(pattern, sources)
 
@@ -79,11 +92,13 @@ class TestPredictQueries:
         assert any("redis" in q for q in queries)
 
     def test_caps_at_five(self):
-        pattern = _make_note("big", title="A very long title with many keywords here",
-                             tags=["alpha", "beta", "gamma", "delta", "epsilon",
-                                   "zeta", "eta", "theta"],
-                             source="inception",
-                             synthesized_from=["a", "b", "c"])
+        pattern = _make_note(
+            "big",
+            title="A very long title with many keywords here",
+            tags=["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"],
+            source="inception",
+            synthesized_from=["a", "b", "c"],
+        )
         sources = [
             _make_note("a", title="Source one about databases"),
             _make_note("b", title="Source two about caching layers"),
@@ -95,16 +110,14 @@ class TestPredictQueries:
         assert len(queries) <= 5
 
     def test_empty_inputs(self):
-        pattern = _make_note("empty", title="", tags=[], source="inception",
-                             synthesized_from=[])
+        pattern = _make_note("empty", title="", tags=[], source="inception", synthesized_from=[])
         queries = _predict_queries(pattern, [])
 
         assert isinstance(queries, list)
 
     def test_short_tags_excluded(self):
         """Tags shorter than 3 chars are excluded."""
-        pattern = _make_note("test", title="Test", tags=["ab", "cd"],
-                             source="inception", synthesized_from=[])
+        pattern = _make_note("test", title="Test", tags=["ab", "cd"], source="inception", synthesized_from=[])
         queries = _predict_queries(pattern, [])
 
         assert not any(q == "ab" for q in queries)
@@ -115,8 +128,7 @@ class TestExtractConnections:
     """Tests for connection map extraction from source notes."""
 
     def test_extracts_projects(self):
-        pattern = _make_note("patterns", title="Patterns", source="inception",
-                             synthesized_from=["a", "b"])
+        pattern = _make_note("patterns", title="Patterns", source="inception", synthesized_from=["a", "b"])
         sources = [
             _make_note("a", project="/home/vic/Projects/api-service"),
             _make_note("b", project="/home/vic/Projects/billing"),
@@ -128,8 +140,7 @@ class TestExtractConnections:
         assert "/home/vic/Projects/billing" in result["projects"]
 
     def test_extracts_code_areas_from_body(self):
-        pattern = _make_note("patterns", title="Patterns", source="inception",
-                             synthesized_from=["a"])
+        pattern = _make_note("patterns", title="Patterns", source="inception", synthesized_from=["a"])
         sources = [
             _make_note("a", body="Fixed the issue in /home/vic/Projects/api/src/cache.rs today."),
         ]
@@ -139,8 +150,7 @@ class TestExtractConnections:
         assert any("src/cache.rs" in area for area in result["code_areas"])
 
     def test_no_projects_returns_empty_list(self):
-        pattern = _make_note("patterns", title="Patterns", source="inception",
-                             synthesized_from=["a"])
+        pattern = _make_note("patterns", title="Patterns", source="inception", synthesized_from=["a"])
         sources = [
             _make_note("a", project=None, body="No paths here."),
         ]
@@ -150,8 +160,7 @@ class TestExtractConnections:
         assert result["projects"] == []
 
     def test_no_code_areas_returns_empty_list(self):
-        pattern = _make_note("patterns", title="Patterns", source="inception",
-                             synthesized_from=["a"])
+        pattern = _make_note("patterns", title="Patterns", source="inception", synthesized_from=["a"])
         sources = [
             _make_note("a", project="/some/project", body="Plain text with no paths."),
         ]
@@ -161,8 +170,7 @@ class TestExtractConnections:
         assert result["code_areas"] == []
 
     def test_deduplicates_projects(self):
-        pattern = _make_note("patterns", title="Patterns", source="inception",
-                             synthesized_from=["a", "b"])
+        pattern = _make_note("patterns", title="Patterns", source="inception", synthesized_from=["a", "b"])
         sources = [
             _make_note("a", project="/home/vic/Projects/api"),
             _make_note("b", project="/home/vic/Projects/api"),
@@ -173,8 +181,7 @@ class TestExtractConnections:
         assert len(result["projects"]) == 1
 
     def test_empty_sources(self):
-        pattern = _make_note("patterns", title="Patterns", source="inception",
-                             synthesized_from=[])
+        pattern = _make_note("patterns", title="Patterns", source="inception", synthesized_from=[])
 
         result = _extract_connections(pattern, [])
 
@@ -187,16 +194,26 @@ class TestPreReason:
 
     def test_writes_valid_json_files(self, tmp_vault, mock_config):
         """Both output files are valid JSON."""
-        pattern = _make_note("redis-patterns", title="Redis caching patterns",
-                             tags=["redis", "caching"], source="inception",
-                             synthesized_from=["redis-cache-ttl", "redis-eviction-policy"])
+        pattern = _make_note(
+            "redis-patterns",
+            title="Redis caching patterns",
+            tags=["redis", "caching"],
+            source="inception",
+            synthesized_from=["redis-cache-ttl", "redis-eviction-policy"],
+        )
         notes_dict = {
-            "redis-cache-ttl": _make_note("redis-cache-ttl",
-                                          title="Redis cache requires explicit TTL",
-                                          tags=["redis"], project="/home/vic/Projects/api"),
-            "redis-eviction-policy": _make_note("redis-eviction-policy",
-                                                title="Redis eviction policy for sessions",
-                                                tags=["redis"], project="/home/vic/Projects/api"),
+            "redis-cache-ttl": _make_note(
+                "redis-cache-ttl",
+                title="Redis cache requires explicit TTL",
+                tags=["redis"],
+                project="/home/vic/Projects/api",
+            ),
+            "redis-eviction-policy": _make_note(
+                "redis-eviction-policy",
+                title="Redis eviction policy for sessions",
+                tags=["redis"],
+                project="/home/vic/Projects/api",
+            ),
         }
 
         qp, cp = pre_reason([pattern], notes_dict, mock_config)
@@ -213,13 +230,15 @@ class TestPreReason:
 
     def test_queries_mapped_to_stem(self, tmp_vault, mock_config):
         """Query predictions are keyed by pattern note stem."""
-        pattern = _make_note("redis-patterns", title="Redis caching patterns",
-                             tags=["redis", "caching"], source="inception",
-                             synthesized_from=["redis-cache-ttl"])
+        pattern = _make_note(
+            "redis-patterns",
+            title="Redis caching patterns",
+            tags=["redis", "caching"],
+            source="inception",
+            synthesized_from=["redis-cache-ttl"],
+        )
         notes_dict = {
-            "redis-cache-ttl": _make_note("redis-cache-ttl",
-                                          title="Redis cache requires explicit TTL",
-                                          tags=["redis"]),
+            "redis-cache-ttl": _make_note("redis-cache-ttl", title="Redis cache requires explicit TTL", tags=["redis"]),
         }
 
         qp, _ = pre_reason([pattern], notes_dict, mock_config)
@@ -231,13 +250,15 @@ class TestPreReason:
 
     def test_connections_mapped_to_stem(self, tmp_vault, mock_config):
         """Connection maps are keyed by pattern note stem."""
-        pattern = _make_note("redis-patterns", title="Redis patterns",
-                             tags=["redis"], source="inception",
-                             synthesized_from=["redis-cache-ttl"])
+        pattern = _make_note(
+            "redis-patterns",
+            title="Redis patterns",
+            tags=["redis"],
+            source="inception",
+            synthesized_from=["redis-cache-ttl"],
+        )
         notes_dict = {
-            "redis-cache-ttl": _make_note("redis-cache-ttl",
-                                          title="Redis cache TTL",
-                                          project="/home/vic/Projects/api"),
+            "redis-cache-ttl": _make_note("redis-cache-ttl", title="Redis cache TTL", project="/home/vic/Projects/api"),
         }
 
         _, cp = pre_reason([pattern], notes_dict, mock_config)
@@ -249,8 +270,7 @@ class TestPreReason:
     def test_disabled_by_config(self, tmp_vault, mock_config):
         """Returns (None, None) when inception_pre_reason is False."""
         mock_config["inception_pre_reason"] = False
-        pattern = _make_note("test", title="Test", source="inception",
-                             synthesized_from=[])
+        pattern = _make_note("test", title="Test", source="inception", synthesized_from=[])
 
         qp, cp = pre_reason([pattern], {}, mock_config)
 
@@ -274,8 +294,9 @@ class TestPreReason:
         existing_connections = {"old-pattern": {"projects": ["/old"], "code_areas": []}}
         (notes_dir / ".inception-connections.json").write_text(json.dumps(existing_connections))
 
-        pattern = _make_note("new-pattern", title="New pattern", tags=["new"],
-                             source="inception", synthesized_from=["src-note"])
+        pattern = _make_note(
+            "new-pattern", title="New pattern", tags=["new"], source="inception", synthesized_from=["src-note"]
+        )
         notes_dict = {
             "src-note": _make_note("src-note", title="Source", project="/new/project"),
         }
@@ -294,15 +315,11 @@ class TestPreReason:
 
     def test_multiple_pattern_notes(self, tmp_vault, mock_config):
         """Handles multiple pattern notes in a single call."""
-        p1 = _make_note("pattern-a", title="Pattern A", tags=["alpha"],
-                         source="inception", synthesized_from=["src-1"])
-        p2 = _make_note("pattern-b", title="Pattern B", tags=["beta"],
-                         source="inception", synthesized_from=["src-2"])
+        p1 = _make_note("pattern-a", title="Pattern A", tags=["alpha"], source="inception", synthesized_from=["src-1"])
+        p2 = _make_note("pattern-b", title="Pattern B", tags=["beta"], source="inception", synthesized_from=["src-2"])
         notes_dict = {
-            "src-1": _make_note("src-1", title="Source 1",
-                                project="/home/vic/Projects/alpha"),
-            "src-2": _make_note("src-2", title="Source 2",
-                                project="/home/vic/Projects/beta"),
+            "src-1": _make_note("src-1", title="Source 1", project="/home/vic/Projects/alpha"),
+            "src-2": _make_note("src-2", title="Source 2", project="/home/vic/Projects/beta"),
         }
 
         qp, cp = pre_reason([p1, p2], notes_dict, mock_config)

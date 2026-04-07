@@ -5,9 +5,16 @@ from pathlib import Path
 from memento_inception import NoteRecord, build_synthesis_prompt
 
 
-def _make_note(stem, title="Untitled", note_type="discovery", tags=None,
-               date="2026-03-10T14:00", certainty=4, project="/home/vic/Projects/api",
-               body="Some body text."):
+def _make_note(
+    stem,
+    title="Untitled",
+    note_type="discovery",
+    tags=None,
+    date="2026-03-10T14:00",
+    certainty=4,
+    project="/home/vic/Projects/api",
+    body="Some body text.",
+):
     """Helper to build a NoteRecord without touching the filesystem."""
     return NoteRecord(
         stem=stem,
@@ -111,5 +118,5 @@ class TestBuildSynthesisPrompt:
         result = build_synthesis_prompt(["sparse"], notes)
 
         assert "Sparse note" in result
-        assert "?" in result      # certainty falls back to '?'
-        assert "none" in result   # project falls back to 'none'
+        assert "?" in result  # certainty falls back to '?'
+        assert "none" in result  # project falls back to 'none'
