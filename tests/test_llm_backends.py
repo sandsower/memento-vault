@@ -58,6 +58,133 @@ class TestCliBackends:
         assert result.text == "codex output"
         mock_unlink.assert_called_once()
         mock_read.assert_called_once()
+        assert mock_run.call_args.kwargs["stdin"] == subprocess.DEVNULL
+
+    @patch("memento.llm.Path.read_text", return_value='{"notes":[]}\n')
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_codex_backend_uses_output_file_when_cli_exits_nonzero(self, mock_run, mock_unlink, mock_read):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "codex",
+                "llm_model": "gpt-5",
+            },
+        )
+
+        assert result.ok is True
+        assert result.text == '{"notes":[]}'
+        mock_unlink.assert_called_once()
+        mock_read.assert_called_once()
+
+    @patch("memento.llm.Path.read_text", return_value="")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_codex_backend_falls_back_to_stdout_when_output_file_is_empty(self, mock_run, mock_unlink, mock_read):
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"notes":[]}\n', stderr="")
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "codex",
+                "llm_model": "gpt-5",
+            },
+        )
+
+        assert result.ok is True
+        assert result.text == '{"notes":[]}'
+        mock_unlink.assert_called_once()
+        mock_read.assert_called_once()
+
+    @patch("memento.llm.Path.read_text", return_value="")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_codex_backend_retries_once_after_transient_cli_failure(self, mock_run, mock_unlink, mock_read):
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout="", stderr=""),
+            MagicMock(returncode=0, stdout='{"notes":[]}\n', stderr=""),
+        ]
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "codex",
+                "llm_model": "gpt-5",
+            },
+        )
+
+        assert result.ok is True
+        assert result.text == '{"notes":[]}'
+        assert mock_run.call_count == 2
+
+    @patch("memento.llm.Path.read_text", return_value="")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_codex_backend_retries_until_third_attempt_succeeds(self, mock_run, mock_unlink, mock_read):
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout="", stderr=""),
+            MagicMock(returncode=1, stdout="", stderr=""),
+            MagicMock(returncode=0, stdout='{"notes":[]}\n', stderr=""),
+        ]
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "codex",
+                "llm_model": "gpt-5",
+            },
+        )
+
+        assert result.ok is True
+        assert result.text == '{"notes":[]}'
+        assert mock_run.call_count == 3
+
+    @patch("memento.llm.Path.read_text", return_value="")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_codex_backend_retries_until_fifth_attempt_succeeds(self, mock_run, mock_unlink, mock_read):
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout="", stderr=""),
+            MagicMock(returncode=1, stdout="", stderr=""),
+            MagicMock(returncode=1, stdout="", stderr=""),
+            MagicMock(returncode=1, stdout="", stderr=""),
+            MagicMock(returncode=0, stdout='{"notes":[]}\n', stderr=""),
+        ]
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "codex",
+                "llm_model": "gpt-5",
+            },
+        )
+
+        assert result.ok is True
+        assert result.text == '{"notes":[]}'
+        assert mock_run.call_count == 5
+
+    @patch("memento.llm.time.sleep")
+    @patch("memento.llm.Path.read_text", return_value="")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_codex_backend_sleeps_between_failed_attempts(self, mock_run, mock_unlink, mock_read, mock_sleep):
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout="", stderr=""),
+            MagicMock(returncode=0, stdout='{"notes":[]}\n', stderr=""),
+        ]
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "codex",
+                "llm_model": "gpt-5",
+            },
+        )
+
+        assert result.ok is True
+        mock_sleep.assert_called_once()
 
     @patch("memento.llm.subprocess.run")
     def test_gemini_backend_builds_correct_command(self, mock_run):

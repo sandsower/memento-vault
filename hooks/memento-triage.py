@@ -465,14 +465,33 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
 
     result = llm_complete(prompt)
     if not result.ok:
+        log_retrieval(
+            "triage",
+            "structured_notes_llm_failed",
+            session_id=session_id,
+            project=project_slug,
+            error=result.error or "unknown llm error",
+        )
         return 0
 
     notes = _parse_structured_notes_response(result.text)
     if not notes:
+        log_retrieval(
+            "triage",
+            "structured_notes_parse_empty",
+            session_id=session_id,
+            project=project_slug,
+        )
         return 0
 
     summary = build_session_summary(meta)
     if not acquire_vault_write_lock():
+        log_retrieval(
+            "triage",
+            "structured_notes_lock_timeout",
+            session_id=session_id,
+            project=project_slug,
+        )
         return 0
     try:
         written = 0
@@ -512,12 +531,28 @@ def _run_structured_notes_worker(payload_path, sentinel_path):
 
     try:
         if payload:
-            process_structured_notes(
-                payload["session_id"],
-                payload["transcript_path"],
-                payload["meta"],
-                payload["project_slug"],
-            )
+            try:
+                written = process_structured_notes(
+                    payload["session_id"],
+                    payload["transcript_path"],
+                    payload["meta"],
+                    payload["project_slug"],
+                )
+                if written == 0:
+                    log_retrieval(
+                        "triage",
+                        "structured_notes_empty",
+                        session_id=payload["session_id"],
+                        project=payload["project_slug"],
+                    )
+            except Exception as exc:
+                log_retrieval(
+                    "triage",
+                    "structured_notes_failed",
+                    session_id=payload["session_id"],
+                    error=str(exc),
+                    project=payload["project_slug"],
+                )
     finally:
         sentinel = Path(sentinel_path)
         sentinel.parent.mkdir(parents=True, exist_ok=True)
@@ -549,6 +584,7 @@ def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
 
     subprocess.Popen(
         [sys.executable, __file__, "--structured-notes", payload_path, str(sentinel)],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,

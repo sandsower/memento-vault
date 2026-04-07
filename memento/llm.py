@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 from urllib import request
 
 from memento.config import get_config
@@ -39,13 +40,27 @@ def _success(text):
 
 def _run_cli(cmd, output_path=None, timeout=30):
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return _error("LLM command timed out")
     except FileNotFoundError as exc:
         return _error(str(exc))
 
     if result.returncode != 0:
+        if output_path is not None:
+            try:
+                text = output_path.read_text()
+            except FileNotFoundError:
+                text = ""
+            finally:
+                try:
+                    output_path.unlink()
+                except FileNotFoundError:
+                    pass
+            if text.strip():
+                return _success(text)
+            if result.stdout.strip():
+                return _success(result.stdout)
         return _error(result.stderr.strip() or f"LLM command failed with exit code {result.returncode}")
 
     if output_path is not None:
@@ -56,6 +71,8 @@ def _run_cli(cmd, output_path=None, timeout=30):
                 output_path.unlink()
             except FileNotFoundError:
                 pass
+        if not text.strip() and result.stdout.strip():
+            return _success(result.stdout)
         return _success(text)
 
     return _success(result.stdout)
@@ -70,14 +87,21 @@ def _claude_complete(prompt, model=None):
 
 
 def _codex_complete(prompt, model=None):
-    with tempfile.NamedTemporaryFile(prefix="memento-llm-", suffix=".txt", delete=False) as handle:
-        output_path = Path(handle.name)
+    for attempt in range(5):
+        with tempfile.NamedTemporaryFile(prefix="memento-llm-", suffix=".txt", delete=False) as handle:
+            output_path = Path(handle.name)
 
-    cmd = ["codex", "exec", "--ephemeral"]
-    if model:
-        cmd.extend(["--model", model])
-    cmd.extend(["-o", str(output_path), prompt])
-    return _run_cli(cmd, output_path=output_path)
+        cmd = ["codex", "exec", "--ephemeral"]
+        if model:
+            cmd.extend(["--model", model])
+        cmd.extend(["-o", str(output_path), prompt])
+        result = _run_cli(cmd, output_path=output_path)
+        if result.ok:
+            return result
+        if attempt < 4:
+            time.sleep(1)
+
+    return result
 
 
 def _gemini_complete(prompt, model=None):

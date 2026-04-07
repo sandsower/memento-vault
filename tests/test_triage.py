@@ -21,6 +21,8 @@ parse_transcript = _mod.parse_transcript
 is_substantial = _mod.is_substantial
 write_fleeting = _mod.write_fleeting
 process_structured_notes = _mod.process_structured_notes
+run_structured_notes_worker = _mod._run_structured_notes_worker
+spawn_memento_agent = _mod.spawn_memento_agent
 
 
 def _write_transcript(tmp_path, entries):
@@ -297,6 +299,114 @@ class TestProcessStructuredNotes:
         assert written == 0
         assert list((tmp_vault / "notes").glob("*.md")) == []
 
+    def test_triage_logs_parse_empty_details(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="not json", ok=True, error=None)),
+            patch("memento_triage.log_retrieval") as mock_log,
+        ):
+            written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
+
+        assert written == 0
+        mock_log.assert_any_call(
+            "triage",
+            "structured_notes_parse_empty",
+            session_id="sess-123",
+            project="api-service",
+        )
+
+
+class TestStructuredNotesWorker:
+    def test_worker_logs_failure_details(self, tmp_path):
+        payload = tmp_path / "payload.json"
+        payload.write_text(
+            json.dumps(
+                {
+                    "session_id": "sess-123",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                    "meta": {"cwd": "/home/vic/Projects/memento-vault", "git_branch": "main"},
+                    "project_slug": "memento-vault",
+                }
+            )
+        )
+        sentinel = tmp_path / "done.sentinel"
+
+        with (
+            patch("memento_triage.process_structured_notes", side_effect=RuntimeError("codex worker boom")),
+            patch("memento_triage.log_retrieval") as mock_log,
+        ):
+            run_structured_notes_worker(str(payload), str(sentinel))
+
+        assert sentinel.exists()
+        mock_log.assert_any_call(
+            "triage",
+            "structured_notes_failed",
+            session_id="sess-123",
+            error="codex worker boom",
+            project="memento-vault",
+        )
+
+    def test_worker_logs_empty_result_from_process_structured_notes(self, tmp_path):
+        payload = tmp_path / "payload.json"
+        payload.write_text(
+            json.dumps(
+                {
+                    "session_id": "sess-123",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                    "meta": {"cwd": "/home/vic/Projects/memento-vault", "git_branch": "main"},
+                    "project_slug": "memento-vault",
+                }
+            )
+        )
+        sentinel = tmp_path / "done.sentinel"
+
+        with (
+            patch("memento_triage.process_structured_notes", return_value=0),
+            patch("memento_triage.log_retrieval") as mock_log,
+        ):
+            run_structured_notes_worker(str(payload), str(sentinel))
+
+        assert sentinel.exists()
+        mock_log.assert_any_call(
+            "triage",
+            "structured_notes_empty",
+            session_id="sess-123",
+            project="memento-vault",
+        )
+
+
+class TestSpawnMementoAgent:
+    def test_spawn_memento_agent_uses_devnull_stdin(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.subprocess.Popen") as mock_popen,
+        ):
+            spawn_memento_agent("sess-1234", str(transcript), meta, "api-service")
+
+        assert mock_popen.call_args.kwargs["stdin"] == _mod.subprocess.DEVNULL
+
     def test_triage_handles_llm_error(self, tmp_vault, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
         transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
@@ -317,3 +427,70 @@ class TestProcessStructuredNotes:
 
         assert written == 0
         assert list((tmp_vault / "notes").glob("*.md")) == []
+
+    def test_triage_logs_llm_error_details(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="codex timed out")),
+            patch("memento_triage.log_retrieval") as mock_log,
+        ):
+            written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
+
+        assert written == 0
+        mock_log.assert_any_call(
+            "triage",
+            "structured_notes_llm_failed",
+            session_id="sess-123",
+            project="api-service",
+            error="codex timed out",
+        )
+
+    def test_triage_logs_lock_timeout_details(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+        llm_payload = json.dumps(
+            [
+                {
+                    "title": "Redis cache keys need explicit TTL",
+                    "body": "Keys without TTL caused stale reads.",
+                    "type": "bugfix",
+                    "tags": ["redis", "caching"],
+                    "certainty": 3,
+                }
+            ]
+        )
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text=llm_payload, ok=True, error=None)),
+            patch("memento_triage.acquire_vault_write_lock", return_value=False),
+            patch("memento_triage.log_retrieval") as mock_log,
+        ):
+            written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
+
+        assert written == 0
+        mock_log.assert_any_call(
+            "triage",
+            "structured_notes_lock_timeout",
+            session_id="sess-123",
+            project="api-service",
+        )
