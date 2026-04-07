@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from memento.config import RUNTIME_DIR, get_config, get_vault
+from memento.store import log_retrieval
 from memento.graph import (
     apply_pagerank_boost,
     extract_wikilinks,
@@ -122,7 +123,10 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_
 
         return results[:limit]
 
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return []
+    except Exception as exc:
+        log_retrieval("search", "qmd_search_unexpected", error=str(exc))
         return []
 
 
@@ -180,8 +184,8 @@ def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=
         for future in as_completed(futures):
             try:
                 results.extend(future.result())
-            except Exception:
-                pass
+            except Exception as exc:
+                log_retrieval("search", "extra_collection_failed", error=str(exc))
 
     results.sort(key=lambda r: r["score"], reverse=True)
     return results[:limit]
@@ -417,7 +421,10 @@ def qmd_get(path, collection=None, timeout=5):
             "score": 0.0,
         }
 
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception):
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return None
+    except Exception as exc:
+        log_retrieval("search", "qmd_get_unexpected", error=str(exc))
         return None
 
 
@@ -696,8 +703,10 @@ def enhance_results(results, config=None, cwd=None):
     try:
         vault = get_vault()
         graph, pagerank = load_or_build_graph(vault)
-    except Exception:
-        pass  # networkx unavailable or graph build failed
+    except ImportError:
+        pass  # networkx unavailable
+    except Exception as exc:
+        log_retrieval("search", "graph_load_failed", error=str(exc))
 
     if pagerank:
         results = apply_pagerank_boost(results, pagerank, config)

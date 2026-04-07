@@ -49,8 +49,12 @@ def log_retrieval(hook, action, **kwargs):
         os.makedirs(log_dir, exist_ok=True)
         with open(RETRIEVAL_LOG_PATH, "a") as f:
             f.write(json.dumps(entry, separators=(",", ":")) + "\n")
-    except OSError:
-        pass
+    except OSError as exc:
+        if not getattr(log_retrieval, "_warned", False):
+            import sys as _sys
+
+            print(f"[memento] warning: cannot write retrieval log: {exc}", file=_sys.stderr)
+            log_retrieval._warned = True
 
 
 def load_inception_state(state_path=None):
