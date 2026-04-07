@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from memento_utils import get_config, get_vault, detect_project, slugify, read_hook_input, sanitize_secrets, log_retrieval
+from memento_utils import get_config, get_vault, detect_project, slugify, read_hook_input, sanitize_secrets, log_retrieval, normalize_note_tags
 
 
 # --- Transcript parsing ---
@@ -302,22 +302,49 @@ def build_session_summary(meta):
 VAULT_COMMIT = Path(__file__).parent / "vault-commit.sh"
 
 
-def vault_commit(message="auto: vault update", delay_seconds=0):
+def normalize_all_notes():
+    """Normalize tags on all notes in the vault. Safe to call multiple times."""
+    vault = get_vault()
+    notes_dir = vault / "notes"
+    if not notes_dir.exists():
+        return
+    for note_path in notes_dir.glob("*.md"):
+        normalize_note_tags(note_path)
+
+
+def vault_commit(message="auto: vault update", delay_seconds=0, normalize_before=False):
     """Commit all vault changes. Runs detached. Optional delay for agent writes."""
     commit_script = str(VAULT_COMMIT)
     if not VAULT_COMMIT.exists():
         # Fall back to looking in the install location
         commit_script = str(Path.home() / ".claude" / "hooks" / "vault-commit.sh")
 
-    # Pass arguments via sys.argv to avoid shell injection from message/path content
-    subprocess.Popen(
-        [sys.executable, "-c",
-         "import subprocess,time,sys; time.sleep(int(sys.argv[1])); subprocess.run([sys.argv[2], sys.argv[3]], capture_output=True)",
-         str(delay_seconds), commit_script, message],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    if normalize_before:
+        # Normalize tags before committing — runs in the delayed subprocess
+        hooks_dir = str(Path(__file__).parent)
+        subprocess.Popen(
+            [sys.executable, "-c",
+             "import time,sys,subprocess; sys.path.insert(0,sys.argv[1]);"
+             " time.sleep(int(sys.argv[2]));"
+             " from memento_utils import normalize_note_tags; from pathlib import Path;"
+             " from memento_utils import get_vault;"
+             " [normalize_note_tags(p) for p in (get_vault()/'notes').glob('*.md')];"
+             " subprocess.run([sys.argv[3], sys.argv[4]], capture_output=True)",
+             hooks_dir, str(delay_seconds), commit_script, message],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    else:
+        # Pass arguments via sys.argv to avoid shell injection from message/path content
+        subprocess.Popen(
+            [sys.executable, "-c",
+             "import subprocess,time,sys; time.sleep(int(sys.argv[1])); subprocess.run([sys.argv[2], sys.argv[3]], capture_output=True)",
+             str(delay_seconds), commit_script, message],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
 
 def reindex_qmd(delay_seconds=0):
@@ -462,7 +489,8 @@ def main():
         spawn_memento_agent(session_id, transcript_path, meta, project_slug)
         delay = config["agent_delay_seconds"]
         if config["auto_commit"]:
-            vault_commit(f"auto: notes from session {session_id[:8]}", delay_seconds=delay)
+            vault_commit(f"auto: notes from session {session_id[:8]}",
+                         delay_seconds=delay, normalize_before=True)
         reindex_qmd(delay_seconds=delay + 5)
     else:
         # Always reindex so fleeting notes become searchable

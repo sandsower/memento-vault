@@ -95,6 +95,23 @@ DEFAULT_CONFIG = {
     # Deep recall — background codex analysis (experimental)
     "deep_recall_enabled": False,
     "deep_recall_backend": "codex",
+    # Tag normalization
+    "tag_aliases": {
+        "k8s": "kubernetes",
+        "js": "javascript",
+        "ts": "typescript",
+        "py": "python",
+        "rb": "ruby",
+        "db": "database",
+        "postgres": "postgresql",
+        "mongo": "mongodb",
+        "ci": "ci-cd",
+        "gh": "github",
+        "gha": "github-actions",
+        "fe": "frontend",
+        "be": "backend",
+        "deps": "dependencies",
+    },
 }
 
 _CONFIG = None
@@ -238,6 +255,71 @@ def sanitize_secrets(text):
     for pattern, replacement in _COMPILED_SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+# --- Tag normalization ---
+
+
+def normalize_tags(tags):
+    """Normalize a list of tags using the configured alias map.
+
+    Lowercases all tags and replaces aliases with canonical forms.
+    Returns deduplicated list preserving order.
+    """
+    config = get_config()
+    aliases = config.get("tag_aliases", {})
+
+    seen = set()
+    normalized = []
+    for tag in tags:
+        tag = tag.lower().strip()
+        tag = aliases.get(tag, tag)
+        if tag and tag not in seen:
+            seen.add(tag)
+            normalized.append(tag)
+    return normalized
+
+
+def normalize_note_tags(note_path):
+    """Read a note file, normalize its frontmatter tags, rewrite if changed.
+
+    Returns True if the file was modified, False otherwise.
+    """
+    path = Path(note_path)
+    if not path.exists() or not path.suffix == ".md":
+        return False
+
+    content = path.read_text()
+    if not content.startswith("---"):
+        return False
+
+    # Find frontmatter boundaries
+    end = content.find("---", 3)
+    if end == -1:
+        return False
+    end += 3
+
+    frontmatter = content[:end]
+    body = content[end:]
+
+    # Extract tags line
+    tag_match = re.search(r"^(tags:\s*)\[([^\]]*)\]", frontmatter, re.MULTILINE)
+    if not tag_match:
+        return False
+
+    prefix = tag_match.group(1)
+    raw_tags = [t.strip().strip('"').strip("'") for t in tag_match.group(2).split(",")]
+    raw_tags = [t for t in raw_tags if t]
+
+    normalized = normalize_tags(raw_tags)
+
+    if raw_tags == normalized:
+        return False
+
+    new_tag_line = f"{prefix}[{', '.join(normalized)}]"
+    new_frontmatter = frontmatter[:tag_match.start()] + new_tag_line + frontmatter[tag_match.end():]
+    path.write_text(new_frontmatter + body)
+    return True
 
 
 # --- Project detection ---
