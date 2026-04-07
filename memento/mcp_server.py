@@ -238,9 +238,10 @@ def memento_get(path: str) -> dict:
     elif not path.startswith("notes/") and "/" not in path:
         path = f"notes/{path}"
 
-    # Path traversal guard
+    # Path traversal guard (use is_relative_to for proper boundary check)
     full_path = (vault / path).resolve()
-    if not str(full_path).startswith(str(vault.resolve())):
+    vault_resolved = vault.resolve()
+    if full_path != vault_resolved and vault_resolved not in full_path.parents:
         return {"error": "Invalid path: traversal outside vault"}
     if full_path.exists():
         content = full_path.read_text()
@@ -312,6 +313,18 @@ def memento_capture(
     if transcript_path:
         if not os.path.exists(transcript_path):
             return {"error": f"Transcript file not found: {transcript_path}"}
+
+        # Restrict to known agent transcript directories
+        abs_path = os.path.abspath(transcript_path)
+        allowed_prefixes = [
+            os.path.join(str(Path.home()), ".claude"),
+            os.path.join(str(Path.home()), ".codex"),
+            os.path.join(str(Path.home()), ".cursor"),
+            os.path.join(str(Path.home()), ".codeium"),
+            "/tmp",
+        ]
+        if not any(abs_path.startswith(p) for p in allowed_prefixes):
+            return {"error": "transcript_path must be inside a known agent directory"}
 
         try:
             from memento.adapters import parse_transcript

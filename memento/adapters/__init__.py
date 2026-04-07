@@ -77,10 +77,10 @@ def parse_transcript(transcript_path, agent=None):
     if agent == "claude":
         meta = _parse_claude(transcript_path)
     elif agent in ("codex", "cursor", "windsurf"):
-        # Stub: these adapters aren't implemented yet.
-        # Fall back to Claude parser since it's the most permissive,
-        # but mark the agent correctly.
-        meta = _parse_claude(transcript_path)
+        raise ValueError(
+            f"Transcript parsing for {agent!r} is not yet implemented. "
+            "Use memento_capture with session_summary instead of transcript_path."
+        )
     else:
         raise ValueError(f"Unknown agent: {agent!r}. Set MEMENTO_AGENT env var or use a supported format.")
 

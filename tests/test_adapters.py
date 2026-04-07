@@ -117,18 +117,18 @@ class TestParseTranscript:
         assert "/home/vic/Projects/test/auth.py" in meta["files_edited"]
         assert "/home/vic/Projects/test/auth.py" in meta["files_read"]
 
-    def test_explicit_agent_override(self, claude_transcript):
-        meta = parse_transcript(str(claude_transcript), agent="codex")
-        assert meta["agent"] == "codex"
+    def test_explicit_agent_override_raises_for_unimplemented(self, claude_transcript):
+        with pytest.raises(ValueError, match="not yet implemented"):
+            parse_transcript(str(claude_transcript), agent="codex")
 
     def test_unknown_agent_raises(self, unknown_transcript):
         with pytest.raises(ValueError, match="Unknown agent"):
             parse_transcript(str(unknown_transcript))
 
-    def test_env_var_agent(self, claude_transcript):
+    def test_env_var_agent_raises_for_unimplemented(self, claude_transcript):
         with patch.dict(os.environ, {"MEMENTO_AGENT": "windsurf"}):
-            meta = parse_transcript(str(claude_transcript))
-            assert meta["agent"] == "windsurf"
+            with pytest.raises(ValueError, match="not yet implemented"):
+                parse_transcript(str(claude_transcript))
 
 
 # --- Claude adapter ---

@@ -28,6 +28,9 @@ def parse_transcript(transcript_path):
 
     with open(transcript_path) as f:
         for line in f:
+            line = line.strip()
+            if not line:
+                continue
             entry = json.loads(line)
             msg_type = entry.get("type")
             cwd = cwd or entry.get("cwd")

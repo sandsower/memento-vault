@@ -321,6 +321,19 @@ class TestMementoGet:
         assert "traversal" in result["error"].lower()
 
     @pytest.mark.usefixtures("_use_vault_config")
+    def test_path_traversal_sibling_directory(self, tmp_vault):
+        # Regression: startswith("vault") would match "vault-evil"
+        sibling = tmp_vault.parent / (tmp_vault.name + "-evil")
+        sibling.mkdir(exist_ok=True)
+        evil_note = sibling / "notes" / "secret.md"
+        evil_note.parent.mkdir(parents=True, exist_ok=True)
+        evil_note.write_text("---\ntitle: secret\n---\nstolen data")
+
+        result = memento_get(f"../{tmp_vault.name}-evil/notes/secret.md")
+        assert "error" in result
+        assert "traversal" in result["error"].lower()
+
+    @pytest.mark.usefixtures("_use_vault_config")
     def test_falls_back_to_qmd(self, tmp_vault):
         fake_result = {
             "path": "notes/qmd-note.md",
