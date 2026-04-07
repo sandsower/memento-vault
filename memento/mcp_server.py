@@ -1,5 +1,6 @@
 """MCP server for memento vault — exposes search, store, status, capture, and get operations."""
 
+import json
 import os
 import re
 import uuid
@@ -67,11 +68,11 @@ def memento_search(
         return []
 
     if not has_qmd():
-        return [{"error": "QMD search engine is not installed or not available"}]
+        return {"error": "QMD search engine is not installed or not available"}
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        return [{"error": f"Vault not found at {vault}"}]
+        return {"error": f"Vault not found at {vault}"}
 
     results = qmd_search_with_extras(
         query,
@@ -342,9 +343,15 @@ def memento_capture(
                     parts.append(meta["last_outcome"])
                 session_summary = " ".join(parts) or f"Session with {meta.get('exchange_count', 0)} exchanges"
 
+        except ValueError as exc:
+            log_retrieval("mcp", "capture_agent_unsupported", error=str(exc))
+            return {"error": str(exc)}
+        except (OSError, json.JSONDecodeError) as exc:
+            log_retrieval("mcp", "capture_parse_failed", error=f"{type(exc).__name__}: {exc}")
+            return {"error": f"Failed to parse transcript ({type(exc).__name__}): {exc}"}
         except Exception as exc:
-            log_retrieval("mcp", "capture_parse_failed", error=str(exc))
-            return {"error": f"Failed to parse transcript: {exc}"}
+            log_retrieval("mcp", "capture_unexpected", error=f"{type(exc).__name__}: {exc}")
+            return {"error": f"Unexpected error: {type(exc).__name__}: {exc}"}
 
     # Derive project
     project_slug, ticket = detect_project(cwd, branch) if cwd else ("unknown", None)

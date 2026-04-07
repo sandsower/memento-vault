@@ -396,19 +396,43 @@ step "Installing memento package..."
 MEMENTO_PKG_DIR="$CLAUDE_DIR/hooks/memento"
 mkdir -p "$MEMENTO_PKG_DIR/adapters"
 
+PKG_COPIED=0
+PKG_SKIPPED=0
+
 for mod in __init__.py config.py utils.py search.py graph.py store.py llm.py types.py mcp_server.py __main__.py; do
     if [ -f "$SCRIPT_DIR/memento/$mod" ]; then
-        safe_copy "$SCRIPT_DIR/memento/$mod" "$MEMENTO_PKG_DIR/$mod" "memento/$mod" || true
+        if safe_copy "$SCRIPT_DIR/memento/$mod" "$MEMENTO_PKG_DIR/$mod" "memento/$mod"; then
+            ((PKG_COPIED++)) || true
+        else
+            ((PKG_SKIPPED++)) || true
+        fi
     fi
 done
 
 for mod in __init__.py claude.py; do
     if [ -f "$SCRIPT_DIR/memento/adapters/$mod" ]; then
-        safe_copy "$SCRIPT_DIR/memento/adapters/$mod" "$MEMENTO_PKG_DIR/adapters/$mod" "memento/adapters/$mod" || true
+        if safe_copy "$SCRIPT_DIR/memento/adapters/$mod" "$MEMENTO_PKG_DIR/adapters/$mod" "memento/adapters/$mod"; then
+            ((PKG_COPIED++)) || true
+        else
+            ((PKG_SKIPPED++)) || true
+        fi
     fi
 done
 
-info "Memento package installed to $MEMENTO_PKG_DIR"
+# Validate critical package files
+for critical in __init__.py config.py utils.py store.py search.py; do
+    if [ ! -f "$MEMENTO_PKG_DIR/$critical" ]; then
+        error "Critical file missing: $MEMENTO_PKG_DIR/$critical"
+        error "Hooks will not work. Rerun with --force or fix permissions."
+        exit 1
+    fi
+done
+
+if [ "$PKG_SKIPPED" -gt 0 ]; then
+    info "Package: $PKG_COPIED updated, $PKG_SKIPPED skipped (locally modified)"
+else
+    info "Package: $PKG_COPIED files installed to $MEMENTO_PKG_DIR"
+fi
 
 # --- MCP server config (--mcp flag) ---
 
@@ -461,12 +485,15 @@ MCP_EOF
                 info "MCP server already configured in $MCP_CONFIG"
             else
                 python3 -c "
-import json, sys
-existing = json.load(open(sys.argv[1]))
+import json, sys, tempfile, os
+config_path = sys.argv[1]
+existing = json.load(open(config_path))
 new_entry = json.loads(sys.argv[2])
 existing.update(new_entry)
-with open(sys.argv[1], 'w') as f:
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(config_path), suffix='.json')
+with os.fdopen(fd, 'w') as f:
     json.dump(existing, f, indent=2)
+os.replace(tmp, config_path)
 " "$MCP_CONFIG" "$MCP_ENTRY"
                 info "Added memento-vault to $MCP_CONFIG"
             fi

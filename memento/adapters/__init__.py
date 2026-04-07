@@ -43,8 +43,12 @@ def detect_agent(transcript_path):
             # Cursor: TBD
             # Windsurf: TBD
 
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, FileNotFoundError):
         pass
+    except OSError:
+        # Let real file access errors (permissions, disk) propagate rather than
+        # hiding them behind a misleading "unknown agent" error.
+        raise
 
     return "unknown"
 
