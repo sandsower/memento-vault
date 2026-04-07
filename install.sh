@@ -152,7 +152,9 @@ safe_copy() {
             record_file "$key" "$dest"
             return 0
         else
-            skip "Skipped $key (exists, may have local changes — use --force to overwrite)"
+            cp "$src" "${dest}.new"
+            skip "Skipped $key (exists, may have local changes)"
+            skip "  New version saved to ${dest}.new — diff and merge your changes"
             record_file "$key" "$dest"
             return 1
         fi
@@ -174,8 +176,11 @@ safe_copy() {
         record_file "$key" "$dest"
         return 0
     else
-        # User modified the file — don't overwrite
-        skip "Skipped $key (locally modified — use --force to overwrite)"
+        # User modified the file — don't overwrite, but save the new version
+        # so the user can diff and merge manually
+        cp "$src" "${dest}.new"
+        skip "Skipped $key (locally modified)"
+        skip "  New version saved to ${dest}.new — diff and merge your changes"
         record_file "$key" "$dest"
         return 1
     fi
@@ -348,6 +353,7 @@ chmod +x "$CLAUDE_DIR/hooks/vault-commit.sh"
 
 if [ "$HOOKS_SKIPPED" -gt 0 ]; then
     info "Hooks: $HOOKS_UPDATED updated, $HOOKS_SKIPPED skipped (locally modified)"
+    info "  Run: diff ~/.claude/hooks/FILE ~/.claude/hooks/FILE.new to review changes"
 else
     info "Hooks: $HOOKS_UPDATED installed to $CLAUDE_DIR/hooks/"
 fi
