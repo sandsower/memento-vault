@@ -198,7 +198,7 @@ def has_new_insight(meta):
                 if extra_result.returncode == 0:
                     extra_lines = extra_result.stdout.strip().splitlines()
                     hit_count += sum(1 for line in extra_lines if line.strip() and not line.startswith("#"))
-            except Exception:
+            except (subprocess.TimeoutExpired, OSError):
                 pass
 
         if hit_count < 3:
@@ -213,7 +213,10 @@ def has_new_insight(meta):
 
         return False
 
-    except (subprocess.TimeoutExpired, Exception):
+    except subprocess.TimeoutExpired:
+        return True
+    except Exception as exc:
+        log_retrieval("triage", "has_new_insight_failed", error=str(exc))
         return True
 
 

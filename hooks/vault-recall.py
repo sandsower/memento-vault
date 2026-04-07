@@ -475,7 +475,8 @@ def run_recall():
 
     try:
         hook_input = read_hook_input()
-    except Exception:
+    except Exception as exc:
+        log_retrieval("recall", "hook_input_failed", error=str(exc))
         return [], None
 
     prompt = hook_input.get("prompt", "")

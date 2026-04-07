@@ -294,7 +294,8 @@ def main():
 
     try:
         hook_input = read_hook_input()
-    except Exception:
+    except Exception as exc:
+        log_retrieval("briefing", "hook_input_failed", error=str(exc))
         sys.exit(0)
 
     cwd = hook_input.get("cwd", "")

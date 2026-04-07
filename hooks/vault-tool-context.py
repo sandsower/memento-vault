@@ -345,7 +345,8 @@ def main():
 
     try:
         hook_input = read_hook_input()
-    except Exception:
+    except Exception as exc:
+        log_retrieval("tool-context", "hook_input_failed", error=str(exc))
         sys.exit(0)
 
     tool_name = hook_input.get("tool_name", "")

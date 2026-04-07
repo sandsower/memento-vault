@@ -171,16 +171,7 @@ def build_wikilink_graph(vault_path):
         Empty DiGraph if networkx is unavailable.
     """
     if not _HAS_NETWORKX:
-        return type(
-            "FakeGraph",
-            (),
-            {
-                "nodes": [],
-                "edges": [],
-                "number_of_nodes": lambda s: 0,
-                "number_of_edges": lambda s: 0,
-            },
-        )()
+        return None
 
     graph = nx.DiGraph()
     vault = Path(vault_path)
