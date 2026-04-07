@@ -12,19 +12,15 @@ import sys
 import time
 from pathlib import Path
 
-# Allow imports from the same directory
+# Allow imports from the repo and same directory
+_repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import (
-    get_config,
-    get_vault,
-    has_qmd,
-    qmd_search_with_extras,
-    enhance_results,
-    log_retrieval,
-    read_hook_input,
-    RUNTIME_DIR,
-)
+from memento.config import RUNTIME_DIR, get_config, get_vault  # noqa: E402
+from memento.search import enhance_results, has_qmd, qmd_search_with_extras  # noqa: E402
+from memento.store import log_retrieval  # noqa: E402
+from memento.utils import read_hook_input  # noqa: E402
 
 CACHE_PATH = os.path.join(RUNTIME_DIR, "tool-context-cache.json")
 RECALL_STATE_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")

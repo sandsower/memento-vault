@@ -18,16 +18,19 @@ from pathlib import Path
 
 import numpy as np
 
-# Add hooks dir to path for memento_utils import
+# Add repo root and hooks dir to path for local imports
+_repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
-from memento_utils import (
-    get_config,
-    slugify,
-    load_inception_state,
-    save_inception_state,
-    acquire_inception_lock,
-    release_inception_lock,
+from memento.config import RUNTIME_DIR, get_config, slugify  # noqa: E402
+from memento.llm import llm_complete  # noqa: E402
+from memento.search import has_qmd  # noqa: E402
+from memento.store import (  # noqa: E402
     INCEPTION_STATE_PATH,
+    acquire_inception_lock,
+    load_inception_state,
+    release_inception_lock,
+    save_inception_state,
 )
 
 
@@ -473,19 +476,33 @@ def check_ledger_dedup(cluster_stems, ledger):
 def check_title_overlap(slug, existing_stems):
     """Check if a slugified title overlaps too much with existing note stems.
 
-    Returns True if overlap > 0.80 with any existing stem.
+    Returns True if overlap > 0.70 with any existing stem (token Jaccard),
+    or if one slug is a substring of the other (catches prefix dupes like
+    "decouple-safety-controls" vs "decouple-safety-controls-and-trust-boundaries").
     """
+    if not slug:
+        return False
+
     slug_tokens = set(slug.split("-"))
     if not slug_tokens:
         return False
 
     for existing in existing_stems:
+        if not existing:
+            continue
+        # Substring containment: catches "foo-bar" vs "foo-bar-baz-qux"
+        if slug in existing or existing in slug:
+            return True
+
         existing_tokens = set(existing.split("-"))
         if not existing_tokens:
             continue
         intersection = slug_tokens & existing_tokens
-        overlap = len(intersection) / min(len(slug_tokens), len(existing_tokens))
-        if overlap > 0.80:
+        # Jaccard similarity (union-based) instead of min-based overlap.
+        # More robust for slugs of different lengths.
+        union = slug_tokens | existing_tokens
+        jaccard = len(intersection) / len(union)
+        if jaccard > 0.70:
             return True
 
     return False
@@ -538,13 +555,14 @@ def cluster_notes(embedding_matrix, stem_index, config):
     return sorted_clusters
 
 
-def write_pattern_note(synthesis, cluster_stems, vault_path):
+def write_pattern_note(synthesis, cluster_stems, vault_path, merge_target=None):
     """Write a pattern note to the vault using atomic write.
 
     Args:
         synthesis: dict with keys: title, body, tags, certainty, related
         cluster_stems: list of source note stems
         vault_path: Path to vault root
+        merge_target: if set, overwrite this existing note stem instead of creating new
 
     Returns:
         Path to the written note, or None if write failed
@@ -552,13 +570,19 @@ def write_pattern_note(synthesis, cluster_stems, vault_path):
     notes_dir = Path(vault_path) / "notes"
     now = datetime.now().strftime("%Y-%m-%dT%H:%M")
 
-    # Build slug, handle collisions
-    base_slug = slugify(synthesis["title"])
-    slug = base_slug
-    counter = 2
-    while (notes_dir / f"{slug}.md").exists():
-        slug = f"{base_slug}-{counter}"
-        counter += 1
+    if merge_target:
+        # Refresh: overwrite the existing note with updated content
+        slug = merge_target
+    else:
+        # Build slug, detect duplicates vs genuine collisions
+        base_slug = slugify(synthesis["title"])
+        slug = base_slug
+
+        if (notes_dir / f"{slug}.md").exists():
+            # An existing note has the exact same slug. This is almost certainly
+            # a duplicate synthesis, not a genuine collision. Return None to skip
+            # rather than creating a -2 suffixed duplicate.
+            return None
 
     # Build frontmatter
     tags_str = "[" + ", ".join(synthesis.get("tags", [])) + "]"
@@ -649,56 +673,14 @@ def call_llm(prompt, config):
     Returns:
         str: raw LLM response text, or empty string on failure
     """
-    backend = config.get("inception_backend", "codex")
-
-    import tempfile
-
-    if backend == "codex":
-        # codex exec writes the last message to a file via -o
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-            out_path = tmp.name
-        cmd = [
-            "codex",
-            "exec",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--ephemeral",
-            "-o",
-            out_path,
-            prompt,
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-            result = Path(out_path).read_text().strip()
-            return result
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return ""
-        finally:
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
-    else:
-        model = config.get("inception_model", "haiku")
-        cmd = [
-            "claude",
-            "--print",
-            "--model",
-            model,
-            "--dangerously-skip-permissions",
-            "--no-session-persistence",
-            "-p",
-            prompt,
-        ]
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return ""
+    result = llm_complete(
+        prompt,
+        {
+            "llm_backend": config.get("inception_backend", "codex"),
+            "llm_model": config.get("inception_model"),
+        },
+    )
+    return result.text if result.ok else ""
 
 
 def parse_synthesis(raw):
@@ -798,9 +780,7 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         return 2
 
     # Acquire lock
-    from memento_utils import RUNTIME_DIR as _rtdir
-
-    _lock_path = lock_path or os.path.join(_rtdir, "inception.lock")
+    _lock_path = lock_path or os.path.join(RUNTIME_DIR, "inception.lock")
     if not acquire_inception_lock(lock_path=_lock_path):
         if args.verbose:
             print("Another Inception instance is running", file=sys.stderr)
@@ -971,7 +951,9 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
             synthesis["related"] = list(set(synthesis.get("related", []) + stems))
 
             # Write (or refresh existing)
-            note_path = write_pattern_note(synthesis, stems, vault_path)
+            note_path = write_pattern_note(
+                synthesis, stems, vault_path, merge_target=merge_target if action == "merge" else None
+            )
             if note_path:
                 if action == "merge":
                     notes_refreshed += 1
@@ -1463,8 +1445,6 @@ def pre_reason(pattern_notes, notes_dict, config):
 
 def _commit_and_reindex(notes_written, config):
     """Commit vault changes and trigger QMD reindex."""
-    from memento_utils import has_qmd
-
     vault = Path(config["vault_path"])
     commit_script = Path.home() / ".claude" / "hooks" / "vault-commit.sh"
 

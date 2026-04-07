@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 docs/research/
 benchmark/*.jsonl
+benchmark/*_results.json
 data/
 plans/
 sweep*.db

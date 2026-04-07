@@ -17,10 +17,16 @@ import sys
 import time
 from pathlib import Path
 
-# Allow imports from the same directory
+# Allow imports from the repo and same directory
+_repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, detect_project, has_qmd, read_hook_input, RUNTIME_DIR
+from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault  # noqa: E402
+from memento.graph import load_or_build_graph, lookup_project_notes  # noqa: E402
+from memento.search import enhance_results, has_qmd, qmd_search  # noqa: E402
+from memento.store import log_retrieval  # noqa: E402
+from memento.utils import read_hook_input  # noqa: E402
 
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
 
@@ -196,8 +202,6 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
 
 def run_deferred_search():
     """Background worker: run QMD search and write results to the deferred file."""
-    from memento_utils import qmd_search, enhance_results, log_retrieval
-
     try:
         with open(DEFERRED_BRIEFING_PATH) as f:
             data = json.load(f)
@@ -328,8 +332,6 @@ def main():
     # --- Fast path: project maps (skip deferred vsearch if maps have enough results) ---
     if config.get("project_maps_enabled", True) and has_qmd():
         try:
-            from memento_utils import lookup_project_notes
-
             max_notes = config.get("briefing_max_notes", 5)
             map_notes = lookup_project_notes(project_slug, limit=max_notes)
             if len(map_notes) >= max_notes:
@@ -353,8 +355,6 @@ def main():
                         f,
                     )
 
-                from memento_utils import log_retrieval
-
                 log_retrieval(
                     "briefing", "project-maps-fast-path", project=project_slug, injected_count=len(note_lines)
                 )
@@ -364,8 +364,6 @@ def main():
 
     # --- Pre-build wikilink graph for recall (non-blocking) ---
     try:
-        from memento_utils import load_or_build_graph
-
         load_or_build_graph(get_vault())
     except Exception:
         pass  # Non-fatal — graph will be built on first recall if needed

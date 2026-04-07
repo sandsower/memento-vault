@@ -6,6 +6,7 @@ Usage: wait-and-commit.py <sentinel> <max_wait_s> <hooks_dir> <commit_script> <m
 Polls for the sentinel file every 2 seconds. Once found (or after max_wait_s),
 normalizes all note tags and runs the commit script.
 """
+
 import subprocess
 import sys
 import time
@@ -26,8 +27,10 @@ while elapsed < max_wait:
     elapsed += 2
 
 # Normalize tags on all notes
+sys.path.insert(0, str(Path(hooks_dir).parent))
 sys.path.insert(0, hooks_dir)
-from memento_utils import get_vault, normalize_note_tags  # noqa: E402
+from memento.config import get_vault  # noqa: E402
+from memento.utils import normalize_note_tags  # noqa: E402
 
 vault = get_vault()
 notes_dir = vault / "notes"

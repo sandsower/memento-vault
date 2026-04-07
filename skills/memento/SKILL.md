@@ -54,7 +54,19 @@ The vault location is configured in `memento.yml` (default: `~/memento`). Check 
 
    File naming: slugified concept title. `redis-cache-requires-explicit-ttl.md`, not `2026-03-05-session.md`.
 
-4. **Update the project index** in the vault's `projects/` directory. Detect the project from the working directory and branch. Add `[[note-name]]` links under `## Notes` and a session line under `## Sessions`. Create the project index if it doesn't exist, using this template:
+4. **Sanitize before writing.** Before writing any note to disk, scan the body and frontmatter for sensitive data and replace it with a generic descriptor. Strip:
+
+   - **AWS account IDs** (12-digit numbers in AWS contexts) → `[AWS account]`
+   - **API keys / tokens / secrets** (long alphanumeric strings, `sk-*`, `xoxb-*`, bearer tokens) → `[redacted]`
+   - **Kennitala** (Icelandic national IDs, 10-digit `DDMMYY-XXXX`) → `[kennitala]`
+   - **Email addresses** in note bodies (keep only if the email is the *subject* of the note, e.g., a contact flow design) → `[email]`
+   - **Internal hostnames / IPs** (RFC 1918 addresses, `*.internal`, `*.local`) → `[internal-host]`
+   - **IAM usernames / ARNs** → describe the role generically (e.g., "personal IAM user")
+   - **Database connection strings** → `[connection-string]`
+
+   Keep domain names that are public (e.g., `vicvalenzuela.com`, `fundid.is`) — those are fine. The goal is to prevent credential and identity leaks if the vault is ever shared, synced, or indexed. When in doubt, strip it — the session transcript has the original values if needed later.
+
+5. **Update the project index** in the vault's `projects/` directory. Detect the project from the working directory and branch. Add `[[note-name]]` links under `## Notes` and a session line under `## Sessions`. Create the project index if it doesn't exist, using this template:
 
    ```yaml
    ---
@@ -70,15 +82,15 @@ The vault location is configured in `memento.yml` (default: `~/memento`). Check 
    ## Sessions
    ```
 
-5. **Run post-capture extensions.** Check if `~/.claude/skills/memento-post/SKILL.md` exists. If it does, read it and follow its instructions. This is the extension point for project-specific workflows (e.g., promoting notes to a team vault, tagging with domain-specific labels, notifying external systems). Skip this step if the file doesn't exist.
+6. **Run post-capture extensions.** Check if `~/.claude/skills/memento-post/SKILL.md` exists. If it does, read it and follow its instructions. This is the extension point for project-specific workflows (e.g., promoting notes to a team vault, tagging with domain-specific labels, notifying external systems). Skip this step if the file doesn't exist.
 
-6. **Commit to vault repo.** After all writes are done, run:
+7. **Commit to vault repo.** After all writes are done, run:
 
    ```bash
    ~/.claude/hooks/vault-commit.sh "memento: [short description of what was captured]"
    ```
 
-7. **Trigger Inception check.** Manual captures bypass SessionEnd triage, so Inception's threshold check doesn't fire automatically. Run it explicitly:
+8. **Trigger Inception check.** Manual captures bypass SessionEnd triage, so Inception's threshold check doesn't fire automatically. Run it explicitly:
 
    ```bash
    python3 ~/.claude/hooks/memento-inception.py --verbose 2>&1 | tail -5
@@ -86,7 +98,7 @@ The vault location is configured in `memento.yml` (default: `~/memento`). Check 
 
    This is a no-op if Inception is disabled, if there aren't enough new notes, or if another instance is already running. It runs in the foreground but returns quickly (~20ms) if the threshold isn't met.
 
-8. **Confirm to the user** what was captured: list the notes created and links added. Include any output from post-capture extensions.
+9. **Confirm to the user** what was captured: list the notes created and links added. Include any output from post-capture extensions.
 
 ## Rules
 

@@ -4,7 +4,7 @@ import json
 
 
 from memento_inception import build_project_maps, write_project_maps
-from memento_utils import load_project_maps, lookup_project_notes
+from memento.graph import load_project_maps, lookup_project_notes
 
 
 # --- build_project_maps ---

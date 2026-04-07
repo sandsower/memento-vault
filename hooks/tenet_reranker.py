@@ -144,7 +144,7 @@ def rerank(query, results, config=None):
     If deps missing or model unavailable, returns results unchanged.
     """
     if config is None:
-        from memento_utils import get_config
+        from memento.config import get_config
 
         config = get_config()
 

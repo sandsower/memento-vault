@@ -279,7 +279,7 @@ class TestParallelConfig:
 
     def test_default_config_has_inception_parallel(self):
         """DEFAULT_CONFIG includes inception_parallel = 4."""
-        from memento_utils import DEFAULT_CONFIG
+        from memento.config import DEFAULT_CONFIG
 
         assert "inception_parallel" in DEFAULT_CONFIG
         assert DEFAULT_CONFIG["inception_parallel"] == 4

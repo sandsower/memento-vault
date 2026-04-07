@@ -1,10 +1,10 @@
 """Tests for Inception LLM caller and response parser."""
 
 import json
-import subprocess
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from memento_inception import call_llm, parse_synthesis
+from memento.llm import LLMResult
 
 
 class TestParseSynthesis:
@@ -84,29 +84,23 @@ class TestParseSynthesis:
 
 
 class TestCallLlm:
-    """Tests for call_llm with mocked subprocess."""
+    """Tests for call_llm via shared llm_complete."""
 
-    @patch("memento_inception.os.unlink")
-    @patch("memento_inception.Path.read_text", return_value="some output\n")
-    @patch("memento_inception.subprocess.run")
-    def test_call_codex_command(self, mock_run, mock_read, mock_unlink):
-        """Codex backend builds correct command with exec and -o flag."""
-        mock_run.return_value = MagicMock(returncode=0)
+    @patch("memento_inception.llm_complete")
+    def test_call_codex_command(self, mock_complete):
+        mock_complete.return_value = LLMResult(text="some output", ok=True, error=None)
 
         result = call_llm("test prompt", {"inception_backend": "codex"})
 
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "codex"
-        assert "exec" in cmd
-        assert "-o" in cmd
-        assert "test prompt" in cmd
+        mock_complete.assert_called_once_with(
+            "test prompt",
+            {"llm_backend": "codex", "llm_model": None},
+        )
         assert result == "some output"
 
-    @patch("memento_inception.subprocess.run")
-    def test_call_claude_command(self, mock_run):
-        """Claude backend builds correct command with --print and model flags."""
-        mock_run.return_value = MagicMock(stdout="claude output\n")
+    @patch("memento_inception.llm_complete")
+    def test_call_claude_command(self, mock_complete):
+        mock_complete.return_value = LLMResult(text="claude output", ok=True, error=None)
 
         result = call_llm(
             "test prompt",
@@ -116,27 +110,23 @@ class TestCallLlm:
             },
         )
 
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "claude"
-        assert "--print" in cmd
-        assert "--model" in cmd
-        assert "sonnet" in cmd
+        mock_complete.assert_called_once_with(
+            "test prompt",
+            {"llm_backend": "claude", "llm_model": "sonnet"},
+        )
         assert result == "claude output"
 
-    @patch("memento_inception.subprocess.run")
-    def test_call_timeout(self, mock_run):
-        """TimeoutExpired returns empty string."""
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=120)
+    @patch("memento_inception.llm_complete")
+    def test_call_timeout(self, mock_complete):
+        mock_complete.return_value = LLMResult(text="", ok=False, error="timed out")
 
         result = call_llm("prompt", {"inception_backend": "codex"})
 
         assert result == ""
 
-    @patch("memento_inception.subprocess.run")
-    def test_call_missing_binary(self, mock_run):
-        """FileNotFoundError returns empty string."""
-        mock_run.side_effect = FileNotFoundError("codex not found")
+    @patch("memento_inception.llm_complete")
+    def test_call_missing_binary(self, mock_complete):
+        mock_complete.return_value = LLMResult(text="", ok=False, error="codex not found")
 
         result = call_llm("prompt", {"inception_backend": "codex"})
 

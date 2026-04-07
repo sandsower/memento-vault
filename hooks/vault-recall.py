@@ -14,25 +14,26 @@ import tempfile
 import time
 from pathlib import Path
 
-# Allow imports from the same directory
+# Allow imports from the repo and same directory
+_repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import (
-    get_config,
-    get_vault,
-    has_qmd,
-    qmd_search_with_extras,
+from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault  # noqa: E402
+from memento.graph import lookup_concepts  # noqa: E402
+from memento.search import (  # noqa: E402
     enhance_results,
-    detect_project,
-    log_retrieval,
-    read_hook_input,
+    has_qmd,
     is_vsearch_warm,
-    rrf_fuse,
     mark_vsearch_warm,
-    prf_expand_query,
     multi_hop_search,
-    RUNTIME_DIR,
+    prf_expand_query,
+    qmd_search_with_extras,
+    rrf_fuse,
 )
+from memento.llm import llm_complete  # noqa: E402
+from memento.store import log_retrieval  # noqa: E402
+from memento.utils import read_hook_input  # noqa: E402
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
@@ -335,43 +336,14 @@ def run_deep_recall_worker(input_path, backend):
         "Return at most 3 suggestions. If nothing additional is needed, return []."
     )
 
-    out_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".txt",
-            prefix="deep-recall-out-",
-            dir=RUNTIME_DIR,
-            delete=False,
-        ) as tmp:
-            out_path = tmp.name
-
-        if backend == "codex":
-            cmd = [
-                "codex",
-                "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--ephemeral",
-                "-o",
-                out_path,
-                codex_prompt,
-            ]
-        else:
-            cmd = [
-                "claude",
-                "--print",
-                "--dangerously-skip-permissions",
-                "--no-session-persistence",
-                "-p",
-                codex_prompt,
-            ]
-
-        result = _subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-
-        if backend == "codex":
-            raw = Path(out_path).read_text().strip()
-        else:
-            raw = result.stdout.strip()
+        result = llm_complete(
+            codex_prompt,
+            {
+                "llm_backend": backend,
+            },
+        )
+        raw = result.text if result.ok else ""
 
         # Parse the LLM response — extract JSON array
         suggestions = _parse_deep_recall_response(raw)
@@ -387,14 +359,8 @@ def run_deep_recall_worker(input_path, backend):
                 f,
             )
 
-    except (_subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except OSError:
         _cleanup_deep_recall_pending()
-    finally:
-        if out_path:
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
 
 
 def _parse_deep_recall_response(raw):
@@ -604,8 +570,6 @@ def run_recall():
     # Concept index supplement (always, O(1) lookup)
     if config.get("concept_index_enabled", True):
         try:
-            from memento_utils import lookup_concepts
-
             concept_hits = lookup_concepts(prompt)
             if concept_hits:
                 existing_paths = {r.get("path", "") for r in results}

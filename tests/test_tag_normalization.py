@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-from memento_utils import normalize_tags, normalize_note_tags
+from memento.utils import normalize_note_tags, normalize_tags
 
 
 _TEST_CONFIG = {
@@ -23,7 +23,7 @@ _TEST_CONFIG = {
 
 class TestNormalizeTags:
     def _normalize(self, tags):
-        with patch("memento_utils.get_config", return_value=_TEST_CONFIG):
+        with patch("memento.utils.get_config", return_value=_TEST_CONFIG):
             return normalize_tags(tags)
 
     def test_basic_alias(self):
@@ -45,7 +45,7 @@ class TestNormalizeTags:
         assert self._normalize(["", "redis", ""]) == ["redis"]
 
     def test_no_aliases_configured(self):
-        with patch("memento_utils.get_config", return_value={"tag_aliases": {}}):
+        with patch("memento.utils.get_config", return_value={"tag_aliases": {}}):
             assert normalize_tags(["k8s", "redis"]) == ["k8s", "redis"]
 
 
@@ -57,7 +57,7 @@ class TestNormalizeNoteTags:
 
     def test_normalizes_tags_in_file(self, tmp_path):
         note = self._write_note(tmp_path, "k8s, redis, js")
-        with patch("memento_utils.get_config", return_value=_TEST_CONFIG):
+        with patch("memento.utils.get_config", return_value=_TEST_CONFIG):
             changed = normalize_note_tags(note)
         assert changed is True
         content = note.read_text()
@@ -67,13 +67,13 @@ class TestNormalizeNoteTags:
 
     def test_no_change_when_already_normalized(self, tmp_path):
         note = self._write_note(tmp_path, "kubernetes, redis")
-        with patch("memento_utils.get_config", return_value=_TEST_CONFIG):
+        with patch("memento.utils.get_config", return_value=_TEST_CONFIG):
             changed = normalize_note_tags(note)
         assert changed is False
 
     def test_preserves_body(self, tmp_path):
         note = self._write_note(tmp_path, "k8s, redis")
-        with patch("memento_utils.get_config", return_value=_TEST_CONFIG):
+        with patch("memento.utils.get_config", return_value=_TEST_CONFIG):
             normalize_note_tags(note)
         content = note.read_text()
         assert "Body text." in content
@@ -93,7 +93,7 @@ class TestNormalizeNoteTags:
             "---\n\n"
             "Body text."
         )
-        with patch("memento_utils.get_config", return_value=_TEST_CONFIG):
+        with patch("memento.utils.get_config", return_value=_TEST_CONFIG):
             changed = normalize_note_tags(note)
         assert changed is True
         content = note.read_text()
@@ -118,7 +118,7 @@ class TestNormalizeNoteTags:
             "---\n\n"
             "Some text\n---\nMore text."
         )
-        with patch("memento_utils.get_config", return_value=_TEST_CONFIG):
+        with patch("memento.utils.get_config", return_value=_TEST_CONFIG):
             changed = normalize_note_tags(note)
         assert changed is True
         content = note.read_text()

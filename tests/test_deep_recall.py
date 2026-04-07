@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+from memento.llm import LLMResult
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
@@ -281,7 +282,7 @@ class TestDeepRecallGate:
     """The gate in run_recall should only trigger when all conditions are met."""
 
     def _make_config(self, **overrides):
-        from memento_utils import DEFAULT_CONFIG
+        from memento.config import DEFAULT_CONFIG
 
         config = dict(DEFAULT_CONFIG)
         config.update(
@@ -457,24 +458,6 @@ class TestDeepRecallGate:
 class TestDeepRecallWorker:
     """Background worker execution."""
 
-    def _mock_codex_run(self, output_text):
-        """Create a side_effect that writes output to the -o file for codex backend."""
-
-        def side_effect(cmd, **kwargs):
-            # For codex backend, write output to the -o path
-            if "codex" in cmd:
-                try:
-                    o_idx = cmd.index("-o")
-                    out_path = cmd[o_idx + 1]
-                    Path(out_path).write_text(output_text)
-                except (ValueError, IndexError):
-                    pass
-            mock_result = MagicMock()
-            mock_result.stdout = output_text
-            return mock_result
-
-        return side_effect
-
     def test_worker_writes_ready_results(self, runtime_dir, tmp_path):
         _, pending_path = runtime_dir
         # Write pending file
@@ -495,7 +478,7 @@ class TestDeepRecallWorker:
 
         codex_output = '[{"title": "Cache invalidation", "reason": "Related approach"}]'
 
-        with patch("vault_recall._subprocess.run", side_effect=self._mock_codex_run(codex_output)):
+        with patch("vault_recall.llm_complete", return_value=LLMResult(text=codex_output, ok=True, error=None)):
             run_deep_recall_worker(input_path, "codex")
 
         assert os.path.exists(pending_path)
@@ -514,7 +497,7 @@ class TestDeepRecallWorker:
         with open(input_path, "w") as f:
             json.dump({"prompt": "test", "initial_results": [], "timestamp": time.time()}, f)
 
-        with patch("vault_recall._subprocess.run", side_effect=self._mock_codex_run("[]")):
+        with patch("vault_recall.llm_complete", return_value=LLMResult(text="[]", ok=True, error=None)):
             run_deep_recall_worker(input_path, "codex")
 
         # Input file should be deleted
@@ -560,15 +543,15 @@ class TestDeepRecallWorker:
                 f,
             )
 
-        mock_result = MagicMock()
-        mock_result.stdout = '[{"title": "Test", "reason": "reason"}]'
-
-        with patch("vault_recall._subprocess.run", return_value=mock_result) as mock_run:
+        with patch(
+            "vault_recall.llm_complete",
+            return_value=LLMResult(text='[{"title": "Test", "reason": "reason"}]', ok=True, error=None),
+        ) as mock_complete:
             run_deep_recall_worker(input_path, "claude")
 
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "claude"
-        assert "--print" in cmd
+        mock_complete.assert_called_once()
+        assert mock_complete.call_args[0][0]
+        assert mock_complete.call_args[0][1]["llm_backend"] == "claude"
 
 
 class TestMainIntegration:

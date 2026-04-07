@@ -1,10 +1,10 @@
-"""Tests for Inception state management functions in memento_utils."""
+"""Tests for Inception state management functions in memento.store."""
 
 import json
 import os
 
 
-from memento_utils import load_inception_state, save_inception_state
+from memento.store import load_inception_state, save_inception_state
 
 
 class TestLoadInceptionState:

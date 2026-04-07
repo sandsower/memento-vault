@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
-from memento_utils import extract_wikilinks, qmd_get, multi_hop_search
+from memento.graph import extract_wikilinks
+from memento.search import multi_hop_search, qmd_get
 
 
 class TestExtractWikilinks:
@@ -60,7 +61,7 @@ class TestQmdGet:
 
     def test_returns_note_dict(self):
         mock_output = '{"file": "notes/foo.md", "title": "Foo", "content": "Some content with [[bar]]."}'
-        with patch("memento_utils.subprocess.run") as mock_run:
+        with patch("memento.search.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = mock_output
             result = qmd_get("notes/foo.md")
@@ -70,7 +71,7 @@ class TestQmdGet:
         assert "content" in result
 
     def test_returns_none_on_failure(self):
-        with patch("memento_utils.subprocess.run") as mock_run:
+        with patch("memento.search.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 1
             mock_run.return_value.stdout = ""
             result = qmd_get("notes/nonexistent.md")
@@ -80,13 +81,13 @@ class TestQmdGet:
     def test_returns_none_on_timeout(self):
         import subprocess
 
-        with patch("memento_utils.subprocess.run", side_effect=subprocess.TimeoutExpired("qmd", 5)):
+        with patch("memento.search.subprocess.run", side_effect=subprocess.TimeoutExpired("qmd", 5)):
             result = qmd_get("notes/slow.md")
 
         assert result is None
 
     def test_calls_qmd_with_correct_args(self):
-        with patch("memento_utils.subprocess.run") as mock_run:
+        with patch("memento.search.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = '{"file": "notes/foo.md", "content": "text"}'
             qmd_get("notes/foo.md", collection="memento")
@@ -123,7 +124,7 @@ class TestMultiHopSearch:
                 return note_c
             return None
 
-        with patch("memento_utils.qmd_get", side_effect=mock_get):
+        with patch("memento.search.qmd_get", side_effect=mock_get):
             results = multi_hop_search("test query", initial, config={"multi_hop_max": 2})
 
         paths = [r["path"] for r in results]
@@ -143,7 +144,7 @@ class TestMultiHopSearch:
                 return {"path": "notes/a.md", "content": note_a_content}
             return {"path": path, "title": Path(path).stem, "content": "content", "score": 0.0}
 
-        with patch("memento_utils.qmd_get", side_effect=mock_get):
+        with patch("memento.search.qmd_get", side_effect=mock_get):
             results = multi_hop_search("test", initial, config={"multi_hop_max": 2})
 
         # initial (1) + max 2 linked = 3
@@ -164,7 +165,7 @@ class TestMultiHopSearch:
                 return {"path": "notes/note-c.md", "title": "Note C", "content": "C", "score": 0.0}
             return None
 
-        with patch("memento_utils.qmd_get", side_effect=mock_get):
+        with patch("memento.search.qmd_get", side_effect=mock_get):
             results = multi_hop_search("test", initial, config={"multi_hop_max": 5})
 
         # note-b already present, so only note-c added
@@ -186,7 +187,7 @@ class TestMultiHopSearch:
                 return {"path": "notes/note-b.md", "title": "Note B", "content": "B", "score": 0.0}
             return None  # nonexistent
 
-        with patch("memento_utils.qmd_get", side_effect=mock_get):
+        with patch("memento.search.qmd_get", side_effect=mock_get):
             results = multi_hop_search("test", initial, config={"multi_hop_max": 5})
 
         assert len(results) == 2
@@ -205,7 +206,7 @@ class TestMultiHopSearch:
         def mock_get(path, **kwargs):
             return {"path": path, "content": "Plain text with no links."}
 
-        with patch("memento_utils.qmd_get", side_effect=mock_get):
+        with patch("memento.search.qmd_get", side_effect=mock_get):
             results = multi_hop_search("test", initial, config={"multi_hop_max": 2})
 
         assert len(results) == 1
@@ -222,7 +223,7 @@ class TestMultiHopSearch:
                 return {"path": "notes/a.md", "content": note_a_content}
             return {"path": path, "title": "High", "content": "B", "score": 0.0}
 
-        with patch("memento_utils.qmd_get", side_effect=mock_get):
+        with patch("memento.search.qmd_get", side_effect=mock_get):
             results = multi_hop_search("test", initial, config={"multi_hop_max": 1})
 
         # Original result (0.3) should be first, linked note (0.0) second
@@ -238,7 +239,7 @@ class TestMultiHopSearch:
             get_calls.append(path)
             return {"path": path, "content": "No links here."}
 
-        with patch("memento_utils.qmd_get", side_effect=mock_get):
+        with patch("memento.search.qmd_get", side_effect=mock_get):
             multi_hop_search("test", initial, config={"multi_hop_max": 2})
 
         # Should only fetch content for top 3, not all 10
