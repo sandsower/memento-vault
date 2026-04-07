@@ -1,10 +1,14 @@
 # Memento Vault
 
-Persistent knowledge capture for Claude Code. Sessions get triaged, scored, and filed as searchable Zettelkasten notes. No cloud services, no databases. Markdown and git.
+Persistent knowledge capture for coding agents. Sessions get triaged, scored, and filed as searchable Zettelkasten notes. No cloud services, no databases. Markdown and git.
+
+Works with Claude Code (native hooks), and any MCP-compatible agent (Cursor, Windsurf, Codex, etc.) via the built-in MCP server.
 
 ## What it does
 
-A hook fires when a Claude Code session ends. It reads the transcript and decides what to keep. Short sessions get a one-liner in a daily log. Substantial ones spawn a background agent that writes atomic notes with YAML frontmatter, wikilinks, and epistemic metadata (how confident is this note? what would make it wrong?). Everything lives in a local git repo you can browse with Obsidian or search with QMD.
+When a coding session ends, the triage pipeline reads the transcript and decides what to keep. Short sessions get a one-liner in a daily log. Substantial ones spawn a background agent that writes atomic notes with YAML frontmatter, wikilinks, and epistemic metadata (how confident is this note? what would make it wrong?). Everything lives in a local git repo you can browse with Obsidian or search with QMD.
+
+For agents without native hook support, the MCP server exposes the same operations as tools: search the vault, store notes, capture sessions, read specific notes.
 
 ## Install
 
@@ -14,7 +18,7 @@ cd memento-vault
 ./install.sh
 ```
 
-Creates the vault at `~/memento`, copies hooks and skills into `~/.claude/`, optionally sets up Obsidian views and QMD search. Works on Linux and macOS.
+Creates the vault at `~/memento`, copies hooks and the `memento/` package into `~/.claude/`, optionally sets up Obsidian views and QMD search. Works on Linux and macOS.
 
 Custom vault path:
 
@@ -22,9 +26,9 @@ Custom vault path:
 MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 ```
 
-### Full install
+### Full install (hooks + retrieval + consolidation)
 
-The base install captures knowledge. To also **inject knowledge back** into active sessions and enable background consolidation:
+The base install captures knowledge. To also inject knowledge back into active sessions and enable background consolidation:
 
 ```bash
 ./install.sh --experimental
@@ -32,18 +36,71 @@ The base install captures knowledge. To also **inject knowledge back** into acti
 
 This adds two modules:
 
-- **Tenet** — three retrieval hooks that inject vault notes into active sessions (briefing, recall, tool context)
-- **Inception** — background consolidation that clusters notes and synthesizes cross-session patterns
+- **Tenet** -- three retrieval hooks that inject vault notes into active sessions (briefing, recall, tool context)
+- **Inception** -- background consolidation that clusters notes and synthesizes cross-session patterns
 
 Both require QMD. Inception also needs `pip install numpy hdbscan scikit-learn`. See [Tenet](#tenet) and [Inception](#inception) for details.
 
+### MCP install (hookless agents)
+
+For agents that support MCP but not native hooks (Cursor, Windsurf, etc.):
+
+```bash
+./install.sh --mcp
+```
+
+This installs the `memento/` package and writes MCP server config. The server runs over stdio via `python -m memento`. The installer verifies the `mcp` Python package is available and installs it if needed.
+
+You can combine flags: `./install.sh --experimental --mcp` gives you hooks + retrieval + MCP.
+
+### Upgrading from v1.x
+
+The installer is version-aware. Modified hooks are preserved with `.new` copies for manual diffing. On subsequent upgrades, modified files are auto-merged via three-way merge (`git merge-file`).
+
+```bash
+cd memento-vault && git pull && ./install.sh --experimental
+```
+
 ### Requirements
 
-- Python 3
+- Python 3.9+
 - Git
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (for hook-based setup)
 - [QMD](https://github.com/tobi/qmd) (optional, semantic search)
 - [Obsidian](https://obsidian.md) (optional, browsing)
+- `mcp` Python package (for MCP setup, installed automatically by `--mcp`)
+
+## MCP server
+
+The MCP server exposes 5 tools over stdio. Any MCP-compatible agent can use them.
+
+| Tool | What it does |
+|------|-------------|
+| `memento_search` | Search vault notes (BM25, semantic, RRF fusion, temporal decay, PageRank boost) |
+| `memento_store` | Write a single knowledge note with frontmatter and project indexing |
+| `memento_capture` | End-of-session triage: parse transcript or accept a summary, write fleeting + atomic note |
+| `memento_get` | Read a specific note by name or path |
+| `memento_status` | Vault health: note count, project count, config summary |
+
+Run manually:
+
+```bash
+python -m memento
+```
+
+Or configure your agent's MCP settings to spawn it as a subprocess:
+
+```json
+{
+  "memento-vault": {
+    "command": "python3",
+    "args": ["-m", "memento"],
+    "env": {"PYTHONPATH": "~/.claude/hooks"}
+  }
+}
+```
+
+`memento_capture` is the MCP equivalent of the SessionEnd hook. Agents without hook support can call it at the end of a session with either a transcript path or a structured summary.
 
 ## Tenet
 
@@ -121,7 +178,7 @@ Pattern notes start at certainty 3 (subject to temporal decay and defrag). Use `
 ### How triage works
 
 ```
-Session ends -> triage hook fires
+Session ends -> triage hook fires (or memento_capture MCP tool)
   -> always: write fleeting one-liner (no LLM cost)
   -> if substantial: spawn background agent for atomic notes
   -> delta-check: skip if vault already covers the topic
@@ -133,6 +190,30 @@ Session ends -> triage hook fires
 ### Note format
 
 Each note has YAML frontmatter: certainty score (1-5), optional validity context, type (decision/discovery/pattern/bugfix/tool), wikilinks to related notes. Full schema in [docs/frontmatter-schema.md](docs/frontmatter-schema.md).
+
+## Architecture
+
+The `memento/` package is agent-agnostic. Seven modules handle config, search, graph algorithms, vault I/O, LLM abstraction, and type definitions. Hooks and MCP tools are thin wrappers around this package.
+
+```
+memento/
+  config.py      Configuration loading, project detection
+  search.py      QMD search, PRF, RRF, temporal decay, PageRank
+  graph.py       Wikilink graph, PageRank, PPR expansion
+  store.py       Vault I/O, write locking, dedup, note writing
+  llm.py         5 backends: claude, codex, gemini, anthropic-api, openai-compat
+  utils.py       Secret sanitization, tag normalization
+  types.py       TypedDict definitions (SearchResult, NoteMetadata, SessionMeta)
+  adapters/      Transcript parsing (Claude adapter, pluggable for others)
+  mcp_server.py  MCP server (5 tools over stdio)
+```
+
+LLM backend is configurable:
+
+```yaml
+llm_backend: claude        # claude, codex, gemini, anthropic-api, openai-compat
+llm_model: sonnet          # model name for the chosen backend
+```
 
 ## Configuration
 
