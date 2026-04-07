@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Shared utilities for memento-vault hooks.
-Config loading, project detection, QMD queries.
+
+This module re-exports from the memento package for backwards compatibility.
+New code should import from memento.config, memento.search, etc. directly.
 """
 
 import json
@@ -12,212 +14,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Add the repo root to sys.path so `import memento` works from hooks/
+_repo_root = str(Path(__file__).parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
-# --- Configuration ---
-
-DEFAULT_CONFIG = {
-    "vault_path": str(Path.home() / "memento"),
-    "exchange_threshold": 15,
-    "file_count_threshold": 3,
-    "notable_patterns": ["plan", "design", "MEMORY.md", "CLAUDE.md", "SKILL.md"],
-    "qmd_collection": "memento",
-    "extra_qmd_collections": [],
-    "project_rules": [],
-    "auto_commit": True,
-    "agent_model": "sonnet",
-    "agent_delay_seconds": 90,
-    # Retrieval hooks
-    "session_briefing": True,
-    "briefing_max_notes": 5,
-    "briefing_min_score": 0.55,
-    "prompt_recall": True,
-    "recall_min_score": 0.6,
-    "recall_max_notes": 3,
-    "recall_high_confidence": 0.55,  # BM25 score above this skips PRF/RRF/CE
-    "recall_skip_patterns": [
-        r"^(yes|no|ok|sure|thanks|y|n|yep|nope|looks good|lgtm|ship it|continue)$",
-        r"^git\s",
-        r"^run\s",
-    ],
-    # PRF (Pseudo-Relevance Feedback) query expansion
-    "prf_enabled": True,
-    "prf_max_terms": 5,
-    "prf_top_docs": 3,
-    # Retrieval enhancements
-    "temporal_decay": True,
-    "temporal_decay_half_life": 90,  # days
-    "temporal_decay_certainty_floor": 4,  # certainty >= this: no decay
-    "wikilink_expansion": True,
-    "wikilink_max_hops": 1,
-    "wikilink_score_factor": 0.5,
-    "wikilink_max_expanded": 3,
-    # Tool context hook (PreToolUse)
-    "tool_context": True,
-    "tool_context_min_score": 0.65,
-    "tool_context_max_notes": 2,
-    "tool_context_max_injections": 5,
-    "tool_context_cooldown": 1,
-    # Inception (background consolidation)
-    "inception_enabled": False,
-    "inception_backend": "codex",
-    "inception_threshold": 5,
-    "inception_min_cluster_size": 3,
-    "inception_max_clusters": 10,
-    "inception_cluster_threshold": 0.7,
-    "inception_exclude_tags": [],
-    "inception_dry_run": False,
-    "inception_pre_reason": True,
-    "inception_parallel": 4,
-    # Personalized PageRank expansion
-    "ppr_enabled": True,
-    "ppr_max_expanded": 5,
-    "ppr_alpha": 0.85,
-    "ppr_min_score": 0.01,
-    # PageRank graph boost
-    "pagerank_alpha": 0.85,
-    "pagerank_boost_weight": 0.3,
-    # Project retrieval maps
-    "project_maps_enabled": True,
-    # Concept index (Tenet)
-    "concept_index_enabled": True,
-    "concept_index_score": 0.5,
-    # RRF (Reciprocal Rank Fusion) hybrid search
-    "rrf_enabled": True,
-    "rrf_k": 60,
-    # Cross-encoder reranking (Tier 2)
-    "reranker_enabled": True,
-    "reranker_top_k": 10,
-    "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
-    "reranker_min_score": 0.01,
-    # Multi-hop retrieval (experimental)
-    "multi_hop_enabled": False,
-    "multi_hop_max": 2,
-    # Deep recall — background codex analysis (experimental)
-    "deep_recall_enabled": False,
-    "deep_recall_backend": "codex",
-    # Tag normalization
-    "tag_aliases": {
-        "k8s": "kubernetes",
-        "js": "javascript",
-        "ts": "typescript",
-        "py": "python",
-        "rb": "ruby",
-        "db": "database",
-        "postgres": "postgresql",
-        "mongo": "mongodb",
-        "ci": "ci-cd",
-        "gh": "github",
-        "gha": "github-actions",
-        "fe": "frontend",
-        "be": "backend",
-        "deps": "dependencies",
-    },
-}
-
-_CONFIG = None
-
-
-def load_config():
-    """Load config from memento.yml, falling back to defaults."""
-    config = dict(DEFAULT_CONFIG)
-
-    candidates = [
-        Path.home() / ".config" / "memento-vault" / "memento.yml",
-        Path.home() / ".memento-vault.yml",
-    ]
-
-    vault_path = Path(config["vault_path"])
-    if vault_path.exists():
-        candidates.insert(0, vault_path / "memento.yml")
-
-    for path in candidates:
-        if path.exists():
-            try:
-                try:
-                    import yaml
-
-                    with open(path) as f:
-                        user_config = yaml.safe_load(f) or {}
-                except ImportError:
-                    user_config = _parse_simple_yaml(path)
-
-                config.update({k: v for k, v in user_config.items() if v is not None})
-            except Exception:
-                pass
-            break
-
-    config["vault_path"] = str(Path(config["vault_path"]).expanduser())
-
-    # Handle floats that simple YAML parser returns as strings
-    for key in ("briefing_min_score", "recall_min_score", "inception_cluster_threshold"):
-        if isinstance(config.get(key), str):
-            try:
-                config[key] = float(config[key])
-            except (ValueError, TypeError):
-                pass
-
-    return config
-
-
-def _parse_simple_yaml(path):
-    """Minimal YAML parser for simple key: value configs. No nested structures."""
-    result = {}
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" in line:
-                key, _, value = line.partition(":")
-                key = key.strip()
-                value = value.strip()
-                if value.lower() in ("true", "yes"):
-                    value = True
-                elif value.lower() in ("false", "no"):
-                    value = False
-                elif value.isdigit():
-                    value = int(value)
-                elif value.startswith("[") and value.endswith("]"):
-                    value = [v.strip().strip('"').strip("'") for v in value[1:-1].split(",")]
-                elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-                    value = value[1:-1]
-                result[key] = value
-    return result
-
-
-def get_config():
-    """Get cached config."""
-    global _CONFIG
-    if _CONFIG is None:
-        _CONFIG = load_config()
-    return _CONFIG
-
-
-def get_vault():
-    """Get vault path."""
-    return Path(get_config()["vault_path"])
-
-
-# --- Runtime directory (private temp files) ---
-
-
-def get_runtime_dir():
-    """Get a user-private directory for temp files.
-
-    Uses $XDG_RUNTIME_DIR (typically /run/user/$UID, mode 0700) with
-    fallback to ~/.cache/memento-vault/. Never uses /tmp to avoid
-    symlink attacks and information disclosure on multi-user systems.
-    """
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime:
-        d = os.path.join(runtime, "memento-vault")
-    else:
-        d = os.path.join(str(Path.home()), ".cache", "memento-vault")
-    os.makedirs(d, mode=0o700, exist_ok=True)
-    return d
-
-
-RUNTIME_DIR = get_runtime_dir()
+# --- Re-exports from memento.config ---
+from memento.config import (  # noqa: E402, F401
+    DEFAULT_CONFIG,
+    RUNTIME_DIR,
+    detect_project,
+    get_config,
+    get_runtime_dir,
+    get_vault,
+    load_config,
+    slugify,
+)
 
 
 # --- Secret sanitization ---
@@ -328,45 +140,6 @@ def normalize_note_tags(note_path):
     new_frontmatter = frontmatter[: tag_match.start()] + new_tag_line + frontmatter[tag_match.end() :]
     path.write_text(new_frontmatter + body)
     return True
-
-
-# --- Project detection ---
-
-
-def slugify(text):
-    """Simple slug from text."""
-    text = text.lower().strip()
-    text = re.sub(r"[^a-z0-9\s-]", "", text)
-    text = re.sub(r"[\s-]+", "-", text)
-    return text[:80]
-
-
-def detect_project(cwd, git_branch):
-    """Derive a project slug and optional ticket from cwd and branch.
-    Returns (project_slug, ticket_or_none).
-    """
-    if not cwd:
-        return "unknown", None
-
-    config = get_config()
-    rules = config.get("project_rules", [])
-
-    for rule in rules:
-        if isinstance(rule, dict) and rule.get("path_contains") and rule["path_contains"] in cwd:
-            ticket = None
-            if git_branch and rule.get("ticket_pattern"):
-                match = re.search(rule["ticket_pattern"], git_branch, re.IGNORECASE)
-                if match:
-                    ticket = match.group(1).upper() if match.lastindex else match.group(0).upper()
-            return rule.get("slug", slugify(Path(cwd).name)), ticket
-
-    ticket = None
-    if git_branch:
-        match = re.search(r"([a-z]+-\d+)", git_branch, re.IGNORECASE)
-        if match:
-            ticket = match.group(1).upper()
-
-    return slugify(Path(cwd).name) or "misc", ticket
 
 
 # --- QMD wrapper ---
