@@ -8,6 +8,7 @@ import pytest
 from memento.config import DEFAULT_CONFIG
 from memento.mcp_server import (
     _strip_injection,
+    memento_capture,
     memento_get,
     memento_search,
     memento_status,
@@ -210,11 +211,11 @@ class TestMementoStore:
         content = note_path.read_text()
         lines = content.splitlines()
         # Newlines should be collapsed — no separate "source: evil" YAML key
-        source_lines = [l for l in lines if l.startswith("source:")]
+        source_lines = [ln for ln in lines if ln.startswith("source:")]
         assert len(source_lines) == 1
         assert source_lines[0] == "source: mcp"
         # "certainty: 99" should not appear as a standalone frontmatter key
-        certainty_lines = [l for l in lines if l.startswith("certainty:")]
+        certainty_lines = [ln for ln in lines if ln.startswith("certainty:")]
         assert len(certainty_lines) == 0
 
     @pytest.mark.usefixtures("_use_vault_config")
@@ -229,7 +230,7 @@ class TestMementoStore:
         content = note_path.read_text()
         lines = content.splitlines()
         # Only one source: line, and it should be the real one
-        source_lines = [l for l in lines if l.startswith("source:")]
+        source_lines = [ln for ln in lines if ln.startswith("source:")]
         assert len(source_lines) == 1
         assert source_lines[0] == "source: mcp"
 
@@ -331,3 +332,93 @@ class TestMementoGet:
 
         assert result["title"] == "QMD note"
         assert result["content"] == "From QMD"
+
+
+# --- memento_capture ---
+
+
+class TestMementoCapture:
+    def test_requires_summary_or_transcript(self):
+        result = memento_capture(session_summary="", transcript_path=None)
+        assert "error" in result
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_captures_from_summary(self, tmp_vault):
+        result = memento_capture(
+            session_summary="Fixed the broken login flow by patching auth.py",
+            cwd="/home/vic/Projects/test",
+            branch="fix/login",
+            files_edited=["/home/vic/Projects/test/auth.py"],
+            agent="cursor",
+        )
+
+        assert "error" not in result
+        assert "note_path" in result
+        assert "session_id" in result
+
+        # Verify note was written
+        note_path = tmp_vault / result["note_path"]
+        assert note_path.exists()
+        content = note_path.read_text()
+        assert "source: mcp-capture" in content
+        assert "auth.py" in content
+
+        # Verify fleeting was written
+        fleeting_path = tmp_vault / result["fleeting"]
+        assert fleeting_path.exists()
+        fleeting_content = fleeting_path.read_text()
+        assert "cursor" in fleeting_content
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_captures_from_transcript(self, tmp_vault, tmp_path):
+        import json
+
+        transcript = tmp_path / "transcript.jsonl"
+        lines = [
+            json.dumps(
+                {
+                    "type": "user",
+                    "cwd": "/home/vic/Projects/test",
+                    "gitBranch": "main",
+                    "message": {"content": "Fix the bug"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "Fixed it."}]},
+                }
+            ),
+        ]
+        transcript.write_text("\n".join(lines))
+
+        result = memento_capture(
+            session_summary="",
+            transcript_path=str(transcript),
+        )
+
+        assert "error" not in result
+        assert result["project"] != "unknown"
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_nonexistent_transcript(self, tmp_vault):
+        result = memento_capture(
+            session_summary="",
+            transcript_path="/nonexistent/path.jsonl",
+        )
+        assert "error" in result
+        assert "not found" in result["error"].lower()
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_updates_project_index(self, tmp_vault):
+        result = memento_capture(
+            session_summary="Added caching layer",
+            cwd="/home/vic/Projects/my-api",
+            agent="windsurf",
+        )
+
+        assert "error" not in result
+        project_file = tmp_vault / "projects" / "my-api.md"
+        assert project_file.exists()
+        content = project_file.read_text()
+        assert "windsurf" in content

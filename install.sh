@@ -14,6 +14,9 @@
 # Install experimental modules (Tenet retrieval + Inception consolidation):
 #   ./install.sh --experimental
 #
+# Install MCP server config (for agents without native hook support):
+#   ./install.sh --mcp
+#
 # Force overwrite all files (ignore local changes):
 #   ./install.sh --force
 
@@ -27,11 +30,13 @@ MANIFEST="$CONFIG_DIR/manifest.json"
 NEW_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 FORCE=false
 EXPERIMENTAL=false
+MCP_INSTALL=false
 
 for arg in "$@"; do
     case "$arg" in
         --force) FORCE=true ;;
         --experimental) EXPERIMENTAL=true ;;
+        --mcp) MCP_INSTALL=true ;;
     esac
 done
 
@@ -383,6 +388,86 @@ if safe_copy "$SCRIPT_DIR/agents/concierge.md" "$CLAUDE_DIR/agents/concierge.md"
     info "Concierge agent installed to $CLAUDE_DIR/agents/"
 fi
 
+# --- Install memento package ---
+
+step "Installing memento package..."
+
+# Copy the memento/ package to Claude's hooks dir so hooks can import it
+MEMENTO_PKG_DIR="$CLAUDE_DIR/hooks/memento"
+mkdir -p "$MEMENTO_PKG_DIR/adapters"
+
+for mod in __init__.py config.py utils.py search.py graph.py store.py llm.py types.py mcp_server.py __main__.py; do
+    if [ -f "$SCRIPT_DIR/memento/$mod" ]; then
+        safe_copy "$SCRIPT_DIR/memento/$mod" "$MEMENTO_PKG_DIR/$mod" "memento/$mod" || true
+    fi
+done
+
+for mod in __init__.py claude.py; do
+    if [ -f "$SCRIPT_DIR/memento/adapters/$mod" ]; then
+        safe_copy "$SCRIPT_DIR/memento/adapters/$mod" "$MEMENTO_PKG_DIR/adapters/$mod" "memento/adapters/$mod" || true
+    fi
+done
+
+info "Memento package installed to $MEMENTO_PKG_DIR"
+
+# --- MCP server config (--mcp flag) ---
+
+if [ "$MCP_INSTALL" = true ]; then
+    step "Setting up MCP server..."
+
+    # Detect MCP config location
+    MCP_CONFIG=""
+    if [ -d "$HOME/.claude" ]; then
+        MCP_CONFIG="$CLAUDE_DIR/mcp-servers.json"
+    fi
+
+    if [ -n "$MCP_CONFIG" ]; then
+        # Create or merge MCP server entry
+        MCP_ENTRY=$(cat << MCP_EOF
+{
+  "memento-vault": {
+    "command": "python3",
+    "args": ["-m", "memento"],
+    "env": {
+      "PYTHONPATH": "$CLAUDE_DIR/hooks"
+    }
+  }
+}
+MCP_EOF
+)
+        if [ -f "$MCP_CONFIG" ]; then
+            # Merge into existing config
+            if grep -q "memento-vault" "$MCP_CONFIG"; then
+                info "MCP server already configured in $MCP_CONFIG"
+            else
+                python3 -c "
+import json, sys
+existing = json.load(open(sys.argv[1]))
+new_entry = json.loads(sys.argv[2])
+existing.update(new_entry)
+with open(sys.argv[1], 'w') as f:
+    json.dump(existing, f, indent=2)
+" "$MCP_CONFIG" "$MCP_ENTRY"
+                info "Added memento-vault to $MCP_CONFIG"
+            fi
+        else
+            echo "$MCP_ENTRY" | python3 -c "import json,sys; json.dump(json.load(sys.stdin), open(sys.argv[1],'w'), indent=2)" "$MCP_CONFIG"
+            info "Created $MCP_CONFIG with memento-vault server"
+        fi
+    else
+        warn "Could not detect MCP config location. Manual setup required."
+        echo ""
+        echo "Add this to your agent's MCP server config:"
+        echo ""
+        echo "  \"memento-vault\": {"
+        echo "    \"command\": \"python3\","
+        echo "    \"args\": [\"-m\", \"memento\"],"
+        echo "    \"env\": {\"PYTHONPATH\": \"$CLAUDE_DIR/hooks\"}"
+        echo "  }"
+        echo ""
+    fi
+fi
+
 # --- Merge settings.json ---
 
 step "Updating Claude Code settings..."
@@ -581,8 +666,12 @@ fi
 
 # --- Done ---
 
-if [ "$EXPERIMENTAL" = true ]; then
+if [ "$EXPERIMENTAL" = true ] && [ "$MCP_INSTALL" = true ]; then
+    step "Installation complete! (v${NEW_VERSION} + Tenet + Inception + MCP)"
+elif [ "$EXPERIMENTAL" = true ]; then
     step "Installation complete! (v${NEW_VERSION} + Tenet + Inception)"
+elif [ "$MCP_INSTALL" = true ]; then
+    step "Installation complete! (v${NEW_VERSION} + MCP)"
 else
     step "Installation complete! (v${NEW_VERSION})"
 fi
