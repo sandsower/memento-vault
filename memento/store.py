@@ -159,6 +159,22 @@ def release_vault_write_lock(lock_path=None):
         pass
 
 
+def _safe_yaml_scalar(value):
+    """Sanitize a value for safe YAML frontmatter interpolation.
+
+    Strips newlines, carriage returns, and leading YAML syntax chars
+    to prevent frontmatter injection via multi-line or structured values.
+    """
+    if value is None:
+        return ""
+    s = str(value)
+    # Collapse to single line
+    s = s.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    # Strip leading YAML block indicators
+    s = s.lstrip("-|>")
+    return s.strip()
+
+
 def _tokenize_for_match(text):
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
@@ -229,26 +245,32 @@ def write_note(
     tmp = notes_dir / f".tmp-{slug}.md"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
+    # Sanitize all scalar fields to prevent frontmatter injection
+    safe_title = _safe_yaml_scalar(title)
+    safe_type = _safe_yaml_scalar(note_type)
+    safe_source = _safe_yaml_scalar(source)
+    safe_tags = [_safe_yaml_scalar(t) for t in tags]
+
     lines = [
         "---",
-        f"title: {title}",
-        f"type: {note_type}",
-        f"tags: [{', '.join(tags)}]",
-        f"source: {source}",
+        f"title: {safe_title}",
+        f"type: {safe_type}",
+        f"tags: [{', '.join(safe_tags)}]",
+        f"source: {safe_source}",
     ]
     if certainty is not None:
-        lines.append(f"certainty: {certainty}")
+        lines.append(f"certainty: {int(certainty)}")
     if validity_context:
-        lines.append(f"validity-context: {validity_context}")
+        lines.append(f"validity-context: {_safe_yaml_scalar(validity_context)}")
     if supersedes:
-        lines.append(f'supersedes: "{supersedes}"')
+        lines.append(f'supersedes: "{_safe_yaml_scalar(supersedes)}"')
     if project:
-        lines.append(f"project: {project}")
+        lines.append(f"project: {_safe_yaml_scalar(project)}")
     if branch:
-        lines.append(f"branch: {branch}")
+        lines.append(f"branch: {_safe_yaml_scalar(branch)}")
     lines.append(f"date: {now}")
     if session_id:
-        lines.append(f"session_id: {session_id}")
+        lines.append(f"session_id: {_safe_yaml_scalar(session_id)}")
     lines.extend(["---", "", body.strip(), "", "## Related", ""])
 
     tmp.write_text("\n".join(lines))
