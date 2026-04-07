@@ -14,6 +14,9 @@
 # Install experimental modules (Tenet retrieval + Inception consolidation):
 #   ./install.sh --experimental
 #
+# Install MCP server config (for agents without native hook support):
+#   ./install.sh --mcp
+#
 # Force overwrite all files (ignore local changes):
 #   ./install.sh --force
 
@@ -27,11 +30,13 @@ MANIFEST="$CONFIG_DIR/manifest.json"
 NEW_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 FORCE=false
 EXPERIMENTAL=false
+MCP_INSTALL=false
 
 for arg in "$@"; do
     case "$arg" in
         --force) FORCE=true ;;
         --experimental) EXPERIMENTAL=true ;;
+        --mcp) MCP_INSTALL=true ;;
     esac
 done
 
@@ -115,14 +120,31 @@ print(json.dumps(d))
 " "$MANIFEST_FILES_JSON" "$key" "$hash")
 }
 
+# Base copy storage — saves the installed version for future three-way merges
+BASE_DIR="$CONFIG_DIR/base"
+
+save_base() {
+    local key="$1" src="$2"
+    local base_path="$BASE_DIR/$key"
+    mkdir -p "$(dirname "$base_path")"
+    cp "$src" "$base_path"
+}
+
 # Safe copy: only overwrites if the user hasn't modified the installed copy.
-# Returns 0 if copied, 1 if skipped.
+# When a user has modified a file and a base copy exists, attempts a three-way
+# merge using git merge-file. Falls back to saving a .new copy when merge
+# isn't possible (no base or no git).
+# Returns 0 if copied/merged, 1 if skipped.
 safe_copy() {
     local src="$1" dest="$2" key="$3"
+
+    # Clean up stale artifacts from previous runs
+    rm -f "${dest}.new" "${dest}.merged"
 
     if [ "$FORCE" = true ]; then
         cp "$src" "$dest"
         record_file "$key" "$dest"
+        save_base "$key" "$src"
         return 0
     fi
 
@@ -130,6 +152,7 @@ safe_copy() {
         # New file — always install
         cp "$src" "$dest"
         record_file "$key" "$dest"
+        save_base "$key" "$src"
         return 0
     fi
 
@@ -138,16 +161,19 @@ safe_copy() {
 
     if [ -z "$manifest_checksum" ]; then
         # File exists but no manifest entry (pre-manifest install or manual file).
-        # Don't overwrite — it's ambiguous.
+        # Don't overwrite — it's ambiguous. No base saved (we didn't put this file here).
         local src_hash dest_hash
         src_hash=$(file_hash "$src")
         dest_hash=$(file_hash "$dest")
         if [ "$src_hash" = "$dest_hash" ]; then
-            # Identical — record it but don't copy
+            # Identical — record it and seed the base for future merges
             record_file "$key" "$dest"
+            save_base "$key" "$src"
             return 0
         else
-            skip "Skipped $key (exists, may have local changes — use --force to overwrite)"
+            cp "$src" "${dest}.new"
+            skip "Skipped $key (exists, may have local changes)"
+            skip "  New version saved to ${dest}.new — diff and merge your changes"
             record_file "$key" "$dest"
             return 1
         fi
@@ -158,8 +184,9 @@ safe_copy() {
     src_hash=$(file_hash "$src")
 
     if [ "$current_hash" = "$src_hash" ]; then
-        # Already up to date (possibly updated outside the installer)
+        # Already up to date — seed the base for future merges
         record_file "$key" "$dest"
+        save_base "$key" "$src"
         return 0
     fi
 
@@ -167,13 +194,50 @@ safe_copy() {
         # File unchanged since last install — safe to overwrite
         cp "$src" "$dest"
         record_file "$key" "$dest"
+        save_base "$key" "$src"
         return 0
-    else
-        # User modified the file — don't overwrite
-        skip "Skipped $key (locally modified — use --force to overwrite)"
-        record_file "$key" "$dest"
-        return 1
     fi
+
+    # User modified the file — try three-way merge if we have a base copy
+    local base_path="$BASE_DIR/$key"
+    if [ -f "$base_path" ] && command -v git &>/dev/null; then
+        local tmp_merged merge_rc
+        tmp_merged=$(mktemp)
+        cp "$dest" "$tmp_merged"
+
+        merge_rc=0
+        git merge-file "$tmp_merged" "$base_path" "$src" >/dev/null 2>&1 || merge_rc=$?
+
+        if [ "$merge_rc" -eq 0 ]; then
+            # Clean merge — apply it
+            cp "$tmp_merged" "$dest"
+            rm -f "$tmp_merged"
+            record_file "$key" "$dest"
+            save_base "$key" "$src"
+            info "Auto-merged $key (your changes preserved)"
+            return 0
+        elif [ "$merge_rc" -gt 0 ]; then
+            # Conflicts — save merged file with markers, keep user's file
+            cp "$tmp_merged" "${dest}.merged"
+            cp "$src" "${dest}.new"
+            rm -f "$tmp_merged"
+            skip "Skipped $key (merge conflicts)"
+            skip "  Conflict file: ${dest}.merged"
+            skip "  New version: ${dest}.new"
+            record_file "$key" "$dest"
+            return 1
+        else
+            # Negative exit = error, fall through to .new fallback
+            rm -f "$tmp_merged"
+        fi
+    fi
+
+    # Fallback: no base or git unavailable — save .new for manual diff
+    cp "$src" "${dest}.new"
+    skip "Skipped $key (locally modified)"
+    skip "  New version saved to ${dest}.new — diff and merge your changes"
+    record_file "$key" "$dest"
+    return 1
 }
 
 # --- Load existing manifest ---
@@ -322,7 +386,7 @@ mkdir -p "$CLAUDE_DIR/hooks"
 HOOKS_UPDATED=0
 HOOKS_SKIPPED=0
 
-STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py"
+STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py wait-and-commit.py _backfill_certainty.py"
 EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py memento-inception.py tenet_reranker.py"
 
 if [ "$EXPERIMENTAL" = true ]; then
@@ -343,6 +407,7 @@ chmod +x "$CLAUDE_DIR/hooks/vault-commit.sh"
 
 if [ "$HOOKS_SKIPPED" -gt 0 ]; then
     info "Hooks: $HOOKS_UPDATED updated, $HOOKS_SKIPPED skipped (locally modified)"
+    info "  Run: diff ~/.claude/hooks/FILE ~/.claude/hooks/FILE.new to review changes"
 else
     info "Hooks: $HOOKS_UPDATED installed to $CLAUDE_DIR/hooks/"
 fi
@@ -381,6 +446,133 @@ step "Installing Claude Code agents..."
 mkdir -p "$CLAUDE_DIR/agents"
 if safe_copy "$SCRIPT_DIR/agents/concierge.md" "$CLAUDE_DIR/agents/concierge.md" "agents/concierge"; then
     info "Concierge agent installed to $CLAUDE_DIR/agents/"
+fi
+
+# --- Install memento package ---
+
+step "Installing memento package..."
+
+# Copy the memento/ package to Claude's hooks dir so hooks can import it
+MEMENTO_PKG_DIR="$CLAUDE_DIR/hooks/memento"
+mkdir -p "$MEMENTO_PKG_DIR/adapters"
+
+PKG_COPIED=0
+PKG_SKIPPED=0
+
+for mod in __init__.py config.py utils.py search.py graph.py store.py llm.py types.py mcp_server.py __main__.py; do
+    if [ -f "$SCRIPT_DIR/memento/$mod" ]; then
+        if safe_copy "$SCRIPT_DIR/memento/$mod" "$MEMENTO_PKG_DIR/$mod" "memento/$mod"; then
+            ((PKG_COPIED++)) || true
+        else
+            ((PKG_SKIPPED++)) || true
+        fi
+    fi
+done
+
+for mod in __init__.py claude.py; do
+    if [ -f "$SCRIPT_DIR/memento/adapters/$mod" ]; then
+        if safe_copy "$SCRIPT_DIR/memento/adapters/$mod" "$MEMENTO_PKG_DIR/adapters/$mod" "memento/adapters/$mod"; then
+            ((PKG_COPIED++)) || true
+        else
+            ((PKG_SKIPPED++)) || true
+        fi
+    fi
+done
+
+# Validate critical package files
+for critical in __init__.py config.py utils.py store.py search.py adapters/__init__.py adapters/claude.py; do
+    if [ ! -f "$MEMENTO_PKG_DIR/$critical" ]; then
+        error "Critical file missing: $MEMENTO_PKG_DIR/$critical"
+        error "Hooks will not work. Rerun with --force or fix permissions."
+        exit 1
+    fi
+done
+
+if [ "$PKG_SKIPPED" -gt 0 ]; then
+    info "Package: $PKG_COPIED updated, $PKG_SKIPPED skipped (locally modified)"
+else
+    info "Package: $PKG_COPIED files installed to $MEMENTO_PKG_DIR"
+fi
+
+# --- MCP server config (--mcp flag) ---
+
+if [ "$MCP_INSTALL" = true ]; then
+    step "Setting up MCP server..."
+
+    # Verify mcp Python package is available
+    if ! python3 -c "import mcp" 2>/dev/null; then
+        warn "MCP Python package not found. Installing..."
+        if command -v uv &>/dev/null; then
+            uv pip install "mcp[cli]>=1.0" 2>/dev/null && info "Installed mcp via uv" || true
+        elif command -v pip3 &>/dev/null; then
+            pip3 install "mcp[cli]>=1.0" 2>/dev/null && info "Installed mcp via pip3" || true
+        elif command -v pip &>/dev/null; then
+            pip install "mcp[cli]>=1.0" 2>/dev/null && info "Installed mcp via pip" || true
+        fi
+
+        if ! python3 -c "import mcp" 2>/dev/null; then
+            error "Could not install mcp Python package. MCP server will not work."
+            error "Install manually: pip install 'mcp[cli]>=1.0'"
+            MCP_INSTALL=false
+        fi
+    else
+        info "MCP Python package: available"
+    fi
+
+    # Detect MCP config location
+    MCP_CONFIG=""
+    if [ -d "$HOME/.claude" ]; then
+        MCP_CONFIG="$CLAUDE_DIR/mcp-servers.json"
+    fi
+
+    if [ -n "$MCP_CONFIG" ]; then
+        # Create or merge MCP server entry
+        MCP_ENTRY=$(cat << MCP_EOF
+{
+  "memento-vault": {
+    "command": "python3",
+    "args": ["-m", "memento"],
+    "env": {
+      "PYTHONPATH": "$CLAUDE_DIR/hooks"
+    }
+  }
+}
+MCP_EOF
+)
+        if [ -f "$MCP_CONFIG" ]; then
+            # Merge into existing config
+            if grep -q "memento-vault" "$MCP_CONFIG"; then
+                info "MCP server already configured in $MCP_CONFIG"
+            else
+                python3 -c "
+import json, sys, tempfile, os
+config_path = sys.argv[1]
+existing = json.load(open(config_path))
+new_entry = json.loads(sys.argv[2])
+existing.update(new_entry)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(config_path), suffix='.json')
+with os.fdopen(fd, 'w') as f:
+    json.dump(existing, f, indent=2)
+os.replace(tmp, config_path)
+" "$MCP_CONFIG" "$MCP_ENTRY"
+                info "Added memento-vault to $MCP_CONFIG"
+            fi
+        else
+            echo "$MCP_ENTRY" | python3 -c "import json,sys; json.dump(json.load(sys.stdin), open(sys.argv[1],'w'), indent=2)" "$MCP_CONFIG"
+            info "Created $MCP_CONFIG with memento-vault server"
+        fi
+    else
+        warn "Could not detect MCP config location. Manual setup required."
+        echo ""
+        echo "Add this to your agent's MCP server config:"
+        echo ""
+        echo "  \"memento-vault\": {"
+        echo "    \"command\": \"python3\","
+        echo "    \"args\": [\"-m\", \"memento\"],"
+        echo "    \"env\": {\"PYTHONPATH\": \"$CLAUDE_DIR/hooks\"}"
+        echo "  }"
+        echo ""
+    fi
 fi
 
 # --- Merge settings.json ---
@@ -581,8 +773,12 @@ fi
 
 # --- Done ---
 
-if [ "$EXPERIMENTAL" = true ]; then
+if [ "$EXPERIMENTAL" = true ] && [ "$MCP_INSTALL" = true ]; then
+    step "Installation complete! (v${NEW_VERSION} + Tenet + Inception + MCP)"
+elif [ "$EXPERIMENTAL" = true ]; then
     step "Installation complete! (v${NEW_VERSION} + Tenet + Inception)"
+elif [ "$MCP_INSTALL" = true ]; then
+    step "Installation complete! (v${NEW_VERSION} + MCP)"
 else
     step "Installation complete! (v${NEW_VERSION})"
 fi

@@ -1,11 +1,15 @@
-"""MCP server for memento vault — exposes search, store, status, and get operations."""
+"""MCP server for memento vault — exposes search, store, status, capture, and get operations."""
 
+import json
+import os
 import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from memento.config import get_config, get_vault, slugify
+from memento.config import detect_project, get_config, get_vault, slugify
 from memento.search import enhance_results, has_qmd, qmd_search_with_extras, qmd_get
 from memento.store import (
     acquire_vault_write_lock,
@@ -21,7 +25,8 @@ mcp = FastMCP(
     instructions=(
         "Memento Vault is a persistent knowledge store for coding agents. "
         "Use memento_search to find past decisions, discoveries, and session notes. "
-        "Use memento_store to capture new knowledge from the current session. "
+        "Use memento_store to write a single knowledge note. "
+        "Use memento_capture at session end to triage and capture the full session. "
         "Use memento_get to read a specific note by path. "
         "Use memento_status to check vault health and stats."
     ),
@@ -63,11 +68,11 @@ def memento_search(
         return []
 
     if not has_qmd():
-        return [{"error": "QMD search engine is not installed or not available"}]
+        return {"error": "QMD search engine is not installed or not available"}
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        return [{"error": f"Vault not found at {vault}"}]
+        return {"error": f"Vault not found at {vault}"}
 
     results = qmd_search_with_extras(
         query,
@@ -234,9 +239,10 @@ def memento_get(path: str) -> dict:
     elif not path.startswith("notes/") and "/" not in path:
         path = f"notes/{path}"
 
-    # Path traversal guard
+    # Path traversal guard (use is_relative_to for proper boundary check)
     full_path = (vault / path).resolve()
-    if not str(full_path).startswith(str(vault.resolve())):
+    vault_resolved = vault.resolve()
+    if full_path != vault_resolved and vault_resolved not in full_path.parents:
         return {"error": "Invalid path: traversal outside vault"}
     if full_path.exists():
         content = full_path.read_text()
@@ -262,6 +268,157 @@ def memento_get(path: str) -> dict:
         }
 
     return {"error": f"Note not found: {path}"}
+
+
+@mcp.tool()
+def memento_capture(
+    session_summary: str,
+    cwd: str = "",
+    branch: str = "",
+    files_edited: list[str] | None = None,
+    session_id: str | None = None,
+    transcript_path: str | None = None,
+    agent: str = "unknown",
+) -> dict:
+    """Capture a session's knowledge into the vault.
+
+    This is the MCP equivalent of the SessionEnd hook. Use it when your agent
+    doesn't have native hook support (Cursor, Windsurf, etc.).
+
+    Two modes:
+    - Provide session_summary with context fields for direct note creation.
+    - Provide transcript_path to parse a transcript file and run full triage.
+
+    Args:
+        session_summary: What happened in this session (decisions, discoveries, fixes).
+        cwd: Working directory of the session.
+        branch: Git branch the session was on.
+        files_edited: List of files that were edited.
+        session_id: Session identifier for traceability. Auto-generated if omitted.
+        transcript_path: Path to a transcript file for full triage parsing.
+        agent: Which agent produced this session (claude, codex, cursor, windsurf).
+
+    Returns:
+        Dict with capture results: notes written, project updated, or error.
+    """
+    if not session_summary and not transcript_path:
+        return {"error": "Provide session_summary or transcript_path"}
+
+    vault = get_vault()
+    if not vault.exists():
+        return {"error": f"Vault not found at {vault}"}
+
+    session_id = session_id or uuid.uuid4().hex[:12]
+
+    # Mode 1: transcript file parsing via adapter
+    if transcript_path:
+        if not os.path.exists(transcript_path):
+            return {"error": f"Transcript file not found: {transcript_path}"}
+
+        # Restrict to known agent transcript directories
+        abs_path = os.path.abspath(transcript_path)
+        allowed_prefixes = [
+            os.path.join(str(Path.home()), ".claude"),
+            os.path.join(str(Path.home()), ".codex"),
+            os.path.join(str(Path.home()), ".cursor"),
+            os.path.join(str(Path.home()), ".codeium"),
+            "/tmp",
+        ]
+        if not any(abs_path.startswith(p) for p in allowed_prefixes):
+            return {"error": "transcript_path must be inside a known agent directory"}
+
+        try:
+            from memento.adapters import parse_transcript
+
+            meta = parse_transcript(transcript_path, agent=agent if agent != "unknown" else None)
+            cwd = cwd or meta.get("cwd", "")
+            branch = branch or meta.get("git_branch", "")
+            files_edited = files_edited or meta.get("files_edited", [])
+
+            if not session_summary:
+                parts = []
+                if meta.get("first_prompt"):
+                    parts.append(meta["first_prompt"])
+                if meta.get("last_outcome"):
+                    parts.append(meta["last_outcome"])
+                session_summary = " ".join(parts) or f"Session with {meta.get('exchange_count', 0)} exchanges"
+
+        except ValueError as exc:
+            log_retrieval("mcp", "capture_agent_unsupported", error=str(exc))
+            return {"error": str(exc)}
+        except (OSError, json.JSONDecodeError) as exc:
+            log_retrieval("mcp", "capture_parse_failed", error=f"{type(exc).__name__}: {exc}")
+            return {"error": f"Failed to parse transcript ({type(exc).__name__}): {exc}"}
+        except Exception as exc:
+            log_retrieval("mcp", "capture_unexpected", error=f"{type(exc).__name__}: {exc}")
+            return {"error": f"Unexpected error: {type(exc).__name__}: {exc}"}
+
+    # Derive project
+    project_slug, ticket = detect_project(cwd, branch) if cwd else ("unknown", None)
+
+    # Write the session note
+    sanitized_summary = sanitize_secrets(session_summary)
+    files_str = ""
+    if files_edited:
+        files_str = "\n\n## Files edited\n" + "\n".join(f"- {f}" for f in files_edited[:20])
+
+    body = sanitized_summary + files_str
+
+    if not acquire_vault_write_lock():
+        return {"error": "Could not acquire vault write lock"}
+
+    try:
+        # Write fleeting note
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now = datetime.now(timezone.utc).strftime("%H:%M")
+        fleeting_dir = vault / "fleeting"
+        fleeting_dir.mkdir(parents=True, exist_ok=True)
+        fleeting_file = fleeting_dir / f"{today}.md"
+
+        if not fleeting_file.exists():
+            fleeting_file.write_text(f"# {today}\n\n")
+
+        branch_str = f" ({branch})" if branch else ""
+        files_count = f", {len(files_edited)} files" if files_edited else ""
+        fleeting_line = f"- {now} `{session_id}` {cwd or '?'}{branch_str} — {agent}{files_count}\n"
+        with open(fleeting_file, "a") as f:
+            f.write(fleeting_line)
+
+        # Write atomic note from summary
+        title_text = sanitized_summary[:80]
+        if len(sanitized_summary) > 80:
+            title_text = title_text.rsplit(" ", 1)[0] + "..."
+
+        note_path = write_note(
+            vault,
+            title=title_text,
+            body=body,
+            note_type="discovery",
+            tags=[agent, project_slug] if project_slug != "unknown" else [agent],
+            certainty=2,
+            source="mcp-capture",
+            project=cwd or None,
+            branch=branch or None,
+            session_id=session_id,
+        )
+
+        # Update project index
+        if project_slug != "unknown":
+            (vault / "projects").mkdir(parents=True, exist_ok=True)
+            summary_line = f"MCP capture ({agent}): {title_text}"
+            update_project_index(vault, project_slug, note_path.stem, summary_line)
+
+        log_retrieval("mcp", "capture", session_id=session_id, agent=agent, project=project_slug)
+
+        return {
+            "session_id": session_id,
+            "note_path": str(note_path.relative_to(vault)),
+            "project": project_slug,
+            "fleeting": str(fleeting_file.relative_to(vault)),
+        }
+
+    finally:
+        release_vault_write_lock()
 
 
 def main():
