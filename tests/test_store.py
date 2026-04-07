@@ -2,6 +2,7 @@
 
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 from memento.store import (
     acquire_vault_write_lock,
@@ -134,6 +135,35 @@ class TestUpdateProjectIndex:
         assert "- [[redis-cache-ttl]]" in text
         assert text.count("- [[redis-cache-ttl]]") == 1
         assert "Fixed cache invalidation" in text
+
+    def test_update_project_index_skips_duplicate_session_line(self, tmp_vault):
+        project_file = tmp_vault / "projects" / "api-service.md"
+        project_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "title: api-service",
+                    "project: /home/vic/Projects/api-service",
+                    "---",
+                    "",
+                    "## Notes",
+                    "",
+                    "## Sessions",
+                    "",
+                    "- 2026-04-01 `sess-123` Fixed cache invalidation",
+                ]
+            )
+        )
+
+        with patch("memento.store.datetime") as mock_datetime:
+            mock_now = mock_datetime.now.return_value
+            mock_now.strftime.return_value = "2026-04-01"
+
+            update_project_index(tmp_vault, "api-service", "redis-cache-ttl", "`sess-123` Fixed cache invalidation")
+
+        text = project_file.read_text()
+        assert text.count("- 2026-04-01 `sess-123` Fixed cache invalidation") == 1
+        assert text.count("- [[redis-cache-ttl]]") == 1
 
 
 class TestVaultWriteLock:

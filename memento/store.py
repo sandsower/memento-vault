@@ -284,9 +284,10 @@ def update_project_index(vault_path, project_slug, note_name, session_summary):
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     session_line = f"- {today} {session_summary}"
-    if "## Sessions" in content:
-        content = content.rstrip() + "\n" + session_line + "\n"
-    else:
-        content = content.rstrip() + "\n\n## Sessions\n\n" + session_line + "\n"
+    if session_line not in content:
+        if "## Sessions" in content:
+            content = content.rstrip() + "\n" + session_line + "\n"
+        else:
+            content = content.rstrip() + "\n\n## Sessions\n\n" + session_line + "\n"
 
     project_file.write_text(content)
