@@ -420,7 +420,7 @@ for mod in __init__.py claude.py; do
 done
 
 # Validate critical package files
-for critical in __init__.py config.py utils.py store.py search.py; do
+for critical in __init__.py config.py utils.py store.py search.py adapters/__init__.py adapters/claude.py; do
     if [ ! -f "$MEMENTO_PKG_DIR/$critical" ]; then
         error "Critical file missing: $MEMENTO_PKG_DIR/$critical"
         error "Hooks will not work. Rerun with --force or fix permissions."
