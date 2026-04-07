@@ -1,9 +1,6 @@
 """Shared fixtures for Inception tests."""
 
-import json
-import os
 import sqlite3
-import struct
 import sys
 from pathlib import Path
 
@@ -206,8 +203,7 @@ def mock_qmd_db(tmp_path):
         path = f"notes/{stem}.md"
 
         conn.execute(
-            "INSERT INTO documents (collection, path, title, hash, created_at, modified_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO documents (collection, path, title, hash, created_at, modified_at) VALUES (?, ?, ?, ?, ?, ?)",
             ("memento", path, stem, doc_hash, "2026-03-22", "2026-03-22"),
         )
 
@@ -229,7 +225,7 @@ def mock_qmd_db(tmp_path):
 
             # Pack vector into chunk blob
             start = next_offset * vec_size
-            all_vectors[start:start + vec_size] = vec_bytes
+            all_vectors[start : start + vec_size] = vec_bytes
             next_offset += 1
 
     # Make redis notes similar, testing notes similar but different cluster

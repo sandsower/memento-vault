@@ -15,7 +15,9 @@ import numpy as np
 MODEL_ID = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 MODEL_CACHE_DIR = os.path.join(
     os.environ.get("XDG_CACHE_HOME", os.path.join(str(Path.home()), ".cache")),
-    "memento-vault", "models", "minilm-l6-v2",
+    "memento-vault",
+    "models",
+    "minilm-l6-v2",
 )
 
 _SESSION = None  # module-level cache: (ort_session, tokenizer)
@@ -32,6 +34,7 @@ def _check_deps():
         import onnxruntime  # noqa: F401
         import tokenizers  # noqa: F401
         import huggingface_hub  # noqa: F401
+
         _DEPS_AVAILABLE = True
     except ImportError:
         _DEPS_AVAILABLE = False
@@ -142,6 +145,7 @@ def rerank(query, results, config=None):
     """
     if config is None:
         from memento_utils import get_config
+
         config = get_config()
 
     if not config.get("reranker_enabled", True):

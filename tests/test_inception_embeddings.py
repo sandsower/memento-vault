@@ -3,7 +3,6 @@
 import sqlite3
 
 import numpy as np
-import pytest
 
 from memento_inception import load_embeddings
 
@@ -59,8 +58,7 @@ class TestLoadEmbeddingsMeanPooling:
         # Insert a document with 2 chunks of known vectors
         doc_hash = "hash_test"
         conn.execute(
-            "INSERT INTO documents (collection, path, title, hash, created_at, modified_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO documents (collection, path, title, hash, created_at, modified_at) VALUES (?, ?, ?, ?, ?, ?)",
             ("memento", "notes/pooling-test.md", "pooling-test", doc_hash, "2026-03-22", "2026-03-22"),
         )
 
@@ -85,7 +83,7 @@ class TestLoadEmbeddingsMeanPooling:
                 (vec_id, 1, seq),
             )
             start = seq * vec_size
-            chunk_blob[start:start + vec_size] = vec.tobytes()
+            chunk_blob[start : start + vec_size] = vec.tobytes()
 
         conn.execute(
             "INSERT INTO vectors_vec_vector_chunks00 (rowid, vectors) VALUES (?, ?)",
@@ -139,9 +137,7 @@ class TestLoadEmbeddingsNoDb:
 class TestLoadEmbeddingsSubset:
     def test_load_embeddings_subset(self, mock_qmd_db):
         """Request only 2 of 5 stems, verify only those 2 returned."""
-        result = load_embeddings(
-            ["zustand-state-reset", "react-query-wrapper"], db_path=mock_qmd_db
-        )
+        result = load_embeddings(["zustand-state-reset", "react-query-wrapper"], db_path=mock_qmd_db)
 
         assert len(result) == 2
         assert "zustand-state-reset" in result

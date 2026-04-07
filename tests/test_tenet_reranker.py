@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import numpy as np
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
@@ -37,7 +36,7 @@ class TestCheckDeps:
 
         tenet_reranker._DEPS_AVAILABLE = None
 
-        original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+        original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
 
         def mock_import(name, *args, **kwargs):
             if name == "onnxruntime":
@@ -74,9 +73,7 @@ class TestScorePairs:
         mock_encoding.type_ids = [0, 0, 0, 1, 1]
         mock_tokenizer.encode.return_value = mock_encoding
 
-        scores = tenet_reranker._score_pairs(
-            mock_session, mock_tokenizer, "test query", ["doc1", "doc2", "doc3"]
-        )
+        scores = tenet_reranker._score_pairs(mock_session, mock_tokenizer, "test query", ["doc1", "doc2", "doc3"])
         assert len(scores) == 3
         assert scores[0] > scores[1]  # 0.9 > 0.1
 
@@ -103,9 +100,7 @@ class TestScorePairs:
         mock_encoding.type_ids = [0, 0]
         mock_tokenizer.encode.return_value = mock_encoding
 
-        scores = tenet_reranker._score_pairs(
-            mock_session, mock_tokenizer, "query", ["pos", "neg"]
-        )
+        scores = tenet_reranker._score_pairs(mock_session, mock_tokenizer, "query", ["pos", "neg"])
         assert scores[0] > 0.99
         assert scores[1] < 0.01
 
@@ -116,9 +111,7 @@ class TestScorePairs:
         mock_session = MagicMock()
         mock_tokenizer = MagicMock()
 
-        scores = tenet_reranker._score_pairs(
-            mock_session, mock_tokenizer, "query", []
-        )
+        scores = tenet_reranker._score_pairs(mock_session, mock_tokenizer, "query", [])
         assert scores == []
 
     def test_pads_to_max_length(self):
@@ -150,9 +143,7 @@ class TestScorePairs:
         mock_tokenizer = MagicMock()
         mock_tokenizer.encode.side_effect = [enc_short, enc_long]
 
-        tenet_reranker._score_pairs(
-            mock_session, mock_tokenizer, "q", ["short", "longer text"]
-        )
+        tenet_reranker._score_pairs(mock_session, mock_tokenizer, "q", ["short", "longer text"])
 
         # Verify the input arrays passed to session.run are padded to length 4
         call_args = mock_session.run.call_args
@@ -174,10 +165,11 @@ class TestRerank:
 
         mock_scores = [0.2, 0.8, 0.5]  # B should rank first after rerank
 
-        with patch.object(tenet_reranker, '_check_deps', return_value=True), \
-             patch.object(tenet_reranker, '_load_session', return_value=(MagicMock(), MagicMock())), \
-             patch.object(tenet_reranker, '_score_pairs', return_value=mock_scores):
-
+        with (
+            patch.object(tenet_reranker, "_check_deps", return_value=True),
+            patch.object(tenet_reranker, "_load_session", return_value=(MagicMock(), MagicMock())),
+            patch.object(tenet_reranker, "_score_pairs", return_value=mock_scores),
+        ):
             config = {"reranker_enabled": True, "reranker_top_k": 10, "reranker_min_score": 0.01}
             reranked = tenet_reranker.rerank("test query", results, config)
 
@@ -200,7 +192,7 @@ class TestRerank:
 
         results = [{"path": "notes/a.md", "title": "A", "score": 0.9}]
 
-        with patch.object(tenet_reranker, '_check_deps', return_value=False):
+        with patch.object(tenet_reranker, "_check_deps", return_value=False):
             reranked = tenet_reranker.rerank("query", results, config={"reranker_enabled": True})
 
         assert reranked == results
@@ -224,18 +216,16 @@ class TestRerank:
         """Only top_k results should be reranked, rest stay in place."""
         import tenet_reranker
 
-        results = [
-            {"path": f"notes/{i}.md", "title": str(i), "score": 1.0 - i * 0.1, "snippet": ""}
-            for i in range(5)
-        ]
+        results = [{"path": f"notes/{i}.md", "title": str(i), "score": 1.0 - i * 0.1, "snippet": ""} for i in range(5)]
 
         # Only rerank top 2, scores reversed
         mock_scores = [0.1, 0.9]
 
-        with patch.object(tenet_reranker, '_check_deps', return_value=True), \
-             patch.object(tenet_reranker, '_load_session', return_value=(MagicMock(), MagicMock())), \
-             patch.object(tenet_reranker, '_score_pairs', return_value=mock_scores):
-
+        with (
+            patch.object(tenet_reranker, "_check_deps", return_value=True),
+            patch.object(tenet_reranker, "_load_session", return_value=(MagicMock(), MagicMock())),
+            patch.object(tenet_reranker, "_score_pairs", return_value=mock_scores),
+        ):
             config = {"reranker_enabled": True, "reranker_top_k": 2, "reranker_min_score": 0.01}
             reranked = tenet_reranker.rerank("query", results, config)
 
@@ -255,10 +245,11 @@ class TestRerank:
 
         mock_scores = [0.8, 0.001]  # B below min_score
 
-        with patch.object(tenet_reranker, '_check_deps', return_value=True), \
-             patch.object(tenet_reranker, '_load_session', return_value=(MagicMock(), MagicMock())), \
-             patch.object(tenet_reranker, '_score_pairs', return_value=mock_scores):
-
+        with (
+            patch.object(tenet_reranker, "_check_deps", return_value=True),
+            patch.object(tenet_reranker, "_load_session", return_value=(MagicMock(), MagicMock())),
+            patch.object(tenet_reranker, "_score_pairs", return_value=mock_scores),
+        ):
             config = {"reranker_enabled": True, "reranker_top_k": 10, "reranker_min_score": 0.01}
             reranked = tenet_reranker.rerank("query", results, config)
 
@@ -274,10 +265,11 @@ class TestRerank:
             {"path": "notes/b.md", "title": "B", "score": 0.7, "snippet": "y"},
         ]
 
-        with patch.object(tenet_reranker, '_check_deps', return_value=True), \
-             patch.object(tenet_reranker, '_load_session', return_value=(MagicMock(), MagicMock())), \
-             patch.object(tenet_reranker, '_score_pairs', return_value=[0.5, 0.8]):
-
+        with (
+            patch.object(tenet_reranker, "_check_deps", return_value=True),
+            patch.object(tenet_reranker, "_load_session", return_value=(MagicMock(), MagicMock())),
+            patch.object(tenet_reranker, "_score_pairs", return_value=[0.5, 0.8]),
+        ):
             config = {"reranker_enabled": True, "reranker_top_k": 10, "reranker_min_score": 0.01}
             reranked = tenet_reranker.rerank("query", results, config)
 
@@ -293,10 +285,11 @@ class TestRerank:
             {"path": "notes/b.md", "title": "B", "score": 0.7, "snippet": "y"},
         ]
 
-        with patch.object(tenet_reranker, '_check_deps', return_value=True), \
-             patch.object(tenet_reranker, '_load_session', return_value=(MagicMock(), MagicMock())), \
-             patch.object(tenet_reranker, '_score_pairs', return_value=[0.3, 0.6]):
-
+        with (
+            patch.object(tenet_reranker, "_check_deps", return_value=True),
+            patch.object(tenet_reranker, "_load_session", return_value=(MagicMock(), MagicMock())),
+            patch.object(tenet_reranker, "_score_pairs", return_value=[0.3, 0.6]),
+        ):
             config = {"reranker_enabled": True, "reranker_top_k": 10, "reranker_min_score": 0.01}
             reranked = tenet_reranker.rerank("query", results, config)
 
@@ -314,9 +307,10 @@ class TestRerank:
             {"path": "notes/b.md", "title": "B", "score": 0.7, "snippet": "y"},
         ]
 
-        with patch.object(tenet_reranker, '_check_deps', return_value=True), \
-             patch.object(tenet_reranker, '_load_session', side_effect=RuntimeError("no model")):
-
+        with (
+            patch.object(tenet_reranker, "_check_deps", return_value=True),
+            patch.object(tenet_reranker, "_load_session", side_effect=RuntimeError("no model")),
+        ):
             config = {"reranker_enabled": True, "reranker_top_k": 10, "reranker_min_score": 0.01}
             reranked = tenet_reranker.rerank("query", results, config)
 
@@ -331,10 +325,11 @@ class TestRerank:
             {"path": "notes/b.md", "title": "B", "score": 0.7, "snippet": "y"},
         ]
 
-        with patch.object(tenet_reranker, '_check_deps', return_value=True), \
-             patch.object(tenet_reranker, '_load_session', return_value=(MagicMock(), MagicMock())), \
-             patch.object(tenet_reranker, '_score_pairs', side_effect=RuntimeError("onnx failed")):
-
+        with (
+            patch.object(tenet_reranker, "_check_deps", return_value=True),
+            patch.object(tenet_reranker, "_load_session", return_value=(MagicMock(), MagicMock())),
+            patch.object(tenet_reranker, "_score_pairs", side_effect=RuntimeError("onnx failed")),
+        ):
             config = {"reranker_enabled": True, "reranker_top_k": 10, "reranker_min_score": 0.01}
             reranked = tenet_reranker.rerank("query", results, config)
 
@@ -355,10 +350,11 @@ class TestRerank:
             captured_texts.extend(texts)
             return [0.5] * len(texts)
 
-        with patch.object(tenet_reranker, '_check_deps', return_value=True), \
-             patch.object(tenet_reranker, '_load_session', return_value=(MagicMock(), MagicMock())), \
-             patch.object(tenet_reranker, '_score_pairs', side_effect=fake_score):
-
+        with (
+            patch.object(tenet_reranker, "_check_deps", return_value=True),
+            patch.object(tenet_reranker, "_load_session", return_value=(MagicMock(), MagicMock())),
+            patch.object(tenet_reranker, "_score_pairs", side_effect=fake_score),
+        ):
             config = {"reranker_enabled": True, "reranker_top_k": 10, "reranker_min_score": 0.01}
             tenet_reranker.rerank("query", results, config)
 

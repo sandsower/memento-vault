@@ -21,9 +21,12 @@ import numpy as np
 # Add hooks dir to path for memento_utils import
 sys.path.insert(0, str(Path(__file__).parent))
 from memento_utils import (
-    get_config, get_vault, read_note_metadata, slugify,
-    load_inception_state, save_inception_state,
-    acquire_inception_lock, release_inception_lock,
+    get_config,
+    slugify,
+    load_inception_state,
+    save_inception_state,
+    acquire_inception_lock,
+    release_inception_lock,
     INCEPTION_STATE_PATH,
 )
 
@@ -55,8 +58,13 @@ def parse_note(path: Path) -> NoteRecord | None:
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return NoteRecord(
-            stem=path.stem, path=path, title=path.stem, note_type="unknown",
-            tags=[], date="", body=text,
+            stem=path.stem,
+            path=path,
+            title=path.stem,
+            note_type="unknown",
+            tags=[],
+            date="",
+            body=text,
         )
 
     fm_end = None
@@ -67,12 +75,17 @@ def parse_note(path: Path) -> NoteRecord | None:
 
     if fm_end is None:
         return NoteRecord(
-            stem=path.stem, path=path, title=path.stem, note_type="unknown",
-            tags=[], date="", body=text,
+            stem=path.stem,
+            path=path,
+            title=path.stem,
+            note_type="unknown",
+            tags=[],
+            date="",
+            body=text,
         )
 
     fm_lines = lines[1:fm_end]
-    body = "\n".join(lines[fm_end + 1:]).strip()
+    body = "\n".join(lines[fm_end + 1 :]).strip()
 
     # Simple frontmatter parser
     meta = {}
@@ -356,13 +369,7 @@ def score_cluster(stems, notes_dict):
     certainties = [r.certainty for r in records if r.certainty is not None]
     certainty_score = (sum(certainties) / len(certainties) / 5.0) if certainties else 0.5
 
-    return (
-        size_score * 1.0
-        + tag_diversity * 0.8
-        + temporal_score * 0.6
-        + project_bonus * 0.5
-        + certainty_score * 0.3
-    )
+    return size_score * 1.0 + tag_diversity * 0.8 + temporal_score * 0.6 + project_bonus * 0.5 + certainty_score * 0.3
 
 
 def build_synthesis_prompt(cluster_stems, notes_dict, merge_target=None):
@@ -386,11 +393,11 @@ def build_synthesis_prompt(cluster_stems, notes_dict, merge_target=None):
         "that is NOT obvious from any single source note alone.\n"
         "- Write 2-5 sentences for the body. Be specific and concrete.\n"
         "- Return your response as a JSON object (no markdown fencing) with these fields:\n"
-        '  - title: string (concise pattern title)\n'
-        '  - body: string (the 2-5 sentence synthesis)\n'
-        '  - tags: list of strings (union of relevant source tags, plus any new cross-cutting tags)\n'
-        '  - certainty: int 1-5 (your confidence this is a real pattern)\n'
-        '  - related: list of strings (ONLY use the exact source note stems provided below, never invent note names)\n'
+        "  - title: string (concise pattern title)\n"
+        "  - body: string (the 2-5 sentence synthesis)\n"
+        "  - tags: list of strings (union of relevant source tags, plus any new cross-cutting tags)\n"
+        "  - certainty: int 1-5 (your confidence this is a real pattern)\n"
+        "  - related: list of strings (ONLY use the exact source note stems provided below, never invent note names)\n"
     )
 
     source_blocks = []
@@ -501,7 +508,6 @@ def cluster_notes(embedding_matrix, stem_index, config):
     import hdbscan
 
     min_cluster_size = config.get("inception_min_cluster_size", 3)
-    epsilon = config.get("inception_cluster_threshold", 0.7)
     max_clusters = config.get("inception_max_clusters", 10)
 
     if len(stem_index) < min_cluster_size:
@@ -524,15 +530,10 @@ def cluster_notes(embedding_matrix, stem_index, config):
         clusters.setdefault(int(label), []).append(stem_index[i])
 
     # Filter by min size and sort by size descending
-    clusters = {
-        cid: stems for cid, stems in clusters.items()
-        if len(stems) >= min_cluster_size
-    }
+    clusters = {cid: stems for cid, stems in clusters.items() if len(stems) >= min_cluster_size}
 
     # Sort by size descending, limit to max_clusters
-    sorted_clusters = dict(
-        sorted(clusters.items(), key=lambda x: len(x[1]), reverse=True)[:max_clusters]
-    )
+    sorted_clusters = dict(sorted(clusters.items(), key=lambda x: len(x[1]), reverse=True)[:max_clusters])
 
     return sorted_clusters
 
@@ -564,17 +565,17 @@ def write_pattern_note(synthesis, cluster_stems, vault_path):
     synth_lines = "\n".join(f"  - {s}" for s in cluster_stems)
 
     content = f"""---
-title: {synthesis['title']}
+title: {synthesis["title"]}
 type: pattern
 tags: {tags_str}
 source: inception
-certainty: {min(synthesis.get('certainty', 3), 3)}
+certainty: {min(synthesis.get("certainty", 3), 3)}
 synthesized_from:
 {synth_lines}
 date: {now}
 ---
 
-{synthesis['body'].strip()}
+{synthesis["body"].strip()}
 
 ## Related
 
@@ -657,10 +658,12 @@ def call_llm(prompt, config):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
             out_path = tmp.name
         cmd = [
-            "codex", "exec",
+            "codex",
+            "exec",
             "--dangerously-bypass-approvals-and-sandbox",
             "--ephemeral",
-            "-o", out_path,
+            "-o",
+            out_path,
             prompt,
         ]
         try:
@@ -677,11 +680,14 @@ def call_llm(prompt, config):
     else:
         model = config.get("inception_model", "haiku")
         cmd = [
-            "claude", "--print",
-            "--model", model,
+            "claude",
+            "--print",
+            "--model",
+            model,
             "--dangerously-skip-permissions",
             "--no-session-persistence",
-            "-p", prompt,
+            "-p",
+            prompt,
         ]
         try:
             result = subprocess.run(
@@ -741,7 +747,7 @@ def parse_synthesis(raw):
 
 # --- Main Pipeline ---
 
-import argparse
+import argparse  # noqa: E402
 
 
 def check_dependencies():
@@ -763,14 +769,10 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Inception — background consolidation agent for memento-vault",
     )
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Log clusters and proposed notes, write nothing")
-    parser.add_argument("--full", action="store_true",
-                        help="Process all notes, ignoring threshold and processed list")
-    parser.add_argument("--max-clusters", type=int, default=None,
-                        help="Override inception_max_clusters config")
-    parser.add_argument("--verbose", action="store_true",
-                        help="Print progress to stderr")
+    parser.add_argument("--dry-run", action="store_true", help="Log clusters and proposed notes, write nothing")
+    parser.add_argument("--full", action="store_true", help="Process all notes, ignoring threshold and processed list")
+    parser.add_argument("--max-clusters", type=int, default=None, help="Override inception_max_clusters config")
+    parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     return parser.parse_args(argv)
 
 
@@ -797,6 +799,7 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
 
     # Acquire lock
     from memento_utils import RUNTIME_DIR as _rtdir
+
     _lock_path = lock_path or os.path.join(_rtdir, "inception.lock")
     if not acquire_inception_lock(lock_path=_lock_path):
         if args.verbose:
@@ -938,10 +941,7 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
 
         if synthesis_queue:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_cid = {
-                    executor.submit(call_llm, item[3], config): item[0]
-                    for item in synthesis_queue
-                }
+                future_to_cid = {executor.submit(call_llm, item[3], config): item[0] for item in synthesis_queue}
                 for future in as_completed(future_to_cid):
                     cid = future_to_cid[future]
                     try:
@@ -1046,15 +1046,15 @@ def _update_state(state, state_path, notes, clusters_processed, notes_written, d
     now = datetime.now().isoformat(timespec="seconds")
     state["last_run_iso"] = now
     state["last_run_note_count"] = len(notes)
-    state.setdefault("runs", []).append({
-        "iso": now,
-        "clusters_found": clusters_processed,
-        "notes_written": notes_written,
-        "dry_run": dry_run,
-    })
-    state["processed_notes"] = list(set(
-        state.get("processed_notes", []) + [n.stem for n in notes]
-    ))
+    state.setdefault("runs", []).append(
+        {
+            "iso": now,
+            "clusters_found": clusters_processed,
+            "notes_written": notes_written,
+            "dry_run": dry_run,
+        }
+    )
+    state["processed_notes"] = list(set(state.get("processed_notes", []) + [n.stem for n in notes]))
     save_inception_state(state, state_path=state_path)
 
 
@@ -1079,12 +1079,14 @@ def build_project_maps(vault_path):
         slug = slugify(Path(record.project).name)
         if not slug:
             continue
-        projects.setdefault(slug, []).append({
-            "stem": record.stem,
-            "title": record.title,
-            "certainty": record.certainty if record.certainty is not None else 2,
-            "date": record.date or "",
-        })
+        projects.setdefault(slug, []).append(
+            {
+                "stem": record.stem,
+                "title": record.title,
+                "certainty": record.certainty if record.certainty is not None else 2,
+                "date": record.date or "",
+            }
+        )
 
     # Rank each project's notes: certainty desc, date desc
     for slug in projects:
@@ -1120,21 +1122,113 @@ def write_project_maps(maps, config_dir=None):
 
 
 # Stopwords for concept index tokenization (same set used by retrieval)
-_CONCEPT_STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
-    "had", "has", "have", "he", "her", "his", "how", "if", "in", "into",
-    "is", "it", "its", "may", "no", "not", "of", "on", "or", "our", "out",
-    "per", "she", "so", "than", "that", "the", "their", "them", "then",
-    "there", "these", "they", "this", "to", "too", "use", "very", "was",
-    "we", "were", "what", "when", "which", "who", "why", "will", "with",
-    "you", "your",
-    "all", "also", "any", "been", "can", "could", "did", "do", "does",
-    "each", "get", "got", "just", "more", "most", "much", "must", "need",
-    "new", "now", "old", "one", "only", "other", "own", "same", "set",
-    "should", "some", "such", "take", "two", "way", "well", "would",
-    # common markdown / note words
-    "cross", "project", "patterns", "pattern", "notes", "note",
-})
+_CONCEPT_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "but",
+        "by",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "he",
+        "her",
+        "his",
+        "how",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "may",
+        "no",
+        "not",
+        "of",
+        "on",
+        "or",
+        "our",
+        "out",
+        "per",
+        "she",
+        "so",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "to",
+        "too",
+        "use",
+        "very",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "which",
+        "who",
+        "why",
+        "will",
+        "with",
+        "you",
+        "your",
+        "all",
+        "also",
+        "any",
+        "been",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "each",
+        "get",
+        "got",
+        "just",
+        "more",
+        "most",
+        "much",
+        "must",
+        "need",
+        "new",
+        "now",
+        "old",
+        "one",
+        "only",
+        "other",
+        "own",
+        "same",
+        "set",
+        "should",
+        "some",
+        "such",
+        "take",
+        "two",
+        "way",
+        "well",
+        "would",
+        # common markdown / note words
+        "cross",
+        "project",
+        "patterns",
+        "pattern",
+        "notes",
+        "note",
+    }
+)
 
 
 def _tokenize_keywords(text):
@@ -1219,9 +1313,9 @@ def write_concept_index(index, config_dir=None):
 # --- Sleep-time pre-reasoning ---
 
 _FILE_PATH_RE = re.compile(
-    r"(?:^|[\s`\"'(])"          # boundary before path
-    r"((?:/[\w.+-]+){2,})"      # at least 2 slash-separated segments
-    r"(?:[\s`\"').,;:]|$)",     # boundary after path
+    r"(?:^|[\s`\"'(])"  # boundary before path
+    r"((?:/[\w.+-]+){2,})"  # at least 2 slash-separated segments
+    r"(?:[\s`\"').,;:]|$)",  # boundary after path
 )
 
 
@@ -1287,9 +1381,7 @@ def _extract_connections(pattern_record, source_records):
         for match in _FILE_PATH_RE.finditer(src.body):
             path = match.group(1)
             # Only keep paths that look like code (have a file extension or known dir)
-            if "." in path.split("/")[-1] or any(
-                seg in path for seg in ("src", "lib", "pkg", "cmd", "hooks", "tests")
-            ):
+            if "." in path.split("/")[-1] or any(seg in path for seg in ("src", "lib", "pkg", "cmd", "hooks", "tests")):
                 code_areas.add(path)
 
     return {

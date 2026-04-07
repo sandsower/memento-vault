@@ -1,6 +1,5 @@
 """Tests for concept index: build (Inception side) and lookup (Tenet side)."""
 
-import json
 import pytest
 
 from memento_inception import build_concept_index, write_concept_index
@@ -113,10 +112,7 @@ class TestLookupConcepts:
         """Even with many matches, return at most 5 results."""
         # Build an index with 10 distinct patterns under one keyword
         index = {
-            "api": [
-                {"stem": f"pattern-{i}", "title": f"Pattern {i}", "score": 0.5 + i * 0.01}
-                for i in range(10)
-            ],
+            "api": [{"stem": f"pattern-{i}", "title": f"Pattern {i}", "score": 0.5 + i * 0.01} for i in range(10)],
         }
         results = lookup_concepts("api", index=index)
         assert len(results) <= 5
@@ -186,9 +182,7 @@ class TestConceptIndexIntegration:
             {"path": "notes/new-pattern.md", "title": "New pattern", "score": 0.7},
         ]
 
-        merged = self._merge_concept_hits(
-            bm25_results, concept_hits, config={"concept_index_enabled": False}
-        )
+        merged = self._merge_concept_hits(bm25_results, concept_hits, config={"concept_index_enabled": False})
 
         assert len(merged) == 1
         assert merged[0]["path"] == "notes/redis-cache-ttl.md"
@@ -212,9 +206,7 @@ class TestConceptIndexIntegration:
             {"path": "notes/low-score.md", "title": "Low score", "score": 0.1},
         ]
 
-        merged = self._merge_concept_hits(
-            bm25_results, concept_hits, config={"concept_index_score": 0.7}
-        )
+        merged = self._merge_concept_hits(bm25_results, concept_hits, config={"concept_index_score": 0.7})
 
         assert merged[0]["score"] == 0.7
 

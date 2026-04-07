@@ -1,6 +1,5 @@
 """Tests for PRF (Pseudo-Relevance Feedback) query expansion."""
 
-import pytest
 from unittest.mock import patch
 
 from memento_utils import _extract_expansion_terms, prf_expand_query, DEFAULT_CONFIG

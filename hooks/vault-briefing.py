@@ -28,10 +28,13 @@ DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
 def get_git_branch(cwd):
     """Read current git branch from cwd."""
     import subprocess
+
     try:
         result = subprocess.run(
             ["git", "-C", cwd, "branch", "--show-current"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
@@ -57,7 +60,9 @@ def read_project_index(project_slug):
 
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("## Sessions") or (stripped.startswith("## ") and stripped[3:4].isalpha() and "-" in stripped):
+        if stripped.startswith("## Sessions") or (
+            stripped.startswith("## ") and stripped[3:4].isalpha() and "-" in stripped
+        ):
             in_sessions = True
             in_notes = False
             continue
@@ -76,7 +81,7 @@ def read_project_index(project_slug):
             for match in re.finditer(r"\[\[([^\]]+)\]\]", stripped):
                 notes.append(match.group(1))
 
-    return sessions[-3:], notes  # last 3 sessions
+    return sessions, notes
 
 
 def read_note_oneliner(note_name):
@@ -132,14 +137,13 @@ def _strip_injection(text):
 def format_qmd_result(result):
     """Format a QMD search result as a one-liner."""
     title = _strip_injection(result.get("title", ""))
-    score = result.get("score", 0)
     snippet = _strip_injection(result.get("snippet", "").strip())
 
     # Truncate snippet to first sentence or 100 chars
     if snippet:
         dot = snippet.find(".")
         if 0 < dot < 100:
-            snippet = snippet[:dot + 1]
+            snippet = snippet[: dot + 1]
         elif len(snippet) > 100:
             snippet = snippet[:100] + "..."
 
@@ -208,6 +212,7 @@ def run_deferred_search():
         linked_notes = params.get("linked_notes", [])
 
         import time as _time
+
         t0 = _time.time()
         results = qmd_search(
             query,
@@ -241,16 +246,24 @@ def run_deferred_search():
 
         final_notes = note_lines[:max_notes]
         with open(DEFERRED_BRIEFING_PATH, "w") as f:
-            json.dump({
-                "status": "ready",
-                "note_lines": final_notes,
-                "timestamp": time.time(),
-            }, f)
+            json.dump(
+                {
+                    "status": "ready",
+                    "note_lines": final_notes,
+                    "timestamp": time.time(),
+                },
+                f,
+            )
 
-        injected_chars = sum(len(l) for l in final_notes)
-        log_retrieval("briefing", "deferred-ready", query=query,
-                      latency_ms=latency_ms, injected_count=len(final_notes),
-                      injected_chars=injected_chars)
+        injected_chars = sum(len(line) for line in final_notes)
+        log_retrieval(
+            "briefing",
+            "deferred-ready",
+            query=query,
+            latency_ms=latency_ms,
+            injected_count=len(final_notes),
+            injected_chars=injected_chars,
+        )
 
     except Exception:
         # Clean up on failure
@@ -294,28 +307,29 @@ def main():
 
     recent_sessions, linked_notes = read_project_index(project_slug)
 
-    output_lines = []
+    # Count notes in vault for context
+    notes_dir = vault / "notes"
+    note_count = len(list(notes_dir.glob("*.md"))) if notes_dir.exists() else 0
 
-    branch_str = f" (branch: {git_branch})" if git_branch else ""
-    output_lines.append(f"[vault] Project: {project_slug}{branch_str}")
-
+    # Compact single-line summary (saves ~320 chars vs old 3-line session history)
+    branch_str = f" ({git_branch})" if git_branch else ""
+    last_date = ""
     if recent_sessions:
-        output_lines.append("[vault] Last sessions:")
-        for s in recent_sessions[-3:]:
-            abbreviated = re.sub(
-                r'`([0-9a-f]{8})[0-9a-f-]{28}`',
-                r'`\1`',
-                s,
-            )
-            output_lines.append(f"  - {abbreviated[:120]}")
+        # Extract date from most recent session line (format: "YYYY-MM-DD ...")
+        last_line = recent_sessions[-1]
+        date_match = re.match(r"(\d{4}-\d{2}-\d{2})", last_line)
+        if date_match:
+            last_date = f", last: {date_match.group(1)}"
 
-    if len(output_lines) > 1:
-        print("\n".join(output_lines))
+    summary = f"[vault] Project: {project_slug}{branch_str}"
+    summary += f" | {len(recent_sessions)} sessions{last_date} | {note_count} notes"
+    print(summary)
 
     # --- Fast path: project maps (skip deferred vsearch if maps have enough results) ---
     if config.get("project_maps_enabled", True) and has_qmd():
         try:
             from memento_utils import lookup_project_notes
+
             max_notes = config.get("briefing_max_notes", 5)
             map_notes = lookup_project_notes(project_slug, limit=max_notes)
             if len(map_notes) >= max_notes:
@@ -327,17 +341,23 @@ def main():
 
                 # Write directly as ready (skip deferred vsearch)
                 import json as _json
+
                 with open(DEFERRED_BRIEFING_PATH, "w") as f:
-                    _json.dump({
-                        "status": "ready",
-                        "note_lines": note_lines,
-                        "timestamp": time.time(),
-                        "source": "project-maps",
-                    }, f)
+                    _json.dump(
+                        {
+                            "status": "ready",
+                            "note_lines": note_lines,
+                            "timestamp": time.time(),
+                            "source": "project-maps",
+                        },
+                        f,
+                    )
 
                 from memento_utils import log_retrieval
-                log_retrieval("briefing", "project-maps-fast-path",
-                              project=project_slug, injected_count=len(note_lines))
+
+                log_retrieval(
+                    "briefing", "project-maps-fast-path", project=project_slug, injected_count=len(note_lines)
+                )
                 return  # Skip deferred vsearch
         except Exception:
             pass  # Fall through to deferred vsearch
@@ -345,6 +365,7 @@ def main():
     # --- Pre-build wikilink graph for recall (non-blocking) ---
     try:
         from memento_utils import load_or_build_graph
+
         load_or_build_graph(get_vault())
     except Exception:
         pass  # Non-fatal — graph will be built on first recall if needed

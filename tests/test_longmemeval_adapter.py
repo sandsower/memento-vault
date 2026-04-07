@@ -223,9 +223,7 @@ class TestRunRetrieval:
         config["retrieval_limit"] = 5
         results = run_retrieval(sample_question, config)
         retrieved_ids = [Path(r["path"]).stem for r in results]
-        assert "sess_001" in retrieved_ids or any(
-            "sess_001" in rid for rid in retrieved_ids
-        )
+        assert "sess_001" in retrieved_ids or any("sess_001" in rid for rid in retrieved_ids)
 
     def test_respects_config_limit(self, sample_question):
         config = get_default_config()

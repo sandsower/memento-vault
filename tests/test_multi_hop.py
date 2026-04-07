@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
@@ -80,6 +79,7 @@ class TestQmdGet:
 
     def test_returns_none_on_timeout(self):
         import subprocess
+
         with patch("memento_utils.subprocess.run", side_effect=subprocess.TimeoutExpired("qmd", 5)):
             result = qmd_get("notes/slow.md")
 
@@ -233,6 +233,7 @@ class TestMultiHopSearch:
         initial = [self._make_result(f"notes/{i}.md", f"Note {i}", ".", 0.5 - i * 0.1) for i in range(10)]
 
         get_calls = []
+
         def mock_get(path, **kwargs):
             get_calls.append(path)
             return {"path": path, "content": "No links here."}

@@ -3,7 +3,6 @@
 import json
 import os
 
-import pytest
 
 from memento_utils import load_inception_state, save_inception_state
 
