@@ -26,9 +26,11 @@ def parse_transcript(transcript_path):
     user_count = 0
     assistant_count = 0
     files_edited = set()
+    files_read = set()
     git_branch = None
     cwd = None
     first_user_prompt = None
+    last_assistant_text = None
 
     with open(transcript_path) as f:
         for line in f:
@@ -53,13 +55,35 @@ def parse_transcript(transcript_path):
                 content = msg.get("content", [])
                 if isinstance(content, list):
                     for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "text":
+                            text = block.get("text", "").strip()
+                            if text:
+                                last_assistant_text = text
+                        elif block.get("type") == "tool_use":
                             name = block.get("name", "")
                             inp = block.get("input", {})
                             if name in ("Edit", "Write"):
                                 fp = inp.get("file_path", "")
                                 if fp:
                                     files_edited.add(fp)
+                            elif name == "Read":
+                                fp = inp.get("file_path", "")
+                                if fp:
+                                    files_read.add(fp)
+
+    # Extract first sentence of last assistant text as session outcome
+    last_outcome = None
+    if last_assistant_text:
+        last_assistant_text = sanitize_secrets(last_assistant_text)
+        dot = last_assistant_text.find(".")
+        if 0 < dot < 150:
+            last_outcome = last_assistant_text[:dot + 1]
+        else:
+            last_outcome = last_assistant_text[:100]
+            if len(last_assistant_text) > 100:
+                last_outcome += "..."
 
     exchange_count = min(user_count, assistant_count)
     return {
@@ -68,11 +92,20 @@ def parse_transcript(transcript_path):
         "exchange_count": exchange_count,
         "user_messages": user_count,
         "files_edited": sorted(files_edited),
+        "files_read": sorted(files_read),
         "first_prompt": first_user_prompt,
+        "last_outcome": last_outcome,
     }
 
 
 # --- Substantiality scoring ---
+
+
+# Keywords that signal a high-value session even with few exchanges
+_INSIGHT_KEYWORDS = re.compile(
+    r"\b(bug|fix|broke|error|issue|debug|crash|regression|root cause|why does|how to)\b",
+    re.IGNORECASE,
+)
 
 
 def is_substantial(meta):
@@ -89,6 +122,16 @@ def is_substantial(meta):
         for pattern in notable_patterns:
             if pattern in f:
                 return True
+
+    # Short but meaty: keyword match in first prompt + at least 5 exchanges
+    if meta["exchange_count"] >= 5 and meta.get("first_prompt"):
+        if _INSIGHT_KEYWORDS.search(meta["first_prompt"]):
+            return True
+
+    # Read-heavy investigation sessions (deep dives)
+    if len(meta.get("files_read", [])) >= 6:
+        return True
+
     return False
 
 
@@ -233,6 +276,8 @@ def write_fleeting(session_id, meta, project_slug):
     )
     if prompt_str:
         line += f" — {prompt_str}"
+    if meta.get("last_outcome"):
+        line += f" → {meta['last_outcome']}"
     line += "\n"
 
     with open(fleeting_file, "a") as f:
@@ -420,6 +465,7 @@ def main():
             vault_commit(f"auto: notes from session {session_id[:8]}", delay_seconds=delay)
         reindex_qmd(delay_seconds=delay + 5)
     else:
+        # Always reindex so fleeting notes become searchable
         reindex_qmd()
 
     # Inception: background consolidation (gated)
