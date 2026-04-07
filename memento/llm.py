@@ -11,11 +11,17 @@ from urllib import request
 from memento.config import get_config
 
 
-@dataclass
+@dataclass(frozen=True)
 class LLMResult:
     text: str
     ok: bool
     error: str | None = None
+
+    def __post_init__(self):
+        if self.ok and not self.text:
+            raise ValueError("LLMResult: ok=True requires non-empty text")
+        if not self.ok and self.error is None:
+            raise ValueError("LLMResult: ok=False requires an error message")
 
 
 def _resolved_config(config=None):
@@ -42,8 +48,12 @@ def _run_cli(cmd, output_path=None, timeout=30):
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
+        if output_path:
+            output_path.unlink(missing_ok=True)
         return _error("LLM command timed out")
     except FileNotFoundError as exc:
+        if output_path:
+            output_path.unlink(missing_ok=True)
         return _error(str(exc))
 
     if result.returncode != 0:
@@ -87,6 +97,7 @@ def _claude_complete(prompt, model=None):
 
 
 def _codex_complete(prompt, model=None):
+    errors = []
     for attempt in range(5):
         with tempfile.NamedTemporaryFile(prefix="memento-llm-", suffix=".txt", delete=False) as handle:
             output_path = Path(handle.name)
@@ -98,10 +109,14 @@ def _codex_complete(prompt, model=None):
         result = _run_cli(cmd, output_path=output_path)
         if result.ok:
             return result
+        errors.append(result.error or "unknown")
+        # Don't retry non-transient errors
+        if result.error and ("not found" in result.error.lower() or "auth" in result.error.lower()):
+            return result
         if attempt < 4:
             time.sleep(1)
 
-    return result
+    return _error(f"codex failed after 5 attempts. Last: {errors[-1]}")
 
 
 def _gemini_complete(prompt, model=None):
@@ -113,6 +128,8 @@ def _gemini_complete(prompt, model=None):
 
 
 def _api_complete(url, headers, payload, extract_text, timeout=30):
+    from urllib.error import HTTPError, URLError
+
     data = json.dumps(payload).encode()
     req = request.Request(url, data=data, method="POST")
     for key, value in headers.items():
@@ -121,10 +138,13 @@ def _api_complete(url, headers, payload, extract_text, timeout=30):
     try:
         with request.urlopen(req, timeout=timeout) as response:
             body = json.loads(response.read().decode())
-    except Exception as exc:
+    except (URLError, HTTPError, OSError, json.JSONDecodeError) as exc:
         return _error(str(exc))
 
-    return _success(extract_text(body))
+    try:
+        return _success(extract_text(body))
+    except (KeyError, TypeError, IndexError) as exc:
+        return _error(f"Unexpected LLM response structure: {exc}")
 
 
 def _anthropic_api_complete(prompt, model, api_key):

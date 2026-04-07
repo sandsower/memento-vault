@@ -213,6 +213,56 @@ class TestCliBackends:
         assert "timed out" in result.error.lower()
 
     @patch("memento.llm.subprocess.run")
+    def test_timeout_cleans_up_temp_file(self, mock_run, tmp_path):
+        """Regression: timeout must not leak the output temp file."""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=30)
+
+        with patch("memento.llm.tempfile.NamedTemporaryFile", wraps=None) as mock_tmp:
+            # Create real temp files in tmp_path so we can verify cleanup
+            call_count = [0]
+
+            def fake_tmpfile(**kwargs):
+                call_count[0] += 1
+                path = tmp_path / f"memento-llm-{call_count[0]}.txt"
+                path.touch()
+                handle = MagicMock()
+                handle.name = str(path)
+                handle.__enter__ = MagicMock(return_value=handle)
+                handle.__exit__ = MagicMock(return_value=False)
+                return handle
+
+            mock_tmp.side_effect = fake_tmpfile
+            result = llm_complete("prompt", {"llm_backend": "codex", "llm_model": "gpt-5"})
+
+        assert result.ok is False
+        leftover = list(tmp_path.glob("memento-llm-*.txt"))
+        assert len(leftover) == 0, f"Leaked temp files: {[f.name for f in leftover]}"
+
+    @patch("memento.llm.subprocess.run")
+    def test_file_not_found_cleans_up_temp_file(self, mock_run, tmp_path):
+        """Regression: FileNotFoundError must not leak the output temp file."""
+        mock_run.side_effect = FileNotFoundError("codex not found")
+
+        call_count = [0]
+
+        def fake_tmpfile(**kwargs):
+            call_count[0] += 1
+            path = tmp_path / f"memento-llm-{call_count[0]}.txt"
+            path.touch()
+            handle = MagicMock()
+            handle.name = str(path)
+            handle.__enter__ = MagicMock(return_value=handle)
+            handle.__exit__ = MagicMock(return_value=False)
+            return handle
+
+        with patch("memento.llm.tempfile.NamedTemporaryFile", side_effect=fake_tmpfile):
+            result = llm_complete("prompt", {"llm_backend": "codex", "llm_model": "gpt-5"})
+
+        assert result.ok is False
+        leftover = list(tmp_path.glob("memento-llm-*.txt"))
+        assert len(leftover) == 0, f"Leaked temp files: {[f.name for f in leftover]}"
+
+    @patch("memento.llm.subprocess.run")
     def test_backend_returns_error_on_missing_binary(self, mock_run):
         mock_run.side_effect = FileNotFoundError("claude not found")
 

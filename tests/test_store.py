@@ -13,6 +13,29 @@ from memento.store import (
 )
 
 
+class TestShimExports:
+    """Regression: backwards-compat shim must re-export all store functions."""
+
+    def test_shim_exports_store_functions(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "memento_utils_shim",
+            str(Path(__file__).parent.parent / "hooks" / "memento_utils.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        for name in [
+            "write_note",
+            "update_project_index",
+            "find_dedup_candidates",
+            "acquire_vault_write_lock",
+            "release_vault_write_lock",
+        ]:
+            assert hasattr(mod, name), f"Shim missing export: {name}"
+
+
 def _write_note_file(directory, stem, title, tags=None):
     path = Path(directory) / f"{stem}.md"
     path.write_text(
@@ -76,6 +99,31 @@ class TestWriteNote:
         text = path.read_text()
         assert "source: session" in text
         assert "date: " in text
+
+
+    def test_write_note_does_not_overwrite_existing(self, tmp_vault):
+        """Regression: slug collision must not silently replace an existing note."""
+        first = write_note(
+            tmp_vault,
+            title="Redis cache requires TTL",
+            body="Original content.",
+            note_type="discovery",
+            tags=["redis"],
+        )
+        second = write_note(
+            tmp_vault,
+            title="Redis cache requires TTL",
+            body="Different content.",
+            note_type="discovery",
+            tags=["redis"],
+        )
+
+        assert first.exists()
+        assert second.exists()
+        assert first != second
+        assert "Original content." in first.read_text()
+        assert "Different content." in second.read_text()
+        assert second.name == "redis-cache-requires-ttl-2.md"
 
 
 class TestFindDedupCandidates:

@@ -27,6 +27,7 @@ while elapsed < max_wait:
     elapsed += 2
 
 # Normalize tags on all notes
+sys.path.insert(0, str(Path(hooks_dir).parent))
 sys.path.insert(0, hooks_dir)
 from memento.config import get_vault  # noqa: E402
 from memento.utils import normalize_note_tags  # noqa: E402

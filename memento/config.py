@@ -140,8 +140,10 @@ def load_config():
                     user_config = _parse_simple_yaml(path)
 
                 config.update({k: v for k, v in user_config.items() if v is not None})
-            except Exception:
-                pass
+            except Exception as exc:
+                import sys as _sys
+
+                print(f"[memento] warning: failed to parse config {path}: {exc}", file=_sys.stderr)
             break
 
     config["vault_path"] = str(Path(config["vault_path"]).expanduser())

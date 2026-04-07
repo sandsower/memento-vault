@@ -65,10 +65,15 @@ from memento.store import (  # noqa: E402, F401
     RETRIEVAL_LOG_PATH,
     _should_log,
     acquire_inception_lock,
+    acquire_vault_write_lock,
+    find_dedup_candidates,
     load_inception_state,
     log_retrieval,
     release_inception_lock,
+    release_vault_write_lock,
     save_inception_state,
+    update_project_index,
+    write_note,
 )
 from memento.utils import (  # noqa: E402, F401
     _COMPILED_SECRET_PATTERNS,

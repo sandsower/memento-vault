@@ -215,6 +215,13 @@ def write_note(
 
     slug = slugify(title)
     target = notes_dir / f"{slug}.md"
+    if target.exists():
+        # Avoid overwriting — append a numeric suffix
+        for i in range(2, 100):
+            candidate = notes_dir / f"{slug}-{i}.md"
+            if not candidate.exists():
+                target = candidate
+                break
     tmp = notes_dir / f".tmp-{slug}.md"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 

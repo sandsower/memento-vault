@@ -324,6 +324,7 @@ class TestProcessStructuredNotes:
             "structured_notes_parse_empty",
             session_id="sess-123",
             project="api-service",
+            raw_preview="not json",
         )
 
 
@@ -491,6 +492,95 @@ class TestSpawnMementoAgent:
         mock_log.assert_any_call(
             "triage",
             "structured_notes_lock_timeout",
+            session_id="sess-123",
+            project="api-service",
+        )
+
+    def test_triage_sanitizes_secrets_in_note_body(self, tmp_vault, tmp_path):
+        """Regression: note bodies must be sanitized before writing to vault."""
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Fix the auth bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "main",
+            "exchange_count": 6,
+            "files_edited": ["src/auth.py"],
+            "first_prompt": "Fix the auth bug",
+            "last_outcome": "Fixed it.",
+        }
+        llm_payload = json.dumps(
+            [
+                {
+                    "title": "Auth token handling",
+                    "body": "Used token sk-abcdefghij1234567890abcdefghij to authenticate.",
+                    "type": "discovery",
+                    "tags": ["auth"],
+                    "certainty": 3,
+                }
+            ]
+        )
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text=llm_payload, ok=True, error=None)),
+        ):
+            written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
+
+        assert written == 1
+        note_files = list((tmp_vault / "notes").glob("*.md"))
+        assert len(note_files) == 1
+        note_text = note_files[0].read_text()
+        assert "sk-abcdefghij1234567890abcdefghij" not in note_text
+
+    def test_triage_sanitizes_transcript_before_llm(self, tmp_vault, tmp_path):
+        """Regression: transcript sent to LLM must be sanitized."""
+        secret = "AKIA1234567890ABCDEF"
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg(f"Deploy with key {secret}")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "main",
+            "exchange_count": 6,
+            "files_edited": ["deploy.py"],
+            "first_prompt": "Deploy",
+            "last_outcome": "Deployed.",
+        }
+
+        captured_prompt = {}
+
+        def mock_llm(prompt, config=None):
+            captured_prompt["text"] = prompt
+            return LLMResult(text="[]", ok=True, error=None)
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", side_effect=mock_llm),
+        ):
+            process_structured_notes("sess-123", str(transcript), meta, "api-service")
+
+        assert secret not in captured_prompt["text"]
+
+    def test_triage_logs_transcript_read_failure(self, tmp_vault, tmp_path):
+        """Regression: unreadable transcript must log, not silently return 0."""
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "main",
+            "exchange_count": 6,
+            "files_edited": ["src/auth.py"],
+            "first_prompt": "Fix it",
+            "last_outcome": "Fixed.",
+        }
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.log_retrieval") as mock_log,
+        ):
+            written = process_structured_notes("sess-123", "/nonexistent/transcript.jsonl", meta, "api-service")
+
+        assert written == 0
+        mock_log.assert_any_call(
+            "triage",
+            "structured_notes_transcript_unreadable",
             session_id="sess-123",
             project="api-service",
         )

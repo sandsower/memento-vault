@@ -437,8 +437,14 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
     """Read transcript, call the shared LLM, and write structured notes."""
     vault = get_vault()
     try:
-        transcript_text = Path(transcript_path).read_text()
+        transcript_text = sanitize_secrets(Path(transcript_path).read_text())
     except OSError:
+        log_retrieval(
+            "triage",
+            "structured_notes_transcript_unreadable",
+            session_id=session_id,
+            project=project_slug,
+        )
         return 0
 
     existing_titles = []
@@ -481,6 +487,7 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             "structured_notes_parse_empty",
             session_id=session_id,
             project=project_slug,
+            raw_preview=result.text[:200] if result.text else "",
         )
         return 0
 
@@ -499,7 +506,7 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             path = write_note(
                 vault,
                 title=note["title"],
-                body=note["body"],
+                body=sanitize_secrets(note["body"]),
                 note_type=note.get("type", "discovery"),
                 tags=note.get("tags", []),
                 certainty=note.get("certainty"),
@@ -598,7 +605,8 @@ def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
 def main():
     try:
         hook_input = read_hook_input()
-    except (json.JSONDecodeError, Exception):
+    except Exception as exc:
+        log_retrieval("triage", "hook_input_failed", error=str(exc))
         sys.exit(0)
 
     session_id = hook_input.get("session_id", "unknown")
@@ -609,7 +617,8 @@ def main():
 
     try:
         meta = parse_transcript(transcript_path)
-    except Exception:
+    except Exception as exc:
+        log_retrieval("triage", "parse_transcript_failed", error=str(exc), session_id=session_id)
         sys.exit(0)
 
     if not meta["cwd"]:

@@ -76,6 +76,25 @@ class TestLoadConfig:
         assert DEFAULT_CONFIG["llm_backend"] == "claude"
         assert DEFAULT_CONFIG["llm_model"] is None
 
+    def test_warns_on_corrupt_config_file(self, tmp_path, capsys):
+        """Regression: corrupt YAML must warn to stderr, not silently use defaults."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        config_file = vault / "memento.yml"
+        config_file.write_text(": : : invalid yaml : :\n")
+
+        with (
+            patch.object(Path, "home", return_value=tmp_path),
+            patch("memento.config.DEFAULT_CONFIG", {**DEFAULT_CONFIG, "vault_path": str(vault)}),
+        ):
+            reset_config()
+            config = load_config()
+
+        captured = capsys.readouterr()
+        assert "[memento] warning: failed to parse config" in captured.err
+        # Should still return defaults
+        assert config["llm_backend"] == "claude"
+
 
 class TestRuntimeDir:
     def test_falls_back_to_temp_when_primary_locations_are_not_writable(self, tmp_path):
