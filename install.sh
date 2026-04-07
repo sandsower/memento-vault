@@ -120,14 +120,31 @@ print(json.dumps(d))
 " "$MANIFEST_FILES_JSON" "$key" "$hash")
 }
 
+# Base copy storage — saves the installed version for future three-way merges
+BASE_DIR="$CONFIG_DIR/base"
+
+save_base() {
+    local key="$1" src="$2"
+    local base_path="$BASE_DIR/$key"
+    mkdir -p "$(dirname "$base_path")"
+    cp "$src" "$base_path"
+}
+
 # Safe copy: only overwrites if the user hasn't modified the installed copy.
-# Returns 0 if copied, 1 if skipped.
+# When a user has modified a file and a base copy exists, attempts a three-way
+# merge using git merge-file. Falls back to saving a .new copy when merge
+# isn't possible (no base or no git).
+# Returns 0 if copied/merged, 1 if skipped.
 safe_copy() {
     local src="$1" dest="$2" key="$3"
+
+    # Clean up stale artifacts from previous runs
+    rm -f "${dest}.new" "${dest}.merged"
 
     if [ "$FORCE" = true ]; then
         cp "$src" "$dest"
         record_file "$key" "$dest"
+        save_base "$key" "$src"
         return 0
     fi
 
@@ -135,6 +152,7 @@ safe_copy() {
         # New file — always install
         cp "$src" "$dest"
         record_file "$key" "$dest"
+        save_base "$key" "$src"
         return 0
     fi
 
@@ -143,13 +161,14 @@ safe_copy() {
 
     if [ -z "$manifest_checksum" ]; then
         # File exists but no manifest entry (pre-manifest install or manual file).
-        # Don't overwrite — it's ambiguous.
+        # Don't overwrite — it's ambiguous. No base saved (we didn't put this file here).
         local src_hash dest_hash
         src_hash=$(file_hash "$src")
         dest_hash=$(file_hash "$dest")
         if [ "$src_hash" = "$dest_hash" ]; then
-            # Identical — record it but don't copy
+            # Identical — record it and seed the base for future merges
             record_file "$key" "$dest"
+            save_base "$key" "$src"
             return 0
         else
             cp "$src" "${dest}.new"
@@ -165,8 +184,9 @@ safe_copy() {
     src_hash=$(file_hash "$src")
 
     if [ "$current_hash" = "$src_hash" ]; then
-        # Already up to date (possibly updated outside the installer)
+        # Already up to date — seed the base for future merges
         record_file "$key" "$dest"
+        save_base "$key" "$src"
         return 0
     fi
 
@@ -174,16 +194,50 @@ safe_copy() {
         # File unchanged since last install — safe to overwrite
         cp "$src" "$dest"
         record_file "$key" "$dest"
+        save_base "$key" "$src"
         return 0
-    else
-        # User modified the file — don't overwrite, but save the new version
-        # so the user can diff and merge manually
-        cp "$src" "${dest}.new"
-        skip "Skipped $key (locally modified)"
-        skip "  New version saved to ${dest}.new — diff and merge your changes"
-        record_file "$key" "$dest"
-        return 1
     fi
+
+    # User modified the file — try three-way merge if we have a base copy
+    local base_path="$BASE_DIR/$key"
+    if [ -f "$base_path" ] && command -v git &>/dev/null; then
+        local tmp_merged merge_rc
+        tmp_merged=$(mktemp)
+        cp "$dest" "$tmp_merged"
+
+        merge_rc=0
+        git merge-file "$tmp_merged" "$base_path" "$src" >/dev/null 2>&1 || merge_rc=$?
+
+        if [ "$merge_rc" -eq 0 ]; then
+            # Clean merge — apply it
+            cp "$tmp_merged" "$dest"
+            rm -f "$tmp_merged"
+            record_file "$key" "$dest"
+            save_base "$key" "$src"
+            info "Auto-merged $key (your changes preserved)"
+            return 0
+        elif [ "$merge_rc" -gt 0 ]; then
+            # Conflicts — save merged file with markers, keep user's file
+            cp "$tmp_merged" "${dest}.merged"
+            cp "$src" "${dest}.new"
+            rm -f "$tmp_merged"
+            skip "Skipped $key (merge conflicts)"
+            skip "  Conflict file: ${dest}.merged"
+            skip "  New version: ${dest}.new"
+            record_file "$key" "$dest"
+            return 1
+        else
+            # Negative exit = error, fall through to .new fallback
+            rm -f "$tmp_merged"
+        fi
+    fi
+
+    # Fallback: no base or git unavailable — save .new for manual diff
+    cp "$src" "${dest}.new"
+    skip "Skipped $key (locally modified)"
+    skip "  New version saved to ${dest}.new — diff and merge your changes"
+    record_file "$key" "$dest"
+    return 1
 }
 
 # --- Load existing manifest ---
