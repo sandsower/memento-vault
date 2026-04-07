@@ -77,10 +77,12 @@ file_hash() {
 }
 
 load_manifest() {
-    # Read the installed version and file checksums from the manifest
+    # Read the installed version, vault path, and file checksums from the manifest
     INSTALLED_VERSION=""
+    MANIFEST_VAULT_PATH=""
     if [ -f "$MANIFEST" ]; then
         INSTALLED_VERSION=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('version',''))" 2>/dev/null || echo "")
+        MANIFEST_VAULT_PATH=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('vault_path',''))" 2>/dev/null || echo "")
     fi
 }
 
@@ -243,6 +245,12 @@ safe_copy() {
 # --- Load existing manifest ---
 
 load_manifest
+
+# On reinstall/upgrade, prefer the vault path from the previous install
+# unless the user explicitly overrode it via MEMENTO_VAULT_PATH.
+if [ -z "${MEMENTO_VAULT_PATH:-}" ] && [ -n "$MANIFEST_VAULT_PATH" ]; then
+    VAULT_PATH="$MANIFEST_VAULT_PATH"
+fi
 
 if [ -n "$INSTALLED_VERSION" ]; then
     if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ] && [ "$FORCE" != true ]; then
