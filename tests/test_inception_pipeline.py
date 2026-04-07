@@ -4,16 +4,13 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import numpy as np
-import pytest
 
 from memento_inception import (
     main,
     check_dependencies,
     parse_args,
-    NoteRecord,
 )
 
 
@@ -77,7 +74,8 @@ class TestMainPipeline:
 
         with _mock_llm_response():
             result = _run_main(
-                mock_config, inception_state_path,
+                mock_config,
+                inception_state_path,
                 ["--dry-run", "--full"],
                 db_path=str(mock_qmd_db),
             )
@@ -88,7 +86,6 @@ class TestMainPipeline:
 
     def test_lock_prevents_concurrent(self, mock_config, sample_notes, tmp_vault, inception_state_path):
         """If lock is held, exits 1."""
-        from memento_utils import acquire_inception_lock, release_inception_lock
         lock_path = str(tmp_vault / "inception.lock")
         # Write a lock with our own PID (simulates another instance)
         Path(lock_path).write_text(str(os.getpid()))
@@ -103,7 +100,8 @@ class TestMainPipeline:
         """After a successful run, state file is updated."""
         with _mock_llm_response():
             result = _run_main(
-                mock_config, inception_state_path,
+                mock_config,
+                inception_state_path,
                 ["--full"],
                 db_path=str(mock_qmd_db),
             )
@@ -128,26 +126,30 @@ class TestMainPipeline:
 
 # --- Helpers ---
 
+
 def _selective_import_error(blocked_module):
     """Create an import function that blocks a specific module."""
-    real_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+    real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
 
     def _import(name, *args, **kwargs):
         if name == blocked_module:
             raise ImportError(f"No module named '{blocked_module}'")
         return real_import(name, *args, **kwargs)
+
     return _import
 
 
 def _mock_llm_response():
     """Patch call_llm to return a valid synthesis JSON."""
-    response = json.dumps({
-        "title": "Test Pattern Note",
-        "body": "This is a synthesized pattern across multiple notes.",
-        "tags": ["test", "pattern"],
-        "certainty": 3,
-        "related": [],
-    })
+    response = json.dumps(
+        {
+            "title": "Test Pattern Note",
+            "body": "This is a synthesized pattern across multiple notes.",
+            "tags": ["test", "pattern"],
+            "certainty": 3,
+            "related": [],
+        }
+    )
     return patch("memento_inception.call_llm", return_value=response)
 
 

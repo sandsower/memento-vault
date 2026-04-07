@@ -1,9 +1,7 @@
 """Tests for wikilink graph building and PageRank computation."""
 
-import json
 import os
 import time
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -145,19 +143,18 @@ def test_load_or_build_uses_cache(tmp_vault, mock_config):
     cache_path = str(tmp_vault / "test-graph-cache.json")
 
     with patch("memento_utils._GRAPH_CACHE", new=[None]):
-        import memento_utils
-        old_cache = memento_utils._GRAPH_CACHE
-
         # First call: builds
         g1, pr1 = load_or_build_graph(
-            vault_path=str(tmp_vault), cache_path=cache_path,
+            vault_path=str(tmp_vault),
+            cache_path=cache_path,
         )
         assert g1.has_edge("alpha", "beta")
 
         # Patch build_wikilink_graph so if it gets called we know cache was missed
         with patch("memento_utils.build_wikilink_graph") as mock_build:
             g2, pr2 = load_or_build_graph(
-                vault_path=str(tmp_vault), cache_path=cache_path,
+                vault_path=str(tmp_vault),
+                cache_path=cache_path,
             )
             mock_build.assert_not_called()
 
@@ -172,12 +169,14 @@ def test_load_or_build_rebuilds_stale_cache(tmp_vault, mock_config):
     cache_path = str(tmp_vault / "stale-cache.json")
 
     import memento_utils
+
     # Clear in-process cache
     memento_utils._GRAPH_CACHE = [None]
 
     # Build and write cache
     g, pr = load_or_build_graph(
-        vault_path=str(tmp_vault), cache_path=cache_path,
+        vault_path=str(tmp_vault),
+        cache_path=cache_path,
     )
 
     # Backdate cache file to 2 hours ago
@@ -191,7 +190,8 @@ def test_load_or_build_rebuilds_stale_cache(tmp_vault, mock_config):
     _write_note(tmp_vault, "gamma", "See [[alpha]].")
 
     g2, pr2 = load_or_build_graph(
-        vault_path=str(tmp_vault), cache_path=cache_path,
+        vault_path=str(tmp_vault),
+        cache_path=cache_path,
     )
 
     assert "gamma" in g2.nodes

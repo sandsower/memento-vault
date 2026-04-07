@@ -1,9 +1,7 @@
 """Tests for project retrieval maps (build, write, load, lookup)."""
 
 import json
-from pathlib import Path
 
-import pytest
 
 from memento_inception import build_project_maps, write_project_maps
 from memento_utils import load_project_maps, lookup_project_notes
@@ -151,12 +149,15 @@ class TestProjectMapsIntegration:
         import time
 
         with open(deferred_path, "w") as f:
-            json.dump({
-                "status": "ready",
-                "note_lines": note_lines,
-                "timestamp": time.time(),
-                "source": "project-maps",
-            }, f)
+            json.dump(
+                {
+                    "status": "ready",
+                    "note_lines": note_lines,
+                    "timestamp": time.time(),
+                    "source": "project-maps",
+                },
+                f,
+            )
 
         with open(deferred_path) as f:
             result = json.load(f)

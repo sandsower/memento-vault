@@ -141,10 +141,12 @@ def find_recent_transcripts():
 
 def triage_orphan(session_id, transcript_path):
     """Feed an orphan transcript through memento-triage.py."""
-    hook_input = json.dumps({
-        "session_id": session_id,
-        "transcript_path": transcript_path,
-    })
+    hook_input = json.dumps(
+        {
+            "session_id": session_id,
+            "transcript_path": transcript_path,
+        }
+    )
 
     triage = str(TRIAGE_SCRIPT)
     if not TRIAGE_SCRIPT.exists():
@@ -172,8 +174,7 @@ def main():
         active = collect_active_session_ids()
         recent = find_recent_transcripts()
 
-        orphans = {sid: path for sid, path in recent.items()
-                   if sid not in known and sid not in active}
+        orphans = {sid: path for sid, path in recent.items() if sid not in known and sid not in active}
 
         if not orphans:
             sys.exit(0)

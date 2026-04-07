@@ -3,9 +3,20 @@
 from pathlib import Path
 
 
-def _write_note(path, *, title, note_type="discovery", tags=None, date="",
-                certainty=None, project=None, source=None,
-                synthesized_from=None, body="", related=None):
+def _write_note(
+    path,
+    *,
+    title,
+    note_type="discovery",
+    tags=None,
+    date="",
+    certainty=None,
+    project=None,
+    source=None,
+    synthesized_from=None,
+    body="",
+    related=None,
+):
     """Helper: write a markdown note with YAML frontmatter."""
     lines = ["---"]
     lines.append(f"title: {title}")

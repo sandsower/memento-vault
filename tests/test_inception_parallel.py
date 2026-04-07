@@ -1,35 +1,28 @@
 """Tests for parallel LLM synthesis in the Inception pipeline."""
 
 import json
-import sys
 import threading
 import time
-from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch
 
-import numpy as np
-import pytest
 
 from memento_inception import (
     main,
     parse_args,
-    NoteRecord,
-    call_llm,
-    parse_synthesis,
-    build_synthesis_prompt,
-    check_ledger_dedup,
 )
 
 
 def _synth_response(title="Test Pattern", body="Synthesized."):
     """Build a valid synthesis JSON string."""
-    return json.dumps({
-        "title": title,
-        "body": body,
-        "tags": ["test"],
-        "certainty": 3,
-        "related": [],
-    })
+    return json.dumps(
+        {
+            "title": title,
+            "body": body,
+            "tags": ["test"],
+            "certainty": 3,
+            "related": [],
+        }
+    )
 
 
 def _run_main(config, state_path, argv, db_path=None, lock_path=None):
@@ -78,7 +71,8 @@ class TestParallelSynthesis:
                             with patch("memento_inception.build_concept_index", return_value={}):
                                 with patch("memento_inception.write_concept_index"):
                                     _run_main(
-                                        mock_config, inception_state_path,
+                                        mock_config,
+                                        inception_state_path,
                                         ["--full"],
                                         db_path=str(mock_qmd_db),
                                     )
@@ -88,26 +82,22 @@ class TestParallelSynthesis:
 
         # Verify calls overlapped (parallel)
         call_times.sort()
-        assert call_times[1][0] < call_times[0][1], (
-            "LLM calls should overlap in time (parallel execution)"
-        )
+        assert call_times[1][0] < call_times[0][1], "LLM calls should overlap in time (parallel execution)"
 
-    def test_results_processed_in_order(
-        self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db
-    ):
+    def test_results_processed_in_order(self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db):
         """Notes are written in scored order, not LLM completion order."""
         write_order = []
         original_write = None
 
         # Import the real write_pattern_note to delegate to
         import memento_inception
+
         original_write = memento_inception.write_pattern_note
 
         def _tracking_write(synthesis, stems, vault_path):
             write_order.append(synthesis["title"])
             return original_write(synthesis, stems, vault_path)
 
-        responses = {}
         call_count = [0]
         lock = threading.Lock()
 
@@ -129,7 +119,8 @@ class TestParallelSynthesis:
                             with patch("memento_inception.build_concept_index", return_value={}):
                                 with patch("memento_inception.write_concept_index"):
                                     _run_main(
-                                        mock_config, inception_state_path,
+                                        mock_config,
+                                        inception_state_path,
                                         ["--full"],
                                         db_path=str(mock_qmd_db),
                                     )
@@ -138,35 +129,31 @@ class TestParallelSynthesis:
         # regardless of which LLM call finishes first
         if len(write_order) >= 2:
             indices = [int(t.split()[-1]) for t in write_order]
-            assert indices == sorted(indices), (
-                f"Write order {write_order} should follow queue order"
-            )
+            assert indices == sorted(indices), f"Write order {write_order} should follow queue order"
 
 
 class TestParallelDedupAndDryRun:
     """Dedup and dry-run still work correctly with the parallel pipeline."""
 
-    def test_dry_run_skips_llm_calls(
-        self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db
-    ):
+    def test_dry_run_skips_llm_calls(self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db):
         """In dry-run mode, call_llm is never invoked."""
         with patch("memento_inception.call_llm") as mock_llm:
             _run_main(
-                mock_config, inception_state_path,
+                mock_config,
+                inception_state_path,
                 ["--dry-run", "--full"],
                 db_path=str(mock_qmd_db),
             )
         mock_llm.assert_not_called()
 
-    def test_dry_run_writes_no_files(
-        self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db
-    ):
+    def test_dry_run_writes_no_files(self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db):
         """Dry run produces no new note files on disk."""
         notes_before = set((tmp_vault / "notes").glob("*.md"))
 
         with patch("memento_inception.call_llm", return_value=_synth_response()):
             _run_main(
-                mock_config, inception_state_path,
+                mock_config,
+                inception_state_path,
                 ["--dry-run", "--full"],
                 db_path=str(mock_qmd_db),
             )
@@ -198,7 +185,8 @@ class TestParallelDedupAndDryRun:
                             with patch("memento_inception.build_concept_index", return_value={}):
                                 with patch("memento_inception.write_concept_index"):
                                     _run_main(
-                                        mock_config, inception_state_path,
+                                        mock_config,
+                                        inception_state_path,
                                         ["--full"],
                                         db_path=str(mock_qmd_db),
                                     )
@@ -218,7 +206,8 @@ class TestParallelDedupAndDryRun:
                             with patch("memento_inception.build_concept_index", return_value={}):
                                 with patch("memento_inception.write_concept_index"):
                                     _run_main(
-                                        mock_config, state_path2,
+                                        mock_config,
+                                        state_path2,
                                         ["--full"],
                                         db_path=str(mock_qmd_db),
                                     )
@@ -255,16 +244,15 @@ class TestParallelErrorHandling:
                         with patch("memento_inception.build_concept_index", return_value={}):
                             with patch("memento_inception.write_concept_index"):
                                 result = _run_main(
-                                    mock_config, inception_state_path,
+                                    mock_config,
+                                    inception_state_path,
                                     ["--full"],
                                     db_path=str(mock_qmd_db),
                                 )
 
         assert result == 0, "Pipeline should complete successfully despite LLM failure"
 
-    def test_all_llm_calls_fail(
-        self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db
-    ):
+    def test_all_llm_calls_fail(self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db):
         """If every LLM call fails, pipeline exits 0 with no notes written."""
         notes_before = set((tmp_vault / "notes").glob("*.md"))
 
@@ -275,7 +263,8 @@ class TestParallelErrorHandling:
 
         with patch("memento_inception.call_llm", side_effect=_always_fail):
             result = _run_main(
-                mock_config, inception_state_path,
+                mock_config,
+                inception_state_path,
                 ["--full"],
                 db_path=str(mock_qmd_db),
             )
@@ -291,12 +280,11 @@ class TestParallelConfig:
     def test_default_config_has_inception_parallel(self):
         """DEFAULT_CONFIG includes inception_parallel = 4."""
         from memento_utils import DEFAULT_CONFIG
+
         assert "inception_parallel" in DEFAULT_CONFIG
         assert DEFAULT_CONFIG["inception_parallel"] == 4
 
-    def test_custom_worker_count(
-        self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db
-    ):
+    def test_custom_worker_count(self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db):
         """Setting inception_parallel=1 forces sequential execution."""
         mock_config["inception_parallel"] = 1
         call_times = []
@@ -317,7 +305,8 @@ class TestParallelConfig:
                         with patch("memento_inception.build_concept_index", return_value={}):
                             with patch("memento_inception.write_concept_index"):
                                 _run_main(
-                                    mock_config, inception_state_path,
+                                    mock_config,
+                                    inception_state_path,
                                     ["--full"],
                                     db_path=str(mock_qmd_db),
                                 )
@@ -325,6 +314,4 @@ class TestParallelConfig:
         # With max_workers=1, calls should be sequential (no overlap)
         if len(call_times) >= 2:
             call_times.sort()
-            assert call_times[1][0] >= call_times[0][1], (
-                "With max_workers=1, calls should not overlap"
-            )
+            assert call_times[1][0] >= call_times[0][1], "With max_workers=1, calls should not overlap"

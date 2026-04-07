@@ -8,7 +8,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import networkx as nx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
@@ -73,13 +72,13 @@ def linked_vault(tmp_path):
     }
 
     for stem, data in note_data.items():
-        links_md = "\n".join(f"- [[{l}]]" for l in data["links"])
+        links_md = "\n".join(f"- [[{link}]]" for link in data["links"])
         content = f"""---
-title: {data['title']}
+title: {data["title"]}
 type: discovery
-tags: [{', '.join(data['tags'])}]
+tags: [{", ".join(data["tags"])}]
 date: 2026-03-20T10:00
-certainty: {data['certainty']}
+certainty: {data["certainty"]}
 project: /home/vic/Projects/test-project
 ---
 
@@ -161,7 +160,8 @@ class TestEnhanceResultsPipeline:
 
         with patch("memento_utils.load_or_build_graph", return_value=(graph, pagerank)):
             enhanced = enhance_results(
-                results, config=integration_config,
+                results,
+                config=integration_config,
                 cwd="/home/vic/Projects/test-project",
             )
 
@@ -217,10 +217,13 @@ Body of other note.
         graph = build_wikilink_graph(linked_vault)
         pagerank = compute_pagerank(graph)
 
-        with patch("memento_utils.load_or_build_graph", return_value=(graph, pagerank)), \
-             patch("memento_utils.get_vault", return_value=linked_vault):
+        with (
+            patch("memento_utils.load_or_build_graph", return_value=(graph, pagerank)),
+            patch("memento_utils.get_vault", return_value=linked_vault),
+        ):
             enhanced = enhance_results(
-                results, config=integration_config,
+                results,
+                config=integration_config,
                 cwd="/home/vic/Projects/test-project",
             )
 
@@ -232,14 +235,25 @@ Body of other note.
 class TestConfigDefaults:
     """Verify all Tier 1 config keys are present in DEFAULT_CONFIG."""
 
-    @pytest.mark.parametrize("key", [
-        "prf_enabled", "prf_max_terms", "prf_top_docs",
-        "ppr_enabled", "ppr_max_expanded", "ppr_alpha", "ppr_min_score",
-        "pagerank_alpha", "pagerank_boost_weight",
-        "rrf_enabled", "rrf_k",
-        "concept_index_enabled", "concept_index_score",
-        "project_maps_enabled",
-    ])
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "prf_enabled",
+            "prf_max_terms",
+            "prf_top_docs",
+            "ppr_enabled",
+            "ppr_max_expanded",
+            "ppr_alpha",
+            "ppr_min_score",
+            "pagerank_alpha",
+            "pagerank_boost_weight",
+            "rrf_enabled",
+            "rrf_k",
+            "concept_index_enabled",
+            "concept_index_score",
+            "project_maps_enabled",
+        ],
+    )
     def test_config_key_exists(self, key):
         """Every Tier 1 config key should have a default."""
         assert key in DEFAULT_CONFIG, f"Missing config default: {key}"

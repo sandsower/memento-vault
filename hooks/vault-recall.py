@@ -17,7 +17,22 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search, qmd_search_with_extras, enhance_results, detect_project, log_retrieval, read_hook_input, is_vsearch_warm, rrf_fuse, mark_vsearch_warm, prf_expand_query, multi_hop_search, RUNTIME_DIR
+from memento_utils import (
+    get_config,
+    get_vault,
+    has_qmd,
+    qmd_search_with_extras,
+    enhance_results,
+    detect_project,
+    log_retrieval,
+    read_hook_input,
+    is_vsearch_warm,
+    rrf_fuse,
+    mark_vsearch_warm,
+    prf_expand_query,
+    multi_hop_search,
+    RUNTIME_DIR,
+)
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
@@ -105,11 +120,14 @@ def record_recall(top_result_path):
     """Record this recall for dedup tracking."""
     try:
         with open(LAST_RECALL_PATH, "w") as f:
-            json.dump({
-                "top_path": top_result_path,
-                "prompts_since": 0,
-                "timestamp": time.time(),
-            }, f)
+            json.dump(
+                {
+                    "top_path": top_result_path,
+                    "prompts_since": 0,
+                    "timestamp": time.time(),
+                },
+                f,
+            )
     except Exception:
         pass
 
@@ -152,7 +170,7 @@ def format_result(result):
     if snippet:
         dot = snippet.find(".")
         if 0 < dot < 120:
-            snippet = snippet[:dot + 1]
+            snippet = snippet[: dot + 1]
         elif len(snippet) > 120:
             snippet = snippet[:120] + "..."
 
@@ -243,8 +261,11 @@ def spawn_deep_recall(prompt, initial_results, config):
     try:
         # Write input for the background worker
         input_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", prefix="deep-recall-input-",
-            dir=RUNTIME_DIR, delete=False,
+            mode="w",
+            suffix=".json",
+            prefix="deep-recall-input-",
+            dir=RUNTIME_DIR,
+            delete=False,
         )
         json.dump(input_data, input_file)
         input_file.close()
@@ -317,25 +338,32 @@ def run_deep_recall_worker(input_path, backend):
     out_path = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", prefix="deep-recall-out-",
-            dir=RUNTIME_DIR, delete=False,
+            mode="w",
+            suffix=".txt",
+            prefix="deep-recall-out-",
+            dir=RUNTIME_DIR,
+            delete=False,
         ) as tmp:
             out_path = tmp.name
 
         if backend == "codex":
             cmd = [
-                "codex", "exec",
+                "codex",
+                "exec",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--ephemeral",
-                "-o", out_path,
+                "-o",
+                out_path,
                 codex_prompt,
             ]
         else:
             cmd = [
-                "claude", "--print",
+                "claude",
+                "--print",
                 "--dangerously-skip-permissions",
                 "--no-session-persistence",
-                "-p", codex_prompt,
+                "-p",
+                codex_prompt,
             ]
 
         result = _subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -349,12 +377,15 @@ def run_deep_recall_worker(input_path, backend):
         suggestions = _parse_deep_recall_response(raw)
 
         with open(DEEP_RECALL_PENDING_PATH, "w") as f:
-            json.dump({
-                "status": "ready",
-                "suggestions": suggestions,
-                "prompt": prompt,
-                "timestamp": time.time(),
-            }, f)
+            json.dump(
+                {
+                    "status": "ready",
+                    "suggestions": suggestions,
+                    "prompt": prompt,
+                    "timestamp": time.time(),
+                },
+                f,
+            )
 
     except (_subprocess.TimeoutExpired, FileNotFoundError, OSError):
         _cleanup_deep_recall_pending()
@@ -380,7 +411,7 @@ def _parse_deep_recall_response(raw):
         pass
 
     # Try extracting JSON from markdown code blocks
-    match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', raw, re.DOTALL)
+    match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw, re.DOTALL)
     if match:
         try:
             parsed = json.loads(match.group(1))
@@ -390,7 +421,7 @@ def _parse_deep_recall_response(raw):
             pass
 
     # Try finding a bare JSON array in the text
-    match = re.search(r'\[.*?\]', raw, re.DOTALL)
+    match = re.search(r"\[.*?\]", raw, re.DOTALL)
     if match:
         try:
             parsed = json.loads(match.group(0))
@@ -523,7 +554,11 @@ def run_recall():
     search_limit = max_notes + 4
 
     results = qmd_search_with_extras(
-        query, limit=search_limit, semantic=False, timeout=5, min_score=min_score,
+        query,
+        limit=search_limit,
+        semantic=False,
+        timeout=5,
+        min_score=min_score,
     )
     top_score = results[0]["score"] if results else 0
     pipeline_depth = "bm25"
@@ -535,8 +570,11 @@ def run_recall():
         expanded_query = prf_expand_query(query, config=config, initial_results=results)
         if expanded_query != query:
             prf_results = qmd_search_with_extras(
-                expanded_query, limit=search_limit,
-                semantic=False, timeout=5, min_score=min_score,
+                expanded_query,
+                limit=search_limit,
+                semantic=False,
+                timeout=5,
+                min_score=min_score,
             )
             if prf_results:
                 existing = {r["path"] for r in results}
@@ -550,8 +588,11 @@ def run_recall():
         # RRF: fuse with vsearch when warm
         if config.get("rrf_enabled", True) and is_vsearch_warm():
             vec_results = qmd_search_with_extras(
-                query, limit=search_limit,
-                semantic=True, timeout=5, min_score=min_score,
+                query,
+                limit=search_limit,
+                semantic=True,
+                timeout=5,
+                min_score=min_score,
             )
             if vec_results:
                 results = rrf_fuse([results, vec_results], k=config.get("rrf_k", 60))
@@ -564,6 +605,7 @@ def run_recall():
     if config.get("concept_index_enabled", True):
         try:
             from memento_utils import lookup_concepts
+
             concept_hits = lookup_concepts(prompt)
             if concept_hits:
                 existing_paths = {r.get("path", "") for r in results}
@@ -576,8 +618,7 @@ def run_recall():
             pass
 
     # Multi-hop retrieval: follow wikilinks from top results
-    multi_hop_gate = (top_score < high_conf
-                      and config.get("multi_hop_enabled", False))
+    multi_hop_gate = top_score < high_conf and config.get("multi_hop_enabled", False)
     multi_hop_added = 0
     if multi_hop_gate and results:
         try:
@@ -591,10 +632,12 @@ def run_recall():
     # Deep recall: spawn background codex for complex prompts
     # Gate: low confidence AND feature enabled
     deep_recall_spawned = False
-    if (top_score < high_conf
-            and config.get("deep_recall_enabled", False)
-            and results
-            and not os.path.exists(DEEP_RECALL_PENDING_PATH)):
+    if (
+        top_score < high_conf
+        and config.get("deep_recall_enabled", False)
+        and results
+        and not os.path.exists(DEEP_RECALL_PENDING_PATH)
+    ):
         try:
             spawn_deep_recall(prompt, results, config)
             deep_recall_spawned = True
@@ -604,8 +647,7 @@ def run_recall():
 
     if not results:
         bump_prompts_since()
-        log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms,
-                      pipeline=pipeline_depth)
+        log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
         return [], None
 
     results = enhance_results(results, config, cwd=cwd)
@@ -614,6 +656,7 @@ def run_recall():
     if top_score < high_conf and config.get("reranker_enabled", True) and len(results) > 1:
         try:
             from tenet_reranker import rerank
+
             results = rerank(prompt, results, config)
             pipeline_depth += "+ce"
         except Exception:
@@ -621,8 +664,7 @@ def run_recall():
 
     if not results:
         bump_prompts_since()
-        log_retrieval("recall", "filtered-empty", query=query,
-                      results_before=results_before, latency_ms=latency_ms)
+        log_retrieval("recall", "filtered-empty", query=query, results_before=results_before, latency_ms=latency_ms)
         return [], None
 
     top_path = results[0].get("path", "")
@@ -637,12 +679,20 @@ def run_recall():
         injected.append(result.get("title", ""))
 
     injected_text = "\n".join(lines)
-    log_retrieval("recall", "inject", query=query, latency_ms=latency_ms,
-                  results_before=results_before, results_after=len(results),
-                  injected_titles=injected, injected_chars=len(injected_text),
-                  pipeline=pipeline_depth,
-                  multi_hop_gate=multi_hop_gate, multi_hop_added=multi_hop_added,
-                  deep_recall_spawned=deep_recall_spawned)
+    log_retrieval(
+        "recall",
+        "inject",
+        query=query,
+        latency_ms=latency_ms,
+        results_before=results_before,
+        results_after=len(results),
+        injected_titles=injected,
+        injected_chars=len(injected_text),
+        pipeline=pipeline_depth,
+        multi_hop_gate=multi_hop_gate,
+        multi_hop_added=multi_hop_added,
+        deep_recall_spawned=deep_recall_spawned,
+    )
 
     return lines, top_path
 

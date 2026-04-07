@@ -15,57 +15,153 @@ from pathlib import Path
 # Allow imports from the same directory
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import get_config, get_vault, has_qmd, qmd_search_with_extras, enhance_results, log_retrieval, read_hook_input, RUNTIME_DIR
+from memento_utils import (
+    get_config,
+    get_vault,
+    has_qmd,
+    qmd_search_with_extras,
+    enhance_results,
+    log_retrieval,
+    read_hook_input,
+    RUNTIME_DIR,
+)
 
 CACHE_PATH = os.path.join(RUNTIME_DIR, "tool-context-cache.json")
 RECALL_STATE_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 
 # Paths that never have vault knowledge
 SKIP_PREFIXES = (
-    "/usr/", "/etc/", "/proc/", "/sys/", "/dev/",
-    "/tmp/", "/var/", "/snap/",
+    "/usr/",
+    "/etc/",
+    "/proc/",
+    "/sys/",
+    "/dev/",
+    "/tmp/",
+    "/var/",
+    "/snap/",
 )
 
 # Directory segments that indicate non-project code
 SKIP_SEGMENTS = {
-    "node_modules", ".git", "dist", "build", ".next",
-    "__pycache__", ".cache", "vendor", ".terraform",
-    "target", ".venv", "venv", ".tox", ".mypy_cache",
-    ".pytest_cache", "coverage", ".nyc_output",
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    "__pycache__",
+    ".cache",
+    "vendor",
+    ".terraform",
+    "target",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    "coverage",
+    ".nyc_output",
 }
 
 # File extensions that are config/assets, not code with domain knowledge
 SKIP_EXTENSIONS = {
-    ".json", ".lock", ".yaml", ".yml", ".toml",
-    ".svg", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp",
-    ".woff", ".woff2", ".ttf", ".eot",
-    ".map", ".min.js", ".min.css",
-    ".sum", ".mod",
-    ".csv", ".xml", ".sql",
-    ".env", ".pem", ".key", ".crt",
+    ".json",
+    ".lock",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".ico",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".map",
+    ".min.js",
+    ".min.css",
+    ".sum",
+    ".mod",
+    ".csv",
+    ".xml",
+    ".sql",
+    ".env",
+    ".pem",
+    ".key",
+    ".crt",
 }
 
 # Specific filenames that match too broadly
 SKIP_FILENAMES = {
-    "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
-    "tsconfig.json", "tsconfig.base.json",
-    "go.mod", "go.sum", "Cargo.lock", "Cargo.toml",
-    ".gitignore", ".prettierrc", ".eslintrc", ".eslintrc.js",
-    "Makefile", "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
-    "jest.config.js", "jest.config.ts", "vitest.config.ts",
-    ".env", ".env.local", ".env.example",
-    "README.md", "CHANGELOG.md", "LICENSE",
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "tsconfig.json",
+    "tsconfig.base.json",
+    "go.mod",
+    "go.sum",
+    "Cargo.lock",
+    "Cargo.toml",
+    ".gitignore",
+    ".prettierrc",
+    ".eslintrc",
+    ".eslintrc.js",
+    "Makefile",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "jest.config.js",
+    "jest.config.ts",
+    "vitest.config.ts",
+    ".env",
+    ".env.local",
+    ".env.example",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
 }
 
 # Path segments too generic for BM25 queries
 STOP_SEGMENTS = {
-    "src", "lib", "app", "apps", "cmd", "pkg", "internal",
-    "components", "utils", "hooks", "helpers", "services",
-    "test", "tests", "__tests__", "spec", "specs",
-    "pages", "views", "controllers", "models", "resolvers",
-    "middleware", "handlers", "routes", "api",
-    "common", "shared", "core", "config", "types",
-    "frontend", "backend", "server", "client",
+    "src",
+    "lib",
+    "app",
+    "apps",
+    "cmd",
+    "pkg",
+    "internal",
+    "components",
+    "utils",
+    "hooks",
+    "helpers",
+    "services",
+    "test",
+    "tests",
+    "__tests__",
+    "spec",
+    "specs",
+    "pages",
+    "views",
+    "controllers",
+    "models",
+    "resolvers",
+    "middleware",
+    "handlers",
+    "routes",
+    "api",
+    "common",
+    "shared",
+    "core",
+    "config",
+    "types",
+    "frontend",
+    "backend",
+    "server",
+    "client",
 }
 
 
@@ -110,7 +206,7 @@ def extract_keywords(file_path):
     # Strip home prefix
     home = str(Path.home())
     if path.startswith(home):
-        path = path[len(home):]
+        path = path[len(home) :]
 
     parts = Path(path).parts
 
@@ -332,8 +428,7 @@ def main():
         save_cache(cache)
 
         if not results:
-            log_retrieval("tool-context", "no-results", query=search_query,
-                          file_path=file_path, latency_ms=latency_ms)
+            log_retrieval("tool-context", "no-results", query=search_query, file_path=file_path, latency_ms=latency_ms)
             sys.exit(0)
 
     # Dedup against recall hook
@@ -357,10 +452,15 @@ def main():
     output_context(injected_text)
 
     injected_titles = [r.get("title", "") for r in filtered[:max_notes]]
-    log_retrieval("tool-context", "inject", file_path=file_path,
-                  query=search_query or dir_key,
-                  injected_titles=injected_titles, injected_chars=len(injected_text),
-                  latency_ms=latency_ms)
+    log_retrieval(
+        "tool-context",
+        "inject",
+        file_path=file_path,
+        query=search_query or dir_key,
+        injected_titles=injected_titles,
+        injected_chars=len(injected_text),
+        latency_ms=latency_ms,
+    )
 
     # Record injection
     record_injection(cache, session_id, injected_paths)

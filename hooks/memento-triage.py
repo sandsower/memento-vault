@@ -15,7 +15,15 @@ from pathlib import Path
 
 # Shared utilities
 sys.path.insert(0, str(Path(__file__).parent))
-from memento_utils import get_config, get_vault, detect_project, slugify, read_hook_input, sanitize_secrets, log_retrieval, normalize_note_tags
+from memento_utils import (
+    get_config,
+    get_vault,
+    detect_project,
+    read_hook_input,
+    sanitize_secrets,
+    log_retrieval,
+    normalize_note_tags,
+)
 
 
 # --- Transcript parsing ---
@@ -79,7 +87,7 @@ def parse_transcript(transcript_path):
         last_assistant_text = sanitize_secrets(last_assistant_text)
         dot = last_assistant_text.find(".")
         if 0 < dot < 150:
-            last_outcome = last_assistant_text[:dot + 1]
+            last_outcome = last_assistant_text[: dot + 1]
         else:
             last_outcome = last_assistant_text[:100]
             if len(last_assistant_text) > 100:
@@ -163,7 +171,9 @@ def has_new_insight(meta):
     try:
         result = subprocess.run(
             ["qmd", "search", query, "-c", config["qmd_collection"], "-n", "5"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode != 0:
             return True
@@ -176,7 +186,9 @@ def has_new_insight(meta):
             try:
                 extra_result = subprocess.run(
                     ["qmd", "search", query, "-c", extra, "-n", "3"],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 if extra_result.returncode == 0:
                     extra_lines = extra_result.stdout.strip().splitlines()
@@ -190,8 +202,7 @@ def has_new_insight(meta):
         # Even with good coverage, new files mean new work
         if len(meta["files_edited"]) > 0:
             vault_path = get_config()["vault_path"]
-            non_vault = [f for f in meta["files_edited"]
-                         if vault_path not in f]
+            non_vault = [f for f in meta["files_edited"] if vault_path not in f]
             if non_vault:
                 return True
 
@@ -270,10 +281,7 @@ def write_fleeting(session_id, meta, project_slug):
         if len(meta["first_prompt"]) > 100:
             prompt_str += "..."
 
-    line = (
-        f"- {now} `{session_id}` {meta['cwd'] or '?'}{branch_str}"
-        f" — {meta['exchange_count']} exchanges{files_str}"
-    )
+    line = f"- {now} `{session_id}` {meta['cwd'] or '?'}{branch_str} — {meta['exchange_count']} exchanges{files_str}"
     if prompt_str:
         line += f" — {prompt_str}"
     if meta.get("last_outcome"):
@@ -323,14 +331,20 @@ def vault_commit(message="auto: vault update", delay_seconds=0, normalize_before
         # Normalize tags before committing — runs in the delayed subprocess
         hooks_dir = str(Path(__file__).parent)
         subprocess.Popen(
-            [sys.executable, "-c",
-             "import time,sys,subprocess; sys.path.insert(0,sys.argv[1]);"
-             " time.sleep(int(sys.argv[2]));"
-             " from memento_utils import normalize_note_tags; from pathlib import Path;"
-             " from memento_utils import get_vault;"
-             " [normalize_note_tags(p) for p in (get_vault()/'notes').glob('*.md')];"
-             " subprocess.run([sys.argv[3], sys.argv[4]], capture_output=True)",
-             hooks_dir, str(delay_seconds), commit_script, message],
+            [
+                sys.executable,
+                "-c",
+                "import time,sys,subprocess; sys.path.insert(0,sys.argv[1]);"
+                " time.sleep(int(sys.argv[2]));"
+                " from memento_utils import normalize_note_tags; from pathlib import Path;"
+                " from memento_utils import get_vault;"
+                " [normalize_note_tags(p) for p in (get_vault()/'notes').glob('*.md')];"
+                " subprocess.run([sys.argv[3], sys.argv[4]], capture_output=True)",
+                hooks_dir,
+                str(delay_seconds),
+                commit_script,
+                message,
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -338,9 +352,14 @@ def vault_commit(message="auto: vault update", delay_seconds=0, normalize_before
     else:
         # Pass arguments via sys.argv to avoid shell injection from message/path content
         subprocess.Popen(
-            [sys.executable, "-c",
-             "import subprocess,time,sys; time.sleep(int(sys.argv[1])); subprocess.run([sys.argv[2], sys.argv[3]], capture_output=True)",
-             str(delay_seconds), commit_script, message],
+            [
+                sys.executable,
+                "-c",
+                "import subprocess,time,sys; time.sleep(int(sys.argv[1])); subprocess.run([sys.argv[2], sys.argv[3]], capture_output=True)",
+                str(delay_seconds),
+                commit_script,
+                message,
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -350,6 +369,7 @@ def vault_commit(message="auto: vault update", delay_seconds=0, normalize_before
 def reindex_qmd(delay_seconds=0):
     """Reindex the memento collection in QMD. Runs detached. No-op if QMD is not installed."""
     import shutil
+
     if not shutil.which("qmd"):
         return
 
@@ -358,11 +378,15 @@ def reindex_qmd(delay_seconds=0):
 
     # Pass collection name via sys.argv to avoid injection
     subprocess.Popen(
-        [sys.executable, "-c",
-         "import subprocess,time,shutil,sys; time.sleep(int(sys.argv[1])); qmd=shutil.which('qmd');"
-         " qmd and subprocess.run([qmd,'update','-c',sys.argv[2]], capture_output=True);"
-         " qmd and subprocess.run([qmd,'embed'], capture_output=True)",
-         str(delay_seconds), collection],
+        [
+            sys.executable,
+            "-c",
+            "import subprocess,time,shutil,sys; time.sleep(int(sys.argv[1])); qmd=shutil.which('qmd');"
+            " qmd and subprocess.run([qmd,'update','-c',sys.argv[2]], capture_output=True);"
+            " qmd and subprocess.run([qmd,'embed'], capture_output=True)",
+            str(delay_seconds),
+            collection,
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -377,9 +401,9 @@ def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
     prompt = f"""You are the Memento agent. Read the transcript and create atomic Zettelkasten notes.
 
 Session ID: {session_id}
-Project: {meta['cwd']}
-Branch: {meta.get('git_branch', 'unknown')}
-Files edited: {json.dumps(meta['files_edited'])}
+Project: {meta["cwd"]}
+Branch: {meta.get("git_branch", "unknown")}
+Files edited: {json.dumps(meta["files_edited"])}
 
 Transcript path: {transcript_path}
 
@@ -413,12 +437,20 @@ Instructions:
     cmd = [
         "claude",
         "--print",
-        "--model", config["agent_model"],
+        "--model",
+        config["agent_model"],
         "--dangerously-skip-permissions",
         "--no-session-persistence",
-        "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep",
-        "--add-dir", str(vault),
-        "-p", prompt,
+        "--allowedTools",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "--add-dir",
+        str(vault),
+        "-p",
+        prompt,
     ]
 
     subprocess.Popen(
@@ -478,19 +510,23 @@ def main():
     substantial = is_substantial(meta)
     new_insight = has_new_insight(meta) if substantial else False
 
-    log_retrieval("triage", "decision",
-                  session_id=session_id[:8], project=project_slug,
-                  exchanges=meta["exchange_count"],
-                  files_edited=len(meta["files_edited"]),
-                  substantial=substantial, new_insight=new_insight,
-                  agent_spawned=substantial and new_insight)
+    log_retrieval(
+        "triage",
+        "decision",
+        session_id=session_id[:8],
+        project=project_slug,
+        exchanges=meta["exchange_count"],
+        files_edited=len(meta["files_edited"]),
+        substantial=substantial,
+        new_insight=new_insight,
+        agent_spawned=substantial and new_insight,
+    )
 
     if substantial and new_insight:
         spawn_memento_agent(session_id, transcript_path, meta, project_slug)
         delay = config["agent_delay_seconds"]
         if config["auto_commit"]:
-            vault_commit(f"auto: notes from session {session_id[:8]}",
-                         delay_seconds=delay, normalize_before=True)
+            vault_commit(f"auto: notes from session {session_id[:8]}", delay_seconds=delay, normalize_before=True)
         reindex_qmd(delay_seconds=delay + 5)
     else:
         # Always reindex so fleeting notes become searchable
@@ -520,18 +556,14 @@ def maybe_trigger_inception(config):
     if last_run:
         try:
             cutoff = datetime.fromisoformat(last_run)
-            new_count = sum(
-                1 for f in notes_dir.glob("*.md")
-                if datetime.fromtimestamp(f.stat().st_mtime) > cutoff
-            )
+            new_count = sum(1 for f in notes_dir.glob("*.md") if datetime.fromtimestamp(f.stat().st_mtime) > cutoff)
         except (ValueError, OSError):
             new_count = 0
     else:
         new_count = len(list(notes_dir.glob("*.md")))
 
     if new_count < threshold:
-        log_retrieval("inception", "skip",
-                      new_notes=new_count, threshold=threshold)
+        log_retrieval("inception", "skip", new_notes=new_count, threshold=threshold)
         return
 
     inception_script = Path(__file__).parent / "memento-inception.py"
@@ -541,9 +573,7 @@ def maybe_trigger_inception(config):
     if not inception_script.exists():
         return
 
-    log_retrieval("inception", "trigger",
-                  new_notes=new_count, threshold=threshold,
-                  last_run=last_run)
+    log_retrieval("inception", "trigger", new_notes=new_count, threshold=threshold, last_run=last_run)
 
     subprocess.Popen(
         [sys.executable, str(inception_script)],

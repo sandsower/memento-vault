@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 # Import memento-triage.py (hyphenated filename)
 _spec = importlib.util.spec_from_file_location(
@@ -78,14 +77,16 @@ class TestParseTranscript:
     def test_tracks_files_read(self, tmp_path):
         entries = [
             _user_msg("Read these files"),
-            _assistant_msg([
-                _read_block("/src/a.py"),
-                _read_block("/src/b.py"),
-                _read_block("/src/c.py"),
-                _read_block("/src/d.py"),
-                _read_block("/src/e.py"),
-                _read_block("/src/f.py"),
-            ]),
+            _assistant_msg(
+                [
+                    _read_block("/src/a.py"),
+                    _read_block("/src/b.py"),
+                    _read_block("/src/c.py"),
+                    _read_block("/src/d.py"),
+                    _read_block("/src/e.py"),
+                    _read_block("/src/f.py"),
+                ]
+            ),
         ]
         meta = parse_transcript(_write_transcript(tmp_path, entries))
         assert len(meta["files_read"]) == 6
@@ -95,7 +96,9 @@ class TestParseTranscript:
             _user_msg("What's wrong?"),
             _assistant_msg([_text_block("Looking into it...")]),
             _user_msg("Any progress?"),
-            _assistant_msg([_text_block("Fixed the null pointer. The issue was an uninitialized variable in the loop.")]),
+            _assistant_msg(
+                [_text_block("Fixed the null pointer. The issue was an uninitialized variable in the loop.")]
+            ),
         ]
         meta = parse_transcript(_write_transcript(tmp_path, entries))
         assert meta["last_outcome"] is not None

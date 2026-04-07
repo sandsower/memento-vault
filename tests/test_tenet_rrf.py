@@ -1,4 +1,3 @@
-import pytest
 from memento_utils import rrf_fuse, is_vsearch_warm, mark_vsearch_warm
 
 

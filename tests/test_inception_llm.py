@@ -12,13 +12,15 @@ class TestParseSynthesis:
 
     def test_parse_valid_json(self):
         """Valid JSON with all fields returns dict with correct values."""
-        raw = json.dumps({
-            "title": "Redis TTL patterns",
-            "body": "Cross-project TTL strategy emerged.",
-            "tags": ["redis", "caching"],
-            "certainty": 4,
-            "related": ["redis-cache-ttl", "redis-eviction-policy"],
-        })
+        raw = json.dumps(
+            {
+                "title": "Redis TTL patterns",
+                "body": "Cross-project TTL strategy emerged.",
+                "tags": ["redis", "caching"],
+                "certainty": 4,
+                "related": ["redis-cache-ttl", "redis-eviction-policy"],
+            }
+        )
 
         result = parse_synthesis(raw)
 
@@ -52,13 +54,15 @@ class TestParseSynthesis:
 
     def test_parse_code_fenced(self):
         """JSON wrapped in markdown code fences is correctly parsed."""
-        inner = json.dumps({
-            "title": "Fenced pattern",
-            "body": "Insight from fenced JSON.",
-            "tags": ["meta"],
-            "certainty": 3,
-            "related": ["note-a"],
-        })
+        inner = json.dumps(
+            {
+                "title": "Fenced pattern",
+                "body": "Insight from fenced JSON.",
+                "tags": ["meta"],
+                "certainty": 3,
+                "related": ["note-a"],
+            }
+        )
         raw = f"```json\n{inner}\n```"
 
         result = parse_synthesis(raw)
@@ -104,10 +108,13 @@ class TestCallLlm:
         """Claude backend builds correct command with --print and model flags."""
         mock_run.return_value = MagicMock(stdout="claude output\n")
 
-        result = call_llm("test prompt", {
-            "inception_backend": "claude",
-            "inception_model": "sonnet",
-        })
+        result = call_llm(
+            "test prompt",
+            {
+                "inception_backend": "claude",
+                "inception_model": "sonnet",
+            },
+        )
 
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]

@@ -1,7 +1,5 @@
 """Tests for Inception cluster scoring function."""
 
-import math
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -172,7 +170,6 @@ def test_missing_certainty():
     # temporal = 1/30 capped -> *0.6
     # project_bonus = 0.0
     # certainty = 0.5 -> *0.3 = 0.15
-    import math
     temporal = min(1 / 30.0, 1.0) * 0.6
     expected = 1.0 + 0.4 + temporal + 0.0 + 0.15
     assert score == pytest.approx(expected, abs=1e-6)

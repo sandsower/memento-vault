@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 from memento_utils import normalize_tags, normalize_note_tags
@@ -53,9 +52,7 @@ class TestNormalizeTags:
 class TestNormalizeNoteTags:
     def _write_note(self, tmp_path, tags_str):
         note = tmp_path / "test-note.md"
-        note.write_text(
-            f"---\ntitle: Test\ntype: discovery\ntags: [{tags_str}]\ndate: 2026-01-01\n---\n\nBody text."
-        )
+        note.write_text(f"---\ntitle: Test\ntype: discovery\ntags: [{tags_str}]\ndate: 2026-01-01\n---\n\nBody text.")
         return note
 
     def test_normalizes_tags_in_file(self, tmp_path):
