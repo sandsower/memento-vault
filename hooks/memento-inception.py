@@ -29,6 +29,7 @@ from memento_utils import (
     release_inception_lock,
     INCEPTION_STATE_PATH,
 )
+from memento.llm import llm_complete
 
 
 @dataclass
@@ -670,56 +671,14 @@ def call_llm(prompt, config):
     Returns:
         str: raw LLM response text, or empty string on failure
     """
-    backend = config.get("inception_backend", "codex")
-
-    import tempfile
-
-    if backend == "codex":
-        # codex exec writes the last message to a file via -o
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-            out_path = tmp.name
-        cmd = [
-            "codex",
-            "exec",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--ephemeral",
-            "-o",
-            out_path,
-            prompt,
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-            result = Path(out_path).read_text().strip()
-            return result
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return ""
-        finally:
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
-    else:
-        model = config.get("inception_model", "haiku")
-        cmd = [
-            "claude",
-            "--print",
-            "--model",
-            model,
-            "--dangerously-skip-permissions",
-            "--no-session-persistence",
-            "-p",
-            prompt,
-        ]
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            return ""
+    result = llm_complete(
+        prompt,
+        {
+            "llm_backend": config.get("inception_backend", "codex"),
+            "llm_model": config.get("inception_model"),
+        },
+    )
+    return result.text if result.ok else ""
 
 
 def parse_synthesis(raw):

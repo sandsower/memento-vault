@@ -10,6 +10,7 @@ import sys
 import os
 import re
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +24,13 @@ from memento_utils import (
     sanitize_secrets,
     log_retrieval,
     normalize_note_tags,
+)
+from memento.llm import llm_complete
+from memento.store import (
+    acquire_vault_write_lock,
+    release_vault_write_lock,
+    update_project_index,
+    write_note,
 )
 
 
@@ -308,9 +316,6 @@ def build_session_summary(meta):
 
 
 VAULT_COMMIT = Path(__file__).parent / "vault-commit.sh"
-AGENT_WRAPPER = Path(__file__).parent / "agent-wrapper.py"
-
-
 def normalize_all_notes():
     """Normalize tags on all notes in the vault. Safe to call multiple times."""
     vault = get_vault()
@@ -401,76 +406,150 @@ def _sentinel_path(session_id):
     return vault / ".agent-done" / f"{session_id[:8]}.done"
 
 
+def _parse_structured_notes_response(raw):
+    """Parse structured note output from the LLM into a list of note dicts."""
+    if not raw:
+        return []
+
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        if lines[-1].strip() == "```":
+            lines = lines[1:-1]
+        else:
+            lines = lines[1:]
+        stripped = "\n".join(lines)
+
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return []
+
+    if isinstance(data, dict):
+        data = data.get("notes", [])
+
+    if not isinstance(data, list):
+        return []
+
+    return [item for item in data if isinstance(item, dict) and item.get("title") and item.get("body")]
+
+
+def process_structured_notes(session_id, transcript_path, meta, project_slug):
+    """Read transcript, call the shared LLM, and write structured notes."""
+    vault = get_vault()
+    try:
+        transcript_text = Path(transcript_path).read_text()
+    except OSError:
+        return 0
+
+    existing_titles = []
+    notes_dir = vault / "notes"
+    if notes_dir.exists():
+        for note_path in notes_dir.glob("*.md"):
+            existing_titles.append(note_path.stem)
+
+    prompt = (
+        "Read this session transcript and return JSON only.\n"
+        "Return either a JSON array of notes or {\"notes\": [...]}.\n"
+        "Each note must include: title, body, type, tags, certainty.\n"
+        "Optional fields: validity_context, supersedes.\n"
+        "Do not include any prose outside JSON.\n\n"
+        f"Session ID: {session_id}\n"
+        f"Project slug: {project_slug}\n"
+        f"CWD: {meta.get('cwd')}\n"
+        f"Branch: {meta.get('git_branch')}\n"
+        f"Edited files: {json.dumps(meta.get('files_edited', []))}\n"
+        f"Existing notes: {json.dumps(existing_titles[:100])}\n\n"
+        "Transcript:\n"
+        f"{transcript_text}"
+    )
+
+    result = llm_complete(prompt)
+    if not result.ok:
+        return 0
+
+    notes = _parse_structured_notes_response(result.text)
+    if not notes:
+        return 0
+
+    summary = build_session_summary(meta)
+    if not acquire_vault_write_lock():
+        return 0
+    try:
+        written = 0
+        for note in notes:
+            path = write_note(
+                vault,
+                title=note["title"],
+                body=note["body"],
+                note_type=note.get("type", "discovery"),
+                tags=note.get("tags", []),
+                certainty=note.get("certainty"),
+                validity_context=note.get("validity_context") or note.get("validity-context"),
+                supersedes=note.get("supersedes"),
+                project=meta.get("cwd"),
+                branch=meta.get("git_branch"),
+                session_id=session_id,
+            )
+            update_project_index(vault, project_slug, path.stem, f"`{session_id}` — {summary}")
+            written += 1
+        return written
+    finally:
+        release_vault_write_lock()
+
+
+def _run_structured_notes_worker(payload_path, sentinel_path):
+    """Detached worker for structured note extraction."""
+    try:
+        with open(payload_path) as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        payload = None
+    finally:
+        try:
+            os.unlink(payload_path)
+        except OSError:
+            pass
+
+    try:
+        if payload:
+            process_structured_notes(
+                payload["session_id"],
+                payload["transcript_path"],
+                payload["meta"],
+                payload["project_slug"],
+            )
+    finally:
+        sentinel = Path(sentinel_path)
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.touch()
+
+
 def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
-    """Spawn a background Claude call to generate atomic notes.
+    """Spawn a background structured-note worker.
 
     Returns the sentinel Path that is touched when the process finishes.
     """
-    config = get_config()
     vault = get_vault()
-
-    prompt = f"""You are the Memento agent. Read the transcript and create atomic Zettelkasten notes.
-
-Session ID: {session_id}
-Project: {meta["cwd"]}
-Branch: {meta.get("git_branch", "unknown")}
-Files edited: {json.dumps(meta["files_edited"])}
-
-Transcript path: {transcript_path}
-
-Instructions:
-1. Read the transcript at the path above
-2. Identify distinct decisions, discoveries, patterns, bugfixes, or tools from this session
-3. For each one, create an atomic note in {vault}/notes/
-4. Each note must have YAML frontmatter with: title, type (decision|discovery|pattern|bugfix|tool), tags, source: session, certainty (1-5), validity-context (optional), supersedes (optional wikilink), project (full cwd path), branch, date (ISO 8601 with time: YYYY-MM-DDTHH:MM), session_id
-   Certainty scale: 1=speculative, 2=observed once, 3=confirmed in code, 4=tested/shipped, 5=established pattern
-   validity-context: short phrase for what this note depends on. Omit if unconditionally true.
-   supersedes: if this note replaces an older one, add [[older-note-name]].
-5. Name files as slugified concept titles (e.g., redis-cache-requires-explicit-ttl.md)
-6. DEDUP CHECK: Before writing each note, search {vault}/notes/ for existing notes on the same topic.
-   Read the top 2-3 matches by filename/title similarity. Then decide:
-   - If an existing note covers the same ground with equal or higher certainty: SKIP this note entirely.
-   - If an existing note covers the same topic but this session has new evidence (higher certainty,
-     additional details, a correction): write the new note with supersedes: "[[existing-note-name]]"
-     in frontmatter. Set certainty >= the old note's certainty. Add a line in the body:
-     "Supersedes [[old-note]] — [what changed]."
-   - If no existing note matches: write normally.
-7. Search existing notes in {vault}/notes/ for related topics and add [[wikilinks]]
-8. Add a Related section at the bottom of each note linking to related existing notes
-9. Update the project index at {vault}/projects/{project_slug}.md — add [[note-name]] links under the Notes section
-10. Never overwrite or delete existing notes
-11. Never write to fleeting/
-12. SECURITY: Never include secrets, API keys, tokens, passwords, or connection strings in notes.
-    Redact any sensitive values you find in the transcript. Replace them with [REDACTED].
-    Common patterns: sk-*, ghp_*, xoxb-*, AKIA*, Bearer tokens, postgres:// URLs, JWT tokens.
-"""
-
-    cmd = [
-        "claude",
-        "--print",
-        "--model",
-        config["agent_model"],
-        "--dangerously-skip-permissions",
-        "--no-session-persistence",
-        "--allowedTools",
-        "Read",
-        "Write",
-        "Edit",
-        "Glob",
-        "Grep",
-        "--add-dir",
-        str(vault),
-        "-p",
-        prompt,
-    ]
 
     sentinel = _sentinel_path(session_id)
     sentinel.parent.mkdir(parents=True, exist_ok=True)
     sentinel.unlink(missing_ok=True)
 
-    wrapper_cmd = [sys.executable, str(AGENT_WRAPPER), str(sentinel)] + cmd
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", prefix="triage-notes-", dir=vault, delete=False) as tmp:
+        json.dump(
+            {
+                "session_id": session_id,
+                "transcript_path": transcript_path,
+                "meta": meta,
+                "project_slug": project_slug,
+            },
+            tmp,
+        )
+        payload_path = tmp.name
+
     subprocess.Popen(
-        wrapper_cmd,
+        [sys.executable, __file__, "--structured-notes", payload_path, str(sentinel)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -635,4 +714,7 @@ def maybe_trigger_inception(config):
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 4 and sys.argv[1] == "--structured-notes":
+        _run_structured_notes_worker(sys.argv[2], sys.argv[3])
+    else:
+        main()

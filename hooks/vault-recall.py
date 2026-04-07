@@ -33,6 +33,7 @@ from memento_utils import (
     multi_hop_search,
     RUNTIME_DIR,
 )
+from memento.llm import llm_complete
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
@@ -335,43 +336,14 @@ def run_deep_recall_worker(input_path, backend):
         "Return at most 3 suggestions. If nothing additional is needed, return []."
     )
 
-    out_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".txt",
-            prefix="deep-recall-out-",
-            dir=RUNTIME_DIR,
-            delete=False,
-        ) as tmp:
-            out_path = tmp.name
-
-        if backend == "codex":
-            cmd = [
-                "codex",
-                "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--ephemeral",
-                "-o",
-                out_path,
-                codex_prompt,
-            ]
-        else:
-            cmd = [
-                "claude",
-                "--print",
-                "--dangerously-skip-permissions",
-                "--no-session-persistence",
-                "-p",
-                codex_prompt,
-            ]
-
-        result = _subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-
-        if backend == "codex":
-            raw = Path(out_path).read_text().strip()
-        else:
-            raw = result.stdout.strip()
+        result = llm_complete(
+            codex_prompt,
+            {
+                "llm_backend": backend,
+            },
+        )
+        raw = result.text if result.ok else ""
 
         # Parse the LLM response — extract JSON array
         suggestions = _parse_deep_recall_response(raw)
@@ -387,14 +359,8 @@ def run_deep_recall_worker(input_path, backend):
                 f,
             )
 
-    except (_subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except OSError:
         _cleanup_deep_recall_pending()
-    finally:
-        if out_path:
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
 
 
 def _parse_deep_recall_response(raw):

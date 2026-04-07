@@ -19,6 +19,7 @@ _spec.loader.exec_module(_mod)
 parse_transcript = _mod.parse_transcript
 is_substantial = _mod.is_substantial
 write_fleeting = _mod.write_fleeting
+process_structured_notes = _mod.process_structured_notes
 
 
 def _write_transcript(tmp_path, entries):
@@ -232,3 +233,86 @@ class TestWriteFleeting:
         fleeting_files = list((tmp_vault / "fleeting").glob("*.md"))
         content = fleeting_files[0].read_text()
         assert "→" not in content
+
+
+class TestProcessStructuredNotes:
+    def test_triage_structured_extraction(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+
+        llm_payload = json.dumps(
+            [
+                {
+                    "title": "Redis cache keys need explicit TTL",
+                    "body": "Keys without TTL caused stale reads.",
+                    "type": "bugfix",
+                    "tags": ["redis", "caching"],
+                    "certainty": 3,
+                }
+            ]
+        )
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=_mod.LLMResult(text=llm_payload, ok=True, error=None)),
+        ):
+            written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
+
+        assert written == 1
+        note = tmp_vault / "notes" / "redis-cache-keys-need-explicit-ttl.md"
+        assert note.exists()
+        assert "type: bugfix" in note.read_text()
+        project_file = tmp_vault / "projects" / "api-service.md"
+        assert project_file.exists()
+        assert "[[redis-cache-keys-need-explicit-ttl]]" in project_file.read_text()
+
+    def test_triage_handles_malformed_json(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=_mod.LLMResult(text="not json", ok=True, error=None)),
+        ):
+            written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
+
+        assert written == 0
+        assert list((tmp_vault / "notes").glob("*.md")) == []
+
+    def test_triage_handles_llm_error(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=_mod.LLMResult(text="", ok=False, error="boom")),
+        ):
+            written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
+
+        assert written == 0
+        assert list((tmp_vault / "notes").glob("*.md")) == []
