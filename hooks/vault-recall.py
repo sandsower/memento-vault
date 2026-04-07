@@ -14,26 +14,26 @@ import tempfile
 import time
 from pathlib import Path
 
-# Allow imports from the same directory
+# Allow imports from the repo and same directory
+_repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memento_utils import (
-    get_config,
-    get_vault,
-    has_qmd,
-    qmd_search_with_extras,
+from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault  # noqa: E402
+from memento.graph import lookup_concepts  # noqa: E402
+from memento.search import (  # noqa: E402
     enhance_results,
-    detect_project,
-    log_retrieval,
-    read_hook_input,
+    has_qmd,
     is_vsearch_warm,
-    rrf_fuse,
     mark_vsearch_warm,
-    prf_expand_query,
     multi_hop_search,
-    RUNTIME_DIR,
+    prf_expand_query,
+    qmd_search_with_extras,
+    rrf_fuse,
 )
-from memento.llm import llm_complete
+from memento.llm import llm_complete  # noqa: E402
+from memento.store import log_retrieval  # noqa: E402
+from memento.utils import read_hook_input  # noqa: E402
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
@@ -570,8 +570,6 @@ def run_recall():
     # Concept index supplement (always, O(1) lookup)
     if config.get("concept_index_enabled", True):
         try:
-            from memento_utils import lookup_concepts
-
             concept_hits = lookup_concepts(prompt)
             if concept_hits:
                 existing_paths = {r.get("path", "") for r in results}

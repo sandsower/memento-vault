@@ -15,23 +15,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Shared utilities
+_repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
-from memento_utils import (
-    get_config,
-    get_vault,
-    detect_project,
-    read_hook_input,
-    sanitize_secrets,
-    log_retrieval,
-    normalize_note_tags,
-)
-from memento.llm import llm_complete
-from memento.store import (
+from memento.config import detect_project, get_config, get_vault  # noqa: E402
+from memento.llm import llm_complete  # noqa: E402
+from memento.store import (  # noqa: E402
     acquire_vault_write_lock,
+    load_inception_state,
+    log_retrieval,
     release_vault_write_lock,
     update_project_index,
     write_note,
 )
+from memento.utils import normalize_note_tags, read_hook_input, sanitize_secrets  # noqa: E402
 
 
 # --- Transcript parsing ---
@@ -316,6 +313,8 @@ def build_session_summary(meta):
 
 
 VAULT_COMMIT = Path(__file__).parent / "vault-commit.sh"
+
+
 def normalize_all_notes():
     """Normalize tags on all notes in the vault. Safe to call multiple times."""
     vault = get_vault()
@@ -450,7 +449,7 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
 
     prompt = (
         "Read this session transcript and return JSON only.\n"
-        "Return either a JSON array of notes or {\"notes\": [...]}.\n"
+        'Return either a JSON array of notes or {"notes": [...]}.\n'
         "Each note must include: title, body, type, tags, certainty.\n"
         "Optional fields: validity_context, supersedes.\n"
         "Do not include any prose outside JSON.\n\n"
@@ -648,10 +647,16 @@ def backfill_certainty(delay_seconds=0):
     # Use the sweeper's backfill subcommand if available, otherwise inline
     if Path(backfill_script).exists():
         subprocess.Popen(
-            [sys.executable, "-c",
-             "import time,subprocess,sys; time.sleep(int(sys.argv[1])); "
-             "subprocess.run([sys.argv[2], sys.argv[3], 'backfill-certainty', sys.argv[4]], capture_output=True)",
-             str(max(delay_seconds, 0)), sys.executable, backfill_script, str(vault / "notes")],
+            [
+                sys.executable,
+                "-c",
+                "import time,subprocess,sys; time.sleep(int(sys.argv[1])); "
+                "subprocess.run([sys.argv[2], sys.argv[3], 'backfill-certainty', sys.argv[4]], capture_output=True)",
+                str(max(delay_seconds, 0)),
+                sys.executable,
+                backfill_script,
+                str(vault / "notes"),
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -661,8 +666,7 @@ def backfill_certainty(delay_seconds=0):
     # Inline fallback: scan notes and patch missing certainty
     notes_dir = str(vault / "notes")
     subprocess.Popen(
-        [sys.executable, str(Path(__file__).parent / "_backfill_certainty.py"),
-         notes_dir, str(max(delay_seconds, 0))],
+        [sys.executable, str(Path(__file__).parent / "_backfill_certainty.py"), notes_dir, str(max(delay_seconds, 0))],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -671,8 +675,6 @@ def backfill_certainty(delay_seconds=0):
 
 def maybe_trigger_inception(config):
     """Spawn the Inception if enough new notes have accumulated."""
-    from memento_utils import load_inception_state
-
     state = load_inception_state()
     vault = Path(config["vault_path"])
     notes_dir = vault / "notes"

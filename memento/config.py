@@ -177,9 +177,7 @@ def _parse_simple_yaml(path):
                     value = int(value)
                 elif value.startswith("[") and value.endswith("]"):
                     value = [v.strip().strip('"').strip("'") for v in value[1:-1].split(",")]
-                elif (value.startswith('"') and value.endswith('"')) or (
-                    value.startswith("'") and value.endswith("'")
-                ):
+                elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
                     value = value[1:-1]
                 result[key] = value
     return result

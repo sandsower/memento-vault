@@ -1,16 +1,15 @@
 """Shared fixtures for Inception tests."""
 
+import importlib.util as _ilu
 import sqlite3
 import sys
 from pathlib import Path
 
 import pytest
 
-# Add hooks/ to path so we can import memento_utils and memento-inception
-sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
-
-# memento-inception.py has a hyphen; register it as memento_inception for imports
-import importlib.util as _ilu
+repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(repo_root))
+sys.path.insert(0, str(repo_root / "hooks"))
 
 _inception_spec = _ilu.spec_from_file_location(
     "memento_inception",
@@ -256,7 +255,7 @@ def mock_qmd_db(tmp_path):
 @pytest.fixture
 def mock_config(tmp_vault):
     """Return a config dict pointing at the tmp vault."""
-    from memento_utils import DEFAULT_CONFIG
+    from memento.config import DEFAULT_CONFIG
 
     config = dict(DEFAULT_CONFIG)
     config["vault_path"] = str(tmp_vault)

@@ -282,7 +282,7 @@ class TestDeepRecallGate:
     """The gate in run_recall should only trigger when all conditions are met."""
 
     def _make_config(self, **overrides):
-        from memento_utils import DEFAULT_CONFIG
+        from memento.config import DEFAULT_CONFIG
 
         config = dict(DEFAULT_CONFIG)
         config.update(

@@ -18,18 +18,20 @@ from pathlib import Path
 
 import numpy as np
 
-# Add hooks dir to path for memento_utils import
+# Add repo root and hooks dir to path for local imports
+_repo_root = Path(__file__).parent.parent
+sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
-from memento_utils import (
-    get_config,
-    slugify,
-    load_inception_state,
-    save_inception_state,
-    acquire_inception_lock,
-    release_inception_lock,
+from memento.config import RUNTIME_DIR, get_config, slugify  # noqa: E402
+from memento.llm import llm_complete  # noqa: E402
+from memento.search import has_qmd  # noqa: E402
+from memento.store import (  # noqa: E402
     INCEPTION_STATE_PATH,
+    acquire_inception_lock,
+    load_inception_state,
+    release_inception_lock,
+    save_inception_state,
 )
-from memento.llm import llm_complete
 
 
 @dataclass
@@ -778,9 +780,7 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         return 2
 
     # Acquire lock
-    from memento_utils import RUNTIME_DIR as _rtdir
-
-    _lock_path = lock_path or os.path.join(_rtdir, "inception.lock")
+    _lock_path = lock_path or os.path.join(RUNTIME_DIR, "inception.lock")
     if not acquire_inception_lock(lock_path=_lock_path):
         if args.verbose:
             print("Another Inception instance is running", file=sys.stderr)
@@ -951,8 +951,9 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
             synthesis["related"] = list(set(synthesis.get("related", []) + stems))
 
             # Write (or refresh existing)
-            note_path = write_pattern_note(synthesis, stems, vault_path,
-                                           merge_target=merge_target if action == "merge" else None)
+            note_path = write_pattern_note(
+                synthesis, stems, vault_path, merge_target=merge_target if action == "merge" else None
+            )
             if note_path:
                 if action == "merge":
                     notes_refreshed += 1
@@ -1444,8 +1445,6 @@ def pre_reason(pattern_notes, notes_dict, config):
 
 def _commit_and_reindex(notes_written, config):
     """Commit vault changes and trigger QMD reindex."""
-    from memento_utils import has_qmd
-
     vault = Path(config["vault_path"])
     commit_script = Path.home() / ".claude" / "hooks" / "vault-commit.sh"
 

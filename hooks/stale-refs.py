@@ -20,19 +20,19 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from memento_utils import get_vault
+from memento.config import get_vault
 
 
 # Patterns that look like repo-relative file paths
 FILE_REF_PATTERN = re.compile(
-    r'(?:frontend|backend|infrastructure|e2e|knowledge|tools)/'
-    r'[\w/\-\.]+\.\w+'
+    r"(?:frontend|backend|infrastructure|e2e|knowledge|tools)/"
+    r"[\w/\-\.]+\.\w+"
 )
 
 
 def extract_project_dir(note_text):
     """Extract the project directory from frontmatter."""
-    m = re.search(r'^project:\s*(.+)', note_text, re.MULTILINE)
+    m = re.search(r"^project:\s*(.+)", note_text, re.MULTILINE)
     if m:
         return m.group(1).strip()
     return None
@@ -67,10 +67,7 @@ def annotate_note(note_path, missing_paths):
     if "**Stale reference:**" in text:
         return False
 
-    annotation = "\n".join(
-        f"> **Stale reference:** `{p}` no longer exists as of {today}."
-        for p in missing_paths
-    )
+    annotation = "\n".join(f"> **Stale reference:** `{p}` no longer exists as of {today}." for p in missing_paths)
 
     # Insert before ## Related section if it exists, otherwise append
     if "## Related" in text:

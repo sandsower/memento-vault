@@ -132,7 +132,7 @@ def _openai_compat_complete(prompt, model, api_key, base_url):
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
         },
-        lambda body: (((body.get("choices") or [{}])[0].get("message") or {}).get("content", "")),
+        lambda body: ((body.get("choices") or [{}])[0].get("message") or {}).get("content", ""),
     )
 
 

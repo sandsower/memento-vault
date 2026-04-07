@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+from memento.llm import LLMResult
 
 # Import memento-triage.py (hyphenated filename)
 _spec = importlib.util.spec_from_file_location(
@@ -263,7 +264,7 @@ class TestProcessStructuredNotes:
 
         with (
             patch("memento_triage.get_vault", return_value=tmp_vault),
-            patch("memento_triage.llm_complete", return_value=_mod.LLMResult(text=llm_payload, ok=True, error=None)),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text=llm_payload, ok=True, error=None)),
         ):
             written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
 
@@ -289,7 +290,7 @@ class TestProcessStructuredNotes:
 
         with (
             patch("memento_triage.get_vault", return_value=tmp_vault),
-            patch("memento_triage.llm_complete", return_value=_mod.LLMResult(text="not json", ok=True, error=None)),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="not json", ok=True, error=None)),
         ):
             written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
 
@@ -310,7 +311,7 @@ class TestProcessStructuredNotes:
 
         with (
             patch("memento_triage.get_vault", return_value=tmp_vault),
-            patch("memento_triage.llm_complete", return_value=_mod.LLMResult(text="", ok=False, error="boom")),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="boom")),
         ):
             written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
 

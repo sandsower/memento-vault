@@ -184,9 +184,7 @@ def find_dedup_candidates(vault_path, title, tags, limit=5):
         note_tags = set()
         if tag_match:
             note_tags = {
-                token.strip().strip('"').strip("'").lower()
-                for token in tag_match.group(1).split(",")
-                if token.strip()
+                token.strip().strip('"').strip("'").lower() for token in tag_match.group(1).split(",") if token.strip()
             }
         overlap += len(tag_tokens & note_tags)
 
