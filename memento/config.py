@@ -1,6 +1,5 @@
 """Configuration loading, project detection, and runtime paths."""
 
-import json
 import os
 import re
 import tempfile

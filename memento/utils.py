@@ -91,7 +91,7 @@ def normalize_note_tags(note_path):
     if end_line is None:
         return False
     # Reconstruct byte offset: everything up to and including the closing fence line
-    end = sum(len(l) + 1 for l in lines[: end_line + 1])
+    end = sum(len(line_text) + 1 for line_text in lines[: end_line + 1])
 
     frontmatter = content[:end].rstrip("\n")
     body = content[end:]

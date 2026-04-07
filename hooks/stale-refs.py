@@ -13,7 +13,6 @@ Without --fix: prints a report of stale references.
 With --fix: adds a blockquote annotation to notes with stale refs.
 """
 
-import glob
 import os
 import re
 import sys
