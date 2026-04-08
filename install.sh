@@ -17,6 +17,9 @@
 # Install MCP server config (for agents without native hook support):
 #   ./install.sh --mcp
 #
+# Connect to a remote vault (Docker or hosted):
+#   ./install.sh --remote https://vault.example.com:8745
+#
 # Force overwrite all files (ignore local changes):
 #   ./install.sh --force
 
@@ -31,12 +34,24 @@ NEW_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 FORCE=false
 EXPERIMENTAL=false
 MCP_INSTALL=false
+REMOTE_URL=""
+REMOTE_MODE=false
 
-for arg in "$@"; do
-    case "$arg" in
-        --force) FORCE=true ;;
-        --experimental) EXPERIMENTAL=true ;;
-        --mcp) MCP_INSTALL=true ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force) FORCE=true; shift ;;
+        --experimental) EXPERIMENTAL=true; shift ;;
+        --mcp) MCP_INSTALL=true; shift ;;
+        --remote)
+            REMOTE_MODE=true
+            if [[ $# -gt 1 && ! "$2" == --* ]]; then
+                REMOTE_URL="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        *) shift ;;
     esac
 done
 
@@ -252,6 +267,38 @@ if [ -z "${MEMENTO_VAULT_PATH:-}" ] && [ -n "$MANIFEST_VAULT_PATH" ]; then
     VAULT_PATH="$MANIFEST_VAULT_PATH"
 fi
 
+# --- Remote mode setup ---
+# When --remote is passed, we install hooks + package but skip local vault creation.
+# Hooks will talk to the remote vault over HTTP instead of local filesystem.
+
+REMOTE_API_KEY=""
+
+if [ "$REMOTE_MODE" = true ]; then
+    if [ -z "$REMOTE_URL" ]; then
+        echo ""
+        read -rp "Remote vault URL (e.g., https://vault.example.com:8745): " REMOTE_URL
+        if [ -z "$REMOTE_URL" ]; then
+            error "Remote URL is required for --remote mode."
+            exit 1
+        fi
+    fi
+
+    REMOTE_API_KEY="${MEMENTO_API_KEY:-}"
+    if [ -z "$REMOTE_API_KEY" ]; then
+        read -rp "API key for remote vault (leave empty if none): " REMOTE_API_KEY
+    fi
+
+    info "Remote mode: hooks will connect to $REMOTE_URL"
+    if [ -n "$REMOTE_API_KEY" ]; then
+        info "API key: configured"
+    else
+        warn "No API key set. Remote vault must allow unauthenticated access."
+    fi
+
+    # In remote mode, MCP is always installed (pointing at remote URL)
+    MCP_INSTALL=true
+fi
+
 if [ -n "$INSTALLED_VERSION" ]; then
     if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ] && [ "$FORCE" != true ]; then
         info "Memento Vault v${NEW_VERSION} is already installed."
@@ -303,59 +350,65 @@ else
     QMD_AVAILABLE=false
 fi
 
-# --- Create vault ---
+# --- Create vault (local mode only) ---
 
-step "Setting up vault at $VAULT_PATH..."
-
-if [ -d "$VAULT_PATH" ]; then
-    info "Vault directory already exists, preserving contents."
-else
-    mkdir -p "$VAULT_PATH"
-    info "Created $VAULT_PATH"
-fi
-
-for dir in fleeting notes projects archive; do
-    mkdir -p "$VAULT_PATH/$dir"
-done
-info "Directory structure: fleeting/ notes/ projects/ archive/"
-
-if [ ! -f "$VAULT_PATH/.gitignore" ]; then
-    cp "$SCRIPT_DIR/templates/vault/.gitignore" "$VAULT_PATH/.gitignore"
-    info "Added .gitignore"
-fi
-
-if [ ! -d "$VAULT_PATH/.git" ]; then
-    git -C "$VAULT_PATH" init
-    git -C "$VAULT_PATH" add -A
-    git -C "$VAULT_PATH" commit -m "init: bootstrap memento vault" --allow-empty
-    info "Initialized git repository"
-else
-    info "Git repo already initialized"
-fi
-
-# --- Obsidian setup (optional, first install only) ---
-
-if [ -z "$INSTALLED_VERSION" ]; then
-    echo ""
-    read -rp "Set up Obsidian views? (Base views for browsing notes) [Y/n] " obsidian
-    if [[ ! "$obsidian" =~ ^[Nn] ]]; then
-        if [ ! -d "$VAULT_PATH/.obsidian" ]; then
-            cp -r "$SCRIPT_DIR/templates/obsidian/.obsidian" "$VAULT_PATH/.obsidian"
-            info "Added Obsidian config (.obsidian/)"
-        else
-            info "Obsidian config already exists, skipping"
-        fi
-
-        for base in "$SCRIPT_DIR"/templates/obsidian/*.base; do
-            basename=$(basename "$base")
-            if [ ! -f "$VAULT_PATH/$basename" ]; then
-                cp "$base" "$VAULT_PATH/$basename"
-            fi
-        done
-        info "Added Base views (by-type, by-project, recent, decisions, bugfixes, by-source, by-tag)"
-    fi
-else
+if [ "$REMOTE_MODE" = true ]; then
+    step "Skipping local vault setup (remote mode)..."
+    info "Vault is hosted at: $REMOTE_URL"
     obsidian="skip"
+else
+    step "Setting up vault at $VAULT_PATH..."
+
+    if [ -d "$VAULT_PATH" ]; then
+        info "Vault directory already exists, preserving contents."
+    else
+        mkdir -p "$VAULT_PATH"
+        info "Created $VAULT_PATH"
+    fi
+
+    for dir in fleeting notes projects archive; do
+        mkdir -p "$VAULT_PATH/$dir"
+    done
+    info "Directory structure: fleeting/ notes/ projects/ archive/"
+
+    if [ ! -f "$VAULT_PATH/.gitignore" ]; then
+        cp "$SCRIPT_DIR/templates/vault/.gitignore" "$VAULT_PATH/.gitignore"
+        info "Added .gitignore"
+    fi
+
+    if [ ! -d "$VAULT_PATH/.git" ]; then
+        git -C "$VAULT_PATH" init
+        git -C "$VAULT_PATH" add -A
+        git -C "$VAULT_PATH" commit -m "init: bootstrap memento vault" --allow-empty
+        info "Initialized git repository"
+    else
+        info "Git repo already initialized"
+    fi
+
+    # --- Obsidian setup (optional, first install only) ---
+
+    if [ -z "$INSTALLED_VERSION" ]; then
+        echo ""
+        read -rp "Set up Obsidian views? (Base views for browsing notes) [Y/n] " obsidian
+        if [[ ! "$obsidian" =~ ^[Nn] ]]; then
+            if [ ! -d "$VAULT_PATH/.obsidian" ]; then
+                cp -r "$SCRIPT_DIR/templates/obsidian/.obsidian" "$VAULT_PATH/.obsidian"
+                info "Added Obsidian config (.obsidian/)"
+            else
+                info "Obsidian config already exists, skipping"
+            fi
+
+            for base in "$SCRIPT_DIR"/templates/obsidian/*.base; do
+                basename=$(basename "$base")
+                if [ ! -f "$VAULT_PATH/$basename" ]; then
+                    cp "$base" "$VAULT_PATH/$basename"
+                fi
+            done
+            info "Added Base views (by-type, by-project, recent, decisions, bugfixes, by-source, by-tag)"
+        fi
+    else
+        obsidian="skip"
+    fi
 fi
 
 # --- Config file ---
@@ -467,7 +520,7 @@ mkdir -p "$MEMENTO_PKG_DIR/adapters"
 PKG_COPIED=0
 PKG_SKIPPED=0
 
-for mod in __init__.py config.py utils.py search.py graph.py store.py llm.py types.py mcp_server.py __main__.py; do
+for mod in __init__.py config.py utils.py search.py search_backend.py graph.py store.py llm.py types.py mcp_server.py __main__.py auth.py remote_client.py; do
     if [ -f "$SCRIPT_DIR/memento/$mod" ]; then
         if safe_copy "$SCRIPT_DIR/memento/$mod" "$MEMENTO_PKG_DIR/$mod" "memento/$mod"; then
             ((PKG_COPIED++)) || true
@@ -535,7 +588,22 @@ if [ "$MCP_INSTALL" = true ]; then
 
     if [ -n "$MCP_CONFIG" ]; then
         # Create or merge MCP server entry
-        MCP_ENTRY=$(cat << MCP_EOF
+        if [ "$REMOTE_MODE" = true ]; then
+            # Remote mode: point MCP at the remote vault URL
+            MCP_HEADERS="{}"
+            if [ -n "$REMOTE_API_KEY" ]; then
+                MCP_HEADERS="{\"Authorization\": \"Bearer $REMOTE_API_KEY\"}"
+            fi
+            MCP_ENTRY=$(python3 -c "
+import json, sys
+entry = {'memento-vault': {'url': sys.argv[1] + '/mcp'}}
+headers = json.loads(sys.argv[2])
+if headers:
+    entry['memento-vault']['headers'] = headers
+print(json.dumps(entry, indent=2))
+" "$REMOTE_URL" "$MCP_HEADERS")
+        else
+            MCP_ENTRY=$(cat << MCP_EOF
 {
   "memento-vault": {
     "command": "python3",
@@ -547,6 +615,7 @@ if [ "$MCP_INSTALL" = true ]; then
 }
 MCP_EOF
 )
+        fi
         if [ -f "$MCP_CONFIG" ]; then
             # Merge into existing config
             if grep -q "memento-vault" "$MCP_CONFIG"; then
@@ -589,6 +658,17 @@ step "Updating Claude Code settings..."
 
 SETTINGS="$CLAUDE_DIR/settings.json"
 
+# Build environment prefix for hook commands
+# In remote mode, hooks need MEMENTO_VAULT_URL (and optionally MEMENTO_API_KEY)
+# to know they should talk to the remote vault instead of local filesystem.
+HOOK_ENV_PREFIX=""
+if [ "$REMOTE_MODE" = true ]; then
+    HOOK_ENV_PREFIX="MEMENTO_VAULT_URL=$REMOTE_URL "
+    if [ -n "$REMOTE_API_KEY" ]; then
+        HOOK_ENV_PREFIX="${HOOK_ENV_PREFIX}MEMENTO_API_KEY=$REMOTE_API_KEY "
+    fi
+fi
+
 if [ ! -f "$SETTINGS" ]; then
     if [ "$EXPERIMENTAL" = true ]; then
         cat > "$SETTINGS" << SETTINGS_EOF
@@ -597,21 +677,21 @@ if [ ! -f "$SETTINGS" ]; then
     "SessionStart": [
       {
         "type": "command",
-        "command": "python3 $CLAUDE_DIR/hooks/vault-briefing.py",
+        "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-briefing.py",
         "timeout": 8000
       }
     ],
     "UserPromptSubmit": [
       {
         "type": "command",
-        "command": "python3 $CLAUDE_DIR/hooks/vault-recall.py",
+        "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-recall.py",
         "timeout": 5000
       }
     ],
     "SessionEnd": [
       {
         "type": "command",
-        "command": "python3 $CLAUDE_DIR/hooks/memento-triage.py",
+        "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/memento-triage.py",
         "timeout": 30000,
         "async": true
       }
@@ -622,7 +702,7 @@ if [ ! -f "$SETTINGS" ]; then
         "hooks": [
           {
             "type": "command",
-            "command": "python3 $CLAUDE_DIR/hooks/vault-tool-context.py",
+            "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-tool-context.py",
             "timeout": 2000
           }
         ]
@@ -647,7 +727,7 @@ SETTINGS_EOF
     "SessionEnd": [
       {
         "type": "command",
-        "command": "python3 $CLAUDE_DIR/hooks/memento-triage.py",
+        "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/memento-triage.py",
         "timeout": 30000,
         "async": true
       }
@@ -715,7 +795,7 @@ info "Manifest saved to $MANIFEST (v${NEW_VERSION})"
 
 # --- QMD setup (optional) ---
 
-if [ "$QMD_AVAILABLE" = true ]; then
+if [ "$QMD_AVAILABLE" = true ] && [ "$REMOTE_MODE" != true ]; then
     step "Setting up QMD collection..."
 
     QMD_CONFIG="$HOME/.config/qmd/index.yml"
@@ -751,7 +831,7 @@ fi
 
 # --- Shell warmup (optional, experimental only) ---
 
-if [ "$QMD_AVAILABLE" = true ] && [ "$EXPERIMENTAL" = true ]; then
+if [ "$QMD_AVAILABLE" = true ] && [ "$EXPERIMENTAL" = true ] && [ "$REMOTE_MODE" != true ]; then
     # Detect shell rc file
     SHELL_RC=""
     case "$(basename "${SHELL:-/bin/bash}")" in
@@ -781,7 +861,29 @@ fi
 
 # --- Done ---
 
-if [ "$EXPERIMENTAL" = true ] && [ "$MCP_INSTALL" = true ]; then
+if [ "$REMOTE_MODE" = true ]; then
+    step "Installation complete! (v${NEW_VERSION} — remote client)"
+    echo ""
+    echo "Connected to remote vault: $REMOTE_URL"
+    echo ""
+    echo "What happens now:"
+    echo "  - Every session end, the triage hook sends knowledge to the remote vault"
+    if [ "$EXPERIMENTAL" = true ]; then
+        echo "  - Sessions start with a vault briefing from the remote vault"
+        echo "  - Each prompt triggers JIT recall from the remote vault"
+        echo "  - File reads inject context from the remote vault"
+    fi
+    echo "  - MCP tools (memento_search, memento_store, etc.) talk to the remote vault"
+    echo ""
+    echo "To switch back to local mode, reinstall without --remote:"
+    echo "  ./install.sh"
+    echo ""
+    echo "To use from other tools, set these environment variables:"
+    echo "  export MEMENTO_VAULT_URL=$REMOTE_URL"
+    if [ -n "$REMOTE_API_KEY" ]; then
+        echo "  export MEMENTO_API_KEY=$REMOTE_API_KEY"
+    fi
+elif [ "$EXPERIMENTAL" = true ] && [ "$MCP_INSTALL" = true ]; then
     step "Installation complete! (v${NEW_VERSION} + Tenet + Inception + MCP)"
 elif [ "$EXPERIMENTAL" = true ]; then
     step "Installation complete! (v${NEW_VERSION} + Tenet + Inception)"
@@ -790,47 +892,54 @@ elif [ "$MCP_INSTALL" = true ]; then
 else
     step "Installation complete! (v${NEW_VERSION})"
 fi
-echo ""
-echo "Your vault is at: $VAULT_PATH"
-echo ""
-echo "What happens now:"
-echo "  - Every session end, the triage hook captures knowledge to the vault"
-echo "  - Trivial sessions get a one-liner in fleeting/"
-echo "  - Substantial sessions spawn a background agent that writes atomic notes"
-if [ "$EXPERIMENTAL" = true ]; then
-    echo "  - Sessions start with a vault briefing (relevant notes for your project)"
-    echo "  - Each prompt triggers JIT recall (related vault notes injected automatically)"
-    echo "  - File reads inject vault notes about known code areas (tool-aware context)"
-fi
-echo "  - Use /memento to manually capture insights during a session"
-echo "  - Use /inception to find cross-session patterns (Inception)"
-echo "  - Use /memento-defrag monthly to archive stale notes"
-echo "  - Use /continue-work to pick up where you left off"
-echo "  - Use /start-fresh to checkpoint and clear context"
-echo ""
-# Check Inception dependencies if enabled
-if grep -q "^inception_enabled: true" "$CONFIG_DIR/memento.yml" 2>/dev/null; then
-    INCEPTION_DEPS_OK=true
-    for pkg in numpy hdbscan sklearn; do
-        if ! python3 -c "import $pkg" 2>/dev/null; then
-            INCEPTION_DEPS_OK=false
-            break
-        fi
-    done
-    if [ "$INCEPTION_DEPS_OK" = false ]; then
-        warn "Inception is enabled but dependencies are missing."
-        echo "  pip install numpy hdbscan scikit-learn"
-        echo ""
-    fi
-fi
 
-if [ "$QMD_AVAILABLE" = true ]; then
-    echo "Search: qmd search \"your query\" -c memento"
-else
-    echo "Search: grep -r \"your query\" $VAULT_PATH/notes/"
-    echo "  (install qmd for semantic search: https://github.com/tobi/qmd)"
-fi
-if [[ ! "$obsidian" =~ ^[Nn] ]]; then
-    echo "Browse: open $VAULT_PATH in Obsidian"
+if [ "$REMOTE_MODE" != true ]; then
+    echo ""
+    echo "Your vault is at: $VAULT_PATH"
+    echo ""
+    echo "What happens now:"
+    echo "  - Every session end, the triage hook captures knowledge to the vault"
+    echo "  - Trivial sessions get a one-liner in fleeting/"
+    echo "  - Substantial sessions spawn a background agent that writes atomic notes"
+    if [ "$EXPERIMENTAL" = true ]; then
+        echo "  - Sessions start with a vault briefing (relevant notes for your project)"
+        echo "  - Each prompt triggers JIT recall (related vault notes injected automatically)"
+        echo "  - File reads inject vault notes about known code areas (tool-aware context)"
+    fi
+    echo "  - Use /memento to manually capture insights during a session"
+    echo "  - Use /inception to find cross-session patterns (Inception)"
+    echo "  - Use /memento-defrag monthly to archive stale notes"
+    echo "  - Use /continue-work to pick up where you left off"
+    echo "  - Use /start-fresh to checkpoint and clear context"
+    echo ""
+    # Check Inception dependencies if enabled
+    if grep -q "^inception_enabled: true" "$CONFIG_DIR/memento.yml" 2>/dev/null; then
+        INCEPTION_DEPS_OK=true
+        for pkg in numpy hdbscan sklearn; do
+            if ! python3 -c "import $pkg" 2>/dev/null; then
+                INCEPTION_DEPS_OK=false
+                break
+            fi
+        done
+        if [ "$INCEPTION_DEPS_OK" = false ]; then
+            warn "Inception is enabled but dependencies are missing."
+            echo "  pip install numpy hdbscan scikit-learn"
+            echo ""
+        fi
+    fi
+
+    if [ "$QMD_AVAILABLE" = true ]; then
+        echo "Search: qmd search \"your query\" -c memento"
+    else
+        echo "Search: grep -r \"your query\" $VAULT_PATH/notes/"
+        echo "  (install qmd for semantic search: https://github.com/tobi/qmd)"
+    fi
+    if [[ ! "$obsidian" =~ ^[Nn] ]]; then
+        echo "Browse: open $VAULT_PATH in Obsidian"
+    fi
+
+    echo ""
+    echo "To deploy this vault as a remote service (Docker):"
+    echo "  See: ./setup-remote.sh"
 fi
 echo ""

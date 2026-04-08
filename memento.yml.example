@@ -2,7 +2,26 @@
 # Copy this to ~/.config/memento-vault/memento.yml or ~/memento/memento.yml
 
 # Where your vault lives (default: ~/memento)
+# Can also be set via MEMENTO_VAULT_PATH environment variable.
 vault_path: ~/memento
+
+# --- Remote / Docker deployment ---
+# To deploy the vault as a remote service, use Docker:
+#   docker compose up -d
+# Then connect clients with:
+#   ./install.sh --remote https://your-server:8745
+#
+# Server-side API key for bearer token auth (clients must send this).
+# Can also be set via MEMENTO_API_KEY environment variable.
+# api_key:
+#
+# Environment variables for remote configuration:
+#   MEMENTO_VAULT_URL   - Remote vault URL (set on clients)
+#   MEMENTO_API_KEY     - Bearer token (set on both server and clients)
+#   MEMENTO_TRANSPORT   - Transport: stdio (default) or streamable-http
+#   MEMENTO_HOST        - Bind address for HTTP (default: 0.0.0.0)
+#   MEMENTO_PORT        - Port for HTTP (default: 8745)
+#   MEMENTO_VAULT_PATH  - Vault directory (default: ~/memento)
 
 # --- Triage thresholds ---
 # Sessions with more than this many exchanges are considered "substantial"
