@@ -1,0 +1,63 @@
+#cloud-config
+# Memento Vault — Oracle Cloud Always Free (ARM) cloud-init
+#
+# Use this as user-data when creating an OCI Ampere A1 instance.
+# It installs Docker, clones the repo, generates an API key, and starts the vault.
+#
+# After provisioning, your vault is at: http://<instance-ip>:8745/mcp
+# Add Caddy for TLS, or use Cloudflare Tunnel / Tailscale for secure access.
+#
+# OCI Console: Compute → Instances → Create → Show advanced options → Cloud-init script
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - git
+  - python3
+
+runcmd:
+  # Install Docker
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+
+  # Clone memento-vault
+  - git clone https://github.com/sandsower/memento-vault.git /opt/memento-vault
+
+  # Generate API key and persist it
+  - "API_KEY=$(python3 -c \"import secrets; print(secrets.token_urlsafe(32))\")"
+  - "echo \"MEMENTO_API_KEY=$API_KEY\" > /opt/memento-vault/.env"
+
+  # Start the vault
+  - cd /opt/memento-vault && docker compose --env-file .env up -d --build
+
+  # Save connection info
+  - |
+    IP=$(curl -s http://169.254.169.254/opc/v1/vnics/ | python3 -c "import sys,json; print(json.load(sys.stdin)[0].get('publicIp','unknown'))" 2>/dev/null || echo "unknown")
+    cat > /opt/memento-vault/CONNECTION_INFO.txt << INFO
+    Memento Vault deployed successfully!
+
+    Vault URL: http://$IP:8745
+    MCP URL:   http://$IP:8745/mcp
+    API Key:   $API_KEY
+
+    Connect clients:
+      MEMENTO_API_KEY=$API_KEY ./install.sh --remote http://$IP:8745 --experimental
+
+    MCP config (for claude.ai/code):
+      "memento-vault": {
+        "url": "http://$IP:8745/mcp",
+        "headers": {"Authorization": "Bearer $API_KEY"}
+      }
+
+    IMPORTANT: Open port 8745 in your OCI security list:
+      OCI Console → Networking → VCN → Security Lists → Add Ingress Rule
+      Source CIDR: 0.0.0.0/0, Protocol: TCP, Destination Port: 8745
+
+    For TLS, add Caddy or use Cloudflare Tunnel:
+      See docker-compose.cloudflare.yml in /opt/memento-vault/
+    INFO
+
+  # Open firewall (iptables — OCI security list must also be configured)
+  - iptables -I INPUT -p tcp --dport 8745 -j ACCEPT
+  - netfilter-persistent save 2>/dev/null || true

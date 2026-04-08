@@ -10,6 +10,11 @@
 #   ./setup-remote.sh --host vault.example.com --tls  # With automatic TLS via Caddy
 #   ./setup-remote.sh --port 9000              # Custom port
 #   ./setup-remote.sh --no-migrate             # Skip vault data copy (fresh start)
+#
+# Other deployment options (not managed by this script):
+#   Fly.io:           See fly.toml (fly launch && fly deploy)
+#   Cloudflare Tunnel: See docker-compose.cloudflare.yml
+#   Oracle Cloud Free: See deploy/cloud-init-oracle.yml
 
 set -euo pipefail
 

@@ -1,0 +1,41 @@
+# Memento Vault — Fly.io deployment
+#
+# Deploy:
+#   fly launch --copy-config --no-deploy
+#   fly volumes create vault_data --region iad --size 1 --yes
+#   fly secrets set MEMENTO_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+#   fly deploy
+#
+# Your vault will be at: https://<app-name>.fly.dev/mcp
+#
+# Custom domain:
+#   fly certs add vault.example.com
+
+app = "memento-vault"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  MEMENTO_VAULT_PATH = "/vault"
+  MEMENTO_TRANSPORT = "streamable-http"
+  MEMENTO_HOST = "0.0.0.0"
+  MEMENTO_PORT = "8745"
+  PYTHONPATH = "/app"
+
+[http_service]
+  internal_port = 8745
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[mounts]
+  source = "vault_data"
+  destination = "/vault"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"

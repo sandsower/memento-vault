@@ -1,0 +1,49 @@
+# Memento Vault — Cloudflare Tunnel deployment
+#
+# Exposes your vault to the internet via Cloudflare Tunnel.
+# No public IP, no port forwarding, automatic TLS.
+#
+# Setup:
+#   1. Create a tunnel in Cloudflare Zero Trust dashboard
+#      (https://one.dash.cloudflare.com → Networks → Tunnels → Create)
+#   2. Copy the tunnel token
+#   3. Configure the tunnel's public hostname to point at http://vault:8745
+#   4. Run:
+#        export CLOUDFLARE_TUNNEL_TOKEN=<your-token>
+#        export MEMENTO_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+#        docker compose -f docker-compose.cloudflare.yml up -d
+#
+# Your vault will be at: https://<hostname-you-configured>/mcp
+
+services:
+  vault:
+    build: .
+    volumes:
+      - vault-data:/vault
+      - vault-config:/home/memento/.config/memento-vault
+    environment:
+      - MEMENTO_VAULT_PATH=/vault
+      - MEMENTO_TRANSPORT=streamable-http
+      - MEMENTO_HOST=0.0.0.0
+      - MEMENTO_PORT=8745
+      - MEMENTO_API_KEY=${MEMENTO_API_KEY:-}
+    restart: unless-stopped
+    networks:
+      - internal
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - vault
+    restart: unless-stopped
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  vault-data:
+  vault-config:
