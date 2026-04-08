@@ -459,12 +459,51 @@ def consume_deep_recall():
         return []
 
 
+def run_remote_recall(prompt, cwd, config):
+    """Run recall via the remote vault client. Returns (lines, top_path) or ([], None)."""
+    from memento.remote_client import search as remote_search
+
+    if should_skip(prompt, config):
+        return [], None
+
+    max_notes = config.get("recall_max_notes", 3)
+    min_score = config.get("recall_min_score", 0.4)
+
+    results = remote_search(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd)
+    if not results:
+        return [], None
+
+    top_path = results[0].get("path", "")
+    if is_duplicate(top_path):
+        return [], None
+
+    lines = ["[vault] Related memories:"]
+    for result in results[:max_notes]:
+        lines.append(format_result(result))
+
+    return lines, top_path
+
+
 def run_recall():
     """Run the recall search. Returns (lines, top_path) or ([], None)."""
     config = get_config()
 
     if not config.get("prompt_recall", True):
         return [], None
+
+    # Remote mode: delegate to remote vault
+    from memento.remote_client import is_remote
+
+    if is_remote():
+        try:
+            hook_input = read_hook_input()
+        except Exception:
+            return [], None
+        prompt = hook_input.get("prompt", "")
+        cwd = hook_input.get("cwd", "")
+        if not prompt:
+            return [], None
+        return run_remote_recall(prompt, cwd, config)
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():

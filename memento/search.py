@@ -1,15 +1,13 @@
-"""QMD search, PRF expansion, RRF fusion, and retrieval enhancements."""
+"""Search, PRF expansion, RRF fusion, and retrieval enhancements."""
 
-import json
 import math
 import os
 import re
-import shutil
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
 from memento.config import RUNTIME_DIR, get_config, get_vault
+from memento.search_backend import _clean_snippet, get_backend  # noqa: F401 (_clean_snippet re-exported for compat)
 from memento.store import log_retrieval
 from memento.graph import (
     apply_pagerank_boost,
@@ -19,49 +17,28 @@ from memento.graph import (
     read_note_metadata,
 )
 
-# --- QMD wrapper ---
+# --- Backend-delegating wrappers (backward compat) ---
 
 
 def has_qmd():
-    """Check if QMD is installed."""
-    return bool(shutil.which("qmd"))
-
-
-def _clean_snippet(raw):
-    """Clean QMD snippet: strip chunk markers, frontmatter, and collapse whitespace."""
-    if not raw:
-        return ""
-    # Remove QMD chunk position markers like "@@ -3,4 @@ (2 before, 12 after)"
-    text = re.sub(r"@@ [^@]+ @@\s*\([^)]*\)\s*", "", raw)
-    # Remove YAML frontmatter lines (key: value at start)
-    lines = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        # Skip frontmatter-like lines and empty/separator lines
-        if stripped == "---" or (": " in stripped and not stripped.startswith("-")):
-            continue
-        if stripped:
-            lines.append(stripped)
-    text = " ".join(lines)
-    # Collapse whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:200]
+    """Check if the search backend is available."""
+    return get_backend().is_available()
 
 
 def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_score=0.0):
-    """Run a QMD search via CLI.
+    """Run a search via the configured backend.
 
     Args:
         query: Search query string
-        collection: QMD collection name (default: from config)
+        collection: Collection name (default: from config)
         limit: Max results
-        semantic: If True, use vsearch (vector); otherwise search (BM25)
-        timeout: Subprocess timeout in seconds
+        semantic: If True, use vector search; otherwise BM25
+        timeout: Backend timeout in seconds
         min_score: Minimum relevance score (0.0-1.0)
 
     Returns:
         List of dicts with keys: path, title, score, snippet
-        Empty list if QMD unavailable or query fails.
+        Empty list if backend unavailable or query fails.
     """
     if not query or not query.strip():
         return []
@@ -69,69 +46,19 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_
     config = get_config()
     collection = collection or config["qmd_collection"]
 
-    if not has_qmd():
+    backend = get_backend()
+    if not backend.is_available():
         return []
-
-    cmd_name = "vsearch" if semantic else "search"
-    cmd = ["qmd", cmd_name, query, "-c", collection, "-n", str(limit), "--json"]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode != 0:
-            return []
-
-        # QMD prints diagnostic lines before JSON — find the JSON start
-        stdout = result.stdout
-        json_start = stdout.find("[")
-        if json_start == -1:
-            json_start = stdout.find("{")
-        if json_start == -1:
-            return []
-        data = json.loads(stdout[json_start:])
-        results = []
-
-        # QMD JSON output is a list of result objects
-        items = data if isinstance(data, list) else data.get("results", [])
-        for item in items:
-            score = item.get("score", 0.0)
-            if score < min_score:
-                continue
-            # Derive a usable title: prefer file basename over QMD's chunk title
-            raw_path = item.get("file", item.get("path", ""))
-            # Strip qmd:// URI prefix if present
-            if "://" in raw_path:
-                raw_path = raw_path.split("://", 1)[1]
-                # Remove collection prefix (e.g., "memento/notes/foo.md" -> "notes/foo.md")
-                parts = raw_path.split("/", 1)
-                if len(parts) > 1:
-                    raw_path = parts[1]
-            file_title = Path(raw_path).stem
-            qmd_title = item.get("title", "")
-            if qmd_title and qmd_title not in ("Related", "Notes", "Sessions", ""):
-                title = qmd_title
-            else:
-                title = file_title
-
-            results.append(
-                {
-                    "path": raw_path,
-                    "title": title,
-                    "score": score,
-                    "snippet": _clean_snippet(item.get("snippet", item.get("content", ""))),
-                }
-            )
-
-        return results[:limit]
-
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
-        return []
+        return backend.search(query, collection, limit=limit, semantic=semantic, timeout=timeout, min_score=min_score)
     except Exception as exc:
         log_retrieval("search", "qmd_search_unexpected", error=str(exc))
         return []
 
 
 def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=0.0):
-    """Search primary collection + any extra_qmd_collections in parallel.
+    """Search primary collection + any extra collections in parallel.
 
     Returns combined results sorted by score descending.
     """
@@ -139,7 +66,6 @@ def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=
     extras = config.get("extra_qmd_collections", [])
 
     if not extras:
-        # No extra collections — skip threading overhead
         results = qmd_search(
             query,
             collection=config["qmd_collection"],
@@ -150,7 +76,6 @@ def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=
         )
         return results[:limit]
 
-    # Run primary + extras in parallel
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     futures = {}
@@ -374,55 +299,26 @@ def mark_vsearch_warm():
         pass
 
 
-# --- QMD get ---
+# --- Backend get ---
 
 
 def qmd_get(path, collection=None, timeout=5):
-    """Fetch a single note by path via qmd get.
+    """Fetch a single note by path via the search backend.
 
     Args:
         path: note path relative to collection (e.g. "notes/foo.md")
-        collection: QMD collection name (default: from config)
-        timeout: subprocess timeout in seconds
+        collection: Collection name (default: from config)
+        timeout: backend timeout in seconds
 
     Returns:
         dict with path, title, content keys, or None if not found.
     """
-    config = get_config()
-    collection = collection or config.get("qmd_collection", "memento")
-
-    if not has_qmd():
+    backend = get_backend()
+    if not backend.is_available():
         return None
-
-    cmd = ["qmd", "get", path, "-c", collection, "--json"]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode != 0:
-            return None
-
-        stdout = result.stdout
-        json_start = stdout.find("{")
-        if json_start == -1:
-            return None
-
-        data = json.loads(stdout[json_start:])
-        raw_path = data.get("file", data.get("path", path))
-        if "://" in raw_path:
-            raw_path = raw_path.split("://", 1)[1]
-            parts = raw_path.split("/", 1)
-            if len(parts) > 1:
-                raw_path = parts[1]
-
-        return {
-            "path": raw_path,
-            "title": data.get("title", Path(raw_path).stem),
-            "content": data.get("content", ""),
-            "score": 0.0,
-        }
-
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
-        return None
+        return backend.get(path, collection=collection, timeout=timeout)
     except Exception as exc:
         log_retrieval("search", "qmd_get_unexpected", error=str(exc))
         return None

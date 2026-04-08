@@ -334,10 +334,60 @@ def output_context(context_text):
     print(json.dumps(response))
 
 
+def run_remote_tool_context(hook_input, config):
+    """Run tool context via the remote vault client."""
+    from memento.remote_client import search as remote_search
+
+    tool_name = hook_input.get("tool_name", "")
+    if tool_name != "Read":
+        return
+
+    file_path = hook_input.get("tool_input", {}).get("file_path", "")
+    cwd = hook_input.get("cwd", "")
+    if not file_path:
+        return
+
+    try:
+        file_path = os.path.realpath(os.path.expanduser(file_path))
+    except (OSError, ValueError):
+        return
+
+    if should_skip(file_path, config):
+        return
+
+    query = extract_keywords(file_path)
+    if not query or len(query.split()) < 2:
+        return
+
+    max_notes = config.get("tool_context_max_notes", 2)
+    min_score = config.get("tool_context_min_score", 0.75)
+
+    results = remote_search(query=query, limit=max_notes, min_score=min_score, cwd=cwd)
+    if not results:
+        return
+
+    lines = ["[connected-to-vault]"]
+    for result in results[:max_notes]:
+        lines.append(format_result(result))
+
+    output_context("\n".join(lines))
+
+
 def main():
     config = get_config()
 
     if not config.get("tool_context", True):
+        sys.exit(0)
+
+    # Remote mode
+    from memento.remote_client import is_remote
+
+    if is_remote():
+        try:
+            hook_input = read_hook_input()
+        except Exception:
+            sys.exit(0)
+        run_remote_tool_context(hook_input, config)
         sys.exit(0)
 
     if not has_qmd():

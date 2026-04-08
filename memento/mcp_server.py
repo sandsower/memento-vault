@@ -1,4 +1,8 @@
-"""MCP server for memento vault — exposes search, store, status, capture, and get operations."""
+"""MCP server for memento vault — exposes search, store, status, capture, and get operations.
+
+Supports both stdio (local) and streamable-http (remote) transports.
+When running over HTTP, authentication is enforced via bearer tokens.
+"""
 
 import json
 import os
@@ -9,7 +13,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from memento.config import detect_project, get_config, get_vault, slugify
+from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
 from memento.search import enhance_results, has_qmd, qmd_search_with_extras, qmd_get
 from memento.store import (
     acquire_vault_write_lock,
@@ -20,17 +24,43 @@ from memento.store import (
 )
 from memento.utils import sanitize_secrets
 
-mcp = FastMCP(
-    "memento-vault",
-    instructions=(
-        "Memento Vault is a persistent knowledge store for coding agents. "
-        "Use memento_search to find past decisions, discoveries, and session notes. "
-        "Use memento_store to write a single knowledge note. "
-        "Use memento_capture at session end to triage and capture the full session. "
-        "Use memento_get to read a specific note by path. "
-        "Use memento_status to check vault health and stats."
-    ),
-)
+
+def _build_server() -> FastMCP:
+    """Build the FastMCP server, configured from environment variables.
+
+    Environment variables:
+        MEMENTO_HOST: Bind address for HTTP transport (default: 0.0.0.0)
+        MEMENTO_PORT: Port for HTTP transport (default: 8745)
+        MEMENTO_API_KEY: Bearer token for HTTP auth (optional)
+    """
+    host = os.environ.get("MEMENTO_HOST", "0.0.0.0")
+    port = int(os.environ.get("MEMENTO_PORT", "8745"))
+
+    kwargs = {
+        "name": "memento-vault",
+        "instructions": (
+            "Memento Vault is a persistent knowledge store for coding agents. "
+            "Use memento_search to find past decisions, discoveries, and session notes. "
+            "Use memento_store to write a single knowledge note. "
+            "Use memento_capture at session end to triage and capture the full session. "
+            "Use memento_get to read a specific note by path. "
+            "Use memento_status to check vault health and stats."
+        ),
+        "host": host,
+        "port": port,
+    }
+
+    # Wire up auth if an API key is configured
+    api_key = os.environ.get("MEMENTO_API_KEY")
+    if api_key:
+        from memento.auth import BearerTokenAuth, MementoTokenVerifier
+
+        kwargs["token_verifier"] = MementoTokenVerifier(BearerTokenAuth(api_key))
+
+    return FastMCP(**kwargs)
+
+
+mcp = _build_server()
 
 
 def _strip_injection(text: str) -> str:
@@ -186,6 +216,7 @@ def memento_status() -> dict:
     vault = get_vault()
 
     status = {
+        "vault_id": get_vault_id(),
         "vault_path": str(vault),
         "vault_exists": vault.exists(),
         "qmd_available": has_qmd(),
@@ -422,8 +453,24 @@ def memento_capture(
 
 
 def main():
-    """Run the MCP server over stdio."""
-    mcp.run(transport="stdio")
+    """Run the MCP server.
+
+    Transport is selected via --transport flag or MEMENTO_TRANSPORT env var.
+    Host/port are configured via MEMENTO_HOST/MEMENTO_PORT env vars or
+    passed to the FastMCP constructor at build time.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Memento Vault MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "streamable-http"],
+        default=os.environ.get("MEMENTO_TRANSPORT", "stdio"),
+        help="Transport protocol (default: stdio, env: MEMENTO_TRANSPORT)",
+    )
+    args = parser.parse_args()
+
+    mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":

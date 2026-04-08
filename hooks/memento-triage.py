@@ -526,11 +526,54 @@ def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
 # --- Main ---
 
 
+def run_remote_triage(hook_input):
+    """Run triage via the remote vault client — sends capture request over HTTP."""
+    from memento.remote_client import capture as remote_capture
+
+    session_id = hook_input.get("session_id", "unknown")
+    transcript_path = hook_input.get("transcript_path")
+
+    if not transcript_path or not os.path.exists(transcript_path):
+        return
+
+    try:
+        meta = parse_transcript(transcript_path)
+    except Exception:
+        return
+
+    if meta["exchange_count"] < 2:
+        return
+
+    if not meta["cwd"]:
+        meta["cwd"] = hook_input.get("cwd")
+
+    substantial = is_substantial(meta)
+    if not substantial:
+        return
+
+    summary = build_session_summary(meta)
+    remote_capture(
+        session_summary=summary,
+        cwd=meta.get("cwd", ""),
+        branch=meta.get("git_branch", ""),
+        files_edited=meta.get("files_edited", []),
+        session_id=session_id,
+        agent="claude",
+    )
+
+
 def main():
     try:
         hook_input = read_hook_input()
     except Exception as exc:
         log_retrieval("triage", "hook_input_failed", error=str(exc))
+        sys.exit(0)
+
+    # Remote mode: send capture to remote vault
+    from memento.remote_client import is_remote
+
+    if is_remote():
+        run_remote_triage(hook_input)
         sys.exit(0)
 
     session_id = hook_input.get("session_id", "unknown")

@@ -1,0 +1,22 @@
+services:
+  vault:
+    build: .
+    ports:
+      - "${MEMENTO_PORT:-8745}:8745"
+    volumes:
+      - vault-data:/vault
+      - vault-config:/home/memento/.config/memento-vault
+    environment:
+      - MEMENTO_VAULT_PATH=/vault
+      - MEMENTO_TRANSPORT=streamable-http
+      - MEMENTO_HOST=0.0.0.0
+      - MEMENTO_PORT=8745
+      # Set your API key for auth (recommended for any non-local deployment)
+      - MEMENTO_API_KEY=${MEMENTO_API_KEY:-}
+    restart: unless-stopped
+
+volumes:
+  vault-data:
+    driver: local
+  vault-config:
+    driver: local
