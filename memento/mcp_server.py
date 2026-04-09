@@ -62,6 +62,9 @@ def _build_server() -> FastMCP:
 
 mcp = _build_server()
 
+# Set at startup by main() — used by tools to know if they're running over HTTP
+_active_transport: str = "stdio"
+
 
 def _strip_injection(text: str) -> str:
     """Strip instruction-like patterns from content (defense-in-depth)."""
@@ -212,14 +215,23 @@ def memento_status() -> dict:
     config = get_config()
     vault = get_vault()
 
+    vault_exists = vault.exists()
+
+    # Read vault_id only if vault exists — get_vault_id() creates dirs as a side effect
+    vault_id = None
+    if vault_exists:
+        identity_file = vault / "vault-identity.json"
+        if identity_file.exists():
+            vault_id = get_vault_id()
+
     status = {
-        "vault_id": get_vault_id(),
+        "vault_id": vault_id,
         "vault_path": str(vault),
-        "vault_exists": vault.exists(),
+        "vault_exists": vault_exists,
         "qmd_available": has_qmd(),
     }
 
-    if not vault.exists():
+    if not vault_exists:
         return status
 
     notes_dir = vault / "notes"
@@ -346,8 +358,7 @@ def memento_capture(
     if transcript_path:
         # Reject transcript_path over HTTP — remote callers must not trigger
         # server-side file reads. They should send session_summary instead.
-        transport = os.environ.get("MEMENTO_TRANSPORT", "stdio")
-        if transport != "stdio":
+        if _active_transport != "stdio":
             return {"error": "transcript_path is only supported in local (stdio) mode. Send session_summary for remote capture."}
 
         if not os.path.exists(transcript_path):
@@ -531,6 +542,10 @@ def main():
         help="Transport protocol (default: stdio, env: MEMENTO_TRANSPORT)",
     )
     args = parser.parse_args()
+
+    # Record the active transport so tools can check it at request time
+    global _active_transport
+    _active_transport = args.transport
 
     # Fail closed: refuse to start HTTP transport without auth on non-local interfaces
     if args.transport in ("sse", "streamable-http"):
