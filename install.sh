@@ -350,14 +350,13 @@ else
     QMD_AVAILABLE=false
 fi
 
-# --- Create vault (local mode only) ---
+# --- Create vault (always — local vault is the primary store even in remote mode) ---
 
+step "Setting up vault at $VAULT_PATH..."
 if [ "$REMOTE_MODE" = true ]; then
-    step "Skipping local vault setup (remote mode)..."
-    info "Vault is hosted at: $REMOTE_URL"
-    obsidian="skip"
-else
-    step "Setting up vault at $VAULT_PATH..."
+    info "Local vault is always maintained. Remote vault syncs at: $REMOTE_URL"
+fi
+{
 
     if [ -d "$VAULT_PATH" ]; then
         info "Vault directory already exists, preserving contents."
@@ -409,7 +408,7 @@ else
     else
         obsidian="skip"
     fi
-fi
+}
 
 # --- Config file ---
 
@@ -902,28 +901,10 @@ fi
 
 # --- Done ---
 
-if [ "$REMOTE_MODE" = true ]; then
-    step "Installation complete! (v${NEW_VERSION} — remote client)"
-    echo ""
-    echo "Connected to remote vault: $REMOTE_URL"
-    echo ""
-    echo "What happens now:"
-    echo "  - Every session end, the triage hook sends knowledge to the remote vault"
-    if [ "$EXPERIMENTAL" = true ]; then
-        echo "  - Sessions start with a vault briefing from the remote vault"
-        echo "  - Each prompt triggers JIT recall from the remote vault"
-        echo "  - File reads inject context from the remote vault"
-    fi
-    echo "  - MCP tools (memento_search, memento_store, etc.) talk to the remote vault"
-    echo ""
-    echo "To switch back to local mode, reinstall without --remote:"
-    echo "  ./install.sh"
-    echo ""
-    echo "To use from other tools, set these environment variables:"
-    echo "  export MEMENTO_VAULT_URL=$REMOTE_URL"
-    if [ -n "$REMOTE_API_KEY" ]; then
-        echo "  export MEMENTO_API_KEY=$REMOTE_API_KEY"
-    fi
+if [ "$REMOTE_MODE" = true ] && [ "$EXPERIMENTAL" = true ]; then
+    step "Installation complete! (v${NEW_VERSION} — local + remote)"
+elif [ "$REMOTE_MODE" = true ]; then
+    step "Installation complete! (v${NEW_VERSION} — local + remote)"
 elif [ "$EXPERIMENTAL" = true ] && [ "$MCP_INSTALL" = true ]; then
     step "Installation complete! (v${NEW_VERSION} + Tenet + Inception + MCP)"
 elif [ "$EXPERIMENTAL" = true ]; then
@@ -934,51 +915,64 @@ else
     step "Installation complete! (v${NEW_VERSION})"
 fi
 
-if [ "$REMOTE_MODE" != true ]; then
-    echo ""
-    echo "Your vault is at: $VAULT_PATH"
-    echo ""
-    echo "What happens now:"
-    echo "  - Every session end, the triage hook captures knowledge to the vault"
-    echo "  - Trivial sessions get a one-liner in fleeting/"
-    echo "  - Substantial sessions spawn a background agent that writes atomic notes"
-    if [ "$EXPERIMENTAL" = true ]; then
-        echo "  - Sessions start with a vault briefing (relevant notes for your project)"
-        echo "  - Each prompt triggers JIT recall (related vault notes injected automatically)"
-        echo "  - File reads inject vault notes about known code areas (tool-aware context)"
-    fi
-    echo "  - Use /memento to manually capture insights during a session"
-    echo "  - Use /inception to find cross-session patterns (Inception)"
-    echo "  - Use /memento-defrag monthly to archive stale notes"
-    echo "  - Use /continue-work to pick up where you left off"
-    echo "  - Use /start-fresh to checkpoint and clear context"
-    echo ""
-    # Check Inception dependencies if enabled
-    if grep -q "^inception_enabled: true" "$CONFIG_DIR/memento.yml" 2>/dev/null; then
-        INCEPTION_DEPS_OK=true
-        for pkg in numpy hdbscan sklearn; do
-            if ! python3 -c "import $pkg" 2>/dev/null; then
-                INCEPTION_DEPS_OK=false
-                break
-            fi
-        done
-        if [ "$INCEPTION_DEPS_OK" = false ]; then
-            warn "Inception is enabled but dependencies are missing."
-            echo "  pip install numpy hdbscan scikit-learn"
-            echo ""
+echo ""
+echo "Your vault is at: $VAULT_PATH"
+if [ "$REMOTE_MODE" = true ]; then
+    echo "Remote sync:    $REMOTE_URL"
+fi
+echo ""
+echo "What happens now:"
+echo "  - Every session end, the triage hook captures knowledge locally"
+echo "  - Trivial sessions get a one-liner in fleeting/"
+echo "  - Substantial sessions spawn a background agent that writes atomic notes"
+if [ "$REMOTE_MODE" = true ]; then
+    echo "  - Sessions are also sent to the remote vault for cross-device access"
+fi
+if [ "$EXPERIMENTAL" = true ]; then
+    echo "  - Sessions start with a vault briefing (relevant notes for your project)"
+    echo "  - Each prompt triggers JIT recall (related vault notes injected automatically)"
+    echo "  - File reads inject vault notes about known code areas (tool-aware context)"
+fi
+echo "  - Use /memento to manually capture insights during a session"
+echo "  - Use /inception to find cross-session patterns (Inception)"
+echo "  - Use /memento-defrag monthly to archive stale notes"
+echo "  - Use /continue-work to pick up where you left off"
+echo "  - Use /start-fresh to checkpoint and clear context"
+echo ""
+# Check Inception dependencies if enabled
+if grep -q "^inception_enabled: true" "$CONFIG_DIR/memento.yml" 2>/dev/null; then
+    INCEPTION_DEPS_OK=true
+    for pkg in numpy hdbscan sklearn; do
+        if ! python3 -c "import $pkg" 2>/dev/null; then
+            INCEPTION_DEPS_OK=false
+            break
         fi
+    done
+    if [ "$INCEPTION_DEPS_OK" = false ]; then
+        warn "Inception is enabled but dependencies are missing."
+        echo "  pip install numpy hdbscan scikit-learn"
+        echo ""
     fi
+fi
 
-    if [ "$QMD_AVAILABLE" = true ]; then
-        echo "Search: qmd search \"your query\" -c memento"
-    else
-        echo "Search: grep -r \"your query\" $VAULT_PATH/notes/"
-        echo "  (install qmd for semantic search: https://github.com/tobi/qmd)"
-    fi
-    if [[ ! "$obsidian" =~ ^[Nn] ]]; then
-        echo "Browse: open $VAULT_PATH in Obsidian"
-    fi
+if [ "$QMD_AVAILABLE" = true ]; then
+    echo "Search: qmd search \"your query\" -c memento"
+else
+    echo "Search: grep -r \"your query\" $VAULT_PATH/notes/"
+    echo "  (install qmd for semantic search: https://github.com/tobi/qmd)"
+fi
+if [[ ! "$obsidian" =~ ^[Nn] ]]; then
+    echo "Browse: open $VAULT_PATH in Obsidian"
+fi
 
+if [ "$REMOTE_MODE" = true ]; then
+    echo ""
+    echo "To use from other tools, set these environment variables:"
+    echo "  export MEMENTO_VAULT_URL=$REMOTE_URL"
+    if [ -n "$REMOTE_API_KEY" ]; then
+        echo "  export MEMENTO_API_KEY=$REMOTE_API_KEY"
+    fi
+else
     echo ""
     echo "To deploy this vault as a remote service (Docker):"
     echo "  See: ./setup-remote.sh"

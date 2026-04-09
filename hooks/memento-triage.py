@@ -602,13 +602,6 @@ def main():
         log_retrieval("triage", "hook_input_failed", error=str(exc))
         sys.exit(0)
 
-    # Remote mode: send capture to remote vault
-    from memento.remote_client import is_remote
-
-    if is_remote():
-        run_remote_triage(hook_input)
-        sys.exit(0)
-
     session_id = hook_input.get("session_id", "unknown")
     transcript_path = hook_input.get("transcript_path")
 
@@ -677,6 +670,15 @@ def main():
     # Inception: background consolidation (gated)
     if config.get("inception_enabled", False):
         maybe_trigger_inception(config)
+
+    # Additionally sync to remote vault if configured
+    from memento.remote_client import is_remote
+
+    if is_remote():
+        try:
+            run_remote_triage(hook_input)
+        except Exception as exc:
+            print(f"[memento] remote sync failed (local capture succeeded): {exc}", file=sys.stderr)
 
     sys.exit(0)
 

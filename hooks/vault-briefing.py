@@ -329,27 +329,32 @@ def main():
     if not config.get("session_briefing", True):
         sys.exit(0)
 
-    # Remote mode: briefing from remote vault
-    from memento.remote_client import is_remote
-
-    if is_remote():
-        try:
-            hook_input = read_hook_input()
-        except Exception:
-            sys.exit(0)
-        cwd = hook_input.get("cwd", "")
-        if cwd:
-            run_remote_briefing(cwd, config)
-        sys.exit(0)
-
-    vault = get_vault()
-    if not vault.exists() or not (vault / "notes").exists():
-        sys.exit(0)
-
     try:
         hook_input = read_hook_input()
     except Exception as exc:
         log_retrieval("briefing", "hook_input_failed", error=str(exc))
+        sys.exit(0)
+
+    # Try remote vault first (has cross-device data), fall through to local
+    from memento.remote_client import is_remote
+
+    if is_remote():
+        try:
+            cwd = hook_input.get("cwd", "")
+            if cwd:
+                run_remote_briefing(cwd, config)
+                # Check if remote produced results
+                if os.path.exists(DEFERRED_BRIEFING_PATH):
+                    import json as _json
+                    with open(DEFERRED_BRIEFING_PATH) as _f:
+                        _data = _json.load(_f)
+                    if _data.get("note_lines"):
+                        sys.exit(0)  # remote had results, done
+        except Exception:
+            pass  # fall through to local
+
+    vault = get_vault()
+    if not vault.exists() or not (vault / "notes").exists():
         sys.exit(0)
 
     cwd = hook_input.get("cwd", "")

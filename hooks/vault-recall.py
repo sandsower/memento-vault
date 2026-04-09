@@ -491,27 +491,6 @@ def run_recall():
     if not config.get("prompt_recall", True):
         return [], None
 
-    # Remote mode: delegate to remote vault
-    from memento.remote_client import is_remote
-
-    if is_remote():
-        try:
-            hook_input = read_hook_input()
-        except Exception:
-            return [], None
-        prompt = hook_input.get("prompt", "")
-        cwd = hook_input.get("cwd", "")
-        if not prompt:
-            return [], None
-        return run_remote_recall(prompt, cwd, config)
-
-    vault = get_vault()
-    if not vault.exists() or not (vault / "notes").exists():
-        return [], None
-
-    if not has_qmd():
-        return [], None
-
     try:
         hook_input = read_hook_input()
     except Exception as exc:
@@ -520,6 +499,24 @@ def run_recall():
 
     prompt = hook_input.get("prompt", "")
     cwd = hook_input.get("cwd", "")
+
+    # Try remote vault first (has cross-device data), fall through to local
+    from memento.remote_client import is_remote
+
+    if is_remote() and prompt:
+        try:
+            lines, top_path = run_remote_recall(prompt, cwd, config)
+            if lines:
+                return lines, top_path
+        except Exception:
+            pass  # fall through to local
+
+    vault = get_vault()
+    if not vault.exists() or not (vault / "notes").exists():
+        return [], None
+
+    if not has_qmd():
+        return [], None
     if not prompt:
         return [], None
 
