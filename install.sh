@@ -835,7 +835,7 @@ info "Manifest saved to $MANIFEST (v${NEW_VERSION})"
 
 # --- QMD setup (optional) ---
 
-if [ "$QMD_AVAILABLE" = true ] && [ "$REMOTE_MODE" != true ]; then
+if [ "$QMD_AVAILABLE" = true ]; then
     step "Setting up QMD collection..."
 
     QMD_CONFIG="$HOME/.config/qmd/index.yml"

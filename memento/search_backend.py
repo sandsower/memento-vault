@@ -58,7 +58,22 @@ class QMDBackend(SearchBackend):
     """Search backend that wraps the QMD CLI tool."""
 
     def is_available(self) -> bool:
-        return bool(shutil.which("qmd"))
+        if not shutil.which("qmd"):
+            return False
+        # Verify the configured collection actually exists
+        from memento.config import get_config
+
+        collection = get_config().get("qmd_collection", "memento")
+        try:
+            result = subprocess.run(
+                ["qmd", "search", "test", "-c", collection, "-n", "1"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
 
     def search(
         self,

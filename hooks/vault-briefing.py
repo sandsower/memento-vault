@@ -340,10 +340,14 @@ def main():
 
     if is_remote():
         try:
+            # Clear any stale deferred briefing from a prior session
+            if os.path.exists(DEFERRED_BRIEFING_PATH):
+                os.unlink(DEFERRED_BRIEFING_PATH)
+
             cwd = hook_input.get("cwd", "")
             if cwd:
                 run_remote_briefing(cwd, config)
-                # Check if remote produced results
+                # Check if remote produced results (file was just written by run_remote_briefing)
                 if os.path.exists(DEFERRED_BRIEFING_PATH):
                     import json as _json
                     with open(DEFERRED_BRIEFING_PATH) as _f:
