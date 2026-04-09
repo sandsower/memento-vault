@@ -786,16 +786,16 @@ else
         info "All hooks already configured"
     fi
 
-    # In remote mode, update existing hook commands to include the remote env prefix.
-    # Use python3 for JSON manipulation instead of sed to avoid issues with
-    # special characters (&, /, \) in URLs and API keys breaking sed patterns.
-    if [ "$REMOTE_MODE" = true ] && [ -n "$HOOK_ENV_PREFIX" ]; then
-        info "Updating hook commands for remote mode..."
-        python3 -c "
+    # Update hook commands: strip any stale remote env prefix, then prepend
+    # the new one if in remote mode. This is idempotent in both directions —
+    # local reinstalls scrub old remote prefixes, remote reinstalls update them.
+    # Uses python3 for JSON manipulation to handle special characters safely.
+    info "Normalizing hook commands..."
+    python3 -c "
 import json, sys, re
 
 settings_path = sys.argv[1]
-prefix = sys.argv[2]
+prefix = sys.argv[2]  # empty string in local mode
 hooks_dir = sys.argv[3] + '/hooks/'
 
 with open(settings_path) as f:
@@ -813,19 +813,22 @@ for event, entries in hooks.items():
             cmd = hook.get('command', '')
             if hooks_dir not in cmd:
                 continue
-            # Strip any existing env prefix, then prepend the new one
+            # Always strip any existing env prefix first
             cleaned = re.sub(r'MEMENTO_VAULT_URL=\S+\s+(MEMENTO_API_KEY=\S+\s+)?', '', cmd)
+            # Prepend the new prefix (empty in local mode = just clean up)
             hook['command'] = prefix + cleaned
             changed = True
 
 if changed:
     with open(settings_path, 'w') as f:
         json.dump(cfg, f, indent=2)
-    print('Hook commands updated with remote vault URL')
+    if prefix:
+        print('Hook commands updated with remote vault URL')
+    else:
+        print('Stale remote prefixes removed from hook commands')
 else:
-    print('No memento hooks found to update')
+    print('No memento hooks to update')
 " "$SETTINGS" "$HOOK_ENV_PREFIX" "$CLAUDE_DIR"
-    fi
 fi
 
 # --- Save manifest ---

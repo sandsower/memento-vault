@@ -347,16 +347,16 @@ def memento_capture(
         if not os.path.exists(transcript_path):
             return {"error": f"Transcript file not found: {transcript_path}"}
 
-        # Restrict to known agent transcript directories
-        abs_path = os.path.abspath(transcript_path)
-        allowed_prefixes = [
-            os.path.join(str(Path.home()), ".claude"),
-            os.path.join(str(Path.home()), ".codex"),
-            os.path.join(str(Path.home()), ".cursor"),
-            os.path.join(str(Path.home()), ".codeium"),
-            "/tmp",
+        # Restrict to known agent transcript directories (proper containment check)
+        candidate = Path(transcript_path).resolve()
+        allowed_roots = [
+            Path.home() / ".claude",
+            Path.home() / ".codex",
+            Path.home() / ".cursor",
+            Path.home() / ".codeium",
+            Path("/tmp"),
         ]
-        if not any(abs_path.startswith(p) for p in allowed_prefixes):
+        if not any(candidate == root or root in candidate.parents for root in allowed_roots):
             return {"error": "transcript_path must be inside a known agent directory"}
 
         try:

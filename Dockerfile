@@ -41,6 +41,11 @@ ENV PYTHONPATH=/app
 EXPOSE 8745
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "from urllib.request import urlopen; urlopen('http://localhost:8745/mcp')" || exit 1
+    CMD python -c "\
+import os; from urllib.request import Request, urlopen; \
+req = Request('http://localhost:8745/mcp'); \
+key = os.environ.get('MEMENTO_API_KEY', ''); \
+req.add_header('Authorization', f'Bearer {key}') if key else None; \
+urlopen(req, timeout=4)" || exit 1
 
 ENTRYPOINT ["python", "-m", "memento"]
