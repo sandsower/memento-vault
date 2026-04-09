@@ -147,6 +147,7 @@ def capture(
     files_edited: list[str] | None = None,
     session_id: str | None = None,
     agent: str = "unknown",
+    fleeting_only: bool = False,
 ) -> dict:
     """Capture a session to the remote vault."""
     args = {"session_summary": session_summary, "cwd": cwd, "branch": branch, "agent": agent}
@@ -154,6 +155,8 @@ def capture(
         args["files_edited"] = files_edited
     if session_id:
         args["session_id"] = session_id
+    if fleeting_only:
+        args["fleeting_only"] = True
     return _call_tool("memento_capture", args)
 
 

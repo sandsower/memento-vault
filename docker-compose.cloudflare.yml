@@ -26,7 +26,7 @@ services:
       - MEMENTO_TRANSPORT=streamable-http
       - MEMENTO_HOST=0.0.0.0
       - MEMENTO_PORT=8745
-      - MEMENTO_API_KEY=${MEMENTO_API_KEY:-}
+      - MEMENTO_API_KEY=${MEMENTO_API_KEY:?Set MEMENTO_API_KEY before starting}
     restart: unless-stopped
     networks:
       - internal

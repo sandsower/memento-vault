@@ -529,11 +529,12 @@ def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
 def run_remote_triage(hook_input):
     """Run triage via the remote vault client — sends capture request over HTTP.
 
-    Unlike the local path, we always send sessions with >=2 exchanges to the
-    remote server. The server-side memento_capture writes fleeting entries,
-    project index updates, and atomic notes — mirroring the local pipeline.
-    Filtering on substantiality here would silently drop sessions that the
-    local path preserves as fleeting entries.
+    Mirrors local triage semantics:
+    - All sessions with >=2 exchanges get a fleeting entry + project index update
+    - Only substantial sessions also get a permanent atomic note
+
+    The server-side memento_capture supports fleeting_only=True to write only
+    the fleeting log without creating a permanent note.
     """
     from memento.remote_client import capture as remote_capture
 
@@ -554,6 +555,7 @@ def run_remote_triage(hook_input):
     if not meta["cwd"]:
         meta["cwd"] = hook_input.get("cwd")
 
+    substantial = is_substantial(meta)
     summary = build_session_summary(meta)
     result = remote_capture(
         session_summary=summary,
@@ -562,6 +564,7 @@ def run_remote_triage(hook_input):
         files_edited=meta.get("files_edited", []),
         session_id=session_id,
         agent="claude",
+        fleeting_only=not substantial,
     )
 
     if isinstance(result, dict) and "error" in result:

@@ -307,6 +307,7 @@ def memento_capture(
     session_id: str | None = None,
     transcript_path: str | None = None,
     agent: str = "unknown",
+    fleeting_only: bool = False,
 ) -> dict:
     """Capture a session's knowledge into the vault.
 
@@ -325,6 +326,9 @@ def memento_capture(
         session_id: Session identifier for traceability. Auto-generated if omitted.
         transcript_path: Path to a transcript file for full triage parsing.
         agent: Which agent produced this session (claude, codex, cursor, windsurf).
+        fleeting_only: If true, only write a fleeting log entry and project index
+            update — do not create a permanent atomic note. Used by remote hooks
+            for non-substantial sessions to match local triage semantics.
 
     Returns:
         Dict with capture results: notes written, project updated, or error.
@@ -396,7 +400,7 @@ def memento_capture(
         return {"error": "Could not acquire vault write lock"}
 
     try:
-        # Write fleeting note
+        # Write fleeting note (always — matches local triage behavior)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         now = datetime.now(timezone.utc).strftime("%H:%M")
         fleeting_dir = vault / "fleeting"
@@ -412,7 +416,21 @@ def memento_capture(
         with open(fleeting_file, "a") as f:
             f.write(fleeting_line)
 
-        # Write atomic note from summary
+        # Update project index (always — even fleeting-only sessions are logged)
+        if project_slug != "unknown":
+            (vault / "projects").mkdir(parents=True, exist_ok=True)
+            summary_line = f"session ({agent}): {sanitized_summary[:80]}"
+            update_project_index(vault, project_slug, session_id, summary_line)
+
+        if fleeting_only:
+            log_retrieval("mcp", "capture_fleeting", session_id=session_id, agent=agent, project=project_slug)
+            return {
+                "session_id": session_id,
+                "project": project_slug,
+                "fleeting": str(fleeting_file.relative_to(vault)),
+            }
+
+        # Write atomic note from summary (substantial sessions only)
         title_text = sanitized_summary[:80]
         if len(sanitized_summary) > 80:
             title_text = title_text.rsplit(" ", 1)[0] + "..."
@@ -429,12 +447,6 @@ def memento_capture(
             branch=branch or None,
             session_id=session_id,
         )
-
-        # Update project index
-        if project_slug != "unknown":
-            (vault / "projects").mkdir(parents=True, exist_ok=True)
-            summary_line = f"MCP capture ({agent}): {title_text}"
-            update_project_index(vault, project_slug, note_path.stem, summary_line)
 
         log_retrieval("mcp", "capture", session_id=session_id, agent=agent, project=project_slug)
 
@@ -457,6 +469,7 @@ def main():
     passed to the FastMCP constructor at build time.
     """
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Memento Vault MCP Server")
     parser.add_argument(
@@ -466,6 +479,19 @@ def main():
         help="Transport protocol (default: stdio, env: MEMENTO_TRANSPORT)",
     )
     args = parser.parse_args()
+
+    # Fail closed: refuse to start HTTP transport without auth on non-local interfaces
+    if args.transport in ("sse", "streamable-http"):
+        host = os.environ.get("MEMENTO_HOST", "0.0.0.0")
+        api_key = os.environ.get("MEMENTO_API_KEY") or get_config().get("api_key")
+        if not api_key and host not in ("127.0.0.1", "localhost", "::1"):
+            print(
+                "[memento] FATAL: refusing to start HTTP transport on "
+                f"{host} without MEMENTO_API_KEY set.\n"
+                "Set MEMENTO_API_KEY or bind to localhost (MEMENTO_HOST=127.0.0.1).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     mcp.run(transport=args.transport)
 
