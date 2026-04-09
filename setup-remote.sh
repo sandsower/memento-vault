@@ -151,14 +151,16 @@ fi
 step "Step 3: Configure authentication"
 
 API_KEY="${MEMENTO_API_KEY:-}"
+ENV_FILE="$SCRIPT_DIR/.env"
 if [ -z "$API_KEY" ]; then
     API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-    info "Generated API key: $API_KEY"
-    echo ""
-    warn "Save this key! You'll need it to connect clients."
+    info "Generated new API key and saved to $ENV_FILE"
 else
     info "Using existing MEMENTO_API_KEY from environment"
 fi
+# Always persist key to env file with restricted permissions
+echo "MEMENTO_API_KEY=$API_KEY" > "$ENV_FILE"
+chmod 600 "$ENV_FILE"
 
 # --- Generate vault identity ---
 
@@ -310,21 +312,22 @@ echo ""
 echo -e "${BOLD}To connect THIS machine:${NC}"
 echo ""
 echo -e "  ${CYAN}cd $SCRIPT_DIR${NC}"
-echo -e "  ${CYAN}MEMENTO_API_KEY=$API_KEY ./install.sh --remote $VAULT_URL --experimental${NC}"
+echo -e "  ${CYAN}source .env && MEMENTO_API_KEY=\$MEMENTO_API_KEY ./install.sh --remote $VAULT_URL --experimental${NC}"
 echo ""
 echo -e "${BOLD}To connect ANOTHER machine (laptop, CI, etc.):${NC}"
 echo ""
+echo -e "  ${CYAN}# Copy the API key from $ENV_FILE on this machine${NC}"
 echo -e "  ${CYAN}git clone https://github.com/sandsower/memento-vault.git${NC}"
 echo -e "  ${CYAN}cd memento-vault${NC}"
-echo -e "  ${CYAN}MEMENTO_API_KEY=$API_KEY ./install.sh --remote $VAULT_URL --experimental${NC}"
+echo -e "  ${CYAN}MEMENTO_API_KEY=<key-from-env-file> ./install.sh --remote $VAULT_URL --experimental${NC}"
 echo ""
 echo -e "${BOLD}To connect from Claude Code on the web (claude.ai/code):${NC}"
 echo ""
-echo "  Add to your MCP server config:"
+echo "  Add to your MCP server config (get key from $ENV_FILE):"
 echo ""
 echo "    \"memento-vault\": {"
 echo "      \"url\": \"$VAULT_URL/mcp\","
-echo "      \"headers\": {\"Authorization\": \"Bearer $API_KEY\"}"
+echo "      \"headers\": {\"Authorization\": \"Bearer <key-from-env-file>\"}"
 echo "    }"
 echo ""
 
@@ -341,7 +344,7 @@ step "Deployment complete!"
 echo ""
 echo "  Vault URL:  $VAULT_URL"
 echo "  MCP URL:    $VAULT_URL/mcp"
-echo "  API Key:    $API_KEY"
+echo "  API Key:    stored in $ENV_FILE (chmod 600)"
 if [ "$ENABLE_TLS" = true ]; then
     echo "  TLS:        Automatic via Caddy (Let's Encrypt)"
 fi

@@ -7,6 +7,7 @@ Designed to be extended with per-user tokens, JWT, or OAuth later.
 Integrates with MCP's TokenVerifier protocol for HTTP transport auth.
 """
 
+import hmac
 import os
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
@@ -62,7 +63,7 @@ class BearerTokenAuth(AuthProvider):
             return None
         if token.startswith("Bearer "):
             token = token[7:]
-        if token == self._expected_token:
+        if hmac.compare_digest(token, self._expected_token):
             return VAULT_OWNER
         return None
 

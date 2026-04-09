@@ -413,27 +413,27 @@ def memento_capture(
 
     body = sanitized_summary + files_str
 
+    # Idempotency check (read-only, no lock needed): if this session was already
+    # captured, return prior result. Prevents duplicate notes on HTTP retry/timeout.
+    notes_dir = vault / "notes"
+    if notes_dir.exists():
+        for existing in notes_dir.glob("*.md"):
+            try:
+                head = existing.read_text(errors="replace")[:500]
+                if f"session_id: {session_id}" in head:
+                    return {
+                        "session_id": session_id,
+                        "note_path": str(existing.relative_to(vault)),
+                        "project": project_slug,
+                        "deduplicated": True,
+                    }
+            except OSError:
+                continue
+
     if not acquire_vault_write_lock():
         return {"error": "Could not acquire vault write lock"}
 
     try:
-        # Idempotency: if this session was already captured, return prior result
-        # This prevents duplicate fleeting entries and notes on HTTP retry/timeout
-        notes_dir = vault / "notes"
-        if notes_dir.exists():
-            for existing in notes_dir.glob("*.md"):
-                try:
-                    head = existing.read_text(errors="replace")[:500]
-                    if f"session_id: {session_id}" in head:
-                        return {
-                            "session_id": session_id,
-                            "note_path": str(existing.relative_to(vault)),
-                            "project": project_slug,
-                            "deduplicated": True,
-                        }
-                except OSError:
-                    continue
-
         # Write fleeting note (always — matches local triage behavior)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         now = datetime.now(timezone.utc).strftime("%H:%M")
@@ -446,7 +446,7 @@ def memento_capture(
 
         # Check fleeting dedup too (for fleeting_only retries)
         existing_fleeting = fleeting_file.read_text() if fleeting_file.exists() else ""
-        if session_id in existing_fleeting:
+        if f"`{session_id}`" in existing_fleeting:
             return {
                 "session_id": session_id,
                 "project": project_slug,

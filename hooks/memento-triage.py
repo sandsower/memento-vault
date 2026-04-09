@@ -577,19 +577,19 @@ def run_remote_triage(hook_input):
             spool_dir = vault / "spool" / "remote-failures"
             spool_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-            spool_file = spool_dir / f"{ts}-{session_id}.md"
+            safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)[:64]
+            spool_file = spool_dir / f"{ts}-{safe_id}.md"
             sanitized = sanitize_secrets(summary)
-            error_msg = str(result['error']).replace('"', '\\"')
-            cwd = str(meta.get('cwd', '')).replace('"', '\\"')
+            fm = {
+                "session_id": session_id,
+                "branch": str(meta.get("git_branch", "")),
+                "cwd": str(meta.get("cwd", "")),
+                "error": str(result["error"]),
+                "captured": ts,
+            }
+            fm_lines = "\n".join(f"{k}: {json.dumps(v)}" for k, v in fm.items())
             spool_file.write_text(
-                f"---\n"
-                f"session_id: {session_id}\n"
-                f"branch: {meta.get('git_branch', '')}\n"
-                f'cwd: "{cwd}"\n'
-                f'error: "{error_msg}"\n'
-                f"captured: {ts}\n"
-                f"---\n\n"
-                f"{sanitized}\n"
+                f"---\n{fm_lines}\n---\n\n{sanitized}\n"
             )
             print(f"[memento] spooled session to {spool_file} for later reconciliation", file=sys.stderr)
         except Exception as fallback_exc:

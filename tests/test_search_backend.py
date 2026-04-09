@@ -147,3 +147,34 @@ class TestMockBackend:
         from memento.search import qmd_get
 
         assert qmd_get("notes/missing.md") is None
+
+
+class TestGrepBackendPathTraversal:
+    """Ensure GrepBackend.get rejects paths that escape the vault."""
+
+    def test_traversal_rejected(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        (vault / "notes").mkdir()
+        secret = tmp_path / "secret.txt"
+        secret.write_text("top secret")
+
+        backend = GrepBackend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("memento.config.get_vault", lambda: vault)
+            result = backend.get("../secret.txt")
+        assert result is None
+
+    def test_valid_path_allowed(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        note = vault / "notes" / "test.md"
+        note.parent.mkdir()
+        note.write_text("---\ntitle: Test\n---\nContent here")
+
+        backend = GrepBackend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("memento.config.get_vault", lambda: vault)
+            result = backend.get("notes/test.md")
+        assert result is not None
+        assert result["title"] == "Test"

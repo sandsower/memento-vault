@@ -4,8 +4,11 @@
 # Use this as user-data when creating an OCI Ampere A1 instance.
 # It installs Docker, clones the repo, generates an API key, and starts the vault.
 #
-# After provisioning, your vault is at: http://<instance-ip>:8745/mcp
-# Add Caddy for TLS, or use Cloudflare Tunnel / Tailscale for secure access.
+# IMPORTANT: This deploys over HTTP. You MUST add TLS before exposing to the internet.
+# Options: Caddy reverse proxy, Cloudflare Tunnel (see docker-compose.cloudflare.yml),
+# or Tailscale. Do NOT send bearer tokens over plaintext HTTP on public networks.
+#
+# After provisioning and TLS setup, your vault is at: https://<your-domain>:8745/mcp
 #
 # OCI Console: Compute → Instances → Create → Show advanced options → Cloud-init script
 
@@ -28,8 +31,10 @@ runcmd:
   # All in one shell block so variables are preserved across steps
   - |
     set -e
+    umask 077
     API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
     echo "MEMENTO_API_KEY=$API_KEY" > /opt/memento-vault/.env
+    chmod 600 /opt/memento-vault/.env
 
     # Verify key was written
     if ! grep -q 'MEMENTO_API_KEY=.' /opt/memento-vault/.env; then
@@ -40,31 +45,27 @@ runcmd:
     # Start the vault
     cd /opt/memento-vault && docker compose --env-file .env up -d --build
 
-    # Save connection info
+    # Save connection info (API key stays in .env only — not duplicated here)
     IP=$(curl -s http://169.254.169.254/opc/v1/vnics/ | python3 -c "import sys,json; print(json.load(sys.stdin)[0].get('publicIp','unknown'))" 2>/dev/null || echo "unknown")
     cat > /opt/memento-vault/CONNECTION_INFO.txt << INFO
     Memento Vault deployed successfully!
 
     Vault URL: http://$IP:8745
     MCP URL:   http://$IP:8745/mcp
-    API Key:   $API_KEY
+    API Key:   stored in /opt/memento-vault/.env (chmod 600)
 
     Connect clients:
-      MEMENTO_API_KEY=$API_KEY ./install.sh --remote http://$IP:8745 --experimental
+      MEMENTO_API_KEY=\$(cat /opt/memento-vault/.env | grep MEMENTO_API_KEY | cut -d= -f2) \\
+        ./install.sh --remote http://$IP:8745 --experimental
 
-    MCP config (for claude.ai/code):
-      "memento-vault": {
-        "url": "http://$IP:8745/mcp",
-        "headers": {"Authorization": "Bearer $API_KEY"}
-      }
+    IMPORTANT: Add TLS before exposing to the internet!
+      See docker-compose.cloudflare.yml in /opt/memento-vault/
 
     IMPORTANT: Open port 8745 in your OCI security list:
       OCI Console → Networking → VCN → Security Lists → Add Ingress Rule
       Source CIDR: 0.0.0.0/0, Protocol: TCP, Destination Port: 8745
-
-    For TLS, add Caddy or use Cloudflare Tunnel:
-      See docker-compose.cloudflare.yml in /opt/memento-vault/
     INFO
+    chmod 600 /opt/memento-vault/CONNECTION_INFO.txt
 
   # Open firewall (iptables — OCI security list must also be configured)
   - iptables -I INPUT -p tcp --dport 8745 -j ACCEPT

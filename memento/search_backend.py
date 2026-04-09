@@ -249,9 +249,17 @@ class GrepBackend(SearchBackend):
         if not search_dirs:
             return []
 
+        vault_resolved = vault.resolve()
         md_files = []
         for d in search_dirs:
-            md_files.extend(d.rglob("*.md"))
+            for f in d.rglob("*.md"):
+                # Skip symlinks and paths that resolve outside the vault
+                if f.is_symlink():
+                    continue
+                resolved = f.resolve()
+                if resolved != vault_resolved and vault_resolved not in resolved.parents:
+                    continue
+                md_files.append(f)
         md_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
         query_lower = query.lower()
@@ -311,7 +319,10 @@ class GrepBackend(SearchBackend):
         from memento.config import get_vault
 
         vault = get_vault()
-        full_path = vault / path
+        full_path = (vault / path).resolve()
+        vault_resolved = vault.resolve()
+        if full_path != vault_resolved and vault_resolved not in full_path.parents:
+            return None
         if not full_path.exists():
             return None
 

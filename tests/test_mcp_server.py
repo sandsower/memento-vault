@@ -69,19 +69,11 @@ class TestMementoSearch:
         assert memento_search("") == []
         assert memento_search("   ") == []
 
-    @patch("memento.mcp_server.has_qmd", return_value=False)
-    def test_no_qmd_returns_error(self, _mock):
-        result = memento_search("redis cache")
-        assert isinstance(result, dict)
-        assert "error" in result
-
-    @patch("memento.mcp_server.has_qmd", return_value=True)
     @patch("memento.mcp_server.get_vault")
-    def test_no_vault_returns_error(self, mock_vault, _mock_qmd, tmp_path):
+    def test_no_vault_returns_empty(self, mock_vault, tmp_path):
         mock_vault.return_value = tmp_path / "nonexistent"
         result = memento_search("redis cache")
-        assert isinstance(result, dict)
-        assert "error" in result
+        assert result == []
 
     @patch("memento.mcp_server.log_retrieval")
     @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)

@@ -232,7 +232,7 @@ def _legacy_vault_identity_path():
     return config_dir / _VAULT_IDENTITY_FILENAME
 
 
-def get_vault_id() -> str:
+def get_vault_id() -> str | None:
     """Get the unique vault ID, creating one on first call.
 
     The vault ID is a stable UUID that uniquely identifies this vault instance.
@@ -280,6 +280,14 @@ def get_vault_id() -> str:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        # Re-read from disk if it exists (another process may have created it)
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+                return data["vault_id"]
+            except (json.JSONDecodeError, KeyError, OSError):
+                pass
+        return None
     return vault_id
 
 

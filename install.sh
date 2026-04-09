@@ -595,7 +595,10 @@ if [ "$MCP_INSTALL" = true ]; then
             fi
             MCP_ENTRY=$(python3 -c "
 import json, sys
-entry = {'memento-vault': {'url': sys.argv[1] + '/mcp'}}
+url = sys.argv[1].rstrip('/')
+if not url.endswith('/mcp'):
+    url += '/mcp'
+entry = {'memento-vault': {'url': url}}
 headers = json.loads(sys.argv[2])
 if headers:
     entry['memento-vault']['headers'] = headers
@@ -660,12 +663,21 @@ SETTINGS="$CLAUDE_DIR/settings.json"
 # Build environment prefix for hook commands
 # In remote mode, hooks need MEMENTO_VAULT_URL (and optionally MEMENTO_API_KEY)
 # to know they should talk to the remote vault instead of local filesystem.
+# Credentials are stored in a separate env file (not inlined in command strings)
+# to avoid shell metacharacter injection and process-visible credentials.
 HOOK_ENV_PREFIX=""
 if [ "$REMOTE_MODE" = true ]; then
-    HOOK_ENV_PREFIX="MEMENTO_VAULT_URL=$REMOTE_URL "
-    if [ -n "$REMOTE_API_KEY" ]; then
-        HOOK_ENV_PREFIX="${HOOK_ENV_PREFIX}MEMENTO_API_KEY=$REMOTE_API_KEY "
-    fi
+    REMOTE_ENV_FILE="$CLAUDE_DIR/memento-remote.env"
+    python3 -c "
+import json, sys, os
+env = {'MEMENTO_VAULT_URL': sys.argv[1]}
+if sys.argv[2]:
+    env['MEMENTO_API_KEY'] = sys.argv[2]
+lines = [f'{k}={json.dumps(v)}' for k, v in env.items()]
+print('\n'.join(lines))
+" "$REMOTE_URL" "${REMOTE_API_KEY:-}" > "$REMOTE_ENV_FILE"
+    chmod 600 "$REMOTE_ENV_FILE"
+    HOOK_ENV_PREFIX="bash -c 'set -a; . $REMOTE_ENV_FILE; set +a; exec \"\$@\"' -- "
 fi
 
 if [ ! -f "$SETTINGS" ]; then
@@ -813,8 +825,10 @@ for event, entries in hooks.items():
             cmd = hook.get('command', '')
             if hooks_dir not in cmd:
                 continue
-            # Always strip any existing env prefix first
-            cleaned = re.sub(r'MEMENTO_VAULT_URL=\S+\s+(MEMENTO_API_KEY=\S+\s+)?', '', cmd)
+            # Extract the core command (python3 ...) by stripping any wrapper prefix.
+            # This handles both old inline env vars and new bash-source wrappers.
+            match = re.search(r'(python3\s+' + re.escape(hooks_dir) + r'.*)', cmd)
+            cleaned = match.group(1) if match else cmd
             # Prepend the new prefix (empty in local mode = just clean up)
             hook['command'] = prefix + cleaned
             changed = True
