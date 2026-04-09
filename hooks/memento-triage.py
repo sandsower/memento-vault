@@ -556,6 +556,7 @@ def run_remote_triage(hook_input):
         meta["cwd"] = hook_input.get("cwd")
 
     substantial = is_substantial(meta)
+    new_insight = has_new_insight(meta) if substantial else False
     summary = build_session_summary(meta)
     result = remote_capture(
         session_summary=summary,
@@ -564,7 +565,7 @@ def run_remote_triage(hook_input):
         files_edited=meta.get("files_edited", []),
         session_id=session_id,
         agent="claude",
-        fleeting_only=not substantial,
+        fleeting_only=not (substantial and new_insight),
     )
 
     if isinstance(result, dict) and "error" in result:

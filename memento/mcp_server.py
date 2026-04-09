@@ -406,6 +406,23 @@ def memento_capture(
         return {"error": "Could not acquire vault write lock"}
 
     try:
+        # Idempotency: if this session was already captured, return prior result
+        # This prevents duplicate fleeting entries and notes on HTTP retry/timeout
+        notes_dir = vault / "notes"
+        if notes_dir.exists():
+            for existing in notes_dir.glob("*.md"):
+                try:
+                    head = existing.read_text(errors="replace")[:500]
+                    if f"session_id: {session_id}" in head:
+                        return {
+                            "session_id": session_id,
+                            "note_path": str(existing.relative_to(vault)),
+                            "project": project_slug,
+                            "deduplicated": True,
+                        }
+                except OSError:
+                    continue
+
         # Write fleeting note (always — matches local triage behavior)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         now = datetime.now(timezone.utc).strftime("%H:%M")
@@ -415,6 +432,16 @@ def memento_capture(
 
         if not fleeting_file.exists():
             fleeting_file.write_text(f"# {today}\n\n")
+
+        # Check fleeting dedup too (for fleeting_only retries)
+        existing_fleeting = fleeting_file.read_text() if fleeting_file.exists() else ""
+        if session_id in existing_fleeting:
+            return {
+                "session_id": session_id,
+                "project": project_slug,
+                "fleeting": str(fleeting_file.relative_to(vault)),
+                "deduplicated": True,
+            }
 
         branch_str = f" ({branch})" if branch else ""
         files_count = f", {len(files_edited)} files" if files_edited else ""

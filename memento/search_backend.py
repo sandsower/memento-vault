@@ -220,7 +220,7 @@ class GrepBackend(SearchBackend):
         from memento.config import get_vault
 
         vault = get_vault()
-        return vault.exists() and (vault / "notes").exists()
+        return vault.exists() and any((vault / d).exists() for d in ("notes", "fleeting", "projects"))
 
     def search(
         self,
@@ -239,14 +239,20 @@ class GrepBackend(SearchBackend):
         from memento.config import get_vault
 
         vault = get_vault()
-        notes_dir = vault / "notes"
-        if not notes_dir.exists():
+        if not vault.exists():
             return []
 
         deadline = time.monotonic() + timeout
 
-        # Collect markdown files sorted by recency (most likely to be relevant)
-        md_files = sorted(notes_dir.rglob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        # Search notes/, fleeting/, and projects/ for full coverage
+        search_dirs = [vault / d for d in ("notes", "fleeting", "projects") if (vault / d).exists()]
+        if not search_dirs:
+            return []
+
+        md_files = []
+        for d in search_dirs:
+            md_files.extend(d.rglob("*.md"))
+        md_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
         query_lower = query.lower()
         terms = query_lower.split()
