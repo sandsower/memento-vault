@@ -249,11 +249,8 @@ fi
 echo -n "Waiting for vault to be ready..."
 for i in $(seq 1 20); do
     if python3 -c "
-import urllib.request, ssl
-ctx = ssl.create_default_context()
-ctx.check_hostname = False
-ctx.verify_mode = ssl.CERT_NONE
-urllib.request.urlopen('$CHECK_URL', context=ctx, timeout=3)
+import urllib.request
+urllib.request.urlopen('$CHECK_URL', timeout=3)
 " 2>/dev/null; then
         echo ""
         info "Vault is healthy!"

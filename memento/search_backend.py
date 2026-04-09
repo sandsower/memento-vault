@@ -193,6 +193,126 @@ class QMDBackend(SearchBackend):
             return False
 
 
+class GrepBackend(SearchBackend):
+    """Simple grep-based fallback search for when QMD is not available.
+
+    Searches vault markdown files using substring matching. Does not support
+    semantic search but provides basic keyword search out of the box with
+    no external dependencies or indexing pipeline.
+    """
+
+    def is_available(self) -> bool:
+        from memento.config import get_vault
+
+        vault = get_vault()
+        return vault.exists() and (vault / "notes").exists()
+
+    def search(
+        self,
+        query: str,
+        collection: str,
+        limit: int = 5,
+        semantic: bool = False,
+        timeout: int = 10,
+        min_score: float = 0.0,
+    ) -> list[dict]:
+        if not query or not query.strip():
+            return []
+
+        import time
+
+        from memento.config import get_vault
+
+        vault = get_vault()
+        notes_dir = vault / "notes"
+        if not notes_dir.exists():
+            return []
+
+        deadline = time.monotonic() + timeout
+
+        # Collect markdown files sorted by recency (most likely to be relevant)
+        md_files = sorted(notes_dir.rglob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+        query_lower = query.lower()
+        terms = query_lower.split()
+        results = []
+        perfect_count = 0  # track how many perfect-score results we have
+
+        for md_file in md_files:
+            # Enforce timeout — return best results found so far
+            if time.monotonic() >= deadline:
+                break
+
+            try:
+                content = md_file.read_text(errors="replace")
+            except OSError:
+                continue
+
+            content_lower = content.lower()
+            # Score: fraction of query terms found in the file
+            matched = sum(1 for t in terms if t in content_lower)
+            if matched == 0:
+                continue
+
+            score = matched / len(terms)
+            if score < min_score:
+                continue
+
+            # Extract title from frontmatter or filename
+            title = md_file.stem
+            for line in content.splitlines()[:10]:
+                stripped = line.strip()
+                if stripped.lower().startswith("title:"):
+                    title = stripped[6:].strip().strip("\"'")
+                    break
+
+            # Build snippet from first matching line
+            snippet = ""
+            for line in content.splitlines():
+                if any(t in line.lower() for t in terms):
+                    snippet = line.strip()[:200]
+                    break
+
+            rel_path = str(md_file.relative_to(vault))
+            results.append({"path": rel_path, "title": title, "score": score, "snippet": snippet})
+
+            if score >= 1.0:
+                perfect_count += 1
+                # Early exit: enough perfect matches to fill the limit
+                if perfect_count >= limit:
+                    break
+
+        # Sort by score descending, then recency (already sorted by mtime)
+        results.sort(key=lambda r: r["score"], reverse=True)
+        return results[:limit]
+
+    def get(self, path: str, collection: str | None = None, timeout: int = 5) -> dict | None:
+        from memento.config import get_vault
+
+        vault = get_vault()
+        full_path = vault / path
+        if not full_path.exists():
+            return None
+
+        try:
+            content = full_path.read_text(errors="replace")
+        except OSError:
+            return None
+
+        title = full_path.stem
+        for line in content.splitlines()[:10]:
+            stripped = line.strip()
+            if stripped.lower().startswith("title:"):
+                title = stripped[6:].strip().strip("\"'")
+                break
+
+        return {"path": path, "title": title, "content": content, "score": 0.0}
+
+    def reindex(self, collection: str, embed: bool = True) -> bool:
+        # Grep backend has no index to update
+        return True
+
+
 def _clean_snippet(raw):
     """Clean QMD snippet: strip chunk markers, frontmatter, and collapse whitespace."""
     if not raw:
@@ -216,10 +336,17 @@ _backend: SearchBackend | None = None
 
 
 def get_backend() -> SearchBackend:
-    """Get the configured search backend (singleton)."""
+    """Get the configured search backend (singleton).
+
+    Tries QMD first; falls back to grep-based search if qmd is not installed.
+    """
     global _backend
     if _backend is None:
-        _backend = QMDBackend()
+        qmd = QMDBackend()
+        if qmd.is_available():
+            _backend = qmd
+        else:
+            _backend = GrepBackend()
     return _backend
 
 

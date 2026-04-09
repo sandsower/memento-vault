@@ -764,27 +764,68 @@ else
 
         if [[ " ${MISSING_HOOKS[*]} " == *"memento-triage"* ]]; then
             echo '  "SessionEnd": ['
-            echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/memento-triage.py\", \"timeout\": 30000, \"async\": true}"
+            echo "    {\"type\": \"command\", \"command\": \"${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/memento-triage.py\", \"timeout\": 30000, \"async\": true}"
             echo '  ],'
         fi
         if [[ " ${MISSING_HOOKS[*]} " == *"vault-briefing"* ]]; then
             echo '  "SessionStart": ['
-            echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/vault-briefing.py\", \"timeout\": 8000}"
+            echo "    {\"type\": \"command\", \"command\": \"${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-briefing.py\", \"timeout\": 8000}"
             echo '  ],'
         fi
         if [[ " ${MISSING_HOOKS[*]} " == *"vault-recall"* ]]; then
             echo '  "UserPromptSubmit": ['
-            echo "    {\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/vault-recall.py\", \"timeout\": 5000}"
+            echo "    {\"type\": \"command\", \"command\": \"${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-recall.py\", \"timeout\": 5000}"
             echo '  ],'
         fi
         if [[ " ${MISSING_HOOKS[*]} " == *"vault-tool-context"* ]]; then
             echo '  "PreToolUse": ['
-            echo "    {\"matcher\": \"Read\", \"hooks\": [{\"type\": \"command\", \"command\": \"python3 $CLAUDE_DIR/hooks/vault-tool-context.py\", \"timeout\": 2000}]}"
+            echo "    {\"matcher\": \"Read\", \"hooks\": [{\"type\": \"command\", \"command\": \"${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-tool-context.py\", \"timeout\": 2000}]}"
             echo '  ]'
         fi
         echo ""
     else
         info "All hooks already configured"
+    fi
+
+    # In remote mode, update existing hook commands to include the remote env prefix.
+    # Use python3 for JSON manipulation instead of sed to avoid issues with
+    # special characters (&, /, \) in URLs and API keys breaking sed patterns.
+    if [ "$REMOTE_MODE" = true ] && [ -n "$HOOK_ENV_PREFIX" ]; then
+        info "Updating hook commands for remote mode..."
+        python3 -c "
+import json, sys, re
+
+settings_path = sys.argv[1]
+prefix = sys.argv[2]
+hooks_dir = sys.argv[3] + '/hooks/'
+
+with open(settings_path) as f:
+    cfg = json.load(f)
+
+hooks = cfg.get('hooks', {})
+changed = False
+for event, entries in hooks.items():
+    if not isinstance(entries, list):
+        continue
+    for entry in entries:
+        # Handle both flat entries and nested {matcher, hooks} entries
+        hook_list = entry.get('hooks', [entry]) if isinstance(entry, dict) else []
+        for hook in hook_list:
+            cmd = hook.get('command', '')
+            if hooks_dir not in cmd:
+                continue
+            # Strip any existing env prefix, then prepend the new one
+            cleaned = re.sub(r'MEMENTO_VAULT_URL=\S+\s+(MEMENTO_API_KEY=\S+\s+)?', '', cmd)
+            hook['command'] = prefix + cleaned
+            changed = True
+
+if changed:
+    with open(settings_path, 'w') as f:
+        json.dump(cfg, f, indent=2)
+    print('Hook commands updated with remote vault URL')
+else:
+    print('No memento hooks found to update')
+" "$SETTINGS" "$HOOK_ENV_PREFIX" "$CLAUDE_DIR"
     fi
 fi
 

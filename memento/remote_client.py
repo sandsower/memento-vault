@@ -94,6 +94,9 @@ def search(query: str, limit: int = 5, semantic: bool = False, min_score: float 
     if isinstance(result, list):
         return result
     if isinstance(result, dict) and "error" in result:
+        import sys
+
+        print(f"[memento] remote search error: {result['error']}", file=sys.stderr)
         return []
     return []
 

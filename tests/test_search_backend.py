@@ -2,6 +2,7 @@
 
 import pytest
 from memento.search_backend import (
+    GrepBackend,
     QMDBackend,
     SearchBackend,
     _clean_snippet,
@@ -69,9 +70,10 @@ class TestCleanSnippet:
 
 
 class TestBackendSingleton:
-    def test_default_is_qmd(self):
+    def test_default_is_qmd_or_grep(self):
         backend = get_backend()
-        assert isinstance(backend, QMDBackend)
+        # QMD when available, GrepBackend as fallback
+        assert isinstance(backend, (QMDBackend, GrepBackend))
 
     def test_set_and_get(self):
         mock = MockBackend()
@@ -82,7 +84,7 @@ class TestBackendSingleton:
         mock = MockBackend()
         set_backend(mock)
         reset_backend()
-        assert isinstance(get_backend(), QMDBackend)
+        assert isinstance(get_backend(), (QMDBackend, GrepBackend))
 
 
 class TestMockBackend:

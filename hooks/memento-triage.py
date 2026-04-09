@@ -527,7 +527,14 @@ def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
 
 
 def run_remote_triage(hook_input):
-    """Run triage via the remote vault client — sends capture request over HTTP."""
+    """Run triage via the remote vault client — sends capture request over HTTP.
+
+    Unlike the local path, we always send sessions with >=2 exchanges to the
+    remote server. The server-side memento_capture writes fleeting entries,
+    project index updates, and atomic notes — mirroring the local pipeline.
+    Filtering on substantiality here would silently drop sessions that the
+    local path preserves as fleeting entries.
+    """
     from memento.remote_client import capture as remote_capture
 
     session_id = hook_input.get("session_id", "unknown")
@@ -547,12 +554,8 @@ def run_remote_triage(hook_input):
     if not meta["cwd"]:
         meta["cwd"] = hook_input.get("cwd")
 
-    substantial = is_substantial(meta)
-    if not substantial:
-        return
-
     summary = build_session_summary(meta)
-    remote_capture(
+    result = remote_capture(
         session_summary=summary,
         cwd=meta.get("cwd", ""),
         branch=meta.get("git_branch", ""),
@@ -560,6 +563,33 @@ def run_remote_triage(hook_input):
         session_id=session_id,
         agent="claude",
     )
+
+    if isinstance(result, dict) and "error" in result:
+        print(f"[memento] remote capture failed for session {session_id}: {result['error']}", file=sys.stderr)
+        # Spool to an isolated directory so data isn't lost but doesn't pollute
+        # the main vault. Operator can reconcile later via the spool dir.
+        try:
+            vault = get_vault()
+            spool_dir = vault / "spool" / "remote-failures"
+            spool_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            spool_file = spool_dir / f"{ts}-{session_id}.md"
+            sanitized = sanitize_secrets(summary)
+            error_msg = str(result['error']).replace('"', '\\"')
+            cwd = str(meta.get('cwd', '')).replace('"', '\\"')
+            spool_file.write_text(
+                f"---\n"
+                f"session_id: {session_id}\n"
+                f"branch: {meta.get('git_branch', '')}\n"
+                f'cwd: "{cwd}"\n'
+                f'error: "{error_msg}"\n'
+                f"captured: {ts}\n"
+                f"---\n\n"
+                f"{sanitized}\n"
+            )
+            print(f"[memento] spooled session to {spool_file} for later reconciliation", file=sys.stderr)
+        except Exception as fallback_exc:
+            print(f"[memento] spool fallback also failed: {fallback_exc}", file=sys.stderr)
 
 
 def main():

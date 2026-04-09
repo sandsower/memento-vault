@@ -50,12 +50,12 @@ def _build_server() -> FastMCP:
         "port": port,
     }
 
-    # Wire up auth if an API key is configured
-    api_key = os.environ.get("MEMENTO_API_KEY")
-    if api_key:
-        from memento.auth import BearerTokenAuth, MementoTokenVerifier
+    # Wire up auth if an API key is configured (env var or config file)
+    from memento.auth import create_auth_provider, MementoTokenVerifier, NoAuth
 
-        kwargs["token_verifier"] = MementoTokenVerifier(BearerTokenAuth(api_key))
+    auth = create_auth_provider()
+    if not isinstance(auth, NoAuth):
+        kwargs["token_verifier"] = MementoTokenVerifier(auth)
 
     return FastMCP(**kwargs)
 
@@ -97,12 +97,9 @@ def memento_search(
     if not query or not query.strip():
         return []
 
-    if not has_qmd():
-        return {"error": "QMD search engine is not installed or not available"}
-
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        return {"error": f"Vault not found at {vault}"}
+        return []
 
     results = qmd_search_with_extras(
         query,

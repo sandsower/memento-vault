@@ -24,15 +24,23 @@ runcmd:
   # Clone memento-vault
   - git clone https://github.com/sandsower/memento-vault.git /opt/memento-vault
 
-  # Generate API key and persist it
-  - "API_KEY=$(python3 -c \"import secrets; print(secrets.token_urlsafe(32))\")"
-  - "echo \"MEMENTO_API_KEY=$API_KEY\" > /opt/memento-vault/.env"
-
-  # Start the vault
-  - cd /opt/memento-vault && docker compose --env-file .env up -d --build
-
-  # Save connection info
+  # Generate API key, persist it, start vault, and save connection info
+  # All in one shell block so variables are preserved across steps
   - |
+    set -e
+    API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+    echo "MEMENTO_API_KEY=$API_KEY" > /opt/memento-vault/.env
+
+    # Verify key was written
+    if ! grep -q 'MEMENTO_API_KEY=.' /opt/memento-vault/.env; then
+      echo "FATAL: API key generation failed — .env is empty" >&2
+      exit 1
+    fi
+
+    # Start the vault
+    cd /opt/memento-vault && docker compose --env-file .env up -d --build
+
+    # Save connection info
     IP=$(curl -s http://169.254.169.254/opc/v1/vnics/ | python3 -c "import sys,json; print(json.load(sys.stdin)[0].get('publicIp','unknown'))" 2>/dev/null || echo "unknown")
     cat > /opt/memento-vault/CONNECTION_INFO.txt << INFO
     Memento Vault deployed successfully!
