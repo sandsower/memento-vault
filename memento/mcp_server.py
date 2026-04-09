@@ -342,8 +342,14 @@ def memento_capture(
 
     session_id = session_id or uuid.uuid4().hex[:12]
 
-    # Mode 1: transcript file parsing via adapter
+    # Mode 1: transcript file parsing via adapter (local/stdio transport only)
     if transcript_path:
+        # Reject transcript_path over HTTP — remote callers must not trigger
+        # server-side file reads. They should send session_summary instead.
+        transport = os.environ.get("MEMENTO_TRANSPORT", "stdio")
+        if transport != "stdio":
+            return {"error": "transcript_path is only supported in local (stdio) mode. Send session_summary for remote capture."}
+
         if not os.path.exists(transcript_path):
             return {"error": f"Transcript file not found: {transcript_path}"}
 
@@ -417,6 +423,25 @@ def memento_capture(
             f.write(fleeting_line)
 
         if fleeting_only:
+            # Ensure project index exists and log session (no [[note]] link)
+            if project_slug != "unknown":
+                project_dir = vault / "projects"
+                project_dir.mkdir(parents=True, exist_ok=True)
+                project_file = project_dir / f"{project_slug}.md"
+                if not project_file.exists():
+                    project_file.write_text(
+                        f"---\ntitle: {project_slug}\nproject: {project_slug}\n---\n\n## Notes\n\n## Sessions\n\n"
+                    )
+                session_line = f"- {today} `{session_id}` — {sanitized_summary[:80]}\n"
+                content = project_file.read_text()
+                if session_id not in content:
+                    if "## Sessions" in content:
+                        idx = content.index("## Sessions") + len("## Sessions")
+                        content = content[:idx] + "\n" + session_line + content[idx:]
+                    else:
+                        content = content.rstrip("\n") + "\n\n## Sessions\n" + session_line
+                    project_file.write_text(content)
+
             log_retrieval("mcp", "capture_fleeting", session_id=session_id, agent=agent, project=project_slug)
             return {
                 "session_id": session_id,

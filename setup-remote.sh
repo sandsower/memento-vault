@@ -286,9 +286,11 @@ if [ "$SKIP_MIGRATE" != true ] && [ "$NOTE_COUNT" -gt 0 ]; then
                     docker cp "$VAULT_PATH/$dir/." "$CONTAINER_ID:/vault/$dir/"
                 fi
             done
-            if [ -f "$VAULT_PATH/memento.yml" ]; then
-                docker cp "$VAULT_PATH/memento.yml" "$CONTAINER_ID:/vault/memento.yml"
-            fi
+            for file in memento.yml vault-identity.json; do
+                if [ -f "$VAULT_PATH/$file" ]; then
+                    docker cp "$VAULT_PATH/$file" "$CONTAINER_ID:/vault/$file"
+                fi
+            done
             info "Vault data migrated to Docker container"
         else
             warn "Could not find running container. Copy vault data manually."
