@@ -416,12 +416,6 @@ def memento_capture(
         with open(fleeting_file, "a") as f:
             f.write(fleeting_line)
 
-        # Update project index (always — even fleeting-only sessions are logged)
-        if project_slug != "unknown":
-            (vault / "projects").mkdir(parents=True, exist_ok=True)
-            summary_line = f"session ({agent}): {sanitized_summary[:80]}"
-            update_project_index(vault, project_slug, session_id, summary_line)
-
         if fleeting_only:
             log_retrieval("mcp", "capture_fleeting", session_id=session_id, agent=agent, project=project_slug)
             return {
@@ -447,6 +441,12 @@ def memento_capture(
             branch=branch or None,
             session_id=session_id,
         )
+
+        # Update project index with real note link (not for fleeting-only)
+        if project_slug != "unknown":
+            (vault / "projects").mkdir(parents=True, exist_ok=True)
+            summary_line = f"MCP capture ({agent}): {title_text}"
+            update_project_index(vault, project_slug, note_path.stem, summary_line)
 
         log_retrieval("mcp", "capture", session_id=session_id, agent=agent, project=project_slug)
 

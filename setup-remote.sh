@@ -245,21 +245,31 @@ else
     VAULT_URL="http://$HOST:$PORT"
 fi
 
-# Wait for health
+# Wait for health (send API key if configured, since HTTP transport requires auth)
+HEALTH_OK=false
 echo -n "Waiting for vault to be ready..."
 for i in $(seq 1 20); do
     if python3 -c "
-import urllib.request
-urllib.request.urlopen('$CHECK_URL', timeout=3)
+import os, urllib.request
+req = urllib.request.Request('$CHECK_URL')
+key = os.environ.get('MEMENTO_API_KEY', '')
+if key:
+    req.add_header('Authorization', f'Bearer {key}')
+urllib.request.urlopen(req, timeout=3)
 " 2>/dev/null; then
         echo ""
         info "Vault is healthy!"
+        HEALTH_OK=true
         break
     fi
     echo -n "."
     sleep 3
 done
 echo ""
+if [ "$HEALTH_OK" != true ]; then
+    warn "Vault did not become healthy within 60 seconds."
+    warn "Check logs: docker compose -f $COMPOSE_FILE logs -f"
+fi
 
 # --- Copy vault data ---
 
