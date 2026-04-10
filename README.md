@@ -1,6 +1,6 @@
 # Memento Vault
 
-Persistent knowledge capture for coding agents. Sessions get triaged, scored, and filed as searchable Zettelkasten notes. No cloud services, no databases. Markdown and git.
+Persistent knowledge capture for coding agents. Sessions get triaged, scored, and filed as searchable Zettelkasten notes. Runs locally or as a remote service accessible from any device.
 
 Works with Claude Code (native hooks), and any MCP-compatible agent (Cursor, Windsurf, Codex, etc.) via the built-in MCP server.
 
@@ -53,6 +53,29 @@ This installs the `memento/` package and writes MCP server config. The server ru
 
 You can combine flags: `./install.sh --experimental --mcp` gives you hooks + retrieval + MCP.
 
+### Remote vault (access from any device)
+
+Deploy the vault as a remote service so multiple devices and agents share the same knowledge base. The local install is the default; remote mode is opt-in.
+
+**Connect to an existing remote vault:**
+
+```bash
+./install.sh --remote https://vault.example.com:8745
+```
+
+This installs hooks that sync to the remote vault over HTTP. A local vault is always created — remote mode is additive, not a replacement.
+
+**Deploy the vault yourself** — four options depending on your setup:
+
+| Option | Cost | What you need |
+|--------|------|---------------|
+| [Docker Compose](#docker-compose) | — | Docker on any machine |
+| [Fly.io](#flyio) | ~$3-5/mo | Fly.io account |
+| [Cloudflare Tunnel](#cloudflare-tunnel) | Free | Docker + Cloudflare account with a domain |
+| [Oracle Cloud](#oracle-cloud-free) | Free forever | Oracle Cloud account |
+
+See [Cloud deployment](#cloud-deployment) for details.
+
 ### Upgrading from v1.x
 
 The installer is version-aware. Modified hooks are preserved with `.new` copies for manual diffing. On subsequent upgrades, modified files are auto-merged via three-way merge (`git merge-file`).
@@ -72,7 +95,7 @@ cd memento-vault && git pull && ./install.sh --experimental
 
 ## MCP server
 
-The MCP server exposes 5 tools over stdio. Any MCP-compatible agent can use them.
+The MCP server exposes 5 tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.
 
 | Tool | What it does |
 |------|-------------|
@@ -101,6 +124,17 @@ Or configure your agent's MCP settings to spawn it as a subprocess:
 ```
 
 `memento_capture` is the MCP equivalent of the SessionEnd hook. Agents without hook support can call it at the end of a session with either a transcript path or a structured summary.
+
+For remote vaults, connect via HTTP instead of stdio:
+
+```json
+{
+  "memento-vault": {
+    "url": "https://vault.example.com/mcp",
+    "headers": {"Authorization": "Bearer <your-api-key>"}
+  }
+}
+```
 
 ## Tenet
 
@@ -191,21 +225,89 @@ Session ends -> triage hook fires (or memento_capture MCP tool)
 
 Each note has YAML frontmatter: certainty score (1-5), optional validity context, type (decision/discovery/pattern/bugfix/tool), wikilinks to related notes. Full schema in [docs/frontmatter-schema.md](docs/frontmatter-schema.md).
 
+## Cloud deployment
+
+Deploy the vault as a service accessible from multiple devices, agents, or the claude.ai/code web interface.
+
+### Docker Compose
+
+The simplest option. Run on any machine with Docker — a home server, VPS, or your laptop.
+
+```bash
+MEMENTO_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))") \
+  docker compose up -d
+```
+
+Vault is at `http://localhost:8745/mcp`. For TLS on a VPS, add Caddy or use `setup-remote.sh --host your-domain.com --tls`.
+
+### Fly.io
+
+Managed cloud with persistent volumes, automatic TLS, ~$3-5/mo.
+
+```bash
+fly launch --copy-config --no-deploy
+fly volumes create vault_data --region iad --size 1 --yes
+fly secrets set MEMENTO_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+fly deploy
+```
+
+Vault is at `https://<app-name>.fly.dev/mcp`. The included `fly.toml` is pre-configured.
+
+### Cloudflare Tunnel
+
+Expose a local Docker container to the internet via Cloudflare. No public IP needed, automatic TLS, free.
+
+1. Create a tunnel in [Cloudflare Zero Trust](https://one.dash.cloudflare.com) → Networks → Tunnels
+2. Set the tunnel's public hostname to point at `http://vault:8745`
+3. Run:
+
+```bash
+export CLOUDFLARE_TUNNEL_TOKEN=<your-token>
+export MEMENTO_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+docker compose -f docker-compose.cloudflare.yml up -d
+```
+
+### Oracle Cloud (free)
+
+Always-free ARM VM with 4 CPUs, 24 GB RAM, 200 GB storage. Use the cloud-init script at `deploy/cloud-init-oracle.yml` as user-data when creating an Ampere A1 instance. It installs Docker, clones the repo, generates an API key, and starts the vault automatically.
+
+### Connecting clients
+
+Once the vault is running, connect any device:
+
+```bash
+MEMENTO_API_KEY=<key> ./install.sh --remote https://vault.example.com --experimental
+```
+
+Or configure MCP directly (for claude.ai/code or other MCP clients):
+
+```json
+{
+  "memento-vault": {
+    "url": "https://vault.example.com/mcp",
+    "headers": {"Authorization": "Bearer <your-api-key>"}
+  }
+}
+```
+
 ## Architecture
 
 The `memento/` package is agent-agnostic. Seven modules handle config, search, graph algorithms, vault I/O, LLM abstraction, and type definitions. Hooks and MCP tools are thin wrappers around this package.
 
 ```
 memento/
-  config.py      Configuration loading, project detection
-  search.py      QMD search, PRF, RRF, temporal decay, PageRank
-  graph.py       Wikilink graph, PageRank, PPR expansion
-  store.py       Vault I/O, write locking, dedup, note writing
-  llm.py         5 backends: claude, codex, gemini, anthropic-api, openai-compat
-  utils.py       Secret sanitization, tag normalization
-  types.py       TypedDict definitions (SearchResult, NoteMetadata, SessionMeta)
-  adapters/      Transcript parsing (Claude adapter, pluggable for others)
-  mcp_server.py  MCP server (5 tools over stdio)
+  config.py         Configuration, project detection, vault identity
+  search.py         Search pipeline: PRF, RRF, temporal decay, PageRank
+  search_backend.py Abstract search backend (QMDBackend, swappable)
+  graph.py          Wikilink graph, PageRank, PPR expansion
+  store.py          Vault I/O, write locking, dedup, note writing
+  llm.py            5 backends: claude, codex, gemini, anthropic-api, openai-compat
+  auth.py           Pluggable auth (bearer token, extensible to per-user)
+  remote_client.py  HTTP client for hooks talking to a remote vault
+  utils.py          Secret sanitization, tag normalization
+  types.py          TypedDict definitions (SearchResult, NoteMetadata, SessionMeta)
+  adapters/         Transcript parsing (Claude adapter, pluggable for others)
+  mcp_server.py     MCP server (5 tools, stdio + HTTP transport)
 ```
 
 LLM backend is configurable:

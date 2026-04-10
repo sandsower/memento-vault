@@ -1,0 +1,38 @@
+# Memento Vault — Docker Compose
+#
+# Basic deployment (no TLS). Good for:
+#   - Local development / testing
+#   - Behind an existing reverse proxy (nginx, Caddy, Cloudflare tunnel)
+#   - Private networks (Tailscale, WireGuard, VPN)
+#
+# Quick start:
+#   MEMENTO_API_KEY=your-secret docker compose up -d
+#
+# For production deployment with automatic TLS, use:
+#   ./setup-remote.sh --host vault.example.com --tls
+#
+# Environment variables:
+#   MEMENTO_API_KEY   - Required for auth (generate: python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+#   MEMENTO_PORT      - External port (default: 8745)
+
+services:
+  vault:
+    build: .
+    ports:
+      - "${MEMENTO_PORT:-8745}:8745"
+    volumes:
+      - vault-data:/vault
+      - vault-config:/home/memento/.config/memento-vault
+    environment:
+      MEMENTO_VAULT_PATH: /vault
+      MEMENTO_TRANSPORT: streamable-http
+      MEMENTO_HOST: 0.0.0.0
+      MEMENTO_PORT: "8745"
+      MEMENTO_API_KEY: "${MEMENTO_API_KEY:?Set MEMENTO_API_KEY before starting}"
+    restart: unless-stopped
+
+volumes:
+  vault-data:
+    driver: local
+  vault-config:
+    driver: local

@@ -277,6 +277,47 @@ def run_deferred_search():
             pass
 
 
+def run_remote_briefing(cwd, config):
+    """Run briefing via the remote vault client."""
+    from memento.remote_client import status as remote_status, search as remote_search
+
+    vault_status = remote_status()
+    if not vault_status or "error" in vault_status:
+        return
+
+    note_count = vault_status.get("note_count", 0)
+
+    # Derive project from cwd
+    git_branch = get_git_branch(cwd)
+    from memento.config import detect_project
+
+    project_slug, ticket = detect_project(cwd, git_branch)
+
+    if project_slug == "unknown":
+        return
+
+    branch_str = f" ({git_branch})" if git_branch else ""
+    summary = f"[vault] Project: {project_slug}{branch_str} | {note_count} notes (remote)"
+    print(summary)
+
+    # Search for project-relevant notes
+    max_notes = config.get("briefing_max_notes", 5)
+    query = project_slug.replace("-", " ")
+    if git_branch and git_branch not in ("main", "master", "HEAD"):
+        query += " " + git_branch.replace("-", " ").replace("/", " ")
+
+    results = remote_search(query=query, limit=max_notes, cwd=cwd)
+    if results:
+        note_lines = []
+        for r in results[:max_notes]:
+            title = r.get("title", "")
+            note_lines.append(f"  - {title}")
+
+        # Write as ready for vault-recall to pick up
+        with open(DEFERRED_BRIEFING_PATH, "w") as f:
+            json.dump({"status": "ready", "note_lines": note_lines, "timestamp": time.time(), "source": "remote"}, f)
+
+
 def main():
     # Handle background worker mode
     if "--deferred" in sys.argv:
@@ -288,14 +329,36 @@ def main():
     if not config.get("session_briefing", True):
         sys.exit(0)
 
-    vault = get_vault()
-    if not vault.exists() or not (vault / "notes").exists():
-        sys.exit(0)
-
     try:
         hook_input = read_hook_input()
     except Exception as exc:
         log_retrieval("briefing", "hook_input_failed", error=str(exc))
+        sys.exit(0)
+
+    # Try remote vault first (has cross-device data), fall through to local
+    from memento.remote_client import is_remote
+
+    if is_remote():
+        try:
+            # Clear any stale deferred briefing from a prior session
+            if os.path.exists(DEFERRED_BRIEFING_PATH):
+                os.unlink(DEFERRED_BRIEFING_PATH)
+
+            cwd = hook_input.get("cwd", "")
+            if cwd:
+                run_remote_briefing(cwd, config)
+                # Check if remote produced results (file was just written by run_remote_briefing)
+                if os.path.exists(DEFERRED_BRIEFING_PATH):
+                    import json as _json
+                    with open(DEFERRED_BRIEFING_PATH) as _f:
+                        _data = _json.load(_f)
+                    if _data.get("note_lines"):
+                        sys.exit(0)  # remote had results, done
+        except Exception as exc:
+            print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
+
+    vault = get_vault()
+    if not vault.exists() or not (vault / "notes").exists():
         sys.exit(0)
 
     cwd = hook_input.get("cwd", "")

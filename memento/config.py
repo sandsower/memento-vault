@@ -1,8 +1,10 @@
-"""Configuration loading, project detection, and runtime paths."""
+"""Configuration loading, project detection, vault identity, and runtime paths."""
 
+import json
 import os
 import re
 import tempfile
+import uuid
 from pathlib import Path
 
 
@@ -146,6 +148,10 @@ def load_config():
                 print(f"[memento] warning: failed to parse config {path}: {exc}", file=_sys.stderr)
             break
 
+    # MEMENTO_VAULT_PATH env var overrides config file
+    env_vault = os.environ.get("MEMENTO_VAULT_PATH")
+    if env_vault:
+        config["vault_path"] = env_vault
     config["vault_path"] = str(Path(config["vault_path"]).expanduser())
 
     # Handle floats that simple YAML parser returns as strings
@@ -202,6 +208,94 @@ def reset_config():
 def get_vault():
     """Get vault path."""
     return Path(get_config()["vault_path"])
+
+
+# --- Vault identity ---
+
+_VAULT_IDENTITY_FILENAME = "vault-identity.json"
+
+
+def _vault_identity_path():
+    """Path to the vault identity file — stored inside the vault itself.
+
+    This ensures the identity is bound to the vault data, not the host config.
+    Two vaults on the same machine get different IDs, and moving a vault to
+    a new host preserves its identity.
+    """
+    vault = Path(get_config()["vault_path"])
+    return vault / _VAULT_IDENTITY_FILENAME
+
+
+def _legacy_vault_identity_path():
+    """Old location for vault identity (pre-migration)."""
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memento-vault"
+    return config_dir / _VAULT_IDENTITY_FILENAME
+
+
+def get_vault_id() -> str | None:
+    """Get the unique vault ID, creating one on first call.
+
+    The vault ID is a stable UUID that uniquely identifies this vault instance.
+    It's generated once and persisted inside the vault directory. Used for
+    cross-vault interoperability and note provenance tracking.
+
+    Migrates from the old global config location on first access.
+    """
+    path = _vault_identity_path()
+
+    # Try current location (inside vault)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            vault_id = data.get("vault_id")
+            if vault_id:
+                return vault_id
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Migrate from legacy global location if it exists
+    legacy = _legacy_vault_identity_path()
+    if legacy.exists():
+        try:
+            data = json.loads(legacy.read_text())
+            vault_id = data.get("vault_id")
+            if vault_id:
+                # Copy to new location
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"vault_id": vault_id, "created": data.get("created", _iso_now()), "migrated_from": str(legacy)}, indent=2))
+                os.replace(tmp, path)
+                return vault_id
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    vault_id = uuid.uuid4().hex
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps({"vault_id": vault_id, "created": _iso_now()}, indent=2))
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        # Re-read from disk if it exists (another process may have created it)
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+                return data["vault_id"]
+            except (json.JSONDecodeError, KeyError, OSError):
+                pass
+        return None
+    return vault_id
+
+
+def _iso_now():
+    """Current time in ISO 8601."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # --- Runtime directory (private temp files) ---

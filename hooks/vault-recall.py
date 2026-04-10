@@ -459,18 +459,36 @@ def consume_deep_recall():
         return []
 
 
+def run_remote_recall(prompt, cwd, config):
+    """Run recall via the remote vault client. Returns (lines, top_path) or ([], None)."""
+    from memento.remote_client import search as remote_search
+
+    if should_skip(prompt, config):
+        return [], None
+
+    max_notes = config.get("recall_max_notes", 3)
+    min_score = config.get("recall_min_score", 0.4)
+
+    results = remote_search(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd)
+    if not results:
+        return [], None
+
+    top_path = results[0].get("path", "")
+    if is_duplicate(top_path):
+        return [], None
+
+    lines = ["[vault] Related memories:"]
+    for result in results[:max_notes]:
+        lines.append(format_result(result))
+
+    return lines, top_path
+
+
 def run_recall():
     """Run the recall search. Returns (lines, top_path) or ([], None)."""
     config = get_config()
 
     if not config.get("prompt_recall", True):
-        return [], None
-
-    vault = get_vault()
-    if not vault.exists() or not (vault / "notes").exists():
-        return [], None
-
-    if not has_qmd():
         return [], None
 
     try:
@@ -481,6 +499,24 @@ def run_recall():
 
     prompt = hook_input.get("prompt", "")
     cwd = hook_input.get("cwd", "")
+
+    # Try remote vault first (has cross-device data), fall through to local
+    from memento.remote_client import is_remote
+
+    if is_remote() and prompt:
+        try:
+            lines, top_path = run_remote_recall(prompt, cwd, config)
+            if lines:
+                return lines, top_path
+        except Exception as exc:
+            print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
+
+    vault = get_vault()
+    if not vault.exists() or not (vault / "notes").exists():
+        return [], None
+
+    if not has_qmd():
+        return [], None
     if not prompt:
         return [], None
 

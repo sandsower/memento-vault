@@ -526,6 +526,76 @@ def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
 # --- Main ---
 
 
+def run_remote_triage(hook_input):
+    """Run triage via the remote vault client — sends capture request over HTTP.
+
+    Mirrors local triage semantics:
+    - All sessions with >=2 exchanges get a fleeting entry + project index update
+    - Only substantial sessions also get a permanent atomic note
+
+    The server-side memento_capture supports fleeting_only=True to write only
+    the fleeting log without creating a permanent note.
+    """
+    from memento.remote_client import capture as remote_capture
+
+    session_id = hook_input.get("session_id", "unknown")
+    transcript_path = hook_input.get("transcript_path")
+
+    if not transcript_path or not os.path.exists(transcript_path):
+        return
+
+    try:
+        meta = parse_transcript(transcript_path)
+    except Exception:
+        return
+
+    if meta["exchange_count"] < 2:
+        return
+
+    if not meta["cwd"]:
+        meta["cwd"] = hook_input.get("cwd")
+
+    substantial = is_substantial(meta)
+    new_insight = has_new_insight(meta) if substantial else False
+    summary = build_session_summary(meta)
+    result = remote_capture(
+        session_summary=summary,
+        cwd=meta.get("cwd", ""),
+        branch=meta.get("git_branch", ""),
+        files_edited=meta.get("files_edited", []),
+        session_id=session_id,
+        agent="claude",
+        fleeting_only=not (substantial and new_insight),
+    )
+
+    if isinstance(result, dict) and "error" in result:
+        print(f"[memento] remote capture failed for session {session_id}: {result['error']}", file=sys.stderr)
+        # Spool to an isolated directory so data isn't lost but doesn't pollute
+        # the main vault. Operator can reconcile later via the spool dir.
+        try:
+            vault = get_vault()
+            spool_dir = vault / "spool" / "remote-failures"
+            spool_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)[:64]
+            spool_file = spool_dir / f"{ts}-{safe_id}.md"
+            sanitized = sanitize_secrets(summary)
+            fm = {
+                "session_id": session_id,
+                "branch": str(meta.get("git_branch", "")),
+                "cwd": str(meta.get("cwd", "")),
+                "error": str(result["error"]),
+                "captured": ts,
+            }
+            fm_lines = "\n".join(f"{k}: {json.dumps(v)}" for k, v in fm.items())
+            spool_file.write_text(
+                f"---\n{fm_lines}\n---\n\n{sanitized}\n"
+            )
+            print(f"[memento] spooled session to {spool_file} for later reconciliation", file=sys.stderr)
+        except Exception as fallback_exc:
+            print(f"[memento] spool fallback also failed: {fallback_exc}", file=sys.stderr)
+
+
 def main():
     try:
         hook_input = read_hook_input()
@@ -601,6 +671,15 @@ def main():
     # Inception: background consolidation (gated)
     if config.get("inception_enabled", False):
         maybe_trigger_inception(config)
+
+    # Additionally sync to remote vault if configured
+    from memento.remote_client import is_remote
+
+    if is_remote():
+        try:
+            run_remote_triage(hook_input)
+        except Exception as exc:
+            print(f"[memento] remote sync failed (local capture succeeded): {exc}", file=sys.stderr)
 
     sys.exit(0)
 

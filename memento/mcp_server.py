@@ -1,4 +1,8 @@
-"""MCP server for memento vault — exposes search, store, status, capture, and get operations."""
+"""MCP server for memento vault — exposes search, store, status, capture, and get operations.
+
+Supports both stdio (local) and streamable-http (remote) transports.
+When running over HTTP, authentication is enforced via bearer tokens.
+"""
 
 import json
 import os
@@ -9,7 +13,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from memento.config import detect_project, get_config, get_vault, slugify
+from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
 from memento.search import enhance_results, has_qmd, qmd_search_with_extras, qmd_get
 from memento.store import (
     acquire_vault_write_lock,
@@ -20,17 +24,41 @@ from memento.store import (
 )
 from memento.utils import sanitize_secrets
 
-mcp = FastMCP(
-    "memento-vault",
-    instructions=(
-        "Memento Vault is a persistent knowledge store for coding agents. "
-        "Use memento_search to find past decisions, discoveries, and session notes. "
-        "Use memento_store to write a single knowledge note. "
-        "Use memento_capture at session end to triage and capture the full session. "
-        "Use memento_get to read a specific note by path. "
-        "Use memento_status to check vault health and stats."
-    ),
-)
+
+def _build_server() -> FastMCP:
+    """Build the FastMCP server, configured from environment variables.
+
+    Environment variables:
+        MEMENTO_HOST: Bind address for HTTP transport (default: 0.0.0.0)
+        MEMENTO_PORT: Port for HTTP transport (default: 8745)
+        MEMENTO_API_KEY: Bearer token for HTTP auth (optional)
+    """
+    host = os.environ.get("MEMENTO_HOST", "0.0.0.0")
+    port = int(os.environ.get("MEMENTO_PORT", "8745"))
+
+    kwargs = {
+        "name": "memento-vault",
+        "instructions": (
+            "Memento Vault is a persistent knowledge store for coding agents. "
+            "Use memento_search to find past decisions, discoveries, and session notes. "
+            "Use memento_store to write a single knowledge note. "
+            "Use memento_capture at session end to triage and capture the full session. "
+            "Use memento_get to read a specific note by path. "
+            "Use memento_status to check vault health and stats."
+        ),
+        "host": host,
+        "port": port,
+        "stateless_http": True,
+        "json_response": True,
+    }
+
+    return FastMCP(**kwargs)
+
+
+mcp = _build_server()
+
+# Set at startup by main() — used by tools to know if they're running over HTTP
+_active_transport: str = "stdio"
 
 
 def _strip_injection(text: str) -> str:
@@ -67,12 +95,9 @@ def memento_search(
     if not query or not query.strip():
         return []
 
-    if not has_qmd():
-        return {"error": "QMD search engine is not installed or not available"}
-
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        return {"error": f"Vault not found at {vault}"}
+        return []
 
     results = qmd_search_with_extras(
         query,
@@ -87,14 +112,23 @@ def memento_search(
 
     output = []
     for r in results[:limit]:
-        output.append(
-            {
-                "path": r.get("path", ""),
-                "title": _strip_injection(r.get("title", "")),
-                "score": round(r.get("score", 0.0), 4),
-                "snippet": _strip_injection(r.get("snippet", "")),
-            }
-        )
+        entry = {
+            "path": r.get("path", ""),
+            "title": _strip_injection(r.get("title", "")),
+            "score": round(r.get("score", 0.0), 4),
+            "snippet": _strip_injection(r.get("snippet", "")),
+        }
+        # Include full content so callers don't need a separate memento_get
+        # round-trip — eliminates latency gap for remote-only notes.
+        note_path = vault / r.get("path", "")
+        if note_path.exists():
+            try:
+                entry["content"] = _strip_injection(note_path.read_text())
+            except OSError:
+                pass
+        if "content" not in entry and r.get("content"):
+            entry["content"] = _strip_injection(r["content"])
+        output.append(entry)
 
     log_retrieval("mcp", "search", query=query, results=len(output))
     return output
@@ -185,13 +219,23 @@ def memento_status() -> dict:
     config = get_config()
     vault = get_vault()
 
+    vault_exists = vault.exists()
+
+    # Read vault_id only if vault exists — get_vault_id() creates dirs as a side effect
+    vault_id = None
+    if vault_exists:
+        identity_file = vault / "vault-identity.json"
+        if identity_file.exists():
+            vault_id = get_vault_id()
+
     status = {
+        "vault_id": vault_id,
         "vault_path": str(vault),
-        "vault_exists": vault.exists(),
+        "vault_exists": vault_exists,
         "qmd_available": has_qmd(),
     }
 
-    if not vault.exists():
+    if not vault_exists:
         return status
 
     notes_dir = vault / "notes"
@@ -267,6 +311,17 @@ def memento_get(path: str) -> dict:
             "content": _strip_injection(result.get("content", "")),
         }
 
+    # Fall back to remote vault if configured
+    from memento.remote_client import is_remote, get as remote_get
+    if is_remote():
+        remote_result = remote_get(path)
+        if remote_result:
+            return {
+                "path": remote_result.get("path", path),
+                "title": _strip_injection(remote_result.get("title", "")),
+                "content": _strip_injection(remote_result.get("content", "")),
+            }
+
     return {"error": f"Note not found: {path}"}
 
 
@@ -279,6 +334,7 @@ def memento_capture(
     session_id: str | None = None,
     transcript_path: str | None = None,
     agent: str = "unknown",
+    fleeting_only: bool = False,
 ) -> dict:
     """Capture a session's knowledge into the vault.
 
@@ -297,6 +353,9 @@ def memento_capture(
         session_id: Session identifier for traceability. Auto-generated if omitted.
         transcript_path: Path to a transcript file for full triage parsing.
         agent: Which agent produced this session (claude, codex, cursor, windsurf).
+        fleeting_only: If true, only write a fleeting log entry and project index
+            update — do not create a permanent atomic note. Used by remote hooks
+            for non-substantial sessions to match local triage semantics.
 
     Returns:
         Dict with capture results: notes written, project updated, or error.
@@ -310,21 +369,26 @@ def memento_capture(
 
     session_id = session_id or uuid.uuid4().hex[:12]
 
-    # Mode 1: transcript file parsing via adapter
+    # Mode 1: transcript file parsing via adapter (local/stdio transport only)
     if transcript_path:
+        # Reject transcript_path over HTTP — remote callers must not trigger
+        # server-side file reads. They should send session_summary instead.
+        if _active_transport != "stdio":
+            return {"error": "transcript_path is only supported in local (stdio) mode. Send session_summary for remote capture."}
+
         if not os.path.exists(transcript_path):
             return {"error": f"Transcript file not found: {transcript_path}"}
 
-        # Restrict to known agent transcript directories
-        abs_path = os.path.abspath(transcript_path)
-        allowed_prefixes = [
-            os.path.join(str(Path.home()), ".claude"),
-            os.path.join(str(Path.home()), ".codex"),
-            os.path.join(str(Path.home()), ".cursor"),
-            os.path.join(str(Path.home()), ".codeium"),
-            "/tmp",
+        # Restrict to known agent transcript directories (proper containment check)
+        candidate = Path(transcript_path).resolve()
+        allowed_roots = [
+            Path.home() / ".claude",
+            Path.home() / ".codex",
+            Path.home() / ".cursor",
+            Path.home() / ".codeium",
+            Path("/tmp"),
         ]
-        if not any(abs_path.startswith(p) for p in allowed_prefixes):
+        if not any(candidate == root or root in candidate.parents for root in allowed_roots):
             return {"error": "transcript_path must be inside a known agent directory"}
 
         try:
@@ -364,11 +428,28 @@ def memento_capture(
 
     body = sanitized_summary + files_str
 
+    # Idempotency check (read-only, no lock needed): if this session was already
+    # captured, return prior result. Prevents duplicate notes on HTTP retry/timeout.
+    notes_dir = vault / "notes"
+    if notes_dir.exists():
+        for existing in notes_dir.glob("*.md"):
+            try:
+                head = existing.read_text(errors="replace")[:500]
+                if f"session_id: {session_id}" in head:
+                    return {
+                        "session_id": session_id,
+                        "note_path": str(existing.relative_to(vault)),
+                        "project": project_slug,
+                        "deduplicated": True,
+                    }
+            except OSError:
+                continue
+
     if not acquire_vault_write_lock():
         return {"error": "Could not acquire vault write lock"}
 
     try:
-        # Write fleeting note
+        # Write fleeting note (always — matches local triage behavior)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         now = datetime.now(timezone.utc).strftime("%H:%M")
         fleeting_dir = vault / "fleeting"
@@ -378,13 +459,50 @@ def memento_capture(
         if not fleeting_file.exists():
             fleeting_file.write_text(f"# {today}\n\n")
 
+        # Check fleeting dedup too (for fleeting_only retries)
+        existing_fleeting = fleeting_file.read_text() if fleeting_file.exists() else ""
+        if f"`{session_id}`" in existing_fleeting:
+            return {
+                "session_id": session_id,
+                "project": project_slug,
+                "fleeting": str(fleeting_file.relative_to(vault)),
+                "deduplicated": True,
+            }
+
         branch_str = f" ({branch})" if branch else ""
         files_count = f", {len(files_edited)} files" if files_edited else ""
         fleeting_line = f"- {now} `{session_id}` {cwd or '?'}{branch_str} — {agent}{files_count}\n"
         with open(fleeting_file, "a") as f:
             f.write(fleeting_line)
 
-        # Write atomic note from summary
+        if fleeting_only:
+            # Ensure project index exists and log session (no [[note]] link)
+            if project_slug != "unknown":
+                project_dir = vault / "projects"
+                project_dir.mkdir(parents=True, exist_ok=True)
+                project_file = project_dir / f"{project_slug}.md"
+                if not project_file.exists():
+                    project_file.write_text(
+                        f"---\ntitle: {project_slug}\nproject: {project_slug}\n---\n\n## Notes\n\n## Sessions\n\n"
+                    )
+                session_line = f"- {today} `{session_id}` — {sanitized_summary[:80]}\n"
+                content = project_file.read_text()
+                if session_id not in content:
+                    if "## Sessions" in content:
+                        idx = content.index("## Sessions") + len("## Sessions")
+                        content = content[:idx] + "\n" + session_line + content[idx:]
+                    else:
+                        content = content.rstrip("\n") + "\n\n## Sessions\n" + session_line
+                    project_file.write_text(content)
+
+            log_retrieval("mcp", "capture_fleeting", session_id=session_id, agent=agent, project=project_slug)
+            return {
+                "session_id": session_id,
+                "project": project_slug,
+                "fleeting": str(fleeting_file.relative_to(vault)),
+            }
+
+        # Write atomic note from summary (substantial sessions only)
         title_text = sanitized_summary[:80]
         if len(sanitized_summary) > 80:
             title_text = title_text.rsplit(" ", 1)[0] + "..."
@@ -402,7 +520,7 @@ def memento_capture(
             session_id=session_id,
         )
 
-        # Update project index
+        # Update project index with real note link (not for fleeting-only)
         if project_slug != "unknown":
             (vault / "projects").mkdir(parents=True, exist_ok=True)
             summary_line = f"MCP capture ({agent}): {title_text}"
@@ -422,8 +540,85 @@ def memento_capture(
 
 
 def main():
-    """Run the MCP server over stdio."""
-    mcp.run(transport="stdio")
+    """Run the MCP server.
+
+    Transport is selected via --transport flag or MEMENTO_TRANSPORT env var.
+    Host/port are configured via MEMENTO_HOST/MEMENTO_PORT env vars or
+    passed to the FastMCP constructor at build time.
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Memento Vault MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "streamable-http"],
+        default=os.environ.get("MEMENTO_TRANSPORT", "stdio"),
+        help="Transport protocol (default: stdio, env: MEMENTO_TRANSPORT)",
+    )
+    args = parser.parse_args()
+
+    # Record the active transport so tools can check it at request time
+    global _active_transport
+    _active_transport = args.transport
+
+    # Fail closed: refuse to start HTTP transport without auth on non-local interfaces
+    if args.transport in ("sse", "streamable-http"):
+        host = os.environ.get("MEMENTO_HOST", "0.0.0.0")
+        api_key = os.environ.get("MEMENTO_API_KEY") or get_config().get("api_key")
+        if not api_key and host not in ("127.0.0.1", "localhost", "::1"):
+            print(
+                "[memento] FATAL: refusing to start HTTP transport on "
+                f"{host} without MEMENTO_API_KEY set.\n"
+                "Set MEMENTO_API_KEY or bind to localhost (MEMENTO_HOST=127.0.0.1).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # For HTTP transports with auth, we wrap the ASGI app with bearer token
+    # middleware. We can't use MCP SDK's token_verifier because it requires
+    # OAuth AuthSettings (issuer_url etc.) which doesn't fit simple bearer tokens.
+    if args.transport in ("sse", "streamable-http"):
+        from memento.auth import create_auth_provider, NoAuth
+
+        auth_provider = create_auth_provider()
+        if not isinstance(auth_provider, NoAuth):
+            # Get the Starlette app that FastMCP would build, wrap it
+            if args.transport == "streamable-http":
+                inner_app = mcp.streamable_http_app()
+            else:
+                inner_app = mcp.sse_app()
+
+            async def auth_app(scope, receive, send):
+                if scope["type"] == "http":
+                    headers = dict(scope.get("headers", []))
+                    auth_header = headers.get(b"authorization", b"").decode()
+                    identity = auth_provider.authenticate(auth_header)
+                    if identity is None:
+                        body = b'{"error": "Unauthorized"}'
+                        await send({
+                            "type": "http.response.start",
+                            "status": 401,
+                            "headers": [
+                                [b"content-type", b"application/json"],
+                                [b"content-length", str(len(body)).encode()],
+                            ],
+                        })
+                        await send({"type": "http.response.body", "body": body})
+                        return
+                await inner_app(scope, receive, send)
+
+            import uvicorn
+
+            uvicorn.run(
+                auth_app,
+                host=os.environ.get("MEMENTO_HOST", "0.0.0.0"),
+                port=int(os.environ.get("MEMENTO_PORT", "8745")),
+                log_level="warning",
+            )
+            return
+
+    mcp.run(transport=args.transport)
 
 
 if __name__ == "__main__":
