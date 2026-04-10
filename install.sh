@@ -598,7 +598,7 @@ import json, sys
 url = sys.argv[1].rstrip('/')
 if not url.endswith('/mcp'):
     url += '/mcp'
-entry = {'memento-vault': {'url': url}}
+entry = {'memento-vault': {'type': 'http', 'url': url}}
 headers = json.loads(sys.argv[2])
 if headers:
     entry['memento-vault']['headers'] = headers
@@ -619,11 +619,8 @@ MCP_EOF
 )
         fi
         if [ -f "$MCP_CONFIG" ]; then
-            # Merge into existing config
-            if grep -q "memento-vault" "$MCP_CONFIG"; then
-                info "MCP server already configured in $MCP_CONFIG"
-            else
-                python3 -c "
+            # Merge or update MCP server entry
+            python3 -c "
 import json, sys, tempfile, os
 config_path = sys.argv[1]
 existing = json.load(open(config_path))
@@ -634,8 +631,7 @@ with os.fdopen(fd, 'w') as f:
     json.dump(existing, f, indent=2)
 os.replace(tmp, config_path)
 " "$MCP_CONFIG" "$MCP_ENTRY"
-                info "Added memento-vault to $MCP_CONFIG"
-            fi
+            info "MCP server configured in $MCP_CONFIG"
         else
             echo "$MCP_ENTRY" | python3 -c "import json,sys; json.dump(json.load(sys.stdin), open(sys.argv[1],'w'), indent=2)" "$MCP_CONFIG"
             info "Created $MCP_CONFIG with memento-vault server"
@@ -987,7 +983,7 @@ if [ "$REMOTE_MODE" = true ]; then
     echo "To use from other tools, set these environment variables:"
     echo "  export MEMENTO_VAULT_URL=$REMOTE_URL"
     if [ -n "$REMOTE_API_KEY" ]; then
-        echo "  export MEMENTO_API_KEY=$REMOTE_API_KEY"
+        echo "  export MEMENTO_API_KEY=<stored in $CLAUDE_DIR/memento-remote.env>"
     fi
 else
     echo ""

@@ -18,7 +18,11 @@ The vault location is configured in `memento.yml` (default: `~/memento`). Check 
 
 ## How to search
 
-### With QMD (if installed)
+Always search **both local and remote** vaults. Notes written from other devices only exist on the remote.
+
+### Local vault (QMD + filesystem)
+
+#### With QMD (if installed)
 
 Use qmd to search the `memento` collection. qmd provides semantic search, much better than keyword grep for finding related concepts.
 
@@ -41,7 +45,7 @@ Check `~/.config/memento-vault/memento.yml` for the collection name (default: `m
 
 3. **Follow `[[wikilinks]]`** in matched notes to find related notes
 
-### Without QMD (fallback)
+#### Without QMD (fallback)
 
 4. **Use Grep** for keyword matching across the vault:
    ```
@@ -49,6 +53,14 @@ Check `~/.config/memento-vault/memento.yml` for the collection name (default: `m
    ```
 
 5. Check frontmatter fields to filter: `project:` for path-based filtering, `tags:` for topic filtering, `date:` for time filtering, `branch:` for branch-specific work
+
+### Remote vault (MCP)
+
+If `memento_search` MCP tool is available, also search the remote vault. This catches notes written from other devices (e.g., claude.ai/code, another laptop).
+
+Call `memento_search` with the user's query. If the tool isn't available (MCP server not connected), skip it — local results are still valid.
+
+**Merge strategy**: Present local and remote results together. Flag any remote-only notes (not found locally) — these are cross-device contributions.
 
 ## Response format
 

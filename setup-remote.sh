@@ -14,7 +14,6 @@
 # Other deployment options (not managed by this script):
 #   Fly.io:           See fly.toml (fly launch && fly deploy)
 #   Cloudflare Tunnel: See docker-compose.cloudflare.yml
-#   Oracle Cloud Free: See deploy/cloud-init-oracle.yml
 
 set -euo pipefail
 

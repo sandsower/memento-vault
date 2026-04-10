@@ -72,7 +72,6 @@ This installs hooks that sync to the remote vault over HTTP. A local vault is al
 | [Docker Compose](#docker-compose) | — | Docker on any machine |
 | [Fly.io](#flyio) | ~$3-5/mo | Fly.io account |
 | [Cloudflare Tunnel](#cloudflare-tunnel) | Free | Docker + Cloudflare account with a domain |
-| [Oracle Cloud](#oracle-cloud-free) | Free forever | Oracle Cloud account |
 
 See [Cloud deployment](#cloud-deployment) for details.
 
@@ -266,10 +265,6 @@ export CLOUDFLARE_TUNNEL_TOKEN=<your-token>
 export MEMENTO_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 docker compose -f docker-compose.cloudflare.yml up -d
 ```
-
-### Oracle Cloud (free)
-
-Always-free ARM VM with 4 CPUs, 24 GB RAM, 200 GB storage. Use the cloud-init script at `deploy/cloud-init-oracle.yml` as user-data when creating an Ampere A1 instance. It installs Docker, clones the repo, generates an API key, and starts the vault automatically.
 
 ### Connecting clients
 
