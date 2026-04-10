@@ -63,7 +63,7 @@ Deploy the vault as a remote service so multiple devices and agents share the sa
 ./install.sh --remote https://vault.example.com:8745
 ```
 
-This installs hooks that talk to the remote vault over HTTP instead of the local filesystem. No local vault is created.
+This installs hooks that sync to the remote vault over HTTP. A local vault is always created — remote mode is additive, not a replacement.
 
 **Deploy the vault yourself** — four options depending on your setup:
 

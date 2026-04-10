@@ -393,8 +393,8 @@ def main():
         try:
             if run_remote_tool_context(hook_input, config):
                 sys.exit(0)  # remote had results
-        except Exception:
-            pass  # fall through to local
+        except Exception as exc:
+            print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
 
     if not has_qmd():
         sys.exit(0)

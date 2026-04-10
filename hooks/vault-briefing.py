@@ -354,8 +354,8 @@ def main():
                         _data = _json.load(_f)
                     if _data.get("note_lines"):
                         sys.exit(0)  # remote had results, done
-        except Exception:
-            pass  # fall through to local
+        except Exception as exc:
+            print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():

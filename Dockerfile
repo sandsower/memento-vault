@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12.11-slim
 
 LABEL maintainer="memento-vault"
 LABEL description="Memento Vault — persistent knowledge store for coding agents"
@@ -19,7 +19,7 @@ COPY hooks/ ./hooks/
 COPY pyproject.toml ./
 
 # Install Python dependencies
-RUN pip install --no-cache-dir "mcp[cli]>=1.0"
+RUN pip install --no-cache-dir "mcp[cli]>=1.27,<2.0"
 
 # Create vault directory
 RUN mkdir -p /vault/notes /vault/fleeting /vault/projects /vault/archive \
@@ -42,8 +42,11 @@ EXPOSE 8745
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "\
-import os; from urllib.request import Request, urlopen; \
-req = Request('http://localhost:8745/mcp'); \
+import json, os; from urllib.request import Request, urlopen; \
+body = json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'memento_status','arguments':{}}}).encode(); \
+req = Request('http://localhost:8745/mcp', data=body, method='POST'); \
+req.add_header('Content-Type', 'application/json'); \
+req.add_header('Accept', 'application/json'); \
 key = os.environ.get('MEMENTO_API_KEY', ''); \
 req.add_header('Authorization', f'Bearer {key}') if key else None; \
 urlopen(req, timeout=4)" || exit 1

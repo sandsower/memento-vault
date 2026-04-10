@@ -48,14 +48,9 @@ def _build_server() -> FastMCP:
         ),
         "host": host,
         "port": port,
+        "stateless_http": True,
+        "json_response": True,
     }
-
-    # Wire up auth if an API key is configured (env var or config file)
-    from memento.auth import create_auth_provider, MementoTokenVerifier, NoAuth
-
-    auth = create_auth_provider()
-    if not isinstance(auth, NoAuth):
-        kwargs["token_verifier"] = MementoTokenVerifier(auth)
 
     return FastMCP(**kwargs)
 
@@ -117,14 +112,23 @@ def memento_search(
 
     output = []
     for r in results[:limit]:
-        output.append(
-            {
-                "path": r.get("path", ""),
-                "title": _strip_injection(r.get("title", "")),
-                "score": round(r.get("score", 0.0), 4),
-                "snippet": _strip_injection(r.get("snippet", "")),
-            }
-        )
+        entry = {
+            "path": r.get("path", ""),
+            "title": _strip_injection(r.get("title", "")),
+            "score": round(r.get("score", 0.0), 4),
+            "snippet": _strip_injection(r.get("snippet", "")),
+        }
+        # Include full content so callers don't need a separate memento_get
+        # round-trip — eliminates latency gap for remote-only notes.
+        note_path = vault / r.get("path", "")
+        if note_path.exists():
+            try:
+                entry["content"] = _strip_injection(note_path.read_text())
+            except OSError:
+                pass
+        if "content" not in entry and r.get("content"):
+            entry["content"] = _strip_injection(r["content"])
+        output.append(entry)
 
     log_retrieval("mcp", "search", query=query, results=len(output))
     return output
@@ -306,6 +310,17 @@ def memento_get(path: str) -> dict:
             "title": _strip_injection(result.get("title", "")),
             "content": _strip_injection(result.get("content", "")),
         }
+
+    # Fall back to remote vault if configured
+    from memento.remote_client import is_remote, get as remote_get
+    if is_remote():
+        remote_result = remote_get(path)
+        if remote_result:
+            return {
+                "path": remote_result.get("path", path),
+                "title": _strip_injection(remote_result.get("title", "")),
+                "content": _strip_injection(remote_result.get("content", "")),
+            }
 
     return {"error": f"Note not found: {path}"}
 
@@ -559,6 +574,49 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
+
+    # For HTTP transports with auth, we wrap the ASGI app with bearer token
+    # middleware. We can't use MCP SDK's token_verifier because it requires
+    # OAuth AuthSettings (issuer_url etc.) which doesn't fit simple bearer tokens.
+    if args.transport in ("sse", "streamable-http"):
+        from memento.auth import create_auth_provider, NoAuth
+
+        auth_provider = create_auth_provider()
+        if not isinstance(auth_provider, NoAuth):
+            # Get the Starlette app that FastMCP would build, wrap it
+            if args.transport == "streamable-http":
+                inner_app = mcp.streamable_http_app()
+            else:
+                inner_app = mcp.sse_app()
+
+            async def auth_app(scope, receive, send):
+                if scope["type"] == "http":
+                    headers = dict(scope.get("headers", []))
+                    auth_header = headers.get(b"authorization", b"").decode()
+                    identity = auth_provider.authenticate(auth_header)
+                    if identity is None:
+                        body = b'{"error": "Unauthorized"}'
+                        await send({
+                            "type": "http.response.start",
+                            "status": 401,
+                            "headers": [
+                                [b"content-type", b"application/json"],
+                                [b"content-length", str(len(body)).encode()],
+                            ],
+                        })
+                        await send({"type": "http.response.body", "body": body})
+                        return
+                await inner_app(scope, receive, send)
+
+            import uvicorn
+
+            uvicorn.run(
+                auth_app,
+                host=os.environ.get("MEMENTO_HOST", "0.0.0.0"),
+                port=int(os.environ.get("MEMENTO_PORT", "8745")),
+                log_level="warning",
+            )
+            return
 
     mcp.run(transport=args.transport)
 

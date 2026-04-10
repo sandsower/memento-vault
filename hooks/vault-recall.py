@@ -508,8 +508,8 @@ def run_recall():
             lines, top_path = run_remote_recall(prompt, cwd, config)
             if lines:
                 return lines, top_path
-        except Exception:
-            pass  # fall through to local
+        except Exception as exc:
+            print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():

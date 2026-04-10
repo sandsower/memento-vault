@@ -74,14 +74,21 @@ def _call_tool(tool_name: str, arguments: dict, timeout: int = 30) -> dict:
 
     result = body.get("result", {})
     # MCP tools/call returns {content: [{type: "text", text: "..."}]}
+    # FastMCP serializes list results as multiple text content blocks,
+    # so we collect all parseable items and return a list if there are many.
     content = result.get("content", [])
     if content and isinstance(content, list):
+        parsed = []
         for item in content:
             if item.get("type") == "text":
                 try:
-                    return json.loads(item["text"])
+                    parsed.append(json.loads(item["text"]))
                 except (json.JSONDecodeError, KeyError):
-                    return {"text": item.get("text", "")}
+                    parsed.append({"text": item.get("text", "")})
+        if len(parsed) == 1:
+            return parsed[0]
+        if parsed:
+            return parsed
     return result
 
 
