@@ -60,6 +60,11 @@ def scan_and_index(vault_path: Path | str, backend) -> dict:
     stale_paths = set(db_index.keys()) - disk_paths
     for stale_path in stale_paths:
         conn.execute("DELETE FROM notes WHERE path = ?", (stale_path,))
+        # Also clean up vector table if it exists
+        try:
+            conn.execute("DELETE FROM notes_vec WHERE path = ?", (stale_path,))
+        except Exception:
+            pass
         removed += 1
         logger.debug("Removed stale: %s", stale_path)
 

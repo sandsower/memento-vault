@@ -102,7 +102,7 @@ def memento_search(
         limit = 5
 
     vault = get_vault()
-    if not vault.exists() or not (vault / "notes").exists():
+    if not vault.exists() or not any((vault / d).exists() for d in ("notes", "fleeting", "projects")):
         return []
 
     results = qmd_search_with_extras(
@@ -131,8 +131,8 @@ def memento_search(
             resolved = note_path.resolve()
             resolved.relative_to(vault.resolve())
             if note_path.exists():
-                entry["content"] = _strip_injection(note_path.read_text())
-        except (ValueError, OSError):
+                entry["content"] = _strip_injection(note_path.read_text(errors="replace"))
+        except (ValueError, OSError, UnicodeDecodeError):
             pass
         if "content" not in entry and r.get("content"):
             entry["content"] = _strip_injection(r["content"])
@@ -297,7 +297,7 @@ def memento_get(path: str) -> dict:
     if full_path != vault_resolved and vault_resolved not in full_path.parents:
         return {"error": "Invalid path: traversal outside vault"}
     if full_path.exists():
-        content = full_path.read_text()
+        content = full_path.read_text(errors="replace")
         # Extract title from frontmatter
         title = Path(path).stem
         title_match = re.search(r"^title:\s*(.+)$", content, re.MULTILINE)

@@ -383,7 +383,7 @@ def get_backend() -> SearchBackend:
         choice = config.get("search_backend", "auto")
 
         if choice == "embedded":
-            _backend = _make_embedded(config)
+            _backend = _make_embedded(config) or GrepBackend()
         elif choice == "grep":
             _backend = GrepBackend()
         elif choice == "qmd":
