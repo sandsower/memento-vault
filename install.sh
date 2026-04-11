@@ -718,170 +718,119 @@ print('\n'.join(lines))
     HOOK_ENV_PREFIX="bash -c 'set -a; . $REMOTE_ENV_FILE; set +a; exec \"\$@\"' -- "
 fi
 
-if [ ! -f "$SETTINGS" ]; then
-    if [ "$EXPERIMENTAL" = true ]; then
-        cat > "$SETTINGS" << SETTINGS_EOF
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "type": "command",
-        "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-briefing.py",
-        "timeout": 8000
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "type": "command",
-        "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-recall.py",
-        "timeout": 5000
-      }
-    ],
-    "SessionEnd": [
-      {
-        "type": "command",
-        "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/memento-triage.py",
-        "timeout": 30000,
-        "async": true
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Read",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-tool-context.py",
-            "timeout": 2000
-          }
-        ]
-      }
-    ]
-  },
-  "permissions": {
-    "allow": [
-      "Read($VAULT_PATH/**)",
-      "Edit($VAULT_PATH/**)",
-      "Write($VAULT_PATH/**)",
-      "Bash($CLAUDE_DIR/hooks/vault-commit.sh:*)"
-    ]
-  }
-}
-SETTINGS_EOF
-        info "Created $SETTINGS with stable + experimental hooks"
-    else
-        cat > "$SETTINGS" << SETTINGS_EOF
-{
-  "hooks": {
-    "SessionEnd": [
-      {
-        "type": "command",
-        "command": "${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/memento-triage.py",
-        "timeout": 30000,
-        "async": true
-      }
-    ]
-  },
-  "permissions": {
-    "allow": [
-      "Read($VAULT_PATH/**)",
-      "Edit($VAULT_PATH/**)",
-      "Write($VAULT_PATH/**)",
-      "Bash($CLAUDE_DIR/hooks/vault-commit.sh:*)"
-    ]
-  }
-}
-SETTINGS_EOF
-        info "Created $SETTINGS with stable hooks"
-    fi
-else
-    info "settings.json already exists, checking for missing hooks..."
-    MISSING_HOOKS=()
-    grep -q "memento-triage" "$SETTINGS" || MISSING_HOOKS+=("SessionEnd/memento-triage")
-
-    if [ "$EXPERIMENTAL" = true ]; then
-        grep -q "vault-briefing" "$SETTINGS" || MISSING_HOOKS+=("SessionStart/vault-briefing")
-        grep -q "vault-recall" "$SETTINGS" || MISSING_HOOKS+=("UserPromptSubmit/vault-recall")
-        grep -q "vault-tool-context" "$SETTINGS" || MISSING_HOOKS+=("PreToolUse/vault-tool-context")
-    fi
-
-    if [ ${#MISSING_HOOKS[@]} -gt 0 ]; then
-        warn "Missing hooks in settings.json: ${MISSING_HOOKS[*]}"
-        echo ""
-        echo -e "${DIM}Add to your settings.json under \"hooks\":${NC}"
-        echo ""
-
-        if [[ " ${MISSING_HOOKS[*]} " == *"memento-triage"* ]]; then
-            echo '  "SessionEnd": ['
-            echo "    {\"type\": \"command\", \"command\": \"${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/memento-triage.py\", \"timeout\": 30000, \"async\": true}"
-            echo '  ],'
-        fi
-        if [[ " ${MISSING_HOOKS[*]} " == *"vault-briefing"* ]]; then
-            echo '  "SessionStart": ['
-            echo "    {\"type\": \"command\", \"command\": \"${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-briefing.py\", \"timeout\": 8000}"
-            echo '  ],'
-        fi
-        if [[ " ${MISSING_HOOKS[*]} " == *"vault-recall"* ]]; then
-            echo '  "UserPromptSubmit": ['
-            echo "    {\"type\": \"command\", \"command\": \"${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-recall.py\", \"timeout\": 5000}"
-            echo '  ],'
-        fi
-        if [[ " ${MISSING_HOOKS[*]} " == *"vault-tool-context"* ]]; then
-            echo '  "PreToolUse": ['
-            echo "    {\"matcher\": \"Read\", \"hooks\": [{\"type\": \"command\", \"command\": \"${HOOK_ENV_PREFIX}python3 $CLAUDE_DIR/hooks/vault-tool-context.py\", \"timeout\": 2000}]}"
-            echo '  ]'
-        fi
-        echo ""
-    else
-        info "All hooks already configured"
-    fi
-
-    # Update hook commands: strip any stale remote env prefix, then prepend
-    # the new one if in remote mode. This is idempotent in both directions —
-    # local reinstalls scrub old remote prefixes, remote reinstalls update them.
-    # Uses python3 for JSON manipulation to handle special characters safely.
-    info "Normalizing hook commands..."
-    python3 -c "
-import json, sys, re
+# Merge hooks into settings.json (create if missing, inject if existing).
+# Uses python3 for safe JSON manipulation. The hook schema requires each
+# event entry to have a "hooks" array (and optionally a "matcher" string).
+python3 -c "
+import json, sys, os, tempfile, re
 
 settings_path = sys.argv[1]
-prefix = sys.argv[2]  # empty string in local mode
+prefix = sys.argv[2]        # empty string in local mode
 hooks_dir = sys.argv[3] + '/hooks/'
+vault_path = sys.argv[4]
+experimental = sys.argv[5] == 'true'
 
-with open(settings_path) as f:
-    cfg = json.load(f)
+# Build the hooks we want present
+wanted = {
+    'SessionEnd': {
+        'matcher': '',
+        'hooks': [{
+            'type': 'command',
+            'command': prefix + 'python3 ' + hooks_dir + 'memento-triage.py',
+            'timeout': 30,
+            'async': True,
+        }],
+    },
+}
+if experimental:
+    wanted['SessionStart'] = {
+        'matcher': '',
+        'hooks': [{
+            'type': 'command',
+            'command': prefix + 'python3 ' + hooks_dir + 'vault-briefing.py',
+            'timeout': 8,
+        }],
+    }
+    wanted['UserPromptSubmit'] = {
+        'matcher': '',
+        'hooks': [{
+            'type': 'command',
+            'command': prefix + 'python3 ' + hooks_dir + 'vault-recall.py',
+            'timeout': 5,
+        }],
+    }
+    wanted['PreToolUse'] = {
+        'matcher': 'Read',
+        'hooks': [{
+            'type': 'command',
+            'command': prefix + 'python3 ' + hooks_dir + 'vault-tool-context.py',
+            'timeout': 2,
+        }],
+    }
 
-hooks = cfg.get('hooks', {})
-changed = False
+# Load or create settings
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        cfg = json.load(f)
+else:
+    cfg = {}
+
+hooks = cfg.setdefault('hooks', {})
+
+# Inject missing hooks
+added = []
+for event, entry in wanted.items():
+    event_hooks = hooks.setdefault(event, [])
+    # Check if our hook script is already present
+    hook_script = entry['hooks'][0]['command']
+    # Extract just the script filename for matching
+    script_name = hook_script.rsplit('/', 1)[-1] if '/' in hook_script else hook_script
+    already = any(
+        script_name in h.get('command', '')
+        for item in event_hooks
+        for h in (item.get('hooks', [item]) if isinstance(item, dict) else [])
+    )
+    if not already:
+        event_hooks.append(entry)
+        added.append(event + '/' + script_name.replace('.py', ''))
+
+# Normalize existing hook commands (update remote prefix)
 for event, entries in hooks.items():
     if not isinstance(entries, list):
         continue
     for entry in entries:
-        # Handle both flat entries and nested {matcher, hooks} entries
         hook_list = entry.get('hooks', [entry]) if isinstance(entry, dict) else []
         for hook in hook_list:
             cmd = hook.get('command', '')
             if hooks_dir not in cmd:
                 continue
-            # Extract the core command (python3 ...) by stripping any wrapper prefix.
-            # This handles both old inline env vars and new bash-source wrappers.
             match = re.search(r'(python3\s+' + re.escape(hooks_dir) + r'.*)', cmd)
             cleaned = match.group(1) if match else cmd
-            # Prepend the new prefix (empty in local mode = just clean up)
             hook['command'] = prefix + cleaned
-            changed = True
 
-if changed:
-    with open(settings_path, 'w') as f:
-        json.dump(cfg, f, indent=2)
-    if prefix:
-        print('Hook commands updated with remote vault URL')
-    else:
-        print('Stale remote prefixes removed from hook commands')
+# Ensure vault permissions exist
+perms = cfg.setdefault('permissions', {}).setdefault('allow', [])
+vault_rules = [
+    'Read(' + vault_path + '/**)',
+    'Edit(' + vault_path + '/**)',
+    'Write(' + vault_path + '/**)',
+    'Bash(' + hooks_dir.rstrip('/').rsplit('/', 1)[0] + '/hooks/vault-commit.sh:*)',
+]
+for rule in vault_rules:
+    if rule not in perms:
+        perms.append(rule)
+
+# Write atomically
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(settings_path), suffix='.json')
+with os.fdopen(fd, 'w') as f:
+    json.dump(cfg, f, indent=2)
+os.replace(tmp, settings_path)
+
+if added:
+    print('Hooks added: ' + ', '.join(added))
 else:
-    print('No memento hooks to update')
-" "$SETTINGS" "$HOOK_ENV_PREFIX" "$CLAUDE_DIR"
-fi
+    print('All hooks already configured')
+" "$SETTINGS" "$HOOK_ENV_PREFIX" "$CLAUDE_DIR" "$VAULT_PATH" "$EXPERIMENTAL"
 
 # --- Save manifest ---
 
