@@ -1,41 +1,34 @@
-# Memento Vault — Fly.io deployment
+# fly.toml app configuration file generated for memento-vault-vic on 2026-04-10T16:12:13Z
 #
-# Deploy:
-#   fly launch --copy-config --no-deploy
-#   fly volumes create vault_data --region iad --size 1 --yes
-#   fly secrets set MEMENTO_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-#   fly deploy
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-# Your vault will be at: https://<app-name>.fly.dev/mcp
-#
-# Custom domain:
-#   fly certs add vault.example.com
 
-app = "memento-vault"
-primary_region = "iad"
+app = 'memento-vault-vic'
+primary_region = 'fra'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  MEMENTO_VAULT_PATH = "/vault"
-  MEMENTO_TRANSPORT = "streamable-http"
-  MEMENTO_HOST = "0.0.0.0"
-  MEMENTO_PORT = "8745"
-  PYTHONPATH = "/app"
+  MEMENTO_HOST = '0.0.0.0'
+  MEMENTO_PORT = '8745'
+  MEMENTO_TRANSPORT = 'streamable-http'
+  MEMENTO_VAULT_PATH = '/vault'
+  PYTHONPATH = '/app'
+
+[[mounts]]
+  source = 'vault_data'
+  destination = '/vault'
 
 [http_service]
   internal_port = 8745
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
 
-[mounts]
-  source = "vault_data"
-  destination = "/vault"
-
 [[vm]]
-  cpu_kind = "shared"
+  memory = '1024mb'
+  cpu_kind = 'shared'
   cpus = 1
-  memory = "512mb"
+  memory_mb = 1024
