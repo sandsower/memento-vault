@@ -83,7 +83,7 @@ class EmbeddedSearchBackend(SearchBackend):
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._indexed: bool = False
         self._provider = embedding_provider
         self._vec_available: bool = False
@@ -173,32 +173,38 @@ class EmbeddedSearchBackend(SearchBackend):
             self._vec_available = False
 
     def is_available(self) -> bool:
-        try:
-            conn = self._get_conn()
-            conn.execute("SELECT 1 FROM notes LIMIT 1")
-            return True
-        except (sqlite3.Error, OSError):
-            return False
+        with self._lock:
+            try:
+                conn = self._get_conn()
+                conn.execute("SELECT 1 FROM notes LIMIT 1")
+                return True
+            except (sqlite3.Error, OSError):
+                return False
 
     def _ensure_indexed(self) -> None:
-        """Auto-index on first search if the database is empty."""
+        """Auto-index on first search if the database is empty.
+
+        Must be called while holding self._lock.
+        """
         if self._indexed:
             return
         try:
             conn = self._get_conn()
             count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
             if count == 0:
-                self.reindex("memento")
+                self._reindex_unlocked("memento")
             self._indexed = True
         except sqlite3.DatabaseError as exc:
             logger.warning("Corrupt search.db, rebuilding: %s", exc)
-            self.close()
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
             try:
                 self._db_path.unlink(missing_ok=True)
             except OSError:
                 pass
             self._init_db()
-            self.reindex("memento")
+            self._reindex_unlocked("memento")
             self._indexed = True
 
     def search(
@@ -218,20 +224,20 @@ class EmbeddedSearchBackend(SearchBackend):
         except (TypeError, ValueError):
             limit = 5
 
-        self._ensure_indexed()
+        with self._lock:
+            self._ensure_indexed()
 
-        if semantic and self._vec_available:
-            return self._vec_search(query, limit, min_score)
+            if semantic and self._vec_available:
+                return self._vec_search(query, limit, min_score)
 
-        if not semantic and self._vec_available:
-            # Hybrid: FTS5 + vector, fused via RRF
-            return self._hybrid_search(query, limit, min_score)
+            if not semantic and self._vec_available:
+                return self._hybrid_search(query, limit, min_score)
 
-        # FTS5, with fallback to simple search for short/symbolic tokens (C++, R)
-        results = self._fts5_search(query, limit, min_score)
-        if not results:
-            results = self._simple_search(query, limit, min_score)
-        return results
+            # FTS5, with fallback to simple search for short/symbolic tokens (C++, R)
+            results = self._fts5_search(query, limit, min_score)
+            if not results:
+                results = self._simple_search(query, limit, min_score)
+            return results
 
     def _fts5_search(self, query: str, limit: int, min_score: float) -> list[dict]:
         """BM25 search via FTS5."""
@@ -410,25 +416,30 @@ class EmbeddedSearchBackend(SearchBackend):
         return results[:limit]
 
     def get(self, path: str, collection: str | None = None, timeout: int = 5) -> dict | None:
-        self._ensure_indexed()
         if not _is_within_vault(self._vault_path / path, self._vault_path):
             return None
 
-        conn = self._get_conn()
-        row = conn.execute(
-            "SELECT path, title, content FROM notes WHERE path = ?", (path,)
-        ).fetchone()
-        if row is None:
-            return None
-        return {
-            "path": row[0],
-            "title": row[1],
-            "content": row[2],
-            "score": 0.0,
-        }
+        with self._lock:
+            self._ensure_indexed()
+            conn = self._get_conn()
+            row = conn.execute(
+                "SELECT path, title, content FROM notes WHERE path = ?", (path,)
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "path": row[0],
+                "title": row[1],
+                "content": row[2],
+                "score": 0.0,
+            }
 
     def reindex(self, collection: str, embed: bool = True) -> bool:
         """Rebuild the search index from all markdown files in the vault."""
+        with self._lock:
+            return self._reindex_unlocked(collection, embed)
+
+    def _reindex_unlocked(self, collection: str, embed: bool = True) -> bool:
         try:
             conn = self._get_conn()
             search_dirs = [
@@ -524,6 +535,10 @@ class EmbeddedSearchBackend(SearchBackend):
 
     def index_note(self, rel_path: str) -> bool:
         """Index or update a single note by its vault-relative path."""
+        with self._lock:
+            return self._index_note_unlocked(rel_path)
+
+    def _index_note_unlocked(self, rel_path: str) -> bool:
         try:
             full_path = self._vault_path / rel_path
             if not full_path.exists():
@@ -573,6 +588,7 @@ class EmbeddedSearchBackend(SearchBackend):
 
     def close(self) -> None:
         """Close the database connection."""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
