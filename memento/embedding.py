@@ -394,7 +394,7 @@ class VoyageProvider(EmbeddingProvider):
             },
         )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             error_body = exc.fp.read().decode() if exc.fp else ""
@@ -466,7 +466,7 @@ class OpenAIProvider(EmbeddingProvider):
             },
         )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             error_body = exc.fp.read().decode() if exc.fp else ""
@@ -536,7 +536,7 @@ class GoogleProvider(EmbeddingProvider):
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             error_body = exc.fp.read().decode() if exc.fp else ""

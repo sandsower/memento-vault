@@ -15,6 +15,20 @@ from memento.search_backend import SearchBackend
 
 logger = logging.getLogger(__name__)
 
+_MAX_EMBED_BATCH = 64
+_MAX_NOTE_SIZE_FOR_EMBED = 100_000  # 100KB
+
+
+def _is_within_vault(path: Path, vault: Path) -> bool:
+    """Check if resolved path is within the vault. Safe against sibling prefix attacks."""
+    try:
+        resolved = path.resolve()
+        vault_resolved = vault.resolve()
+        resolved.relative_to(vault_resolved)
+        return True
+    except (ValueError, OSError):
+        return False
+
 
 def _extract_title(content: str, fallback: str) -> str:
     """Extract title from frontmatter or fall back to filename stem."""
@@ -84,8 +98,10 @@ class EmbeddedSearchBackend(SearchBackend):
                     import sqlite_vec
 
                     self._conn.enable_load_extension(True)
-                    sqlite_vec.load(self._conn)
-                    self._conn.enable_load_extension(False)
+                    try:
+                        sqlite_vec.load(self._conn)
+                    finally:
+                        self._conn.enable_load_extension(False)
                 except (ImportError, sqlite3.OperationalError):
                     pass
         return self._conn
@@ -139,8 +155,10 @@ class EmbeddedSearchBackend(SearchBackend):
             import sqlite_vec
 
             conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            conn.enable_load_extension(False)
+            try:
+                sqlite_vec.load(conn)
+            finally:
+                conn.enable_load_extension(False)
             dim = self._provider.dimensions()
             conn.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec
@@ -164,11 +182,22 @@ class EmbeddedSearchBackend(SearchBackend):
         """Auto-index on first search if the database is empty."""
         if self._indexed:
             return
-        conn = self._get_conn()
-        count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
-        if count == 0:
+        try:
+            conn = self._get_conn()
+            count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+            if count == 0:
+                self.reindex("memento")
+            self._indexed = True
+        except sqlite3.DatabaseError as exc:
+            logger.warning("Corrupt search.db, rebuilding: %s", exc)
+            self.close()
+            try:
+                self._db_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._init_db()
             self.reindex("memento")
-        self._indexed = True
+            self._indexed = True
 
     def search(
         self,
@@ -372,13 +401,7 @@ class EmbeddedSearchBackend(SearchBackend):
 
     def get(self, path: str, collection: str | None = None, timeout: int = 5) -> dict | None:
         self._ensure_indexed()
-        # Reject path traversal
-        try:
-            resolved = (self._vault_path / path).resolve()
-            vault_resolved = self._vault_path.resolve()
-            if not str(resolved).startswith(str(vault_resolved)):
-                return None
-        except (ValueError, OSError):
+        if not _is_within_vault(self._vault_path / path, self._vault_path):
             return None
 
         conn = self._get_conn()
@@ -404,7 +427,6 @@ class EmbeddedSearchBackend(SearchBackend):
                 if (self._vault_path / d).exists()
             ]
 
-            vault_resolved = self._vault_path.resolve()
             indexed_paths = set()
             notes_for_embedding: list[tuple[str, str]] = []  # (path, content)
 
@@ -412,8 +434,7 @@ class EmbeddedSearchBackend(SearchBackend):
                 for md_file in search_dir.rglob("*.md"):
                     if md_file.is_symlink():
                         continue
-                    resolved = md_file.resolve()
-                    if not str(resolved).startswith(str(vault_resolved)):
+                    if not _is_within_vault(md_file, self._vault_path):
                         continue
 
                     rel_path = str(md_file.relative_to(self._vault_path))
@@ -457,22 +478,29 @@ class EmbeddedSearchBackend(SearchBackend):
             return False
 
     def _batch_embed(self, conn: sqlite3.Connection, notes: list[tuple[str, str]]) -> None:
-        """Embed a batch of notes and upsert into notes_vec."""
-        try:
-            texts = [content for _, content in notes]
-            vectors = self._provider.embed(texts)
+        """Embed notes in bounded chunks and upsert into notes_vec."""
+        # Truncate oversized notes for embedding (full text stays in FTS5)
+        truncated = [
+            (path, content[:_MAX_NOTE_SIZE_FOR_EMBED])
+            for path, content in notes
+        ]
 
-            for (path, _), vec in zip(notes, vectors):
-                blob = _vec_to_blob(vec)
-                # Delete existing then insert (vec0 doesn't support ON CONFLICT)
-                conn.execute("DELETE FROM notes_vec WHERE path = ?", (path,))
-                conn.execute(
-                    "INSERT INTO notes_vec (path, embedding) VALUES (?, ?)",
-                    (path, blob),
-                )
-            conn.commit()
-        except Exception as exc:
-            logger.warning("Batch embedding failed: %s", exc)
+        for i in range(0, len(truncated), _MAX_EMBED_BATCH):
+            chunk = truncated[i:i + _MAX_EMBED_BATCH]
+            try:
+                texts = [content for _, content in chunk]
+                vectors = self._provider.embed(texts)
+
+                for (path, _), vec in zip(chunk, vectors):
+                    blob = _vec_to_blob(vec)
+                    conn.execute("DELETE FROM notes_vec WHERE path = ?", (path,))
+                    conn.execute(
+                        "INSERT INTO notes_vec (path, embedding) VALUES (?, ?)",
+                        (path, blob),
+                    )
+                conn.commit()
+            except Exception as exc:
+                logger.warning("Batch embedding chunk %d failed: %s", i, exc)
 
     def index_note(self, rel_path: str) -> bool:
         """Index or update a single note by its vault-relative path."""
@@ -481,9 +509,7 @@ class EmbeddedSearchBackend(SearchBackend):
             if not full_path.exists():
                 return False
 
-            resolved = full_path.resolve()
-            vault_resolved = self._vault_path.resolve()
-            if not str(resolved).startswith(str(vault_resolved)):
+            if not _is_within_vault(full_path, self._vault_path):
                 return False
 
             content = full_path.read_text(errors="replace")

@@ -414,7 +414,21 @@ def _make_embedded(config: dict) -> "SearchBackend | None":
             return None
         db_rel = config.get("search_db_path", ".search/search.db")
         db_path = vault / db_rel
-        return EmbeddedSearchBackend(vault_path=vault, db_path=db_path)
+
+        # Try to build an embedding provider for vector search
+        provider = None
+        try:
+            from memento.embedding import get_embedding_provider
+
+            provider = get_embedding_provider(config)
+            if not provider.is_available():
+                import logging
+                logging.getLogger(__name__).info("Embedding provider not available, running FTS5-only")
+                provider = None
+        except Exception:
+            pass
+
+        return EmbeddedSearchBackend(vault_path=vault, db_path=db_path, embedding_provider=provider)
     except Exception:
         return None
 

@@ -95,6 +95,9 @@ def memento_search(
     if not query or not query.strip():
         return []
 
+    # Clamp limit to prevent DoS via unbounded scans
+    limit = max(1, min(int(limit), 50))
+
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
         return []
@@ -121,11 +124,13 @@ def memento_search(
         # Include full content so callers don't need a separate memento_get
         # round-trip — eliminates latency gap for remote-only notes.
         note_path = vault / r.get("path", "")
-        if note_path.exists():
-            try:
+        try:
+            resolved = note_path.resolve()
+            resolved.relative_to(vault.resolve())
+            if note_path.exists():
                 entry["content"] = _strip_injection(note_path.read_text())
-            except OSError:
-                pass
+        except (ValueError, OSError):
+            pass
         if "content" not in entry and r.get("content"):
             entry["content"] = _strip_injection(r["content"])
         output.append(entry)
