@@ -111,7 +111,14 @@ Run manually:
 python -m memento
 ```
 
-Or configure your agent's MCP settings to spawn it as a subprocess:
+For Claude Code, register with the CLI:
+
+```bash
+claude mcp add -s user -e PYTHONPATH="$HOME/.claude/hooks" \
+  memento-vault -- python3 -m memento
+```
+
+For other MCP-compatible agents (Cursor, Windsurf, etc.), add to your agent's MCP config:
 
 ```json
 {
@@ -132,7 +139,14 @@ If you have a remote vault running (Docker, Fly.io, etc.), any MCP-compatible ag
 1. **Vault URL** (e.g. `https://vault.example.com`)
 2. **API key** (a bearer token for authentication)
 
-Add this to your agent's MCP config (Claude Code uses `~/.claude/mcp-servers.json`):
+**Claude Code** — register via the CLI:
+
+```bash
+claude mcp add -s user --transport http memento-vault https://vault.example.com/mcp \
+  --header "Authorization: Bearer <your-api-key>"
+```
+
+**Other MCP agents** (Cursor, Windsurf, etc.) — add to your agent's MCP config file:
 
 ```json
 {
@@ -144,9 +158,7 @@ Add this to your agent's MCP config (Claude Code uses `~/.claude/mcp-servers.jso
 }
 ```
 
-The `"type": "http"` field is required for Streamable HTTP transport. Without it, some clients won't detect the server.
-
-For Cursor, Windsurf, or other MCP clients, check their docs for where MCP server config lives. The payload is the same: type, url, and auth header.
+> **Note:** Claude Code ignores `~/.claude/mcp-servers.json`. You must use `claude mcp add` to register servers. The JSON config above is for other MCP clients only.
 
 After connecting, the 6 tools listed above are available. Search returns full note content inline (no extra round-trip needed). Restart your agent session after adding the config.
 
@@ -289,7 +301,15 @@ Once the vault is running, connect any device:
 MEMENTO_API_KEY=<key> ./install.sh --remote https://vault.example.com --experimental
 ```
 
-Or configure MCP directly (for claude.ai/code or other MCP clients):
+Or configure MCP directly:
+
+```bash
+# Claude Code
+claude mcp add -s user --transport http memento-vault https://vault.example.com/mcp \
+  --header "Authorization: Bearer <your-api-key>"
+```
+
+For other MCP clients (Cursor, Windsurf, etc.), add to their MCP config:
 
 ```json
 {

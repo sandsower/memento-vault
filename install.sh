@@ -589,21 +589,13 @@ if [ "$MCP_INSTALL" = true ]; then
         info "MCP Python package: available"
     fi
 
-    # Detect MCP config location
-    MCP_CONFIG=""
-    if [ -d "$HOME/.claude" ]; then
-        MCP_CONFIG="$CLAUDE_DIR/mcp-servers.json"
-    fi
-
-    if [ -n "$MCP_CONFIG" ]; then
-        # Create or merge MCP server entry
-        if [ "$REMOTE_MODE" = true ]; then
-            # Remote mode: point MCP at the remote vault URL
-            MCP_HEADERS="{}"
-            if [ -n "$REMOTE_API_KEY" ]; then
-                MCP_HEADERS="{\"Authorization\": \"Bearer $REMOTE_API_KEY\"}"
-            fi
-            MCP_ENTRY=$(python3 -c "
+    # Build MCP server entry for mcp-servers.json (used by Cursor, Windsurf, etc.)
+    if [ "$REMOTE_MODE" = true ]; then
+        MCP_HEADERS="{}"
+        if [ -n "$REMOTE_API_KEY" ]; then
+            MCP_HEADERS="{\"Authorization\": \"Bearer $REMOTE_API_KEY\"}"
+        fi
+        MCP_ENTRY=$(python3 -c "
 import json, sys
 url = sys.argv[1].rstrip('/')
 if not url.endswith('/mcp'):
@@ -614,8 +606,8 @@ if headers:
     entry['memento-vault']['headers'] = headers
 print(json.dumps(entry, indent=2))
 " "$REMOTE_URL" "$MCP_HEADERS")
-        else
-            MCP_ENTRY=$(cat << MCP_EOF
+    else
+        MCP_ENTRY=$(cat << MCP_EOF
 {
   "memento-vault": {
     "command": "python3",
@@ -627,9 +619,16 @@ print(json.dumps(entry, indent=2))
 }
 MCP_EOF
 )
-        fi
+    fi
+
+    # Write mcp-servers.json for non-Claude agents (Cursor, Windsurf, etc.)
+    MCP_CONFIG=""
+    if [ -d "$HOME/.claude" ]; then
+        MCP_CONFIG="$CLAUDE_DIR/mcp-servers.json"
+    fi
+
+    if [ -n "$MCP_CONFIG" ]; then
         if [ -f "$MCP_CONFIG" ]; then
-            # Merge or update MCP server entry
             python3 -c "
 import json, sys, tempfile, os
 config_path = sys.argv[1]
@@ -641,21 +640,54 @@ with os.fdopen(fd, 'w') as f:
     json.dump(existing, f, indent=2)
 os.replace(tmp, config_path)
 " "$MCP_CONFIG" "$MCP_ENTRY"
-            info "MCP server configured in $MCP_CONFIG"
         else
             echo "$MCP_ENTRY" | python3 -c "import json,sys; json.dump(json.load(sys.stdin), open(sys.argv[1],'w'), indent=2)" "$MCP_CONFIG"
-            info "Created $MCP_CONFIG with memento-vault server"
         fi
+        info "MCP config written to $MCP_CONFIG (Cursor, Windsurf, etc.)"
+    fi
+
+    # Register with Claude Code CLI (claude mcp add) — Claude Code ignores mcp-servers.json
+    if command -v claude &>/dev/null; then
+        claude mcp remove memento-vault -s user 2>/dev/null || true
+
+        if [ "$REMOTE_MODE" = true ]; then
+            MCP_URL=$(python3 -c "
+import sys
+url = sys.argv[1].rstrip('/')
+if not url.endswith('/mcp'):
+    url += '/mcp'
+print(url)
+" "$REMOTE_URL")
+            if [ -n "$REMOTE_API_KEY" ]; then
+                claude mcp add -s user --transport http memento-vault "$MCP_URL" \
+                    --header "Authorization: Bearer $REMOTE_API_KEY"
+            else
+                claude mcp add -s user --transport http memento-vault "$MCP_URL"
+            fi
+        else
+            claude mcp add -s user -e PYTHONPATH="$CLAUDE_DIR/hooks" \
+                memento-vault -- python3 -m memento
+        fi
+        info "MCP server registered with Claude Code (scope: user)"
     else
-        warn "Could not detect MCP config location. Manual setup required."
+        warn "Claude Code CLI not found. To register manually, run:"
         echo ""
-        echo "Add this to your agent's MCP server config:"
-        echo ""
-        echo "  \"memento-vault\": {"
-        echo "    \"command\": \"python3\","
-        echo "    \"args\": [\"-m\", \"memento\"],"
-        echo "    \"env\": {\"PYTHONPATH\": \"$CLAUDE_DIR/hooks\"}"
-        echo "  }"
+        if [ "$REMOTE_MODE" = true ]; then
+            MCP_URL=$(python3 -c "
+import sys
+url = sys.argv[1].rstrip('/')
+if not url.endswith('/mcp'):
+    url += '/mcp'
+print(url)
+" "$REMOTE_URL")
+            echo "  claude mcp add -s user --transport http memento-vault $MCP_URL \\"
+            if [ -n "$REMOTE_API_KEY" ]; then
+                echo "    --header \"Authorization: Bearer $REMOTE_API_KEY\""
+            fi
+        else
+            echo "  claude mcp add -s user -e PYTHONPATH=\"$CLAUDE_DIR/hooks\" \\"
+            echo "    memento-vault -- python3 -m memento"
+        fi
         echo ""
     fi
 fi
