@@ -103,6 +103,7 @@ The MCP server exposes 5 tools over stdio (local) or HTTP (remote). Any MCP-comp
 | `memento_capture` | End-of-session triage: parse transcript or accept a summary, write fleeting + atomic note |
 | `memento_get` | Read a specific note by name or path |
 | `memento_status` | Vault health: note count, project count, config summary |
+| `memento_reindex` | Rebuild the search index from all markdown files (after bulk adds, git pull, Obsidian sync) |
 
 Run manually:
 
@@ -124,16 +125,30 @@ Or configure your agent's MCP settings to spawn it as a subprocess:
 
 `memento_capture` is the MCP equivalent of the SessionEnd hook. Agents without hook support can call it at the end of a session with either a transcript path or a structured summary.
 
-For remote vaults, connect via HTTP instead of stdio:
+### Connecting to a remote vault via MCP
+
+If you have a remote vault running (Docker, Fly.io, etc.), any MCP-compatible agent can connect over HTTP. You need two things from whoever deployed the vault:
+
+1. **Vault URL** (e.g. `https://vault.example.com`)
+2. **API key** (a bearer token for authentication)
+
+Add this to your agent's MCP config (Claude Code uses `~/.claude/mcp-servers.json`):
 
 ```json
 {
   "memento-vault": {
+    "type": "http",
     "url": "https://vault.example.com/mcp",
     "headers": {"Authorization": "Bearer <your-api-key>"}
   }
 }
 ```
+
+The `"type": "http"` field is required for Streamable HTTP transport. Without it, some clients won't detect the server.
+
+For Cursor, Windsurf, or other MCP clients, check their docs for where MCP server config lives. The payload is the same: type, url, and auth header.
+
+After connecting, the 6 tools listed above are available. Search returns full note content inline (no extra round-trip needed). Restart your agent session after adding the config.
 
 ## Tenet
 
@@ -279,6 +294,7 @@ Or configure MCP directly (for claude.ai/code or other MCP clients):
 ```json
 {
   "memento-vault": {
+    "type": "http",
     "url": "https://vault.example.com/mcp",
     "headers": {"Authorization": "Bearer <your-api-key>"}
   }
@@ -291,18 +307,21 @@ The `memento/` package is agent-agnostic. Seven modules handle config, search, g
 
 ```
 memento/
-  config.py         Configuration, project detection, vault identity
-  search.py         Search pipeline: PRF, RRF, temporal decay, PageRank
-  search_backend.py Abstract search backend (QMDBackend, swappable)
-  graph.py          Wikilink graph, PageRank, PPR expansion
-  store.py          Vault I/O, write locking, dedup, note writing
-  llm.py            5 backends: claude, codex, gemini, anthropic-api, openai-compat
-  auth.py           Pluggable auth (bearer token, extensible to per-user)
-  remote_client.py  HTTP client for hooks talking to a remote vault
-  utils.py          Secret sanitization, tag normalization
-  types.py          TypedDict definitions (SearchResult, NoteMetadata, SessionMeta)
-  adapters/         Transcript parsing (Claude adapter, pluggable for others)
-  mcp_server.py     MCP server (5 tools, stdio + HTTP transport)
+  config.py          Configuration, project detection, vault identity
+  search.py          Search pipeline: PRF, RRF, temporal decay, PageRank
+  search_backend.py  Abstract search backend (QMD, Embedded, Grep — auto-detected)
+  embedded_search.py Built-in search: SQLite FTS5 + sqlite-vec vectors, RRF hybrid
+  embedding.py       Embedding providers: local nomic-embed-text, Voyage, OpenAI, Google
+  indexer.py         Background indexer for files added outside the write path
+  graph.py           Wikilink graph, PageRank, PPR expansion
+  store.py           Vault I/O, write locking, dedup, note writing
+  llm.py             5 backends: claude, codex, gemini, anthropic-api, openai-compat
+  auth.py            Pluggable auth (bearer token, extensible to per-user)
+  remote_client.py   HTTP client for hooks talking to a remote vault
+  utils.py           Secret sanitization, tag normalization
+  types.py           TypedDict definitions (SearchResult, NoteMetadata, SessionMeta)
+  adapters/          Transcript parsing (Claude adapter, pluggable for others)
+  mcp_server.py      MCP server (6 tools, stdio + HTTP transport)
 ```
 
 LLM backend is configurable:
@@ -344,9 +363,21 @@ Three ways to layer project-specific behavior on top without forking:
 - `extra_qmd_collections` in config: search additional QMD collections alongside the vault
 - `~/.claude/skills/memento-post/SKILL.md`: post-capture hook that runs after `/memento` creates notes (e.g., promote to a team vault, apply domain tags)
 
-## QMD (optional)
+## Search backends
 
-QMD adds semantic search over your vault. Without it the concierge agent falls back to grep, which handles keyword searches but misses conceptual matches. QMD is required for Tenet and Inception.
+The vault auto-detects the best available search backend:
+
+1. **QMD** (if installed) — BM25 + vector search + reranking via external CLI tool (3.2GB)
+2. **Embedded** (if onnxruntime + sqlite-vec installed) — built-in FTS5 + sqlite-vec with nomic-embed-text, RRF hybrid fusion. No external tools needed. Default on remote/Docker deployments.
+3. **Grep** — substring matching fallback. Always works, no dependencies.
+
+Override with `search_backend: qmd | embedded | grep` in config, or `MEMENTO_SEARCH_BACKEND` env var.
+
+The embedded backend uses a single `search.db` SQLite file (derived, disposable). Markdown files stay the source of truth. Embeddings come from a local nomic-embed-text-v1.5 model by default (137MB, no API key). Optional API providers (Voyage, OpenAI, Google) configurable via `embedding_provider` in config.
+
+### QMD (optional)
+
+QMD adds semantic search over your vault. Without it the concierge agent uses the embedded backend or falls back to grep. QMD is required for Tenet and Inception.
 
 ```bash
 qmd search "caching strategy" -c memento

@@ -275,6 +275,19 @@ def write_note(
 
     tmp.write_text("\n".join(lines))
     os.replace(tmp, target)
+
+    # Index in embedded search backend if active
+    try:
+        from memento.search_backend import get_backend
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        backend = get_backend()
+        if isinstance(backend, EmbeddedSearchBackend):
+            rel_path = str(target.relative_to(Path(vault_path)))
+            backend.index_note(rel_path)
+    except Exception:
+        pass  # Indexing failure must not block note storage
+
     return target
 
 

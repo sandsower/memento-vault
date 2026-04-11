@@ -370,16 +370,67 @@ _backend: SearchBackend | None = None
 def get_backend() -> SearchBackend:
     """Get the configured search backend (singleton).
 
-    Tries QMD first; falls back to grep-based search if qmd is not installed.
+    Detection order (search_backend: auto):
+        QMD → Embedded → Grep
+
+    Config override: search_backend: qmd | embedded | grep
     """
     global _backend
     if _backend is None:
-        qmd = QMDBackend()
-        if qmd.is_available():
-            _backend = qmd
-        else:
+        from memento.config import get_config, get_vault
+
+        config = get_config()
+        choice = config.get("search_backend", "auto")
+
+        if choice == "embedded":
+            _backend = _make_embedded(config) or GrepBackend()
+        elif choice == "grep":
             _backend = GrepBackend()
+        elif choice == "qmd":
+            qmd = QMDBackend()
+            _backend = qmd if qmd.is_available() else GrepBackend()
+        else:
+            # auto: QMD → Embedded → Grep
+            qmd = QMDBackend()
+            if qmd.is_available():
+                _backend = qmd
+            else:
+                embedded = _make_embedded(config)
+                if embedded is not None and embedded.is_available():
+                    _backend = embedded
+                else:
+                    _backend = GrepBackend()
     return _backend
+
+
+def _make_embedded(config: dict) -> "SearchBackend | None":
+    """Try to create an EmbeddedSearchBackend. Returns None on failure."""
+    try:
+        from memento.config import get_vault
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        vault = get_vault()
+        if not vault.exists():
+            return None
+        db_rel = config.get("search_db_path", ".search/search.db")
+        db_path = vault / db_rel
+
+        # Try to build an embedding provider for vector search
+        provider = None
+        try:
+            from memento.embedding import get_embedding_provider
+
+            provider = get_embedding_provider(config)
+            if not provider.is_available():
+                import logging
+                logging.getLogger(__name__).info("Embedding provider not available, running FTS5-only")
+                provider = None
+        except Exception:
+            pass
+
+        return EmbeddedSearchBackend(vault_path=vault, db_path=db_path, embedding_provider=provider)
+    except Exception:
+        return None
 
 
 def set_backend(backend: SearchBackend) -> None:

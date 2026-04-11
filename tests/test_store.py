@@ -2,7 +2,7 @@
 
 import threading
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from memento.store import (
     acquire_vault_write_lock,
@@ -100,6 +100,47 @@ class TestWriteNote:
         assert "source: session" in text
         assert "date: " in text
 
+
+    def test_write_note_triggers_indexing(self, tmp_vault):
+        """When embedded backend is active, index_note is called after write."""
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        mock_backend = MagicMock(spec=EmbeddedSearchBackend)
+
+        with patch("memento.search_backend.get_backend", return_value=mock_backend):
+            path = write_note(
+                tmp_vault,
+                title="Indexing test note",
+                body="Should trigger index_note.",
+                note_type="discovery",
+                tags=["test"],
+            )
+
+        assert path.exists()
+        mock_backend.index_note.assert_called_once()
+        call_arg = mock_backend.index_note.call_args[0][0]
+        assert call_arg.startswith("notes/")
+        assert call_arg.endswith(".md")
+
+    def test_write_note_survives_indexing_failure(self, tmp_vault):
+        """If index_note raises, the note is still written successfully."""
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        mock_backend = MagicMock(spec=EmbeddedSearchBackend)
+        mock_backend.index_note.side_effect = RuntimeError("index exploded")
+
+        with patch("memento.search_backend.get_backend", return_value=mock_backend):
+            path = write_note(
+                tmp_vault,
+                title="Survives index failure",
+                body="Note must persist even if indexing blows up.",
+                note_type="decision",
+                tags=["resilience"],
+            )
+
+        assert path.exists()
+        assert "Note must persist" in path.read_text()
+        mock_backend.index_note.assert_called_once()
 
     def test_write_note_does_not_overwrite_existing(self, tmp_vault):
         """Regression: slug collision must not silently replace an existing note."""

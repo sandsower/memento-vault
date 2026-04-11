@@ -95,8 +95,14 @@ def memento_search(
     if not query or not query.strip():
         return []
 
+    # Clamp limit to prevent DoS via unbounded scans
+    try:
+        limit = max(1, min(int(limit), 50))
+    except (TypeError, ValueError):
+        limit = 5
+
     vault = get_vault()
-    if not vault.exists() or not (vault / "notes").exists():
+    if not vault.exists() or not any((vault / d).exists() for d in ("notes", "fleeting", "projects")):
         return []
 
     results = qmd_search_with_extras(
@@ -121,11 +127,13 @@ def memento_search(
         # Include full content so callers don't need a separate memento_get
         # round-trip — eliminates latency gap for remote-only notes.
         note_path = vault / r.get("path", "")
-        if note_path.exists():
-            try:
-                entry["content"] = _strip_injection(note_path.read_text())
-            except OSError:
-                pass
+        try:
+            resolved = note_path.resolve()
+            resolved.relative_to(vault.resolve())
+            if note_path.exists():
+                entry["content"] = _strip_injection(note_path.read_text(errors="replace"))
+        except (ValueError, OSError, UnicodeDecodeError):
+            pass
         if "content" not in entry and r.get("content"):
             entry["content"] = _strip_injection(r["content"])
         output.append(entry)
@@ -289,7 +297,7 @@ def memento_get(path: str) -> dict:
     if full_path != vault_resolved and vault_resolved not in full_path.parents:
         return {"error": "Invalid path: traversal outside vault"}
     if full_path.exists():
-        content = full_path.read_text()
+        content = full_path.read_text(errors="replace")
         # Extract title from frontmatter
         title = Path(path).stem
         title_match = re.search(r"^title:\s*(.+)$", content, re.MULTILINE)
@@ -537,6 +545,46 @@ def memento_capture(
 
     finally:
         release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_reindex() -> dict:
+    """Rebuild the search index from all markdown files in the vault.
+
+    Triggers a full reindex of FTS5 and vector tables. Use this after
+    bulk-adding notes outside the normal write path (e.g., git pull,
+    Obsidian sync, manual file copy).
+
+    Returns:
+        Dict with reindex status and note count.
+    """
+    from memento.search_backend import get_backend
+
+    try:
+        config = get_config()
+        vault = get_vault()
+        collection = config.get("qmd_collection", "memento")
+
+        backend = get_backend()
+        ok = backend.reindex(collection)
+
+        if not ok:
+            log_retrieval("mcp", "reindex_failed")
+            return {"error": "reindex failed — backend returned false"}
+
+        # Count markdown files across vault content dirs
+        count = 0
+        for subdir in ("notes", "fleeting", "projects"):
+            d = vault / subdir
+            if d.exists():
+                count += len(list(d.glob("*.md")))
+
+        log_retrieval("mcp", "reindex", notes_indexed=count)
+        return {"status": "ok", "notes_indexed": count}
+
+    except Exception as exc:
+        log_retrieval("mcp", "reindex_error", error=str(exc))
+        return {"error": f"reindex failed: {type(exc).__name__}: {exc}"}
 
 
 def main():
