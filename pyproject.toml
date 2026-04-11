@@ -1,5 +1,6 @@
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.0"]
+embedded = ["onnxruntime", "sqlite-vec", "numpy", "tokenizers"]
 
 [tool.ruff]
 target-version = "py39"

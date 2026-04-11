@@ -539,6 +539,46 @@ def memento_capture(
         release_vault_write_lock()
 
 
+@mcp.tool()
+def memento_reindex() -> dict:
+    """Rebuild the search index from all markdown files in the vault.
+
+    Triggers a full reindex of FTS5 and vector tables. Use this after
+    bulk-adding notes outside the normal write path (e.g., git pull,
+    Obsidian sync, manual file copy).
+
+    Returns:
+        Dict with reindex status and note count.
+    """
+    from memento.search_backend import get_backend
+
+    try:
+        config = get_config()
+        vault = get_vault()
+        collection = config.get("qmd_collection", "memento")
+
+        backend = get_backend()
+        ok = backend.reindex(collection)
+
+        if not ok:
+            log_retrieval("mcp", "reindex_failed")
+            return {"error": "reindex failed — backend returned false"}
+
+        # Count markdown files across vault content dirs
+        count = 0
+        for subdir in ("notes", "fleeting", "projects"):
+            d = vault / subdir
+            if d.exists():
+                count += len(list(d.glob("*.md")))
+
+        log_retrieval("mcp", "reindex", notes_indexed=count)
+        return {"status": "ok", "notes_indexed": count}
+
+    except Exception as exc:
+        log_retrieval("mcp", "reindex_error", error=str(exc))
+        return {"error": f"reindex failed: {type(exc).__name__}: {exc}"}
+
+
 def main():
     """Run the MCP server.
 

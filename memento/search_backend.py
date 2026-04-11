@@ -370,16 +370,53 @@ _backend: SearchBackend | None = None
 def get_backend() -> SearchBackend:
     """Get the configured search backend (singleton).
 
-    Tries QMD first; falls back to grep-based search if qmd is not installed.
+    Detection order (search_backend: auto):
+        QMD → Embedded → Grep
+
+    Config override: search_backend: qmd | embedded | grep
     """
     global _backend
     if _backend is None:
-        qmd = QMDBackend()
-        if qmd.is_available():
-            _backend = qmd
-        else:
+        from memento.config import get_config, get_vault
+
+        config = get_config()
+        choice = config.get("search_backend", "auto")
+
+        if choice == "embedded":
+            _backend = _make_embedded(config)
+        elif choice == "grep":
             _backend = GrepBackend()
+        elif choice == "qmd":
+            qmd = QMDBackend()
+            _backend = qmd if qmd.is_available() else GrepBackend()
+        else:
+            # auto: QMD → Embedded → Grep
+            qmd = QMDBackend()
+            if qmd.is_available():
+                _backend = qmd
+            else:
+                embedded = _make_embedded(config)
+                if embedded is not None and embedded.is_available():
+                    _backend = embedded
+                else:
+                    _backend = GrepBackend()
     return _backend
+
+
+def _make_embedded(config: dict) -> "SearchBackend | None":
+    """Try to create an EmbeddedSearchBackend. Returns None on failure."""
+    try:
+        from memento.config import get_vault
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        vault = get_vault()
+        if not vault.exists():
+            return None
+        db_rel = config.get("search_db_path", ".search/search.db")
+        db_path = vault / db_rel
+        return EmbeddedSearchBackend(vault_path=vault, db_path=db_path)
+    except Exception:
+        return None
 
 
 def set_backend(backend: SearchBackend) -> None:
