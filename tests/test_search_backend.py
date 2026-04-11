@@ -149,6 +149,80 @@ class TestMockBackend:
         assert qmd_get("notes/missing.md") is None
 
 
+class TestEmbeddedBackendDetection:
+    """EmbeddedSearchBackend detection in get_backend()."""
+
+    def test_embedded_used_when_qmd_unavailable(self, tmp_path):
+        """When QMD is not available but vault exists, EmbeddedSearchBackend is used."""
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        vault = tmp_path / "vault"
+        for d in ("notes", "fleeting", "projects"):
+            (vault / d).mkdir(parents=True)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("memento.search_backend.QMDBackend.is_available", lambda self: False)
+            mp.setattr("memento.config.get_vault", lambda: vault)
+            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "auto", "search_db_path": ".search/search.db"})
+            reset_backend()
+            backend = get_backend()
+            assert isinstance(backend, EmbeddedSearchBackend)
+
+    def test_qmd_preferred_over_embedded(self, tmp_path):
+        """When QMD is available, it should be used over EmbeddedSearchBackend."""
+        vault = tmp_path / "vault"
+        for d in ("notes", "fleeting", "projects"):
+            (vault / d).mkdir(parents=True)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("memento.search_backend.QMDBackend.is_available", lambda self: True)
+            mp.setattr("memento.config.get_vault", lambda: vault)
+            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "auto", "search_db_path": ".search/search.db"})
+            reset_backend()
+            backend = get_backend()
+            assert isinstance(backend, QMDBackend)
+
+    def test_config_override_forces_embedded(self, tmp_path):
+        """search_backend: embedded in config forces EmbeddedSearchBackend."""
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        vault = tmp_path / "vault"
+        for d in ("notes", "fleeting", "projects"):
+            (vault / d).mkdir(parents=True)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("memento.search_backend.QMDBackend.is_available", lambda self: True)
+            mp.setattr("memento.config.get_vault", lambda: vault)
+            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "embedded", "search_db_path": ".search/search.db"})
+            reset_backend()
+            backend = get_backend()
+            assert isinstance(backend, EmbeddedSearchBackend)
+
+    def test_config_override_forces_grep(self, tmp_path):
+        """search_backend: grep in config forces GrepBackend."""
+        vault = tmp_path / "vault"
+        for d in ("notes", "fleeting", "projects"):
+            (vault / d).mkdir(parents=True)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("memento.config.get_vault", lambda: vault)
+            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "grep", "search_db_path": ".search/search.db"})
+            reset_backend()
+            backend = get_backend()
+            assert isinstance(backend, GrepBackend)
+
+    def test_grep_fallback_when_no_vault(self, tmp_path):
+        """When vault doesn't exist, fall back to GrepBackend."""
+        vault = tmp_path / "nonexistent"
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("memento.search_backend.QMDBackend.is_available", lambda self: False)
+            mp.setattr("memento.config.get_vault", lambda: vault)
+            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "auto", "search_db_path": ".search/search.db"})
+            reset_backend()
+            backend = get_backend()
+            assert isinstance(backend, GrepBackend)
+
+
 class TestGrepBackendPathTraversal:
     """Ensure GrepBackend.get rejects paths that escape the vault."""
 

@@ -54,8 +54,8 @@ def server(tmp_path_factory):
     )
 
     api_key = "test-integration-key-12345"
-    # Strip qmd from PATH so the server uses GrepBackend (searches the temp vault
-    # instead of the real QMD collection which doesn't have our test notes)
+    # Force GrepBackend so the server searches the temp vault
+    # instead of the real QMD collection which doesn't have our test notes
     clean_path = os.pathsep.join(
         p for p in os.environ.get("PATH", "").split(os.pathsep)
         if not os.path.isfile(os.path.join(p, "qmd"))
@@ -63,6 +63,7 @@ def server(tmp_path_factory):
     env = {
         **os.environ,
         "PATH": clean_path,
+        "MEMENTO_SEARCH_BACKEND": "grep",
         "MEMENTO_VAULT_PATH": str(vault),
         "MEMENTO_TRANSPORT": "streamable-http",
         "MEMENTO_HOST": "127.0.0.1",

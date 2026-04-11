@@ -19,10 +19,23 @@ COPY hooks/ ./hooks/
 COPY pyproject.toml ./
 
 # Install Python dependencies
-RUN pip install --no-cache-dir "mcp[cli]>=1.27,<2.0"
+RUN pip install --no-cache-dir "mcp[cli]>=1.27,<2.0" onnxruntime sqlite-vec numpy tokenizers
+
+# Download nomic-embed-text-v1.5 int8 model at build time
+RUN python -c "\
+from pathlib import Path; \
+from urllib.request import urlretrieve; \
+model_dir = Path('/app/models/nomic-embed-text-v1.5'); \
+model_dir.mkdir(parents=True, exist_ok=True); \
+base = 'https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx'; \
+urlretrieve(f'{base}/model_quantized.onnx', model_dir / 'model_quantized.onnx'); \
+urlretrieve('https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json', model_dir / 'tokenizer.json'); \
+print(f'Model downloaded: {list(model_dir.iterdir())}')"
+
+ENV MEMENTO_MODEL_CACHE_DIR=/app/models
 
 # Create vault directory
-RUN mkdir -p /vault/notes /vault/fleeting /vault/projects /vault/archive \
+RUN mkdir -p /vault/notes /vault/fleeting /vault/projects /vault/archive /vault/.search \
     && chown -R memento:memento /vault
 
 # Create config directory

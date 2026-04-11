@@ -10,6 +10,7 @@ from memento.mcp_server import (
     _strip_injection,
     memento_capture,
     memento_get,
+    memento_reindex,
     memento_search,
     memento_status,
     memento_store,
@@ -427,3 +428,44 @@ class TestMementoCapture:
         assert project_file.exists()
         content = project_file.read_text()
         assert "windsurf" in content
+
+
+# --- memento_reindex ---
+
+
+class TestMementoReindex:
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_reindex_returns_success(self, tmp_vault, sample_notes):
+        mock_backend = type("MockBackend", (), {"reindex": lambda self, c, embed=True: True})()
+        with (
+            patch("memento.search_backend.get_backend", return_value=mock_backend),
+            patch("memento.mcp_server.log_retrieval"),
+        ):
+            result = memento_reindex()
+
+        assert result["status"] == "ok"
+        assert result["notes_indexed"] >= 1
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_reindex_calls_backend(self, tmp_vault, sample_notes, vault_config):
+        mock_backend = type("MockBackend", (), {"reindex": lambda self, c, embed=True: True})()
+        collection = vault_config.get("qmd_collection", "memento")
+        with (
+            patch("memento.search_backend.get_backend", return_value=mock_backend),
+            patch.object(mock_backend, "reindex", return_value=True) as mock_reindex,
+            patch("memento.mcp_server.log_retrieval"),
+        ):
+            memento_reindex()
+
+        mock_reindex.assert_called_once_with(collection)
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_reindex_backend_failure(self, tmp_vault):
+        mock_backend = type("MockBackend", (), {"reindex": lambda self, c, embed=True: False})()
+        with (
+            patch("memento.search_backend.get_backend", return_value=mock_backend),
+            patch("memento.mcp_server.log_retrieval"),
+        ):
+            result = memento_reindex()
+
+        assert "error" in result

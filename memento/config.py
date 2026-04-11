@@ -107,6 +107,15 @@ DEFAULT_CONFIG = {
         "be": "backend",
         "deps": "dependencies",
     },
+    # Search backend
+    "search_backend": "auto",  # auto | qmd | embedded | grep
+    "search_db_path": ".search/search.db",  # relative to vault_path
+    # Embedding (for embedded search backend)
+    "embedding_provider": "local",  # local | voyage | openai | google
+    "embedding_model": "nomic-embed-text-v1.5",
+    "embedding_dimensions": 512,
+    "embedding_api_key": None,
+    "embedding_api_base": None,
     # LLM backend (agent-agnostic)
     "llm_backend": "claude",
     "llm_model": None,  # None = use agent_model for backwards compat
@@ -148,10 +157,13 @@ def load_config():
                 print(f"[memento] warning: failed to parse config {path}: {exc}", file=_sys.stderr)
             break
 
-    # MEMENTO_VAULT_PATH env var overrides config file
+    # Environment overrides
     env_vault = os.environ.get("MEMENTO_VAULT_PATH")
     if env_vault:
         config["vault_path"] = env_vault
+    env_backend = os.environ.get("MEMENTO_SEARCH_BACKEND")
+    if env_backend:
+        config["search_backend"] = env_backend
     config["vault_path"] = str(Path(config["vault_path"]).expanduser())
 
     # Handle floats that simple YAML parser returns as strings
