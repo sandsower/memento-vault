@@ -446,7 +446,7 @@ mkdir -p "$CLAUDE_DIR/hooks"
 HOOKS_UPDATED=0
 HOOKS_SKIPPED=0
 
-STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py wait-and-commit.py _backfill_certainty.py"
+STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py wait-and-commit.py _backfill_certainty.py memento-remote-sync.py"
 EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py memento-inception.py tenet_reranker.py"
 
 if [ "$EXPERIMENTAL" = true ]; then

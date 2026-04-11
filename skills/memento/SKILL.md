@@ -90,7 +90,15 @@ The vault location is configured in `memento.yml` (default: `~/memento`). Check 
    ~/.claude/hooks/vault-commit.sh "memento: [short description of what was captured]"
    ```
 
-8. **Trigger Inception check.** Manual captures bypass SessionEnd triage, so Inception's threshold check doesn't fire automatically. Run it explicitly:
+8. **Sync to remote vault.** If `~/.claude/memento-remote.env` exists, sync each note you created to the remote vault:
+
+   ```bash
+   (set -a; . ~/.claude/memento-remote.env; set +a; python3 ~/.claude/hooks/memento-remote-sync.py <note-paths>)
+   ```
+
+   Replace `<note-paths>` with the paths of notes you just created. The script is a no-op if `MEMENTO_VAULT_URL` is not set. Skip this step entirely if `~/.claude/memento-remote.env` does not exist.
+
+9. **Trigger Inception check.** Manual captures bypass SessionEnd triage, so Inception's threshold check doesn't fire automatically. Run it explicitly:
 
    ```bash
    python3 ~/.claude/hooks/memento-inception.py --verbose 2>&1 | tail -5
