@@ -227,8 +227,11 @@ class EmbeddedSearchBackend(SearchBackend):
             # Hybrid: FTS5 + vector, fused via RRF
             return self._hybrid_search(query, limit, min_score)
 
-        # FTS5-only fallback
-        return self._fts5_search(query, limit, min_score)
+        # FTS5, with fallback to simple search for short/symbolic tokens (C++, R)
+        results = self._fts5_search(query, limit, min_score)
+        if not results:
+            results = self._simple_search(query, limit, min_score)
+        return results
 
     def _fts5_search(self, query: str, limit: int, min_score: float) -> list[dict]:
         """BM25 search via FTS5."""

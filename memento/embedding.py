@@ -370,9 +370,9 @@ class VoyageProvider(EmbeddingProvider):
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        body = {"input": texts, "model": self._model}
+        body = {"input": texts, "model": self._model, "output_dimension": self._dims}
         data = self._api_call(body)
-        return [item["embedding"] for item in data["data"]]
+        return [item["embedding"][:self._dims] for item in data["data"]]
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed([text])[0]
@@ -528,7 +528,10 @@ class GoogleProvider(EmbeddingProvider):
     def _api_call(self, text: str) -> dict:
         url = _GOOGLE_API_URL_TEMPLATE.format(model=self._model)
         url = f"{url}?key={self._api_key}"
-        body = {"content": {"parts": [{"text": text}]}}
+        body = {
+            "content": {"parts": [{"text": text}]},
+            "outputDimensionality": self._dims,
+        }
         payload = json.dumps(body).encode()
         req = urllib.request.Request(
             url,
