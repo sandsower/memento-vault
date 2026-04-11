@@ -106,6 +106,8 @@ class NomicLocalProvider(EmbeddingProvider):
         self._dims = dimensions
         if cache_dir is not None:
             self._cache_dir = Path(cache_dir)
+        elif os.environ.get("MEMENTO_MODEL_CACHE_DIR"):
+            self._cache_dir = Path(os.environ["MEMENTO_MODEL_CACHE_DIR"])
         else:
             self._cache_dir = (
                 Path.home() / ".cache" / "memento-vault" / "models"
