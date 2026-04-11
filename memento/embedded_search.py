@@ -9,6 +9,7 @@ import logging
 import re
 import sqlite3
 import struct
+import threading
 from pathlib import Path
 
 from memento.search_backend import SearchBackend
@@ -82,6 +83,7 @@ class EmbeddedSearchBackend(SearchBackend):
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
+        self._lock = threading.Lock()
         self._indexed: bool = False
         self._provider = embedding_provider
         self._vec_available: bool = False
@@ -89,7 +91,7 @@ class EmbeddedSearchBackend(SearchBackend):
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self._db_path))
+            self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             # Reload sqlite-vec extension on reconnect
@@ -210,6 +212,11 @@ class EmbeddedSearchBackend(SearchBackend):
     ) -> list[dict]:
         if not query or not query.strip():
             return []
+
+        try:
+            limit = max(1, min(int(limit), 200))
+        except (TypeError, ValueError):
+            limit = 5
 
         self._ensure_indexed()
 
@@ -491,6 +498,11 @@ class EmbeddedSearchBackend(SearchBackend):
                 texts = [content for _, content in chunk]
                 vectors = self._provider.embed(texts)
 
+                if len(vectors) != len(chunk):
+                    logger.warning("Embedding returned %d vectors for %d texts, skipping chunk", len(vectors), len(chunk))
+                    continue
+
+                conn.execute("SAVEPOINT embed_chunk")
                 for (path, _), vec in zip(chunk, vectors):
                     blob = _vec_to_blob(vec)
                     conn.execute("DELETE FROM notes_vec WHERE path = ?", (path,))
@@ -498,9 +510,14 @@ class EmbeddedSearchBackend(SearchBackend):
                         "INSERT INTO notes_vec (path, embedding) VALUES (?, ?)",
                         (path, blob),
                     )
-                conn.commit()
+                conn.execute("RELEASE embed_chunk")
             except Exception as exc:
                 logger.warning("Batch embedding chunk %d failed: %s", i, exc)
+                try:
+                    conn.execute("ROLLBACK TO embed_chunk")
+                    conn.execute("RELEASE embed_chunk")
+                except sqlite3.Error:
+                    pass
 
     def index_note(self, rel_path: str) -> bool:
         """Index or update a single note by its vault-relative path."""
@@ -511,6 +528,9 @@ class EmbeddedSearchBackend(SearchBackend):
 
             if not _is_within_vault(full_path, self._vault_path):
                 return False
+
+            # Canonicalize to prevent duplicate/non-canonical keys
+            rel_path = str(full_path.resolve().relative_to(self._vault_path.resolve()))
 
             content = full_path.read_text(errors="replace")
             title = _extract_title(content, full_path.stem)

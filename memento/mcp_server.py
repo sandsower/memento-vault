@@ -96,7 +96,10 @@ def memento_search(
         return []
 
     # Clamp limit to prevent DoS via unbounded scans
-    limit = max(1, min(int(limit), 50))
+    try:
+        limit = max(1, min(int(limit), 50))
+    except (TypeError, ValueError):
+        limit = 5
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
