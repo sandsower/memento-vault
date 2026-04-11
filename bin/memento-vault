@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# memento-vault CLI wrapper
+# Entry point for Homebrew and manual installations.
+#
+# Usage:
+#   memento-vault install [--experimental] [--mcp] [--remote URL] [--force]
+#   memento-vault uninstall
+#   memento-vault update          # git pull + reinstall
+#   memento-vault version
+set -euo pipefail
+
+# Resolve the repo root (bin/ lives one level below it)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Homebrew installs to a prefix — check both layouts
+if [ ! -f "$SCRIPT_DIR/install.sh" ]; then
+    # Homebrew cellar layout: libexec/memento-vault/install.sh
+    if [ -f "$SCRIPT_DIR/libexec/memento-vault/install.sh" ]; then
+        SCRIPT_DIR="$SCRIPT_DIR/libexec/memento-vault"
+    else
+        echo "Error: cannot find memento-vault installation at $SCRIPT_DIR" >&2
+        exit 1
+    fi
+fi
+
+usage() {
+    echo "Usage: memento-vault <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  install     Install hooks, skills, and agents into Claude Code"
+    echo "  uninstall   Remove memento-vault from Claude Code"
+    echo "  update      Pull latest version and reinstall"
+    echo "  version     Show installed version"
+    echo ""
+    echo "Install options:"
+    echo "  --experimental   Enable Tenet retrieval + Inception consolidation"
+    echo "  --mcp            Install MCP server config"
+    echo "  --remote URL     Connect to a remote vault"
+    echo "  --force          Force overwrite all files"
+}
+
+cmd="${1:-}"
+shift 2>/dev/null || true
+
+case "$cmd" in
+    install)
+        exec "$SCRIPT_DIR/install.sh" "$@"
+        ;;
+    uninstall)
+        exec "$SCRIPT_DIR/uninstall.sh" "$@"
+        ;;
+    update)
+        if [ -d "$SCRIPT_DIR/.git" ]; then
+            echo "Updating memento-vault..."
+            git -C "$SCRIPT_DIR" pull --ff-only 2>/dev/null || git -C "$SCRIPT_DIR" pull --rebase
+            echo ""
+            exec "$SCRIPT_DIR/install.sh" "$@"
+        else
+            echo "Error: not a git checkout — reinstall via brew or bootstrap" >&2
+            exit 1
+        fi
+        ;;
+    version|-v|--version)
+        cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown"
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    "")
+        usage
+        exit 1
+        ;;
+    *)
+        echo "Unknown command: $cmd" >&2
+        echo ""
+        usage
+        exit 1
+        ;;
+esac
