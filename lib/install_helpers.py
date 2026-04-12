@@ -243,6 +243,74 @@ def mcp_url(remote_url):
     print(url)
 
 
+# --- MCP warmup (wake suspended/stopped Fly.io machines) ---
+
+def warmup(remote_url, api_key):
+    """Ping the remote vault with retries to wake it from suspend/stop.
+
+    Prints 'OK <name> v<version>' on success, exits 1 on failure.
+    """
+    import time
+    import urllib.request
+
+    url = remote_url.rstrip("/")
+    if not url.endswith("/mcp"):
+        url += "/mcp"
+
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "memento-installer", "version": "1.0.0"},
+        },
+    }).encode()
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        try:
+            req = urllib.request.Request(
+                url, data=payload, headers=headers, method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read())
+            if "result" in result:
+                info = result["result"].get("serverInfo", {})
+                print(f"OK {info.get('name', 'unknown')} v{info.get('version', '?')}")
+                return
+            raise RuntimeError(result.get("error", {}).get("message", "bad response"))
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                time.sleep(2)
+                continue
+            print(f"FAIL {e}", file=sys.stderr)
+            sys.exit(1)
+
+
+# --- Clear stale MCP auth cache ---
+
+def clear_auth_cache(claude_dir, server_name):
+    """Remove a server from Claude Code's mcp-needs-auth-cache.json."""
+    cache_path = os.path.join(claude_dir, "mcp-needs-auth-cache.json")
+    if not os.path.exists(cache_path):
+        return
+    with open(cache_path) as f:
+        data = json.load(f)
+    if server_name in data:
+        del data[server_name]
+        with open(cache_path, "w") as f:
+            json.dump(data, f)
+        print(f"Cleared {server_name} from auth cache")
+    else:
+        print(f"No stale cache for {server_name}")
+
+
 # --- Dispatch ---
 
 COMMANDS = {
@@ -265,6 +333,10 @@ COMMANDS = {
         sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else ""
     ),
     "mcp-url": lambda: mcp_url(sys.argv[2]),
+    "warmup": lambda: warmup(
+        sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ""
+    ),
+    "clear-auth-cache": lambda: clear_auth_cache(sys.argv[2], sys.argv[3]),
 }
 
 

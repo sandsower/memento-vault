@@ -256,6 +256,20 @@ setup_vault() {
 # Registers the MCP server with `claude mcp add` (or prints manual instructions).
 
 register_mcp_cli() {
+    # Clear stale auth cache (prevents "Skipping connection (cached needs-auth)")
+    python3 "$HELPER" clear-auth-cache "$CLAUDE_DIR" "memento-vault" 2>/dev/null || true
+
+    if [ "$REMOTE_MODE" = true ]; then
+        # Wake the remote server before registering (Fly.io suspend/cold start)
+        info "Warming up remote vault (may take a few seconds on first wake)..."
+        if python3 "$HELPER" warmup "$REMOTE_URL" "${REMOTE_API_KEY:-}"; then
+            info "Remote vault is reachable"
+        else
+            warn "Could not reach remote vault at $REMOTE_URL"
+            warn "MCP registration will proceed, but verify the server is running"
+        fi
+    fi
+
     if command -v claude &>/dev/null; then
         claude mcp remove memento-vault -s user 2>/dev/null || true
 

@@ -310,24 +310,29 @@ fi
 if [ "$MCP_INSTALL" = true ]; then
     step "Setting up MCP server..."
 
-    # Verify mcp Python package is available
-    if ! python3 -c "import mcp" 2>/dev/null; then
-        warn "MCP Python package not found. Installing..."
-        if command -v uv &>/dev/null; then
-            uv pip install "mcp[cli]>=1.0" 2>/dev/null && info "Installed mcp via uv" || true
-        elif command -v pip3 &>/dev/null; then
-            pip3 install "mcp[cli]>=1.0" 2>/dev/null && info "Installed mcp via pip3" || true
-        elif command -v pip &>/dev/null; then
-            pip install "mcp[cli]>=1.0" 2>/dev/null && info "Installed mcp via pip" || true
-        fi
-
+    # The mcp Python package is only needed for local stdio mode.
+    # Remote mode uses HTTP transport — no local Python server required.
+    if [ "$REMOTE_MODE" != true ]; then
         if ! python3 -c "import mcp" 2>/dev/null; then
-            error "Could not install mcp Python package. MCP server will not work."
-            error "Install manually: pip install 'mcp[cli]>=1.0'"
-            MCP_INSTALL=false
+            warn "MCP Python package not found. Installing..."
+            if command -v uv &>/dev/null; then
+                uv pip install "mcp[cli]>=1.0" 2>/dev/null && info "Installed mcp via uv" || true
+            elif command -v pip3 &>/dev/null; then
+                pip3 install "mcp[cli]>=1.0" 2>/dev/null && info "Installed mcp via pip3" || true
+            elif command -v pip &>/dev/null; then
+                pip install "mcp[cli]>=1.0" 2>/dev/null && info "Installed mcp via pip" || true
+            fi
+
+            if ! python3 -c "import mcp" 2>/dev/null; then
+                error "Could not install mcp Python package. MCP server will not work."
+                error "Install manually: pip install 'mcp[cli]>=1.0'"
+                MCP_INSTALL=false
+            fi
+        else
+            info "MCP Python package: available"
         fi
     else
-        info "MCP Python package: available"
+        info "Remote mode: MCP Python package not required locally"
     fi
 
     # Write/merge mcp-servers.json and register with Claude Code CLI
