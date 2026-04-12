@@ -325,6 +325,13 @@ echo ""
 echo -e "  ${CYAN}claude mcp add -s user --transport http memento-vault $VAULT_URL/mcp \\${NC}"
 echo -e "  ${CYAN}  --header \"Authorization: Bearer <key-from-$ENV_FILE>\"${NC}"
 echo ""
+echo -e "${BOLD}To connect from Codex:${NC}"
+echo ""
+echo -e "  ${CYAN}export MEMENTO_API_KEY=<key-from-$ENV_FILE>${NC}"
+echo -e "  ${CYAN}codex mcp add memento-vault \\${NC}"
+echo -e "  ${CYAN}  --url $VAULT_URL/mcp \\${NC}"
+echo -e "  ${CYAN}  --bearer-token-env-var MEMENTO_API_KEY${NC}"
+echo ""
 
 if [ "$IS_REMOTE" != true ]; then
     read -rp "Reconfigure this machine now? [Y/n] " reconfig

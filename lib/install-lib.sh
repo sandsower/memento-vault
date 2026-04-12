@@ -253,7 +253,7 @@ setup_vault() {
 }
 
 # --- register_mcp_cli ---
-# Registers the MCP server with `claude mcp add` (or prints manual instructions).
+# Registers the MCP server with installed MCP-capable CLIs where supported.
 
 register_mcp_cli() {
     # Clear stale auth cache (prevents "Skipping connection (cached needs-auth)")
@@ -300,6 +300,47 @@ register_mcp_cli() {
         else
             echo "  claude mcp add -s user -e PYTHONPATH=\"$CLAUDE_DIR/hooks\" \\"
             echo "    memento-vault -- python3 -m memento"
+        fi
+        echo ""
+    fi
+
+    if command -v codex &>/dev/null; then
+        codex mcp remove memento-vault 2>/dev/null || true
+
+        if [ "$REMOTE_MODE" = true ]; then
+            local codex_mcp_url
+            codex_mcp_url=$(python3 "$HELPER" mcp-url "$REMOTE_URL")
+            if [ -n "$REMOTE_API_KEY" ]; then
+                codex mcp add memento-vault \
+                    --url "$codex_mcp_url" \
+                    --bearer-token-env-var MEMENTO_API_KEY
+            else
+                codex mcp add memento-vault --url "$codex_mcp_url"
+            fi
+        else
+            codex mcp add memento-vault \
+                --env PYTHONPATH="$CLAUDE_DIR/hooks" \
+                -- python3 -m memento
+        fi
+        info "MCP server registered with Codex"
+    else
+        warn "Codex CLI not found. To register manually, run:"
+        echo ""
+        if [ "$REMOTE_MODE" = true ]; then
+            local codex_mcp_url
+            codex_mcp_url=$(python3 "$HELPER" mcp-url "$REMOTE_URL")
+            if [ -n "$REMOTE_API_KEY" ]; then
+                echo "  export MEMENTO_API_KEY=<stored in $CLAUDE_DIR/memento-remote.env>"
+                echo "  codex mcp add memento-vault \\"
+                echo "    --url $codex_mcp_url \\"
+                echo "    --bearer-token-env-var MEMENTO_API_KEY"
+            else
+                echo "  codex mcp add memento-vault --url $codex_mcp_url"
+            fi
+        else
+            echo "  codex mcp add memento-vault \\"
+            echo "    --env PYTHONPATH=\"$CLAUDE_DIR/hooks\" \\"
+            echo "    -- python3 -m memento"
         fi
         echo ""
     fi
@@ -452,6 +493,7 @@ print_summary() {
         echo "  export MEMENTO_VAULT_URL=$REMOTE_URL"
         if [ -n "$REMOTE_API_KEY" ]; then
             echo "  export MEMENTO_API_KEY=<stored in $CLAUDE_DIR/memento-remote.env>"
+            echo "  (Codex remote MCP reads this variable when Codex starts.)"
         fi
     else
         echo ""

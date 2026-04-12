@@ -49,7 +49,7 @@ For agents that support MCP but not native hooks (Cursor, Windsurf, etc.):
 ./install.sh --mcp
 ```
 
-This installs the `memento/` package and writes MCP server config. The server runs over stdio via `python -m memento`. The installer verifies the `mcp` Python package is available and installs it if needed.
+This installs the `memento/` package, writes generic MCP server config, and registers the server with Claude Code and Codex when those CLIs are installed. The server runs over stdio via `python -m memento`. The installer verifies the `mcp` Python package is available and installs it if needed. Claude Code gets Claude-specific skills and the concierge agent under `~/.claude`; Codex gets agent-agnostic skills under `~/.codex/skills`.
 
 You can combine flags: `./install.sh --experimental --mcp` gives you hooks + retrieval + MCP.
 
@@ -118,6 +118,14 @@ claude mcp add -s user -e PYTHONPATH="$HOME/.claude/hooks" \
   memento-vault -- python3 -m memento
 ```
 
+For Codex, register with the CLI:
+
+```bash
+codex mcp add memento-vault \
+  --env PYTHONPATH="$HOME/.claude/hooks" \
+  -- python3 -m memento
+```
+
 For other MCP-compatible agents (Cursor, Windsurf, etc.), add to your agent's MCP config:
 
 ```json
@@ -146,6 +154,15 @@ claude mcp add -s user --transport http memento-vault https://vault.example.com/
   --header "Authorization: Bearer <your-api-key>"
 ```
 
+**Codex** — register via the CLI:
+
+```bash
+export MEMENTO_API_KEY=<your-api-key>
+codex mcp add memento-vault \
+  --url https://vault.example.com/mcp \
+  --bearer-token-env-var MEMENTO_API_KEY
+```
+
 **Other MCP agents** (Cursor, Windsurf, etc.) — add to your agent's MCP config file:
 
 ```json
@@ -158,7 +175,7 @@ claude mcp add -s user --transport http memento-vault https://vault.example.com/
 }
 ```
 
-> **Note:** Claude Code ignores `~/.claude/mcp-servers.json`. You must use `claude mcp add` to register servers. The JSON config above is for other MCP clients only.
+> **Note:** Claude Code ignores `~/.claude/mcp-servers.json`. You must use `claude mcp add` to register servers. Codex uses `codex mcp add`. The JSON config above is for other MCP clients only.
 
 After connecting, the 6 tools listed above are available. Search returns full note content inline (no extra round-trip needed). Restart your agent session after adding the config.
 
@@ -235,6 +252,12 @@ Pattern notes start at certainty 3 (subject to temporal decay and defrag). Use `
 | `/start-fresh` | Capture + save pending work + clear context |
 | `/continue-work` | Recover context from local state and vault |
 
+Agent-specific packaging:
+
+- Claude Code skills live in `skills/` and are installed to `~/.claude/skills`.
+- Claude Code agents live in `agents/` and are installed to `~/.claude/agents`.
+- Agent-agnostic skills live in `skills/generic/` and are installed to `~/.codex/skills` when Codex is available. These are also the source to adapt for future Gemini, Kimi, or other MCP-capable agents.
+
 ### How triage works
 
 ```
@@ -301,12 +324,28 @@ Once the vault is running, connect any device:
 MEMENTO_API_KEY=<key> ./install.sh --remote https://vault.example.com --experimental
 ```
 
+The installer registers the remote MCP server with Claude Code and Codex when their CLIs are installed. Codex stores only the bearer-token environment variable name, so start Codex with `MEMENTO_API_KEY` available in the environment.
+
+To upgrade an existing Claude-only remote install after installing Codex, rerun:
+
+```bash
+./install.sh --remote --experimental
+```
+
+If `~/.claude/memento-remote.env` exists, the installer reuses the saved remote URL and API key.
+
 Or configure MCP directly:
 
 ```bash
 # Claude Code
 claude mcp add -s user --transport http memento-vault https://vault.example.com/mcp \
   --header "Authorization: Bearer <your-api-key>"
+
+# Codex
+export MEMENTO_API_KEY=<your-api-key>
+codex mcp add memento-vault \
+  --url https://vault.example.com/mcp \
+  --bearer-token-env-var MEMENTO_API_KEY
 ```
 
 For other MCP clients (Cursor, Windsurf, etc.), add to their MCP config:
