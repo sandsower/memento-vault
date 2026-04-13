@@ -25,6 +25,77 @@ from memento.store import (
 from memento.utils import sanitize_secrets
 
 
+def _meaningful_note_body(body: str) -> str:
+    body = body.strip()
+    while body.endswith("## Related"):
+        body = body[: -len("## Related")].rstrip()
+    return body
+
+
+def _note_payload_matches(
+    path: Path,
+    *,
+    title: str,
+    body: str,
+    note_type: str,
+    tags: list[str],
+    certainty: int | None = None,
+    project: str | None = None,
+    branch: str | None = None,
+    validity_context: str | None = None,
+    supersedes: str | None = None,
+    session_id: str | None = None,
+) -> bool:
+    """Return True when an existing note represents the same store payload."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    parts = raw.split("---", 2)
+    if len(parts) < 3:
+        return False
+
+    fm, existing_body = parts[1], _meaningful_note_body(parts[2])
+
+    def scalar(key: str) -> str | None:
+        match = re.search(rf"^{re.escape(key)}:\s*(.+)$", fm, re.MULTILINE)
+        if not match:
+            return None
+        return match.group(1).strip().strip("\"'")
+
+    def tag_values() -> list[str]:
+        match = re.search(r"^tags:\s*\[([^\]]*)\]", fm, re.MULTILINE)
+        if not match:
+            return []
+        return [
+            t.strip().strip("\"'")
+            for t in match.group(1).split(",")
+            if t.strip()
+        ]
+
+    comparisons = [
+        scalar("title") == title.strip(),
+        scalar("type") == note_type,
+        tag_values() == (tags or []),
+        existing_body == _meaningful_note_body(body),
+    ]
+
+    optional_fields = {
+        "certainty": str(int(certainty)) if certainty is not None else None,
+        "project": project,
+        "branch": branch,
+        "validity-context": validity_context,
+        "supersedes": supersedes,
+        "session_id": session_id,
+    }
+    for key, expected in optional_fields.items():
+        if expected is not None:
+            comparisons.append(scalar(key) == str(expected))
+
+    return all(comparisons)
+
+
 def _build_server() -> FastMCP:
     """Build the FastMCP server, configured from environment variables.
 
@@ -187,6 +258,29 @@ def memento_store(
         return {"error": "Could not acquire vault write lock (another write in progress)"}
 
     try:
+        target = vault / "notes" / f"{slugify(title.strip())}.md"
+        if target.exists() and _note_payload_matches(
+            target,
+            title=title,
+            body=sanitized_body,
+            note_type=note_type,
+            tags=tags or [],
+            certainty=certainty,
+            project=project,
+            branch=branch,
+            validity_context=validity_context,
+            supersedes=supersedes,
+            session_id=session_id,
+        ):
+            rel_path = str(target.relative_to(vault))
+            log_retrieval("mcp", "store_idempotent", title=title, path=rel_path)
+            return {
+                "path": rel_path,
+                "title": title.strip(),
+                "created": False,
+                "idempotent": True,
+            }
+
         path = write_note(
             vault,
             title=title.strip(),

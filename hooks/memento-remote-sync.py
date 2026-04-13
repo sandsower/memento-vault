@@ -14,23 +14,30 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from memento import sync_ledger  # noqa: E402
-from memento.config import get_vault  # noqa: E402
-from memento.remote_client import is_remote, store  # noqa: E402
+from memento.config import get_vault, slugify  # noqa: E402
+from memento.remote_client import get, is_remote, store  # noqa: E402
 
 
-def parse_note(path):
-    """Parse a markdown note into title, body, type, and tags."""
-    raw = Path(path).read_text()
+def _meaningful_body(body):
+    """Drop empty trailing Related headings added by note writers."""
+    body = body.strip()
+    while body.endswith("## Related"):
+        body = body[: -len("## Related")].rstrip()
+    return body
+
+
+def parse_note_text(raw, fallback_title):
+    """Parse markdown note text into title, body, type, and tags."""
     parts = raw.split("---", 2)
     if len(parts) < 3:
         return None
 
-    fm, body = parts[1], parts[2].strip()
+    fm, body = parts[1], _meaningful_body(parts[2])
     if not body:
         return None
 
     title_m = re.search(r"^title:\s*(.+)$", fm, re.MULTILINE)
-    title = title_m.group(1).strip().strip("\"'") if title_m else Path(path).stem
+    title = title_m.group(1).strip().strip("\"'") if title_m else fallback_title
 
     type_m = re.search(r"^type:\s*(.+)$", fm, re.MULTILINE)
     note_type = type_m.group(1).strip() if type_m else "discovery"
@@ -64,6 +71,11 @@ def parse_note(path):
     }
 
 
+def parse_note(path):
+    """Parse a markdown note into title, body, type, and tags."""
+    return parse_note_text(Path(path).read_text(), Path(path).stem)
+
+
 def _sync_payload(note: dict) -> str:
     """Stable string fed to content_hash — changes here invalidate prior hashes."""
     return "\n".join(
@@ -80,12 +92,37 @@ def _sync_payload(note: dict) -> str:
     )
 
 
+def _remote_note_path(note: dict) -> str:
+    return f"notes/{slugify(note.get('title', ''))}.md"
+
+
+def _dry_run_note(note: dict) -> str:
+    """Return the dry-run disposition for a note without writing remotely."""
+    remote_path = _remote_note_path(note)
+    remote = get(remote_path)
+    if not remote:
+        return "create"
+
+    remote_note = parse_note_text(remote.get("content", ""), Path(remote_path).stem)
+    if remote_note and sync_ledger.content_hash(
+        _sync_payload(remote_note)
+    ) == sync_ledger.content_hash(_sync_payload(note)):
+        return "skip"
+    return "conflict"
+
+
 def main():
     if not is_remote():
         sys.exit(0)
 
-    if len(sys.argv) < 2:
-        print("Usage: memento-remote-sync.py <note-path> [...]", file=sys.stderr)
+    args = sys.argv[1:]
+    dry_run = False
+    if "--dry-run" in args:
+        dry_run = True
+        args = [arg for arg in args if arg != "--dry-run"]
+
+    if not args:
+        print("Usage: memento-remote-sync.py [--dry-run] <note-path> [...]", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -93,7 +130,7 @@ def main():
     except Exception:
         vault = None
 
-    for path in sys.argv[1:]:
+    for path in args:
         if not os.path.exists(path):
             print(f"  Skip (not found): {path}", file=sys.stderr)
             continue
@@ -101,6 +138,16 @@ def main():
         note = parse_note(path)
         if not note:
             print(f"  Skip (empty/unparseable): {path}", file=sys.stderr)
+            continue
+
+        if dry_run:
+            disposition = _dry_run_note(note)
+            if disposition == "skip":
+                print(f"  Would skip (remote exists, same content): {note['title']}")
+            elif disposition == "conflict":
+                print(f"  Would conflict (remote exists, different content): {note['title']}")
+            else:
+                print(f"  Would create: {note['title']}")
             continue
 
         # Stable source key (relative to vault when possible, so moving the
