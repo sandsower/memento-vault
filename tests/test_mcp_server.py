@@ -165,6 +165,52 @@ class TestMementoStore:
         assert "certainty: 3" in content
 
     @pytest.mark.usefixtures("_use_vault_config")
+    def test_identical_existing_note_returns_existing_path(self, tmp_vault):
+        first = memento_store(
+            title="Duplicate safe note",
+            body="Same body.",
+            note_type="discovery",
+            tags=["sync"],
+            certainty=4,
+            project="/home/vic/Projects/memento-vault",
+            branch="main",
+        )
+        second = memento_store(
+            title="Duplicate safe note",
+            body="Same body.",
+            note_type="discovery",
+            tags=["sync"],
+            certainty=4,
+            project="/home/vic/Projects/memento-vault",
+            branch="main",
+        )
+
+        assert second["path"] == first["path"]
+        assert second["created"] is False
+        assert second["idempotent"] is True
+        assert not (tmp_vault / "notes" / "duplicate-safe-note-2.md").exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_same_title_different_content_still_creates_suffix(self, tmp_vault):
+        first = memento_store(
+            title="Conflicting note",
+            body="Original body.",
+            note_type="discovery",
+            tags=["sync"],
+        )
+        second = memento_store(
+            title="Conflicting note",
+            body="Different body.",
+            note_type="discovery",
+            tags=["sync"],
+        )
+
+        assert first["path"] == "notes/conflicting-note.md"
+        assert second["path"] == "notes/conflicting-note-2.md"
+        assert second.get("created") is not False
+        assert (tmp_vault / second["path"]).exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
     def test_writes_note_with_project(self, tmp_vault):
         result = memento_store(
             title="Project note",
