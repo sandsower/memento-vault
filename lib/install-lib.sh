@@ -254,6 +254,13 @@ setup_vault() {
 
 # --- register_mcp_cli ---
 # Registers the MCP server with installed MCP-capable CLIs where supported.
+#
+# Failure model: `claude mcp add` and `codex mcp add` both error if an entry
+# with the same name already exists, so we have to remove first. To avoid
+# leaving the user with no registration when `add` then fails (version skew,
+# unsupported flags, config write error), we snapshot the prior config first
+# and surface a recovery hint on failure. The `if cmd; then ...; else ...; fi`
+# pattern also keeps `set -e` from killing the install on a failed add.
 
 register_mcp_cli() {
     # Clear stale auth cache (prevents "Skipping connection (cached needs-auth)")
@@ -270,24 +277,21 @@ register_mcp_cli() {
         fi
     fi
 
-    if command -v claude &>/dev/null; then
-        claude mcp remove memento-vault -s user 2>/dev/null || true
+    _register_with_claude
+    _register_with_codex
+}
 
-        if [ "$REMOTE_MODE" = true ]; then
-            local mcp_url
-            mcp_url=$(python3 "$HELPER" mcp-url "$REMOTE_URL")
-            if [ -n "$REMOTE_API_KEY" ]; then
-                claude mcp add -s user --transport http memento-vault "$mcp_url" \
-                    --header "Authorization: Bearer $REMOTE_API_KEY"
-            else
-                claude mcp add -s user --transport http memento-vault "$mcp_url"
-            fi
-        else
-            claude mcp add -s user -e PYTHONPATH="$CLAUDE_DIR/hooks" \
-                memento-vault -- python3 -m memento
-        fi
-        info "MCP server registered with Claude Code (scope: user)"
-    else
+# Print the prior MCP config (if any) so the user can manually restore.
+_print_prior_config() {
+    local prior="$1"
+    if [ -n "$prior" ]; then
+        warn "Previous registration was:"
+        printf '%s\n' "$prior" | sed 's/^/    /'
+    fi
+}
+
+_register_with_claude() {
+    if ! command -v claude &>/dev/null; then
         warn "Claude Code CLI not found. To register manually, run:"
         echo ""
         if [ "$REMOTE_MODE" = true ]; then
@@ -302,28 +306,43 @@ register_mcp_cli() {
             echo "    memento-vault -- python3 -m memento"
         fi
         echo ""
+        return
     fi
 
-    if command -v codex &>/dev/null; then
-        codex mcp remove memento-vault 2>/dev/null || true
+    # Snapshot existing registration (best effort) so we can show it on failure.
+    local prior_config=""
+    prior_config=$(claude mcp get memento-vault 2>/dev/null || true)
 
-        if [ "$REMOTE_MODE" = true ]; then
-            local codex_mcp_url
-            codex_mcp_url=$(python3 "$HELPER" mcp-url "$REMOTE_URL")
-            if [ -n "$REMOTE_API_KEY" ]; then
-                codex mcp add memento-vault \
-                    --url "$codex_mcp_url" \
-                    --bearer-token-env-var MEMENTO_API_KEY
-            else
-                codex mcp add memento-vault --url "$codex_mcp_url"
-            fi
+    # Build the add command as an array so quoting stays sane.
+    local add_cmd=()
+    if [ "$REMOTE_MODE" = true ]; then
+        local mcp_url
+        mcp_url=$(python3 "$HELPER" mcp-url "$REMOTE_URL")
+        if [ -n "$REMOTE_API_KEY" ]; then
+            add_cmd=(claude mcp add -s user --transport http memento-vault "$mcp_url" \
+                --header "Authorization: Bearer $REMOTE_API_KEY")
         else
-            codex mcp add memento-vault \
-                --env PYTHONPATH="$CLAUDE_DIR/hooks" \
-                -- python3 -m memento
+            add_cmd=(claude mcp add -s user --transport http memento-vault "$mcp_url")
         fi
-        info "MCP server registered with Codex"
     else
+        add_cmd=(claude mcp add -s user -e "PYTHONPATH=$CLAUDE_DIR/hooks" \
+            memento-vault -- python3 -m memento)
+    fi
+
+    claude mcp remove memento-vault -s user 2>/dev/null || true
+
+    if "${add_cmd[@]}"; then
+        info "MCP server registered with Claude Code (scope: user)"
+    else
+        local rc=$?
+        warn "claude mcp add failed (exit $rc); previous registration was removed."
+        _print_prior_config "$prior_config"
+        warn "Re-register manually: ${add_cmd[*]}"
+    fi
+}
+
+_register_with_codex() {
+    if ! command -v codex &>/dev/null; then
         warn "Codex CLI not found. To register manually, run:"
         echo ""
         if [ "$REMOTE_MODE" = true ]; then
@@ -343,6 +362,56 @@ register_mcp_cli() {
             echo "    -- python3 -m memento"
         fi
         echo ""
+        return
+    fi
+
+    # Preflight: only the remote path uses the newer --url / --bearer-token-env-var
+    # flags. Bail out of the destructive remove if this Codex CLI doesn't know them.
+    if [ "$REMOTE_MODE" = true ]; then
+        local codex_help
+        codex_help=$(codex mcp add --help 2>&1 || true)
+        if ! printf '%s' "$codex_help" | grep -q -- "--url"; then
+            warn "Installed Codex CLI does not support '--url' (remote MCP)."
+            warn "Skipping Codex registration to preserve any existing config."
+            warn "Upgrade Codex CLI and rerun the installer to register."
+            return
+        fi
+        if [ -n "$REMOTE_API_KEY" ] && ! printf '%s' "$codex_help" | grep -q -- "--bearer-token-env-var"; then
+            warn "Installed Codex CLI does not support '--bearer-token-env-var'."
+            warn "Skipping Codex registration to preserve any existing config."
+            return
+        fi
+    fi
+
+    local prior_config=""
+    prior_config=$(codex mcp get memento-vault 2>/dev/null || true)
+
+    local add_cmd=()
+    if [ "$REMOTE_MODE" = true ]; then
+        local codex_mcp_url
+        codex_mcp_url=$(python3 "$HELPER" mcp-url "$REMOTE_URL")
+        if [ -n "$REMOTE_API_KEY" ]; then
+            add_cmd=(codex mcp add memento-vault \
+                --url "$codex_mcp_url" \
+                --bearer-token-env-var MEMENTO_API_KEY)
+        else
+            add_cmd=(codex mcp add memento-vault --url "$codex_mcp_url")
+        fi
+    else
+        add_cmd=(codex mcp add memento-vault \
+            --env "PYTHONPATH=$CLAUDE_DIR/hooks" \
+            -- python3 -m memento)
+    fi
+
+    codex mcp remove memento-vault 2>/dev/null || true
+
+    if "${add_cmd[@]}"; then
+        info "MCP server registered with Codex"
+    else
+        local rc=$?
+        warn "codex mcp add failed (exit $rc); previous registration was removed."
+        _print_prior_config "$prior_config"
+        warn "Re-register manually: ${add_cmd[*]}"
     fi
 }
 
