@@ -30,6 +30,7 @@ from memento.store import (  # noqa: E402
 )
 from memento.adapters import parse_transcript  # noqa: E402
 from memento.utils import normalize_note_tags, read_hook_input, sanitize_secrets  # noqa: E402
+from memento import sync_ledger  # noqa: E402
 
 
 # --- Substantiality scoring ---
@@ -568,18 +569,33 @@ def run_remote_triage(hook_input):
         fleeting_only=not (substantial and new_insight),
     )
 
+    # Best-effort vault lookup; if this fails, ledger recording is skipped
+    # but the rest of the branch still runs.
+    try:
+        vault = get_vault()
+    except Exception:
+        vault = None
+
+    source = f"session:{session_id}"
+    sanitized_summary = sanitize_secrets(summary)
+    payload_hash = sync_ledger.content_hash(sanitized_summary)
+
     if isinstance(result, dict) and "error" in result:
         print(f"[memento] remote capture failed for session {session_id}: {result['error']}", file=sys.stderr)
-        # Spool to an isolated directory so data isn't lost but doesn't pollute
-        # the main vault. Operator can reconcile later via the spool dir.
+        # Spool BOTH formats:
+        #   1. Legacy markdown spool under vault/spool/remote-failures/ for
+        #      operator inspection (kept for backward compat with older tools).
+        #   2. Structured JSON envelope under .sync/spool/capture/ with the
+        #      full capture args — this is what the retry path replays from,
+        #      so a substantive capture doesn't silently degrade to fleeting.
+        legacy_spool_path = None
         try:
-            vault = get_vault()
-            spool_dir = vault / "spool" / "remote-failures"
+            legacy_vault = vault or get_vault()
+            spool_dir = legacy_vault / "spool" / "remote-failures"
             spool_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
             safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)[:64]
             spool_file = spool_dir / f"{ts}-{safe_id}.md"
-            sanitized = sanitize_secrets(summary)
             fm = {
                 "session_id": session_id,
                 "branch": str(meta.get("git_branch", "")),
@@ -589,11 +605,66 @@ def run_remote_triage(hook_input):
             }
             fm_lines = "\n".join(f"{k}: {json.dumps(v)}" for k, v in fm.items())
             spool_file.write_text(
-                f"---\n{fm_lines}\n---\n\n{sanitized}\n"
+                f"---\n{fm_lines}\n---\n\n{sanitized_summary}\n"
             )
+            legacy_spool_path = str(spool_file)
             print(f"[memento] spooled session to {spool_file} for later reconciliation", file=sys.stderr)
         except Exception as fallback_exc:
             print(f"[memento] spool fallback also failed: {fallback_exc}", file=sys.stderr)
+
+        # Build the JSON envelope the retry path will consume. Preserves every
+        # argument the original remote_capture() call used so the replay is
+        # identical to the first attempt.
+        retry_spool_path = None
+        if vault:
+            try:
+                envelope = {
+                    "version": 1,
+                    "session_summary": sanitized_summary,
+                    "cwd": meta.get("cwd", "") or "",
+                    "branch": meta.get("git_branch", "") or "",
+                    "files_edited": list(meta.get("files_edited") or []),
+                    "session_id": session_id,
+                    "agent": "claude",
+                    "fleeting_only": not (substantial and new_insight),
+                }
+                retry_spool_path = str(sync_ledger.spool_payload(
+                    vault, "capture", source, json.dumps(envelope)
+                ))
+            except Exception as exc:
+                print(f"[memento] retry spool failed: {exc}", file=sys.stderr)
+
+        # Record the failure in the sync ledger so retry tooling can find it.
+        # Prefer the structured envelope; fall back to legacy spool if envelope
+        # write failed.
+        if vault:
+            try:
+                sync_ledger.record(
+                    vault,
+                    "capture",
+                    source,
+                    status="error",
+                    content_hash=payload_hash,
+                    error=str(result["error"]),
+                    spool_path=retry_spool_path or legacy_spool_path,
+                )
+            except Exception as exc:
+                print(f"[memento] ledger record failed: {exc}", file=sys.stderr)
+    else:
+        # Record success so retry tooling skips this session and idempotency
+        # holds if the same capture is attempted again.
+        if vault:
+            try:
+                sync_ledger.record(
+                    vault,
+                    "capture",
+                    source,
+                    status="ok",
+                    content_hash=payload_hash,
+                    remote_path=(result or {}).get("path") if isinstance(result, dict) else None,
+                )
+            except Exception as exc:
+                print(f"[memento] ledger record failed: {exc}", file=sys.stderr)
 
 
 def main():
