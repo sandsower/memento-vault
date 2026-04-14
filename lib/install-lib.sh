@@ -302,8 +302,8 @@ _register_with_claude() {
                 echo "    --header \"Authorization: Bearer $REMOTE_API_KEY\""
             fi
         else
-            echo "  claude mcp add -s user -e PYTHONPATH=\"$CLAUDE_DIR/hooks\" \\"
-            echo "    memento-vault -- python3 -m memento"
+            echo "  claude mcp add memento-vault -s user -e PYTHONPATH=\"$CLAUDE_DIR/hooks\" \\"
+            echo "    -- python3 -m memento"
         fi
         echo ""
         return
@@ -325,8 +325,8 @@ _register_with_claude() {
             add_cmd=(claude mcp add -s user --transport http memento-vault "$mcp_url")
         fi
     else
-        add_cmd=(claude mcp add -s user -e "PYTHONPATH=$CLAUDE_DIR/hooks" \
-            memento-vault -- python3 -m memento)
+        add_cmd=(claude mcp add memento-vault -s user -e "PYTHONPATH=$CLAUDE_DIR/hooks" \
+            -- python3 -m memento)
     fi
 
     claude mcp remove memento-vault -s user 2>/dev/null || true

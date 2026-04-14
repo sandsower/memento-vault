@@ -114,8 +114,8 @@ python -m memento
 For Claude Code, register with the CLI:
 
 ```bash
-claude mcp add -s user -e PYTHONPATH="$HOME/.claude/hooks" \
-  memento-vault -- python3 -m memento
+claude mcp add memento-vault -s user -e PYTHONPATH="$HOME/.claude/hooks" \
+  -- python3 -m memento
 ```
 
 For Codex, register with the CLI:
