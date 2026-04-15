@@ -158,14 +158,18 @@ class TestCatchUp:
 
         mock_store.assert_not_called()
 
-    def test_catch_up_detects_changed_notes_by_hash(self, tmp_path, capsys):
+    def test_catch_up_treats_hash_mismatch_as_conflict(self, tmp_path, capsys):
+        """Hash mismatches are conflicts, not pushable changes.
+
+        store() is append-only — pushing a hash-mismatched note would create
+        a `-2.md` duplicate instead of reconciling. Skip and flag instead.
+        """
         mod = _load_remote_sync_module()
         vault = tmp_path / "vault"
 
         note_a = vault / "notes" / "note-a.md"
         _write_note(note_a, title="Note A", body="Updated body.")
 
-        # Remote has the same filename but a different hash (older content)
         remote_inventory = [
             {"path": "notes/note-a.md", "title": "Note A", "hash": "stale_hash_from_old_version"},
         ]
@@ -174,13 +178,41 @@ class TestCatchUp:
             patch.object(mod, "is_remote", return_value=True),
             patch.object(mod, "get_vault", return_value=vault),
             patch("memento.remote_client.list_notes", return_value=remote_inventory),
-            patch.object(mod, "store", return_value={"path": "notes/note-a.md"}) as mock_store,
+            patch.object(mod, "store") as mock_store,
             patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
         ):
             mod.main()
 
-        # Changed notes should be pushed
-        mock_store.assert_called_once()
+        mock_store.assert_not_called()
+        output = capsys.readouterr().out
+        assert "conflict" in output.lower()
+        assert "note-a" in output.lower()
+
+    def test_catch_up_aborts_when_inventory_fetch_fails(self, tmp_path, capsys):
+        """A failed list_notes() must not be treated as an empty remote.
+
+        If we treat an error as empty, catch-up would bulk-push the entire
+        local vault as duplicates.
+        """
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        _write_note(vault / "notes" / "note-a.md", title="Note A")
+        _write_note(vault / "notes" / "note-b.md", title="Note B")
+
+        # Simulate inventory fetch failure with None sentinel
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=None),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                mod.main()
+
+        mock_store.assert_not_called()
+        assert exc_info.value.code != 0
 
     def test_catch_up_dry_run_does_not_store(self, tmp_path, capsys):
         mod = _load_remote_sync_module()

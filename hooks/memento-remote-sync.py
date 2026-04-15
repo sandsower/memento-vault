@@ -119,7 +119,14 @@ def _dry_run_note(note: dict) -> str:
 
 
 def catch_up(vault, dry_run=False, batch=0):
-    """Walk local notes and push anything missing from the remote."""
+    """Walk local notes and push anything missing from the remote.
+
+    Hash mismatches are treated as CONFLICTS (printed and skipped), not
+    pushable changes — store() is append-only and would create duplicates.
+
+    Inventory fetch failures abort the run. Treating a failed list_notes()
+    as an empty remote would bulk-push the entire vault as duplicates.
+    """
     import hashlib
     from memento.remote_client import list_notes
 
@@ -130,10 +137,16 @@ def catch_up(vault, dry_run=False, batch=0):
 
     print("  Fetching remote inventory...")
     remote_notes = list_notes(include_hash=True)
+    if remote_notes is None:
+        print("  Catch-up aborted: could not fetch remote inventory.", file=sys.stderr)
+        print("  Check MEMENTO_VAULT_URL, network, and that the server supports memento_list.", file=sys.stderr)
+        sys.exit(2)
+
     remote_by_name = {Path(r["path"]).name: r for r in remote_notes}
 
     local_files = sorted(notes_dir.glob("*.md"))
     to_push = []
+    conflicts = []
 
     for f in local_files:
         try:
@@ -144,30 +157,31 @@ def catch_up(vault, dry_run=False, batch=0):
         local_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         remote = remote_by_name.get(f.name)
 
-        if remote and remote.get("hash") == local_hash:
-            continue  # identical
+        if remote is None:
+            to_push.append(f)
+        elif remote.get("hash") == local_hash:
+            continue  # identical, nothing to do
+        else:
+            conflicts.append(f)
 
-        to_push.append((f, "changed" if remote else "missing"))
+    for f in conflicts:
+        print(f"  Conflict (hash mismatch, skipped): {f.name}")
 
     if batch > 0:
         to_push = to_push[:batch]
-
-    if not to_push:
-        print(f"  Catch-up: {len(local_files)} local, {len(remote_notes)} remote, 0 to push.")
-        return
 
     pushed = 0
     skipped = 0
     errors = 0
 
-    for f, reason in to_push:
+    for f in to_push:
         note = parse_note(f)
         if not note:
             skipped += 1
             continue
 
         if dry_run:
-            print(f"  Would push ({reason}): {note['title']}")
+            print(f"  Would push: {note['title']}")
             pushed += 1
             continue
 
@@ -189,11 +203,15 @@ def catch_up(vault, dry_run=False, batch=0):
                 vault, "note", source,
                 status="ok", content_hash=chash, remote_path=remote_path,
             )
-            print(f"  Synced ({reason}): {note['title']} -> {remote_path}")
+            print(f"  Synced: {note['title']} -> {remote_path}")
             pushed += 1
 
     action = "Would push" if dry_run else "Pushed"
-    print(f"  Catch-up: {action} {pushed}, skipped {skipped}, errors {errors} (of {len(local_files)} local, {len(remote_notes)} remote)")
+    print(
+        f"  Catch-up: {action} {pushed}, conflicts {len(conflicts)}, "
+        f"skipped {skipped}, errors {errors} "
+        f"(of {len(local_files)} local, {len(remote_notes)} remote)"
+    )
 
 
 def main():

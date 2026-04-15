@@ -153,10 +153,42 @@ class TestCallTool:
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")
-    def test_list_notes_returns_empty_on_error(self, mock_urlopen, mock_url):
+    def test_list_notes_returns_none_on_error(self, mock_urlopen, mock_url):
+        """list_notes() returns None on error to distinguish from empty remote.
+
+        Returning [] would conflate a genuinely-empty vault with a failed call,
+        which makes --catch-up dangerously bulk-push on network errors.
+        """
         from urllib.error import URLError
 
         mock_urlopen.side_effect = URLError("Connection refused")
 
         result = list_notes()
+        assert result is None
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_list_notes_returns_empty_list_when_remote_empty(self, mock_urlopen, mock_url):
+        """An actual empty remote returns [], not None."""
+        mock_urlopen.return_value = self._mock_response([])
+
+        result = list_notes()
         assert result == []
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_list_notes_returns_none_on_server_error(self, mock_urlopen, mock_url):
+        """Server-side errors (JSON-RPC error result) also yield None."""
+        error_response = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32601, "message": "Method not found: memento_list"},
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(error_response).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        result = list_notes()
+        assert result is None
