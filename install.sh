@@ -355,7 +355,7 @@ mkdir -p "$MEMENTO_PKG_DIR/adapters"
 PKG_COPIED=0
 PKG_SKIPPED=0
 
-for mod in __init__.py config.py utils.py search.py search_backend.py graph.py store.py llm.py types.py mcp_server.py __main__.py auth.py remote_client.py embedded_search.py embedding.py indexer.py; do
+for mod in __init__.py config.py utils.py search.py search_backend.py graph.py store.py llm.py types.py mcp_server.py __main__.py auth.py remote_client.py embedded_search.py embedding.py indexer.py sync_ledger.py; do
     if [ -f "$SCRIPT_DIR/memento/$mod" ]; then
         if safe_copy "$SCRIPT_DIR/memento/$mod" "$MEMENTO_PKG_DIR/$mod" "memento/$mod"; then
             ((PKG_COPIED++)) || true
