@@ -56,8 +56,8 @@ Options:
 Environment:
   MEMENTO_VAULT_PATH  Override vault location (default: ~/memento)
 
-Options are remembered between installs. A plain ./install.sh upgrade
-re-applies whatever flags were used last time.
+Options are remembered between installs. Running ./install.sh with no
+flags re-applies whatever was used last time.
 
 Examples:
   ./install.sh                              # Upgrade with previously saved options
