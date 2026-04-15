@@ -36,14 +36,46 @@ EXPERIMENTAL=false
 MCP_INSTALL=false
 REMOTE_URL=""
 REMOTE_MODE=false
+CLI_EXPERIMENTAL=false
+CLI_MCP=false
+CLI_REMOTE=false
+
+usage() {
+    cat <<EOF
+Memento Vault installer v${NEW_VERSION}
+
+Usage: ./install.sh [OPTIONS]
+
+Options:
+  --experimental  Install Tenet retrieval + Inception consolidation modules
+  --mcp           Install MCP server config (Claude Code, Codex, generic clients)
+  --remote [URL]  Connect to a remote vault (implies --mcp)
+  --force         Overwrite all files, ignoring local changes
+  --help          Show this help message
+
+Environment:
+  MEMENTO_VAULT_PATH  Override vault location (default: ~/memento)
+
+Options are remembered between installs. A plain ./install.sh upgrade
+re-applies whatever flags were used last time.
+
+Examples:
+  ./install.sh                              # Upgrade with previously saved options
+  ./install.sh --experimental --mcp         # First install with extras
+  ./install.sh --remote https://vault.example.com:8745
+  MEMENTO_VAULT_PATH=~/my-vault ./install.sh
+EOF
+    exit 0
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --help|-h) usage ;;
         --force) FORCE=true; shift ;;
-        --experimental) EXPERIMENTAL=true; shift ;;
-        --mcp) MCP_INSTALL=true; shift ;;
+        --experimental) EXPERIMENTAL=true; CLI_EXPERIMENTAL=true; shift ;;
+        --mcp) MCP_INSTALL=true; CLI_MCP=true; shift ;;
         --remote)
-            REMOTE_MODE=true
+            REMOTE_MODE=true; CLI_REMOTE=true
             if [[ $# -gt 1 && ! "$2" == --* ]]; then
                 REMOTE_URL="$2"
                 shift 2
@@ -63,6 +95,19 @@ HELPER="$SCRIPT_DIR/lib/install_helpers.py"
 # --- Load existing manifest ---
 
 load_manifest
+
+# Restore options from previous install (CLI flags override)
+if [ -n "$MANIFEST_OPTIONS" ] && [ "$MANIFEST_OPTIONS" != "{}" ]; then
+    if [ "$CLI_EXPERIMENTAL" != true ] && echo "$MANIFEST_OPTIONS" | python3 -c "import sys,json; exit(0 if json.load(sys.stdin).get('experimental') else 1)" 2>/dev/null; then
+        EXPERIMENTAL=true
+    fi
+    if [ "$CLI_MCP" != true ] && echo "$MANIFEST_OPTIONS" | python3 -c "import sys,json; exit(0 if json.load(sys.stdin).get('mcp') else 1)" 2>/dev/null; then
+        MCP_INSTALL=true
+    fi
+    if [ "$CLI_REMOTE" != true ] && echo "$MANIFEST_OPTIONS" | python3 -c "import sys,json; exit(0 if json.load(sys.stdin).get('remote') else 1)" 2>/dev/null; then
+        REMOTE_MODE=true
+    fi
+fi
 
 # On reinstall/upgrade, prefer the vault path from the previous install
 # unless the user explicitly overrode it via MEMENTO_VAULT_PATH.

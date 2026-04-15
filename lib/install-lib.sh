@@ -7,7 +7,7 @@
 #   NEW_VERSION  FORCE  EXPERIMENTAL  MCP_INSTALL
 #   REMOTE_MODE  REMOTE_URL  REMOTE_API_KEY
 #   MANIFEST_FILES_JSON  (accumulator, init to "{}")
-#   INSTALLED_VERSION  MANIFEST_VAULT_PATH  (set by load_manifest)
+#   INSTALLED_VERSION  MANIFEST_VAULT_PATH  MANIFEST_OPTIONS  (set by load_manifest)
 #   QMD_AVAILABLE  (set by preflight checks)
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,11 +48,13 @@ file_hash() {
 load_manifest() {
     INSTALLED_VERSION=""
     MANIFEST_VAULT_PATH=""
+    MANIFEST_OPTIONS=""
     if [ -f "$MANIFEST" ]; then
         local output
         output=$(python3 "$HELPER" manifest-load "$MANIFEST" 2>/dev/null) || return
         INSTALLED_VERSION=$(echo "$output" | sed -n '1p')
         MANIFEST_VAULT_PATH=$(echo "$output" | sed -n '2p')
+        MANIFEST_OPTIONS=$(echo "$output" | sed -n '3p')
     fi
 }
 
@@ -72,9 +74,19 @@ record_file() {
     MANIFEST_FILES_JSON=$(python3 "$HELPER" manifest-record "$MANIFEST_FILES_JSON" "$key" "$hash")
 }
 
+build_options_json() {
+    local opts="{}"
+    [ "$EXPERIMENTAL" = true ] && opts=$(echo "$opts" | python3 -c "import sys,json; d=json.load(sys.stdin); d['experimental']=True; print(json.dumps(d))")
+    [ "$MCP_INSTALL" = true ] && opts=$(echo "$opts" | python3 -c "import sys,json; d=json.load(sys.stdin); d['mcp']=True; print(json.dumps(d))")
+    [ "$REMOTE_MODE" = true ] && opts=$(echo "$opts" | python3 -c "import sys,json; d=json.load(sys.stdin); d['remote']=True; print(json.dumps(d))")
+    echo "$opts"
+}
+
 save_manifest() {
     mkdir -p "$CONFIG_DIR"
-    python3 "$HELPER" manifest-save "$MANIFEST_FILES_JSON" "$NEW_VERSION" "$VAULT_PATH" "$MANIFEST"
+    local opts
+    opts=$(build_options_json)
+    python3 "$HELPER" manifest-save "$MANIFEST_FILES_JSON" "$NEW_VERSION" "$VAULT_PATH" "$MANIFEST" "$opts"
 }
 
 # --- Base copy storage ---
