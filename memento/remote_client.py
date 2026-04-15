@@ -92,6 +92,19 @@ def _call_tool(tool_name: str, arguments: dict, timeout: int = 30) -> dict:
     return result
 
 
+def list_notes(include_hash: bool = True) -> list[dict]:
+    """List all notes on the remote vault with optional content hashes."""
+    result = _call_tool("memento_list", {"include_hash": include_hash})
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict) and "error" in result:
+        import sys
+
+        print(f"[memento] remote list error: {result['error']}", file=sys.stderr)
+        return []
+    return []
+
+
 def search(query: str, limit: int = 5, semantic: bool = False, min_score: float = 0.0, cwd: str = "") -> list[dict]:
     """Search the remote vault."""
     result = _call_tool(

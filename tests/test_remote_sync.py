@@ -1,9 +1,12 @@
 """Tests for hooks/memento-remote-sync.py."""
 
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, call
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -30,6 +33,10 @@ def _write_note(path: Path, *, title: str, body: str = "Body.") -> None:
         "---\n\n"
         f"{body}\n"
     )
+
+
+def _file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 
 
 class TestRemoteSyncDryRun:
@@ -98,3 +105,181 @@ class TestRemoteSyncDryRun:
 
         store.assert_not_called()
         assert "Would conflict (remote exists, different content): Same title" in capsys.readouterr().out
+
+
+class TestCatchUp:
+    def test_catch_up_pushes_missing_notes(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note_a = vault / "notes" / "note-a.md"
+        note_b = vault / "notes" / "note-b.md"
+        _write_note(note_a, title="Note A")
+        _write_note(note_b, title="Note B")
+
+        # Remote has note-a but not note-b
+        remote_inventory = [
+            {"path": "notes/note-a.md", "title": "Note A", "hash": _file_hash(note_a)},
+        ]
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store", return_value={"path": "notes/note-b.md"}) as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        mock_store.assert_called_once()
+        assert mock_store.call_args[1]["title"] == "Note B" or mock_store.call_args[0][0] == "Note B"
+        output = capsys.readouterr().out
+        assert "note-b" in output.lower()
+
+    def test_catch_up_skips_notes_already_on_remote(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note_a = vault / "notes" / "note-a.md"
+        _write_note(note_a, title="Note A")
+
+        remote_inventory = [
+            {"path": "notes/note-a.md", "title": "Note A", "hash": _file_hash(note_a)},
+        ]
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        mock_store.assert_not_called()
+
+    def test_catch_up_detects_changed_notes_by_hash(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note_a = vault / "notes" / "note-a.md"
+        _write_note(note_a, title="Note A", body="Updated body.")
+
+        # Remote has the same filename but a different hash (older content)
+        remote_inventory = [
+            {"path": "notes/note-a.md", "title": "Note A", "hash": "stale_hash_from_old_version"},
+        ]
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store", return_value={"path": "notes/note-a.md"}) as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        # Changed notes should be pushed
+        mock_store.assert_called_once()
+
+    def test_catch_up_dry_run_does_not_store(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note_a = vault / "notes" / "note-a.md"
+        _write_note(note_a, title="Note A")
+
+        remote_inventory = []  # Remote is empty
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up", "--dry-run"]),
+        ):
+            mod.main()
+
+        mock_store.assert_not_called()
+        output = capsys.readouterr().out
+        assert "would push" in output.lower() or "would create" in output.lower()
+
+    def test_catch_up_respects_batch_limit(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        # Create 5 notes, all missing from remote
+        for i in range(5):
+            _write_note(vault / "notes" / f"note-{i}.md", title=f"Note {i}")
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=[]),
+            patch.object(mod, "store", return_value={"path": "notes/x.md"}) as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up", "--batch", "2"]),
+        ):
+            mod.main()
+
+        assert mock_store.call_count == 2
+
+    def test_catch_up_records_in_ledger(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+        (vault / "notes").mkdir(parents=True)
+
+        note_a = vault / "notes" / "note-a.md"
+        _write_note(note_a, title="Note A")
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=[]),
+            patch.object(mod, "store", return_value={"path": "notes/note-a.md"}),
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        ledger_file = vault / ".sync" / "ledger.jsonl"
+        assert ledger_file.exists()
+        content = ledger_file.read_text()
+        assert "note-a" in content
+        assert '"status":"ok"' in content.replace(" ", "").replace(": ", ":")
+
+    def test_catch_up_prints_summary(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        _write_note(vault / "notes" / "new.md", title="New Note")
+        _write_note(vault / "notes" / "existing.md", title="Existing Note")
+
+        existing_hash = _file_hash(vault / "notes" / "existing.md")
+        remote_inventory = [
+            {"path": "notes/existing.md", "title": "Existing Note", "hash": existing_hash},
+        ]
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store", return_value={"path": "notes/new.md"}),
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        output = capsys.readouterr().out
+        # Should show some kind of summary with counts
+        assert "1" in output  # 1 pushed or 1 skipped
+
+    def test_catch_up_noop_when_not_remote(self, tmp_path):
+        mod = _load_remote_sync_module()
+
+        with (
+            patch.object(mod, "is_remote", return_value=False),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            with pytest.raises(SystemExit):
+                mod.main()
+
+        mock_store.assert_not_called()

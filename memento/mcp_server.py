@@ -642,6 +642,46 @@ def memento_capture(
 
 
 @mcp.tool()
+def memento_list(include_hash: bool = True) -> list[dict]:
+    """List all notes in the vault with optional content hashes.
+
+    Returns a lightweight inventory for sync clients to diff local vs remote
+    without fetching full content.
+
+    Args:
+        include_hash: Include sha256 hash of raw file content (default: True).
+
+    Returns:
+        List of dicts with path, title, and optionally hash.
+    """
+    import hashlib
+
+    vault = get_vault()
+    notes_dir = vault / "notes"
+    if not notes_dir.exists():
+        return []
+
+    results = []
+    for f in sorted(notes_dir.glob("*.md")):
+        entry = {"path": f"notes/{f.name}"}
+        try:
+            raw = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        title_match = re.search(r"^title:\s*(.+)$", raw, re.MULTILINE)
+        entry["title"] = title_match.group(1).strip().strip("\"'") if title_match else f.stem
+
+        if include_hash:
+            entry["hash"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+        results.append(entry)
+
+    log_retrieval("mcp", "list", count=len(results))
+    return results
+
+
+@mcp.tool()
 def memento_reindex() -> dict:
     """Rebuild the search index from all markdown files in the vault.
 

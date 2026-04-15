@@ -4,7 +4,7 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 
-from memento.remote_client import is_remote, search, get, store, capture, status
+from memento.remote_client import is_remote, list_notes, search, get, store, capture, status
 
 
 class TestIsRemote:
@@ -133,3 +133,30 @@ class TestCallTool:
 
         req = mock_urlopen.call_args[0][0]
         assert req.full_url == "http://localhost:8745/mcp"
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_list_notes(self, mock_urlopen, mock_url):
+        inventory = [
+            {"path": "notes/foo.md", "title": "Foo", "hash": "abc123"},
+            {"path": "notes/bar.md", "title": "Bar", "hash": "def456"},
+        ]
+        mock_urlopen.return_value = self._mock_response(inventory)
+
+        result = list_notes()
+        assert len(result) == 2
+        assert result[0]["path"] == "notes/foo.md"
+        assert result[1]["hash"] == "def456"
+
+        body = json.loads(mock_urlopen.call_args[0][0].data)
+        assert body["params"]["name"] == "memento_list"
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_list_notes_returns_empty_on_error(self, mock_urlopen, mock_url):
+        from urllib.error import URLError
+
+        mock_urlopen.side_effect = URLError("Connection refused")
+
+        result = list_notes()
+        assert result == []
