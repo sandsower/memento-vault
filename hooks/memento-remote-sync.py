@@ -118,8 +118,33 @@ def _dry_run_note(note: dict) -> str:
     return "conflict"
 
 
+def _build_ledger_index(vault):
+    """Build lookup indexes from the sync ledger.
+
+    Returns:
+        by_source: {source_path: entry} — latest entry per local source
+        remote_paths: set of remote_path values from successful pushes
+    """
+    by_source = {}
+    remote_paths = set()
+    for entry in sync_ledger.iter_entries(vault):
+        if entry.get("kind") != "note":
+            continue
+        source = entry.get("source", "")
+        if source:
+            by_source[source] = entry
+        if entry.get("status") == "ok" and entry.get("remote_path"):
+            remote_paths.add(Path(entry["remote_path"]).name)
+    return by_source, remote_paths
+
+
 def catch_up(vault, dry_run=False, batch=0):
     """Walk local notes and push anything missing from the remote.
+
+    Uses two layers to determine what needs pushing:
+    1. Remote inventory (filename match) — catches notes pushed by other means
+    2. Sync ledger (source + content hash) — catches notes whose remote
+       filename differs from the local one (slugification, dedupe suffixes)
 
     Hash mismatches are treated as CONFLICTS (printed and skipped), not
     pushable changes — store() is append-only and would create duplicates.
@@ -144,9 +169,12 @@ def catch_up(vault, dry_run=False, batch=0):
 
     remote_by_name = {Path(r["path"]).name: r for r in remote_notes}
 
+    ledger_by_source, ledger_remote_paths = _build_ledger_index(vault)
+
     local_files = sorted(notes_dir.glob("*.md"))
     to_push = []
     conflicts = []
+    ledger_skipped = 0
 
     for f in local_files:
         try:
@@ -157,12 +185,35 @@ def catch_up(vault, dry_run=False, batch=0):
         local_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         remote = remote_by_name.get(f.name)
 
-        if remote is None:
-            to_push.append(f)
-        elif remote.get("hash") == local_hash:
-            continue  # identical, nothing to do
-        else:
-            conflicts.append(f)
+        if remote is not None:
+            if remote.get("hash") == local_hash:
+                continue  # identical by filename match
+            else:
+                conflicts.append(f)
+                continue
+
+        # No filename match — check the ledger for a prior successful push
+        source = str(f.relative_to(vault))
+        ledger_entry = ledger_by_source.get(source)
+        if ledger_entry and ledger_entry.get("status") == "ok":
+            # Ledger says we pushed this before. Verify content hasn't changed.
+            note = parse_note(f)
+            if note:
+                chash = sync_ledger.content_hash(_sync_payload(note))
+                if chash == ledger_entry.get("content_hash"):
+                    ledger_skipped += 1
+                    continue
+                # Content changed since last push — check if remote has the
+                # note under its slugified name (it may be a conflict).
+                remote_name = Path(ledger_entry.get("remote_path", "")).name
+                if remote_name and remote_name in remote_by_name:
+                    conflicts.append(f)
+                    continue
+            else:
+                ledger_skipped += 1
+                continue
+
+        to_push.append(f)
 
     for f in conflicts:
         print(f"  Conflict (hash mismatch, skipped): {f.name}")
@@ -209,7 +260,7 @@ def catch_up(vault, dry_run=False, batch=0):
     action = "Would push" if dry_run else "Pushed"
     print(
         f"  Catch-up: {action} {pushed}, conflicts {len(conflicts)}, "
-        f"skipped {skipped}, errors {errors} "
+        f"skipped {skipped}, ledger-matched {ledger_skipped}, errors {errors} "
         f"(of {len(local_files)} local, {len(remote_notes)} remote)"
     )
 
