@@ -315,3 +315,112 @@ class TestCatchUp:
                 mod.main()
 
         mock_store.assert_not_called()
+
+    def test_catch_up_skips_ledger_matched_notes(self, tmp_path, capsys):
+        """Notes pushed under a different remote filename must not be re-pushed.
+
+        store() slugifies the title, which can produce a different filename
+        than the local one. The ledger records the mapping, so catch-up should
+        use it to avoid duplicates.
+        """
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note = vault / "notes" / "local-name.md"
+        _write_note(note, title="Local Name")
+
+        # Remote has this note under a slugified name — no filename match
+        remote_inventory = [
+            {"path": "notes/local-name-2.md", "title": "Local Name", "hash": "different"},
+        ]
+
+        # Simulate a prior successful push recorded in the ledger
+        parsed = mod.parse_note(note)
+        chash = mod.sync_ledger.content_hash(mod._sync_payload(parsed))
+        mod.sync_ledger.record(
+            vault, "note", "notes/local-name.md",
+            status="ok", content_hash=chash, remote_path="notes/local-name-2.md",
+        )
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        mock_store.assert_not_called()
+        output = capsys.readouterr().out
+        assert "ledger-matched 1" in output
+
+    def test_catch_up_pushes_when_content_changed_since_ledger(self, tmp_path, capsys):
+        """If local content changed after the ledger recorded a push, push again."""
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note = vault / "notes" / "evolving-note.md"
+        _write_note(note, title="Evolving Note", body="Version 1.")
+
+        # Record a ledger entry for the old version
+        parsed_v1 = mod.parse_note(note)
+        chash_v1 = mod.sync_ledger.content_hash(mod._sync_payload(parsed_v1))
+        mod.sync_ledger.record(
+            vault, "note", "notes/evolving-note.md",
+            status="ok", content_hash=chash_v1, remote_path="notes/evolving-note.md",
+        )
+
+        # Now update the local note
+        _write_note(note, title="Evolving Note", body="Version 2 — updated.")
+
+        # Remote doesn't have a filename match (was stored under slugified name)
+        remote_inventory = []
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store", return_value={"path": "notes/evolving-note.md"}) as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        mock_store.assert_called_once()
+
+    def test_catch_up_conflict_when_content_changed_and_remote_has_old(self, tmp_path, capsys):
+        """Changed content + remote has the old version = conflict, not push."""
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note = vault / "notes" / "diverged-note.md"
+        _write_note(note, title="Diverged Note", body="Version 1.")
+
+        # Record ledger with the old push
+        parsed_v1 = mod.parse_note(note)
+        chash_v1 = mod.sync_ledger.content_hash(mod._sync_payload(parsed_v1))
+        mod.sync_ledger.record(
+            vault, "note", "notes/diverged-note.md",
+            status="ok", content_hash=chash_v1, remote_path="notes/diverged-note-2.md",
+        )
+
+        # Now update the local note
+        _write_note(note, title="Diverged Note", body="Version 2.")
+
+        # Remote has the note under the slugified name from the ledger
+        remote_inventory = [
+            {"path": "notes/diverged-note-2.md", "title": "Diverged Note", "hash": "old_hash"},
+        ]
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        mock_store.assert_not_called()
+        output = capsys.readouterr().out
+        assert "conflict" in output.lower()
