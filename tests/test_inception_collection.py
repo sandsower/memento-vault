@@ -137,6 +137,29 @@ class TestCollectEligibleNotes:
         assert "new-note" in stems
         assert "old-note" not in stems
 
+    def test_incremental_falls_back_to_mtime_when_date_missing(self, tmp_vault, mock_config):
+        """Notes without a date frontmatter fall back to file mtime for the incremental cutoff."""
+        import os
+        import time
+        from memento_inception import collect_eligible_notes
+
+        # Note with no date, mtime set well before last_run
+        old = tmp_vault / "notes" / "no-date-old.md"
+        old.write_text("---\ntitle: Old\ntype: discovery\ntags: []\n---\n\nBody.\n")
+        past = time.mktime(time.strptime("2026-03-01T00:00:00", "%Y-%m-%dT%H:%M:%S"))
+        os.utime(str(old), (past, past))
+
+        # Note with no date, mtime now (after last_run)
+        new = tmp_vault / "notes" / "no-date-new.md"
+        new.write_text("---\ntitle: New\ntype: discovery\ntags: []\n---\n\nBody.\n")
+
+        state = {"processed_notes": [], "last_run_iso": "2026-03-15T00:00:00"}
+        result = collect_eligible_notes(mock_config, state)
+
+        stems = {r.stem for r in result}
+        assert "no-date-new" in stems
+        assert "no-date-old" not in stems
+
     def test_skip_dotfiles(self, tmp_vault, mock_config):
         """Hidden files (starting with .) are skipped."""
         from memento_inception import collect_eligible_notes
