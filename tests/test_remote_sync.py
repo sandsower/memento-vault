@@ -316,6 +316,109 @@ class TestCatchUp:
 
         mock_store.assert_not_called()
 
+    def test_catch_up_skips_hash_mismatch_when_ledger_explains_it(self, tmp_path, capsys):
+        """Hash mismatch with matching ledger content_hash = expected metadata divergence.
+
+        write_note() on the remote reconstructs source/date fields, so raw file
+        hashes always differ. When the ledger confirms the semantic content was
+        already pushed (content_hash match), skip instead of flagging conflict.
+        """
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note = vault / "notes" / "synced-note.md"
+        _write_note(note, title="Synced Note", body="Same body.")
+
+        # Remote has the same filename but a different raw hash (metadata divergence)
+        remote_inventory = [
+            {"path": "notes/synced-note.md", "title": "Synced Note", "hash": "different_due_to_metadata"},
+        ]
+
+        # Ledger records a successful push with matching content_hash
+        parsed = mod.parse_note(note)
+        chash = mod.sync_ledger.content_hash(mod._sync_payload(parsed))
+        mod.sync_ledger.record(
+            vault, "note", "notes/synced-note.md",
+            status="ok", content_hash=chash, remote_path="notes/synced-note.md",
+        )
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        mock_store.assert_not_called()
+        output = capsys.readouterr().out
+        assert "conflict (hash mismatch" not in output.lower()
+        assert "conflicts 0" in output
+        assert "ledger-matched 1" in output
+
+    def test_catch_up_conflicts_hash_mismatch_without_ledger(self, tmp_path, capsys):
+        """Hash mismatch with no ledger entry = genuine conflict."""
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note = vault / "notes" / "diverged.md"
+        _write_note(note, title="Diverged", body="Local version.")
+
+        remote_inventory = [
+            {"path": "notes/diverged.md", "title": "Diverged", "hash": "remote_wrote_different_content"},
+        ]
+
+        # No ledger entry — we don't know why hashes differ
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        mock_store.assert_not_called()
+        output = capsys.readouterr().out
+        assert "conflict" in output.lower()
+
+    def test_catch_up_conflicts_hash_mismatch_with_stale_ledger(self, tmp_path, capsys):
+        """Hash mismatch + ledger content_hash also differs = real content change."""
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note = vault / "notes" / "evolved.md"
+        _write_note(note, title="Evolved", body="Version 1.")
+
+        # Record ledger for version 1
+        parsed_v1 = mod.parse_note(note)
+        chash_v1 = mod.sync_ledger.content_hash(mod._sync_payload(parsed_v1))
+        mod.sync_ledger.record(
+            vault, "note", "notes/evolved.md",
+            status="ok", content_hash=chash_v1, remote_path="notes/evolved.md",
+        )
+
+        # Local content changed to version 2
+        _write_note(note, title="Evolved", body="Version 2 — updated locally.")
+
+        remote_inventory = [
+            {"path": "notes/evolved.md", "title": "Evolved", "hash": "remote_has_v1_metadata"},
+        ]
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        mock_store.assert_not_called()
+        output = capsys.readouterr().out
+        assert "conflict" in output.lower()
+
     def test_catch_up_skips_ledger_matched_notes(self, tmp_path, capsys):
         """Notes pushed under a different remote filename must not be re-pushed.
 
