@@ -179,6 +179,11 @@ def _tokenize_for_match(text):
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
+def _body_has_related_heading(body):
+    """Return True when the body already contains a top-level ``## Related`` heading."""
+    return any(line.strip() == "## Related" for line in body.splitlines())
+
+
 def find_dedup_candidates(vault_path, title, tags, limit=5):
     """Find notes with title/tag overlap likely to cover the same topic."""
     notes_dir = Path(vault_path) / "notes"
@@ -271,7 +276,15 @@ def write_note(
     lines.append(f"date: {now}")
     if session_id:
         lines.append(f"session_id: {_safe_yaml_scalar(session_id)}")
-    lines.extend(["---", "", body.strip(), "", "## Related", ""])
+
+    # Append the canonical "## Related" placeholder only if the body doesn't
+    # already contain one — otherwise callers that include their own ## Related
+    # section produce duplicate (often empty) headers.
+    body_stripped = body.strip()
+    if _body_has_related_heading(body_stripped):
+        lines.extend(["---", "", body_stripped, ""])
+    else:
+        lines.extend(["---", "", body_stripped, "", "## Related", ""])
 
     tmp.write_text("\n".join(lines))
     os.replace(tmp, target)

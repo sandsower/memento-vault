@@ -142,6 +142,41 @@ class TestWriteNote:
         assert "Note must persist" in path.read_text()
         mock_backend.index_note.assert_called_once()
 
+    def test_write_note_appends_related_when_body_lacks_one(self, tmp_vault):
+        """Bodies without a ``## Related`` section get the canonical placeholder."""
+        path = write_note(
+            tmp_vault,
+            title="No related in body",
+            body="Just a plain body.",
+            note_type="discovery",
+            tags=["test"],
+        )
+
+        text = path.read_text()
+        assert text.count("## Related") == 1
+        assert text.rstrip().endswith("## Related")
+
+    def test_write_note_skips_related_when_body_has_one(self, tmp_vault):
+        """Regression: bodies with their own ``## Related`` section must not get a duplicate."""
+        body = (
+            "Body content with cross-references.\n\n"
+            "## Related\n"
+            "- [[note-a]]\n"
+            "- [[note-b]]\n"
+        )
+        path = write_note(
+            tmp_vault,
+            title="Related in body",
+            body=body,
+            note_type="pattern",
+            tags=["test"],
+        )
+
+        text = path.read_text()
+        assert text.count("## Related") == 1
+        assert "[[note-a]]" in text
+        assert "[[note-b]]" in text
+
     def test_write_note_does_not_overwrite_existing(self, tmp_vault):
         """Regression: slug collision must not silently replace an existing note."""
         first = write_note(
