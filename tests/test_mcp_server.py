@@ -10,6 +10,7 @@ from memento.mcp_server import (
     _strip_injection,
     memento_capture,
     memento_get,
+    memento_list,
     memento_reindex,
     memento_search,
     memento_status,
@@ -515,3 +516,97 @@ class TestMementoReindex:
             result = memento_reindex()
 
         assert "error" in result
+
+
+# --- memento_list ---
+
+
+class TestMementoList:
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_returns_all_notes(self, tmp_vault, sample_notes):
+        with patch("memento.mcp_server.log_retrieval"):
+            results = memento_list()
+
+        # sample_notes creates 6 notes in notes/ (1 goes to archive/)
+        note_count = len(list((tmp_vault / "notes").glob("*.md")))
+        assert len(results) == note_count
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_each_entry_has_path_title_hash(self, tmp_vault, sample_notes):
+        with patch("memento.mcp_server.log_retrieval"):
+            results = memento_list()
+
+        for entry in results:
+            assert "path" in entry
+            assert "title" in entry
+            assert "hash" in entry
+            assert entry["path"].startswith("notes/")
+            assert entry["path"].endswith(".md")
+            assert len(entry["hash"]) == 64  # sha256 hex
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_hash_is_sha256_of_raw_content(self, tmp_vault, sample_notes):
+        import hashlib
+
+        with patch("memento.mcp_server.log_retrieval"):
+            results = memento_list()
+
+        for entry in results:
+            file_path = tmp_vault / entry["path"]
+            expected = hashlib.sha256(file_path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+            assert entry["hash"] == expected
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_include_hash_false_omits_hash(self, tmp_vault, sample_notes):
+        with patch("memento.mcp_server.log_retrieval"):
+            results = memento_list(include_hash=False)
+
+        for entry in results:
+            assert "hash" not in entry
+            assert "path" in entry
+            assert "title" in entry
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_empty_vault_returns_empty(self, tmp_vault):
+        with patch("memento.mcp_server.log_retrieval"):
+            results = memento_list()
+
+        assert results == []
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_excludes_archive_notes(self, tmp_vault, sample_notes):
+        with patch("memento.mcp_server.log_retrieval"):
+            results = memento_list()
+
+        paths = [r["path"] for r in results]
+        assert not any("archive" in p for p in paths)
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_results_sorted_by_path(self, tmp_vault, sample_notes):
+        with patch("memento.mcp_server.log_retrieval"):
+            results = memento_list()
+
+        paths = [r["path"] for r in results]
+        assert paths == sorted(paths)
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_title_extracted_from_frontmatter(self, tmp_vault):
+        note = tmp_vault / "notes" / "test-note.md"
+        note.write_text("---\ntitle: My Custom Title\ntype: discovery\n---\n\nBody.\n")
+
+        with patch("memento.mcp_server.log_retrieval"):
+            results = memento_list()
+
+        assert len(results) == 1
+        assert results[0]["title"] == "My Custom Title"
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_title_falls_back_to_stem(self, tmp_vault):
+        note = tmp_vault / "notes" / "no-frontmatter.md"
+        note.write_text("Just some content without frontmatter.\n")
+
+        with patch("memento.mcp_server.log_retrieval"):
+            results = memento_list()
+
+        assert len(results) == 1
+        assert results[0]["title"] == "no-frontmatter"

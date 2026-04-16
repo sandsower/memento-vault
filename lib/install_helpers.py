@@ -15,14 +15,15 @@ import tempfile
 # --- Manifest operations ---
 
 def manifest_load(manifest_path):
-    """Print 'version\\nvault_path' from the manifest file."""
+    """Print 'version\\nvault_path\\noptions_json' from the manifest file."""
     if not os.path.exists(manifest_path):
-        print("\n")
+        print("\n\n")
         return
     with open(manifest_path) as f:
         m = json.load(f)
     print(m.get("version", ""))
     print(m.get("vault_path", ""))
+    print(json.dumps(m.get("options", {})))
 
 
 def manifest_hash(manifest_path, key):
@@ -41,10 +42,11 @@ def manifest_record(json_acc, key, hash_val):
     print(json.dumps(d))
 
 
-def manifest_save(json_acc, version, vault_path, manifest_path):
+def manifest_save(json_acc, version, vault_path, manifest_path, options_json="{}"):
     """Write the manifest file atomically."""
     files = json.loads(json_acc)
-    manifest = {"version": version, "vault_path": vault_path, "files": files}
+    options = json.loads(options_json)
+    manifest = {"version": version, "vault_path": vault_path, "options": options, "files": files}
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
@@ -320,7 +322,8 @@ COMMANDS = {
         sys.argv[2], sys.argv[3], sys.argv[4]
     ),
     "manifest-save": lambda: manifest_save(
-        sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+        sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5],
+        sys.argv[6] if len(sys.argv) > 6 else "{}",
     ),
     "mcp-config": lambda: mcp_config(
         sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
