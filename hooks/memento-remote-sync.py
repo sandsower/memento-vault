@@ -146,8 +146,13 @@ def catch_up(vault, dry_run=False, batch=0):
     2. Sync ledger (source + content hash) — catches notes whose remote
        filename differs from the local one (slugification, dedupe suffixes)
 
-    Hash mismatches are treated as CONFLICTS (printed and skipped), not
-    pushable changes — store() is append-only and would create duplicates.
+    Hash mismatches are checked against the ledger before flagging as
+    conflicts. write_note() on the remote reconstructs metadata (source,
+    date), so raw file hashes always differ from the local original. When
+    the ledger confirms the semantic content was already pushed (matching
+    _sync_payload content hash), the mismatch is expected and skipped.
+    Unrecognized mismatches remain CONFLICTS — store() is append-only and
+    pushing would create duplicates.
 
     Inventory fetch failures abort the run. Treating a failed list_notes()
     as an empty remote would bulk-push the entire vault as duplicates.
@@ -185,15 +190,30 @@ def catch_up(vault, dry_run=False, batch=0):
         local_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         remote = remote_by_name.get(f.name)
 
+        source = str(f.relative_to(vault))
+
         if remote is not None:
             if remote.get("hash") == local_hash:
                 continue  # identical by filename match
-            else:
-                conflicts.append(f)
-                continue
+
+            # Hash mismatch — check if the ledger explains it.
+            # write_note() on the remote reconstructs metadata (source, date),
+            # so raw hashes always differ. The ledger's content_hash uses
+            # _sync_payload() which excludes metadata, so a match means the
+            # semantic content is identical and the mismatch is expected.
+            ledger_entry = ledger_by_source.get(source)
+            if ledger_entry and ledger_entry.get("status") == "ok":
+                note = parse_note(f)
+                if note:
+                    chash = sync_ledger.content_hash(_sync_payload(note))
+                    if chash == ledger_entry.get("content_hash"):
+                        ledger_skipped += 1
+                        continue
+
+            conflicts.append(f)
+            continue
 
         # No filename match — check the ledger for a prior successful push
-        source = str(f.relative_to(vault))
         ledger_entry = ledger_by_source.get(source)
         if ledger_entry and ledger_entry.get("status") == "ok":
             # Ledger says we pushed this before. Verify content hasn't changed.
