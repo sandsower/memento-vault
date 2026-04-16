@@ -179,6 +179,25 @@ def _tokenize_for_match(text):
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
+def _append_under_heading(content, heading, line):
+    """Insert ``line`` at the end of the ``heading`` section's body.
+
+    The section ends at the next ``## `` heading or end-of-file. Trailing
+    blank lines inside the section are collapsed before the line is added.
+    """
+    start = content.find(heading)
+    if start == -1:
+        return content.rstrip() + "\n\n" + heading + "\n\n" + line + "\n"
+
+    body_start = start + len(heading)
+    next_heading = content.find("\n## ", body_start)
+    end = len(content) if next_heading == -1 else next_heading
+
+    section = content[body_start:end].rstrip()
+    new_section = section + "\n" + line + ("\n" if next_heading != -1 else "\n")
+    return content[:body_start] + new_section + content[end:]
+
+
 def find_dedup_candidates(vault_path, title, tags, limit=5):
     """Find notes with title/tag overlap likely to cover the same topic."""
     notes_dir = Path(vault_path) / "notes"
@@ -331,9 +350,15 @@ def update_project_index(vault_path, project_slug, note_name, session_summary):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     session_line = f"- {today} {session_summary}"
     if session_line not in content:
-        if "## Sessions" in content:
-            content = content.rstrip() + "\n" + session_line + "\n"
-        else:
+        # Prefer "## Activity log" when the project hub has split handwritten
+        # session entries from auto-captures; fall back to "## Sessions" for
+        # backward compatibility with un-split hubs.
+        target_heading = "## Activity log" if "## Activity log" in content else (
+            "## Sessions" if "## Sessions" in content else None
+        )
+        if target_heading is None:
             content = content.rstrip() + "\n\n## Sessions\n\n" + session_line + "\n"
+        else:
+            content = _append_under_heading(content, target_heading, session_line)
 
     project_file.write_text(content)

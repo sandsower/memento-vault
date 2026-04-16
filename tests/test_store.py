@@ -255,6 +255,79 @@ class TestUpdateProjectIndex:
         assert text.count("- [[redis-cache-ttl]]") == 1
 
 
+    def test_update_project_index_routes_to_activity_log_when_present(self, tmp_vault):
+        """When the hub splits Sessions from Activity log, auto-captures land in Activity log."""
+        project_file = tmp_vault / "projects" / "api-service.md"
+        project_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "title: api-service",
+                    "---",
+                    "",
+                    "## Notes",
+                    "",
+                    "- [[existing-note]]",
+                    "",
+                    "## Sessions",
+                    "",
+                    "- 2026-04-01 — handwritten session entry with full context",
+                    "",
+                    "## Activity log",
+                    "",
+                    "- 2026-04-01 — [[earlier-auto-capture]]",
+                    "",
+                ]
+            )
+        )
+
+        with patch("memento.store.datetime") as mock_datetime:
+            mock_now = mock_datetime.now.return_value
+            mock_now.strftime.return_value = "2026-04-15"
+
+            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
+
+        text = project_file.read_text()
+        # Handwritten Sessions entry untouched
+        assert "- 2026-04-01 — handwritten session entry with full context" in text
+        # New auto-capture lands inside the Activity log section
+        activity_pos = text.index("## Activity log")
+        sessions_pos = text.index("## Sessions")
+        new_line_pos = text.index("- 2026-04-15 MCP store: New note title")
+        assert new_line_pos > activity_pos
+        # And not inside Sessions
+        assert sessions_pos < activity_pos < new_line_pos
+
+    def test_update_project_index_falls_back_to_sessions(self, tmp_vault):
+        """Hubs without an Activity log section still receive auto-captures in Sessions."""
+        project_file = tmp_vault / "projects" / "api-service.md"
+        project_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "title: api-service",
+                    "---",
+                    "",
+                    "## Notes",
+                    "",
+                    "## Sessions",
+                    "",
+                    "- 2026-04-01 — earlier entry",
+                ]
+            )
+        )
+
+        with patch("memento.store.datetime") as mock_datetime:
+            mock_now = mock_datetime.now.return_value
+            mock_now.strftime.return_value = "2026-04-15"
+
+            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
+
+        text = project_file.read_text()
+        assert "- 2026-04-15 MCP store: New note title" in text
+        assert "## Activity log" not in text
+
+
 class TestVaultWriteLock:
     def test_vault_write_lock_serialization(self, tmp_vault):
         lock_path = tmp_vault / ".vault-write.lock"
