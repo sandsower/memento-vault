@@ -29,7 +29,12 @@ def _resolved_config(config=None):
     if config:
         merged.update(config)
     if merged.get("llm_model") is None:
-        merged["llm_model"] = merged.get("agent_model")
+        # `agent_model` predates multi-backend support and holds a claude
+        # model name (sonnet/opus/haiku). Only fall back to it for the
+        # claude backend — passing it to codex/gemini causes the provider
+        # to reject the model and silently return no output.
+        if merged.get("llm_backend") == "claude":
+            merged["llm_model"] = merged.get("agent_model")
     return merged
 
 

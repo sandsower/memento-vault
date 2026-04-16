@@ -300,6 +300,42 @@ class TestCliBackends:
         assert cmd == ["claude", "--print", "--model", "haiku", "-p", "prompt"]
         assert result.ok is True
 
+    @patch("memento.llm.Path.read_text", return_value="ok\n")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_agent_model_does_not_leak_into_codex(self, mock_run, mock_unlink, mock_read):
+        """agent_model (a claude model name) must not be passed to codex as --model."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        # Global config has agent_model=sonnet (claude name). Caller selects
+        # codex via the overriding config dict without setting llm_model.
+        with patch(
+            "memento.llm.get_config",
+            return_value={"llm_backend": "claude", "agent_model": "sonnet"},
+        ):
+            result = llm_complete("prompt", {"llm_backend": "codex", "llm_model": None})
+
+        cmd = mock_run.call_args[0][0]
+        assert "--model" not in cmd
+        assert "sonnet" not in cmd
+        assert result.ok is True
+
+    @patch("memento.llm.Path.read_text", return_value="ok\n")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_explicit_llm_model_still_passes_to_codex(self, mock_run, mock_unlink, mock_read):
+        """When llm_model is set explicitly for codex, it passes through."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("memento.llm.get_config", return_value={"agent_model": "sonnet"}):
+            result = llm_complete("prompt", {"llm_backend": "codex", "llm_model": "gpt-5"})
+
+        cmd = mock_run.call_args[0][0]
+        assert "--model" in cmd
+        assert "gpt-5" in cmd
+        assert "sonnet" not in cmd
+        assert result.ok is True
+
     @patch("memento.llm.subprocess.run")
     def test_preflight_check_claude(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="1.0.0\n", stderr="")
