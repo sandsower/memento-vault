@@ -110,12 +110,18 @@ def _build_server() -> FastMCP:
     kwargs = {
         "name": "memento-vault",
         "instructions": (
-            "Memento Vault is a persistent knowledge store for coding agents. "
-            "Use memento_search to find past decisions, discoveries, and session notes. "
-            "Use memento_store to write a single knowledge note. "
-            "Use memento_capture at session end to triage and capture the full session. "
-            "Use memento_get to read a specific note by path. "
-            "Use memento_status to check vault health and stats."
+            "Memento Vault is a persistent knowledge store for coding agents.\n\n"
+            "Reads: use memento_search to find past decisions, discoveries, and "
+            "session notes; memento_get to read a specific note; memento_status "
+            "for vault health; memento_list for sync/inventory.\n\n"
+            "Writes: if your agent has a `memento` skill or `SessionEnd` hook, "
+            "use it — the skill is local-first (writes to the git-backed vault, "
+            "commits, then syncs here), which avoids duplicate notes and keeps "
+            "the local vault canonical. memento_store and memento_capture are "
+            "low-level primitives intended for automated sync scripts (e.g., "
+            "memento-remote-sync.py) and agents without skill/hook support "
+            "(Windsurf, some Cursor configs). Do not call them from interactive "
+            "Claude Code or Codex sessions — use the /memento skill instead."
         ),
         "host": host,
         "port": port,
@@ -226,7 +232,14 @@ def memento_store(
     validity_context: str | None = None,
     supersedes: str | None = None,
 ) -> dict:
-    """Store a new note in the memento vault.
+    """Store a new note in the memento vault (low-level primitive).
+
+    Prefer the `/memento` skill in interactive Claude Code / Codex sessions —
+    the skill writes the note to the local git-backed vault first, commits, and
+    then syncs here via memento-remote-sync.py. Calling this tool directly from
+    an interactive session skips the local vault and creates orphaned remote
+    notes that the skill may later duplicate. This tool is intended for
+    automated sync scripts and agents without skill support.
 
     Args:
         title: Note title (used as the filename slug).
@@ -438,10 +451,12 @@ def memento_capture(
     agent: str = "unknown",
     fleeting_only: bool = False,
 ) -> dict:
-    """Capture a session's knowledge into the vault.
+    """Capture a session's knowledge into the vault (low-level primitive).
 
     This is the MCP equivalent of the SessionEnd hook. Use it when your agent
-    doesn't have native hook support (Cursor, Windsurf, etc.).
+    doesn't have native hook support (Cursor, Windsurf, etc.). Do not call this
+    from Claude Code or Codex — those have SessionEnd hooks and the `/memento`
+    skill that handle capture via the local-first flow.
 
     Two modes:
     - Provide session_summary with context fields for direct note creation.
