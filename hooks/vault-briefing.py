@@ -25,10 +25,63 @@ sys.path.insert(0, str(Path(__file__).parent))
 from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault  # noqa: E402
 from memento.graph import load_or_build_graph, lookup_project_notes  # noqa: E402
 from memento.search import enhance_results, has_qmd, qmd_search  # noqa: E402
-from memento.store import log_retrieval  # noqa: E402
+from memento.store import RETRIEVAL_LOG_PATH, log_retrieval  # noqa: E402
 from memento.utils import read_hook_input  # noqa: E402
 
+TRIAGE_HEALTH_WINDOW_HOURS = 24
+TRIAGE_HEALTH_MIN_EVENTS = 3
+TRIAGE_HEALTH_FAIL_RATIO = 0.5
+
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
+
+
+def triage_health_warning():
+    """Return a one-line warning if SessionEnd triage is silently failing.
+
+    Scans retrieval.jsonl for the last 24h of triage events and flags when
+    the failure ratio crosses TRIAGE_HEALTH_FAIL_RATIO. Returns None when
+    healthy or when there isn't enough data to judge.
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        if not os.path.exists(RETRIEVAL_LOG_PATH):
+            return None
+
+        cutoff = datetime.now() - timedelta(hours=TRIAGE_HEALTH_WINDOW_HOURS)
+        total = 0
+        failed = 0
+        with open(RETRIEVAL_LOG_PATH) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("hook") != "triage":
+                    continue
+                ts_raw = rec.get("ts")
+                if not ts_raw:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ts_raw)
+                except ValueError:
+                    continue
+                if ts < cutoff:
+                    continue
+                action = rec.get("action") or ""
+                if action not in ("decision", "parse_transcript_failed", "structured_notes_llm_failed"):
+                    continue
+                total += 1
+                if action != "decision":
+                    failed += 1
+
+        if total < TRIAGE_HEALTH_MIN_EVENTS:
+            return None
+        if (failed / total) < TRIAGE_HEALTH_FAIL_RATIO:
+            return None
+        return f"[vault] WARN: triage failing {failed}/{total} in last {TRIAGE_HEALTH_WINDOW_HOURS}h — check {RETRIEVAL_LOG_PATH}"
+    except Exception:
+        return None
 
 
 def get_git_branch(cwd):
@@ -392,6 +445,10 @@ def main():
     summary = f"[vault] Project: {project_slug}{branch_str}"
     summary += f" | {len(recent_sessions)} sessions{last_date} | {note_count} notes"
     print(summary)
+
+    warning = triage_health_warning()
+    if warning:
+        print(warning)
 
     # --- Fast path: project maps (skip deferred vsearch if maps have enough results) ---
     if config.get("project_maps_enabled", True) and has_qmd():

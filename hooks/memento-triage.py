@@ -188,14 +188,21 @@ def append_session_to_project(project_file, session_id, summary, ticket=None):
 
 
 def write_fleeting(session_id, meta, project_slug):
-    """Write a one-liner to today's fleeting note."""
+    """Append a one-liner session ledger entry to today's fleeting note.
+
+    Sessions are written under a ## Sessions header so structured content
+    from other systems (e.g. orra's vault-bridge) can coexist above it.
+    """
     vault = get_vault()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     now = datetime.now(timezone.utc).strftime("%H:%M")
     fleeting_file = vault / "fleeting" / f"{today}.md"
 
     if not fleeting_file.exists():
-        fleeting_file.write_text(f"# {today}\n\n")
+        fleeting_file.write_text(f"# {today}\n\n## Sessions\n\n")
+    elif "## Sessions" not in fleeting_file.read_text():
+        with open(fleeting_file, "a") as f:
+            f.write("\n## Sessions\n\n")
 
     branch_str = ""
     if meta["git_branch"] and meta["git_branch"] != "HEAD":
