@@ -30,7 +30,8 @@ class TestCliBackends:
         )
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["claude", "--print", "--model", "sonnet", "-p", "test prompt"]
+        assert cmd == ["claude", "--print", "--model", "sonnet"]
+        assert mock_run.call_args.kwargs["input"] == "test prompt"
         assert result.ok is True
         assert result.text == "claude output"
 
@@ -297,7 +298,8 @@ class TestCliBackends:
             result = llm_complete("prompt")
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["claude", "--print", "--model", "haiku", "-p", "prompt"]
+        assert cmd == ["claude", "--print", "--model", "haiku"]
+        assert mock_run.call_args.kwargs["input"] == "prompt"
         assert result.ok is True
 
     @patch("memento.llm.Path.read_text", return_value="ok\n")

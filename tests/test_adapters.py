@@ -103,6 +103,34 @@ class TestDetectAgent:
         bad.write_text("not json at all\n")
         assert detect_agent(str(bad)) == "unknown"
 
+    def test_detects_claude_past_metadata_prefix(self, tmp_path):
+        transcript = tmp_path / "prefixed.jsonl"
+        lines = [
+            json.dumps({"type": "file-history-snapshot", "messageId": "m1", "snapshot": {}}),
+            json.dumps({"type": "attachment", "messageId": "m1"}),
+            json.dumps({"type": "user", "cwd": "/tmp", "message": {"content": "hi"}}),
+        ]
+        transcript.write_text("\n".join(lines))
+        assert detect_agent(str(transcript)) == "claude"
+
+    def test_detects_claude_ignores_invalid_lines_in_prefix(self, tmp_path):
+        transcript = tmp_path / "mixed.jsonl"
+        transcript.write_text(
+            "garbage line\n"
+            + json.dumps({"type": "system"})
+            + "\n"
+            + json.dumps({"type": "user", "message": {"content": "yo"}})
+            + "\n"
+        )
+        assert detect_agent(str(transcript)) == "claude"
+
+    def test_metadata_only_returns_unknown(self, tmp_path):
+        transcript = tmp_path / "metadata.jsonl"
+        transcript.write_text(
+            "\n".join(json.dumps({"type": "file-history-snapshot", "i": i}) for i in range(5)) + "\n"
+        )
+        assert detect_agent(str(transcript)) == "unknown"
+
 
 # --- parse_transcript (dispatcher) ---
 

@@ -49,14 +49,25 @@ def _success(text):
     return LLMResult(text=stripped, ok=True, error=None)
 
 
-def _run_cli(cmd, output_path=None, timeout=30):
+def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        if stdin_input is None:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
+            )
+        else:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, input=stdin_input
+            )
     except subprocess.TimeoutExpired:
         if output_path:
             output_path.unlink(missing_ok=True)
         return _error("LLM command timed out")
     except FileNotFoundError as exc:
+        if output_path:
+            output_path.unlink(missing_ok=True)
+        return _error(str(exc))
+    except OSError as exc:
         if output_path:
             output_path.unlink(missing_ok=True)
         return _error(str(exc))
@@ -93,12 +104,14 @@ def _run_cli(cmd, output_path=None, timeout=30):
     return _success(result.stdout)
 
 
-def _claude_complete(prompt, model=None):
+def _claude_complete(prompt, model=None, timeout=30):
+    # Pass the prompt over stdin instead of argv. Large transcripts (>~2MB)
+    # overflow ARG_MAX and raise OSError("Argument list too long"); stdin has
+    # no such ceiling.
     cmd = ["claude", "--print"]
     if model:
         cmd.extend(["--model", model])
-    cmd.extend(["-p", prompt])
-    return _run_cli(cmd)
+    return _run_cli(cmd, stdin_input=prompt, timeout=timeout)
 
 
 def _codex_complete(prompt, model=None):
@@ -185,13 +198,18 @@ def _openai_compat_complete(prompt, model, api_key, base_url):
     )
 
 
-def llm_complete(prompt, config=None):
+def llm_complete(prompt, config=None, timeout=None):
     resolved = _resolved_config(config)
     backend = resolved.get("llm_backend", "claude")
     model = resolved.get("llm_model")
+    # Scale timeout with prompt size. Baseline 60s covers short completions;
+    # add 1s per 5KB of prompt so a 500KB transcript gets ~160s, capped at 300s.
+    effective_timeout = (
+        timeout if timeout is not None else max(60, min(300, 60 + len(prompt) // 5_000))
+    )
 
     if backend == "claude":
-        return _claude_complete(prompt, model)
+        return _claude_complete(prompt, model, timeout=effective_timeout)
     if backend == "codex":
         return _codex_complete(prompt, model)
     if backend == "gemini":
