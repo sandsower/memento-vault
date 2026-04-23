@@ -10,6 +10,8 @@ import os
 
 from memento.adapters.claude import parse_transcript as _parse_claude
 
+_SNIFF_MAX_LINES = 20
+
 
 def detect_agent(transcript_path):
     """Detect which agent produced a transcript file.
@@ -24,26 +26,31 @@ def detect_agent(transcript_path):
     if env_agent in ("claude", "codex", "cursor", "windsurf"):
         return env_agent
 
-    # Sniff transcript format from first line
+    # Sniff transcript format by scanning early records. Claude Code writes
+    # metadata records (file-history-snapshot, attachment, system) ahead of
+    # the first user/assistant message, so checking only line 1 is unreliable.
     try:
         with open(transcript_path) as f:
-            first_line = f.readline().strip()
-            if not first_line:
-                return "unknown"
-
-            data = json.loads(first_line)
-
-            # Claude Code JSONL: has "type" field with "user"/"assistant"
-            # and optionally "cwd", "gitBranch"
-            if data.get("type") in ("user", "assistant"):
-                return "claude"
+            for _ in range(_SNIFF_MAX_LINES):
+                line = f.readline()
+                if not line:
+                    break
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    data = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict) and data.get("type") in ("user", "assistant"):
+                    return "claude"
 
             # Future: add sniffing for codex, cursor, windsurf formats
             # Codex: TBD
             # Cursor: TBD
             # Windsurf: TBD
 
-    except (json.JSONDecodeError, UnicodeDecodeError, FileNotFoundError):
+    except (UnicodeDecodeError, FileNotFoundError):
         pass
     except OSError:
         # Let real file access errors (permissions, disk) propagate rather than
