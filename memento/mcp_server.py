@@ -20,6 +20,7 @@ from memento.store import (
     log_retrieval,
     release_vault_write_lock,
     update_project_index,
+    write_daily_snapshot,
     write_note,
 )
 from memento.utils import sanitize_secrets
@@ -665,6 +666,92 @@ def memento_store(
         log_retrieval("mcp", "store", title=title, path=str(path))
         return {"path": str(path.relative_to(vault)), "title": title.strip()}
 
+    finally:
+        release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_daily_snapshot(
+    date: str,
+    repo_slug: str,
+    content: str,
+    frontmatter_extra: dict | None = None,
+    supersede: bool = False,
+) -> dict:
+    """Write a structured per-repo daily snapshot into the vault.
+
+    Writes a deterministic-filename note at notes/daily-<date>-<repo_slug>.md
+    for integrations (like orra's vault-bridge) that need path-controlled
+    writes rather than title-slugged ones. Unlike memento_store, the filename
+    is owned by the caller via date plus repo_slug, so read-back is a plain
+    memento_get by path.
+
+    Append-only: re-writing the same (date, repo_slug) pair requires
+    supersede=True, which writes daily-<date>-<repo_slug>-v<n>.md with a
+    supersedes chain back to the original. Preserves the vault append-only
+    invariant.
+
+    Args:
+        date: ISO date string YYYY-MM-DD.
+        repo_slug: Repo identifier, matches [a-z0-9][a-z0-9_-]*
+            (e.g. care_git, fundid, memento-vault).
+        content: Markdown body (no frontmatter — the tool manages it).
+        frontmatter_extra: Optional dict of extra frontmatter fields to merge.
+            Managed keys (title, type, tags, source, certainty, date,
+            repo_slug, supersedes) are stripped if present.
+        supersede: If True and a snapshot exists for (date, repo_slug), write
+            a -v<n>.md variant with a supersedes link. If False and one exists,
+            return reason: already_exists.
+
+    Returns:
+        On success: {"path": "notes/daily-...", "supersedes": "daily-..." | None,
+        "version": 1|N}.
+        On error: {"error": "...", "reason": "invalid_date" | "invalid_repo_slug"
+        | "empty_content" | "already_exists" | "write_failed"}.
+    """
+    vault = get_vault()
+    if not vault.exists():
+        return {"error": f"Vault not found at {vault}", "reason": "vault_missing"}
+
+    if not acquire_vault_write_lock():
+        return {
+            "error": "Could not acquire vault write lock (another write in progress)",
+            "reason": "lock_timeout",
+        }
+
+    try:
+        try:
+            result = write_daily_snapshot(
+                vault_path=vault,
+                date=date,
+                repo_slug=repo_slug,
+                content=content,
+                frontmatter_extra=frontmatter_extra,
+                supersede=supersede,
+            )
+        except OSError as exc:
+            log_retrieval("mcp", "daily_snapshot_write_failed", error=str(exc))
+            return {"error": f"write failed: {exc}", "reason": "write_failed"}
+
+        if "error" in result:
+            log_retrieval(
+                "mcp",
+                "daily_snapshot_rejected",
+                date=date,
+                repo_slug=repo_slug,
+                reason=result.get("reason"),
+            )
+            return result
+
+        log_retrieval(
+            "mcp",
+            "daily_snapshot",
+            date=date,
+            repo_slug=repo_slug,
+            path=result["path"],
+            version=result["version"],
+        )
+        return result
     finally:
         release_vault_write_lock()
 

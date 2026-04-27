@@ -304,6 +304,151 @@ def write_note(
     return target
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_REPO_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_DAILY_VERSION_RE = re.compile(r"^daily-\d{4}-\d{2}-\d{2}-[a-z0-9_-]+-v(\d+)\.md$")
+
+_MANAGED_DAILY_KEYS = {
+    "title",
+    "type",
+    "tags",
+    "source",
+    "certainty",
+    "date",
+    "repo_slug",
+    "supersedes",
+}
+
+
+def _next_daily_version(notes_dir, base_slug):
+    """Return the next version number for a daily snapshot supersede chain."""
+    highest = 1
+    prefix = f"{base_slug}-v"
+    for existing in notes_dir.glob(f"{base_slug}-v*.md"):
+        match = _DAILY_VERSION_RE.match(existing.name)
+        if not match:
+            continue
+        if not existing.name.startswith(prefix):
+            continue
+        n = int(match.group(1))
+        if n > highest:
+            highest = n
+    return highest + 1
+
+
+def write_daily_snapshot(
+    vault_path,
+    date,
+    repo_slug,
+    content,
+    frontmatter_extra=None,
+    supersede=False,
+):
+    """Write a structured per-repo daily snapshot into notes/.
+
+    Returns a dict with keys:
+        path: str, relative to vault_path
+        supersedes: str | None (title of the superseded note)
+        version: int (1 for first write, n for v<n>)
+
+    Or an error dict with 'error' and 'reason' keys.
+    """
+    if not isinstance(date, str) or not _DATE_RE.match(date):
+        return {"error": "date must be YYYY-MM-DD", "reason": "invalid_date"}
+    if not isinstance(repo_slug, str) or not _REPO_SLUG_RE.match(repo_slug):
+        return {
+            "error": "repo_slug must match [a-z0-9][a-z0-9_-]*",
+            "reason": "invalid_repo_slug",
+        }
+    if not content or not content.strip():
+        return {"error": "content is required", "reason": "empty_content"}
+
+    notes_dir = Path(vault_path) / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+
+    base_slug = f"daily-{date}-{repo_slug}"
+    base_file = notes_dir / f"{base_slug}.md"
+
+    supersedes_title = None
+    version = 1
+    if base_file.exists():
+        if not supersede:
+            return {
+                "error": f"daily snapshot already exists for {date} {repo_slug}",
+                "reason": "already_exists",
+                "existing_path": str(base_file.relative_to(Path(vault_path))),
+            }
+        version = _next_daily_version(notes_dir, base_slug)
+        target = notes_dir / f"{base_slug}-v{version}.md"
+        supersedes_title = base_slug
+    else:
+        target = base_file
+
+    # Sanitize body before writing
+    from memento.utils import sanitize_secrets
+
+    sanitized = sanitize_secrets(content)
+
+    extras = dict(frontmatter_extra or {})
+    for key in _MANAGED_DAILY_KEYS:
+        extras.pop(key, None)
+
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    safe_repo = _safe_yaml_scalar(repo_slug)
+
+    lines = [
+        "---",
+        f"title: Daily {date} {safe_repo}",
+        "type: daily",
+        f"tags: [daily, {safe_repo}]",
+        "source: orra",
+        "certainty: 2",
+        f"date: {now_ts}",
+        f"repo_slug: {safe_repo}",
+    ]
+    if supersedes_title:
+        lines.append(f'supersedes: "[[{_safe_yaml_scalar(supersedes_title)}]]"')
+
+    for key, value in extras.items():
+        if value is None:
+            continue
+        safe_key = _safe_yaml_scalar(key)
+        if not safe_key:
+            continue
+        if isinstance(value, list):
+            safe_items = [_safe_yaml_scalar(v) for v in value]
+            lines.append(f"{safe_key}: [{', '.join(safe_items)}]")
+        else:
+            lines.append(f"{safe_key}: {_safe_yaml_scalar(value)}")
+
+    body = sanitized.strip()
+    if _body_has_related_heading(body):
+        lines.extend(["---", "", body, ""])
+    else:
+        lines.extend(["---", "", body, "", "## Related", ""])
+
+    tmp = notes_dir / f".tmp-{target.name}"
+    tmp.write_text("\n".join(lines))
+    os.replace(tmp, target)
+
+    try:
+        from memento.search_backend import get_backend
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        backend = get_backend()
+        if isinstance(backend, EmbeddedSearchBackend):
+            rel_path = str(target.relative_to(Path(vault_path)))
+            backend.index_note(rel_path)
+    except Exception:
+        pass
+
+    return {
+        "path": str(target.relative_to(Path(vault_path))),
+        "supersedes": supersedes_title,
+        "version": version,
+    }
+
+
 def update_project_index(vault_path, project_slug, note_name, session_summary):
     """Ensure project index exists and append note/session references."""
     project_dir = Path(vault_path) / "projects"
