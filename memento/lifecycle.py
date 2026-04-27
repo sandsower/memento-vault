@@ -12,8 +12,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault
-from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes
+from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, slugify
+from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
 from memento.llm import llm_complete
 from memento.search import (
     enhance_results,
@@ -542,6 +542,31 @@ LOW_SIGNAL_RECALL_PATTERNS = (
     r"^go for the [a-z0-9 _-]+ cleanup$",
 )
 
+BROAD_PROJECT_HISTORY_PATTERNS = (
+    r"^what previous decisions did we make (?:on|about|for) (?P<subject>[a-z0-9][a-z0-9 _-]*)\??$",
+    r"^what do we know about (?P<subject>[a-z0-9][a-z0-9 _-]*)\??$",
+    r"^summari[sz]e (?P<subject>[a-z0-9][a-z0-9 _-]*?)(?: history)?\??$",
+    r"^what was decided before about (?P<subject>[a-z0-9][a-z0-9 _-]*)\??$",
+)
+
+PROJECT_ENTITY_STOPWORDS = {
+    "what",
+    "previous",
+    "decisions",
+    "make",
+    "know",
+    "about",
+    "summarize",
+    "summarise",
+    "history",
+    "decided",
+    "before",
+}
+
+SPECIFIC_PROJECT_QUERY_PATTERNS = (
+    r"\bwhat did we decide about (?P<subject>[a-z0-9][a-z0-9 _-]*)",
+)
+
 
 def recall_signal_terms(prompt: str) -> list[str]:
     tokens = re.findall(r"[a-z0-9][a-z0-9-]+", prompt.lower())
@@ -572,9 +597,127 @@ def is_low_signal_recall_prompt(prompt: str) -> bool:
     return True
 
 
+def _subject_is_broad(subject: str) -> bool:
+    terms = recall_signal_terms(subject)
+    # Broad project/history questions usually name only a project or a short
+    # project phrase. Longer subjects carry domain intent and should use recall.
+    return 0 < len(terms) <= 3
+
+
+def is_broad_project_history_query(prompt: str) -> bool:
+    """Return True when a prompt asks for broad project history, not turn context."""
+    normalized = re.sub(r"\s+", " ", prompt.lower()).strip().strip(".!")
+    if not normalized:
+        return False
+    for pattern in BROAD_PROJECT_HISTORY_PATTERNS:
+        match = re.match(pattern, normalized)
+        if match and _subject_is_broad(match.group("subject")):
+            return True
+    return False
+
+
 def should_append_project_to_recall(prompt: str) -> bool:
     """Only append project slug when the prompt has enough standalone signal."""
-    return not is_low_signal_recall_prompt(prompt)
+    return not is_low_signal_recall_prompt(prompt) and not is_broad_project_history_query(prompt)
+
+
+def _project_slug_from_value(value: str | None) -> str:
+    if not value:
+        return ""
+    value = str(value).strip().strip('"').strip("'")
+    if not value:
+        return ""
+    if "/" in value or "\\" in value:
+        value = Path(value).name
+    return slugify(value)
+
+
+def _candidate_project_slug(result: dict) -> str:
+    project = result.get("project")
+    meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else None
+    if not project and meta:
+        project = meta.get("project")
+    if not project:
+        note_path = result.get("path", "")
+        if note_path:
+            meta = read_note_metadata(note_path)
+            if meta:
+                project = meta.get("project")
+    return _project_slug_from_value(project)
+
+
+def _subject_project_slug(subject: str) -> str:
+    terms = recall_signal_terms(subject)
+    if not terms:
+        return ""
+    slug = slugify(terms[0])
+    if not slug or slug in PROJECT_ENTITY_STOPWORDS or slug in RECALL_DOMAIN_ALLOWLIST:
+        return ""
+    return slug
+
+
+def _prompt_project_slugs(prompt: str) -> set[str]:
+    slugs = set()
+    for pattern in SPECIFIC_PROJECT_QUERY_PATTERNS:
+        match = re.search(pattern, prompt.lower())
+        if not match:
+            continue
+        slug = _subject_project_slug(match.group("subject"))
+        if slug:
+            slugs.add(slug)
+    return slugs
+
+
+def _explicit_project_slugs(prompt: str, results: list[dict]) -> set[str]:
+    normalized_prompt = f" {slugify(prompt).replace('-', ' ')} "
+    slugs = set()
+
+    for result in results:
+        candidate_slug = _candidate_project_slug(result)
+        if not candidate_slug:
+            continue
+        phrase = candidate_slug.replace("-", " ")
+        if f" {phrase} " in normalized_prompt:
+            slugs.add(candidate_slug)
+
+    slugs.update(_prompt_project_slugs(prompt))
+
+    for match in re.finditer(r"\b[A-Z][A-Za-z0-9]*(?:[- ][A-Z][A-Za-z0-9]*)*\b", prompt):
+        value = match.group(0)
+        # Acronyms like MCP are domains/tools, not reliable project names.
+        if value.isupper() and len(value) > 1:
+            continue
+        slug = slugify(value)
+        if slug and slug not in PROJECT_ENTITY_STOPWORDS:
+            slugs.add(slug)
+
+    return slugs
+
+
+def filter_recall_results_by_explicit_project(prompt: str, results: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Drop results with explicit mismatching project metadata.
+
+    This is intentionally conservative: it only acts when the prompt names a
+    project and a candidate declares a different project. Unscoped notes remain
+    eligible as general knowledge.
+    """
+    explicit_slugs = _explicit_project_slugs(prompt, results)
+    if not explicit_slugs:
+        return results, []
+
+    filtered = []
+    decisions = []
+    for result in results:
+        candidate_slug = _candidate_project_slug(result)
+        if not candidate_slug:
+            filtered.append(result)
+            decisions.append(_candidate_summary(result, "no-project-metadata"))
+        elif candidate_slug in explicit_slugs:
+            filtered.append(result)
+            decisions.append(_candidate_summary(result, "project-match"))
+        else:
+            decisions.append(_candidate_summary(result, "project-mismatch"))
+    return filtered, decisions
 
 
 def recall_diagnostics_enabled(config: dict) -> bool:
@@ -614,6 +757,9 @@ def should_skip_recall(prompt, config):
         return True
 
     if config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
+        return True
+
+    if config.get("recall_skip_broad_project_queries", True) and is_broad_project_history_query(prompt):
         return True
 
     # Skill invocation
@@ -1034,28 +1180,38 @@ def consume_deep_recall():
 
 
 def run_remote_recall(prompt, cwd, config):
-    """Run recall via the remote vault client. Returns (lines, top_path) or ([], None)."""
+    """Run recall via the remote vault client.
+
+    Returns (lines, top_path, results, reason, project_decisions). A plain
+    remote miss keeps reason="no-results" so callers may fall back to local;
+    an explicit project mismatch is a terminal skip because local fallback would
+    risk injecting the unrelated context the filter just removed.
+    """
     from memento.remote_client import search as remote_search
 
     if should_skip_recall(prompt, config):
-        return [], None
+        reason = "broad-project-query" if is_broad_project_history_query(prompt) else "skipped-prompt"
+        return [], None, [], reason, []
 
     max_notes = config.get("recall_max_notes", 3)
     min_score = config.get("recall_min_score", 0.4)
 
-    results = remote_search(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd)
+    raw_results = remote_search(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd)
+    results, project_decisions = filter_recall_results_by_explicit_project(prompt, raw_results)
     if not results:
-        return [], None
+        reason = "project-mismatch-filtered-empty" if project_decisions else "no-results"
+        return [], None, [], reason, project_decisions
 
     top_path = results[0].get("path", "")
     if is_duplicate(top_path):
-        return [], None
+        return [], None, [], "duplicate", project_decisions
 
     lines = ["[vault] Related memories:"]
-    for result in results[:max_notes]:
+    injected_results = results[:max_notes]
+    for result in injected_results:
         lines.append(format_result(result))
 
-    return lines, top_path
+    return lines, top_path, injected_results, None, project_decisions
 
 
 def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
@@ -1087,13 +1243,20 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         return [], None, [], "empty-prompt"
     if should_skip_recall(prompt, config):
         bump_prompts_since()
-        reason = (
-            "low-signal-prompt"
-            if config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt)
-            else "skipped-prompt"
-        )
+        if config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
+            reason = "low-signal-prompt"
+        elif config.get("recall_skip_broad_project_queries", True) and is_broad_project_history_query(prompt):
+            reason = "broad-project-query"
+        else:
+            reason = "skipped-prompt"
         log_retrieval("recall", reason, query=prompt, cwd=cwd, session_id=session_id)
-        log_recall_diagnostic(config, "skip", reason=reason, normalized_prompt=re.sub(r"\s+", " ", prompt).strip())
+        log_recall_diagnostic(
+            config,
+            "skip",
+            reason=reason,
+            normalized_prompt=re.sub(r"\s+", " ", prompt).strip(),
+            broad_project_query=is_broad_project_history_query(prompt),
+        )
         log_recall_diagnostic(config, "decision", decision="skipped", reason=reason)
         return [], None, [], reason
 
@@ -1102,10 +1265,21 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     if is_remote() and prompt:
         try:
-            lines, top_path = run_remote_recall(prompt, cwd, config)
+            lines, top_path, remote_results, remote_reason, project_decisions = run_remote_recall(prompt, cwd, config)
+            if project_decisions and config.get("recall_diagnostics_include_candidates", False):
+                log_recall_diagnostic(
+                    config,
+                    "candidates",
+                    stage="remote-project-filter",
+                    candidates=project_decisions,
+                    query=prompt,
+                )
             if lines:
                 log_recall_diagnostic(config, "decision", decision="injected", source="remote", top_path=top_path)
-                return lines, top_path, [], None
+                return lines, top_path, remote_results, None
+            if remote_reason in ("project-mismatch-filtered-empty", "duplicate"):
+                log_recall_diagnostic(config, "decision", decision="skipped", source="remote", reason=remote_reason)
+                return [], None, [], remote_reason
         except Exception as exc:
             print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
 
@@ -1263,6 +1437,11 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     results = enhance_results(results, config, cwd=cwd)
     log_recall_candidates(config, results, "enhanced", query=query)
 
+    results, project_decisions = filter_recall_results_by_explicit_project(prompt, results)
+    project_filter_applied = bool(project_decisions)
+    if project_decisions and config.get("recall_diagnostics_include_candidates", False):
+        log_recall_diagnostic(config, "candidates", stage="project-filter", candidates=project_decisions, query=query)
+
     # CE reranking (only on deep path)
     if top_score < high_conf and config.get("reranker_enabled", True) and len(results) > 1:
         try:
@@ -1276,9 +1455,10 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     if not results:
         bump_prompts_since()
-        log_retrieval("recall", "filtered-empty", query=query, results_before=results_before, latency_ms=latency_ms)
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="filtered-empty", latency_ms=latency_ms)
-        return [], None, [], "filtered-empty"
+        reason = "project-mismatch-filtered-empty" if project_filter_applied else "filtered-empty"
+        log_retrieval("recall", reason, query=query, results_before=results_before, latency_ms=latency_ms)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=reason, latency_ms=latency_ms)
+        return [], None, [], reason
 
     top_path = results[0].get("path", "")
     if is_duplicate(top_path):

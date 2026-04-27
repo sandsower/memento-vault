@@ -94,6 +94,10 @@ recall_diagnostics: false
 recall_diagnostics_include_candidates: false
 recall_diagnostics_max_candidates: 10
 
+# Skip broad project/history questions such as "what do we know about X?".
+# Use explicit search tools for those instead of automatic turn-level recall.
+recall_skip_broad_project_queries: true
+
 # Regex patterns for prompts that should skip recall
 # (matched case-insensitively against the full prompt)
 # recall_skip_patterns: ["^(yes|no|ok|sure|thanks)$", "^git\\s", "^run\\s"]

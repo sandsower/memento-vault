@@ -81,6 +81,9 @@ class TestLoadConfig:
         assert DEFAULT_CONFIG["recall_diagnostics_include_candidates"] is False
         assert DEFAULT_CONFIG["recall_diagnostics_max_candidates"] == 10
 
+    def test_broad_project_query_skip_defaults_enabled(self):
+        assert DEFAULT_CONFIG["recall_skip_broad_project_queries"] is True
+
     def test_warns_on_corrupt_config_file(self, tmp_path, capsys):
         """Regression: corrupt YAML must warn to stderr, not silently use defaults."""
         vault = tmp_path / "vault"
