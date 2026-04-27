@@ -11,7 +11,11 @@ import argparse
 import json
 import sys
 import re
+import subprocess
+import time
 import traceback
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +54,54 @@ def _run_lifecycle(source: str, fn, *args: Any) -> int:
         return _emit(_error_payload(source, exc))
 
 
+def _queue_file(vault: Path | None = None) -> Path:
+    return (vault or get_vault()) / "queue" / "pi-captures.jsonl"
+
+
+def _load_queue(vault: Path | None = None) -> list[dict[str, Any]]:
+    path = _queue_file(vault)
+    if not path.exists():
+        return []
+    captures = []
+    for line in path.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            captures.append(json.loads(line))
+        except json.JSONDecodeError:
+            captures.append({"id": f"invalid-{len(captures) + 1}", "error": "invalid-json", "raw": line})
+    return captures
+
+
+def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> None:
+    path = _queue_file(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(capture, ensure_ascii=False) + "\n" for capture in captures))
+
+
+def _queue_count(vault: Path | None = None) -> int:
+    return len(_load_queue(vault))
+
+
+def _git_branch(cwd: str) -> str | None:
+    if not cwd:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return None
+    branch = result.stdout.strip()
+    return branch or None
+
+
 def _status(cwd: str = "") -> dict[str, Any]:
     vault = get_vault()
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
@@ -74,11 +126,14 @@ def _status(cwd: str = "") -> dict[str, Any]:
         "remote_error": remote_error,
         "note_count": len(list(notes_dir.glob("*.md"))) if notes_dir.exists() else 0,
         "project_count": len(list(projects_dir.glob("*.md"))) if projects_dir.exists() else 0,
+        "queued_capture_count": _queue_count(vault),
+        "queue_path": str(_queue_file(vault)),
         "lifecycle": {
             "briefing": get_config().get("session_briefing", True),
             "prompt_recall": get_config().get("prompt_recall", True),
             "tool_context": get_config().get("tool_context", True),
             "auto_capture": False,
+            "capture_queue": True,
         },
     }
 
@@ -148,7 +203,15 @@ def _get(path: str) -> dict[str, Any]:
     return {"error": f"Note not found: {note_path}"}
 
 
-def _capture(title: str, body: str, cwd: str, session_id: str) -> dict[str, Any]:
+def _capture(
+    title: str,
+    body: str,
+    cwd: str,
+    session_id: str,
+    queue: bool = False,
+    reason: str = "manual",
+    source_event: str = "manual",
+) -> dict[str, Any]:
     if not title.strip():
         return {"error": "title is required"}
     if not body.strip():
@@ -157,6 +220,28 @@ def _capture(title: str, body: str, cwd: str, session_id: str) -> dict[str, Any]
     if not vault.exists():
         return {"error": f"Vault not found at {vault}"}
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
+    branch = _git_branch(cwd)
+    if queue:
+        capture_id = f"pi-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        capture = {
+            "id": capture_id,
+            "title": title.strip(),
+            "body": body.strip(),
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "reason": reason,
+            "source_event": source_event,
+            "metadata": {
+                "cwd": cwd,
+                "project": project_slug,
+                "branch": branch,
+                "session_id": session_id,
+            },
+        }
+        captures = _load_queue(vault)
+        captures.append(capture)
+        _write_queue(captures, vault)
+        return {"id": capture_id, "title": title.strip(), "queued": True, "queue_path": str(_queue_file(vault))}
+
     note_path = write_note(
         vault,
         title.strip(),
@@ -165,9 +250,52 @@ def _capture(title: str, body: str, cwd: str, session_id: str) -> dict[str, Any]
         ["pi", project_slug] if project_slug != "unknown" else ["pi"],
         source="pi",
         project=project_slug if project_slug != "unknown" else None,
+        branch=branch,
         session_id=session_id if session_id != "unknown" else None,
     )
     return {"path": str(note_path.relative_to(vault)), "title": title.strip(), "queued": False}
+
+
+def _queue_list(limit: int = 20, include_body: bool = False) -> dict[str, Any]:
+    captures = _load_queue()
+    visible = []
+    for capture in captures[-max(1, int(limit)) :]:
+        item = dict(capture)
+        if not include_body:
+            item.pop("body", None)
+        visible.append(item)
+    return {"count": len(captures), "captures": visible, "queue_path": str(_queue_file())}
+
+
+def _queue_flush(capture_id: str = "", all_captures: bool = False) -> dict[str, Any]:
+    vault = get_vault()
+    captures = _load_queue(vault)
+    selected = []
+    remaining = []
+    for capture in captures:
+        if all_captures or capture.get("id") == capture_id:
+            selected.append(capture)
+        else:
+            remaining.append(capture)
+
+    written = []
+    for capture in selected:
+        metadata = capture.get("metadata") or {}
+        note_path = write_note(
+            vault,
+            capture.get("title") or "Queued pi capture",
+            capture.get("body") or "",
+            "session",
+            ["pi", "queued"],
+            source="pi",
+            project=metadata.get("project") if metadata.get("project") != "unknown" else None,
+            branch=metadata.get("branch"),
+            session_id=metadata.get("session_id") if metadata.get("session_id") != "unknown" else None,
+        )
+        written.append({"id": capture.get("id"), "path": str(note_path.relative_to(vault))})
+
+    _write_queue(remaining, vault)
+    return {"flushed": len(written), "remaining": len(remaining), "written": written}
 
 
 def _run_json(source: str, fn, *args: Any) -> int:
@@ -208,11 +336,23 @@ def build_parser() -> argparse.ArgumentParser:
     get = sub.add_parser("get", help="Read a memento note")
     get.add_argument("--path", default="")
 
-    capture = sub.add_parser("capture", help="Manually capture a memento note")
+    capture = sub.add_parser("capture", help="Manually capture or queue a memento note")
     capture.add_argument("--title", default="")
     capture.add_argument("--body", default="")
     capture.add_argument("--cwd", default="")
     capture.add_argument("--session-id", default="unknown")
+    capture.add_argument("--queue", action="store_true", help="Queue for later review instead of writing a note")
+    capture.add_argument("--reason", default="manual")
+    capture.add_argument("--source-event", default="manual")
+
+    queue = sub.add_parser("queue", help="Inspect or flush queued pi captures")
+    queue_sub = queue.add_subparsers(dest="queue_command", required=True)
+    queue_list = queue_sub.add_parser("list", help="List queued captures")
+    queue_list.add_argument("--limit", type=int, default=20)
+    queue_list.add_argument("--include-body", action="store_true")
+    queue_flush = queue_sub.add_parser("flush", help="Write queued captures to notes")
+    queue_flush.add_argument("--id", default="")
+    queue_flush.add_argument("--all", action="store_true")
 
     return parser
 
@@ -239,7 +379,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "get":
         return _run_json("get", _get, args.path)
     if args.command == "capture":
-        return _run_json("capture", _capture, args.title, args.body, args.cwd, args.session_id)
+        return _run_json(
+            "capture",
+            _capture,
+            args.title,
+            args.body,
+            args.cwd,
+            args.session_id,
+            args.queue,
+            args.reason,
+            args.source_event,
+        )
+    if args.command == "queue":
+        if args.queue_command == "list":
+            return _run_json("queue", _queue_list, args.limit, args.include_body)
+        if args.queue_command == "flush":
+            return _run_json("queue", _queue_flush, args.id, args.all)
     raise AssertionError(f"unhandled command: {args.command}")
 
 

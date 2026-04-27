@@ -69,7 +69,56 @@ For package installation from a checkout:
 pi install /path/to/memento-vault
 ```
 
-The pi bridge does not start a long-lived MCP child process. Automatic durable writes are not enabled by default.
+The pi bridge does not start a long-lived MCP child process. Automatic durable writes are not enabled by default. Candidate captures can be queued for review and flushed manually.
+
+Useful pi commands/tools:
+
+- `/memento-status` or `memento_status` — bridge/vault status, lifecycle feature state, queue count.
+- `/memento-queue` or `memento_queue` — list queued pi capture candidates.
+- `/memento-flush-queue <id>` or `memento_flush_queue` — write an approved queued capture to the vault (`--all` flushes all).
+- `memento_capture` — manually write a durable note; pass `queue: true` to queue instead.
+
+Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.json`, project-local `.pi/settings.json`, or project `package.json`. The bridge reads `memento.piBridge` first, then `piBridge`, then top-level keys:
+
+```json
+{
+  "memento": {
+    "piBridge": {
+      "enabled": true,
+      "briefing": true,
+      "promptRecall": true,
+      "toolContext": false,
+      "autoCapture": false,
+      "captureQueue": true,
+      "maxInjectedChars": 4000,
+      "maxToolContextPerSession": 5
+    }
+  }
+}
+```
+
+Environment variables override file config:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MEMENTO_PI_ENABLED` | `true` | Enable/disable the extension lifecycle work. |
+| `MEMENTO_PI_BRIEFING` | `true` | First-turn project briefing. |
+| `MEMENTO_PI_PROMPT_RECALL` | `true` | Prompt recall before each agent turn. |
+| `MEMENTO_PI_TOOL_CONTEXT` | `false` | Read-tool context injection. |
+| `MEMENTO_PI_MAX_INJECTED_CHARS` | `4000` | Per-injection character cap. |
+| `MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION` | `5` | Tool-context injection cap per pi session. |
+| `MEMENTO_PI_AUTO_CAPTURE` | `false` | Queue automatic capture candidates on `agent_end`, compaction, and shutdown lifecycle events. |
+| `MEMENTO_PI_CAPTURE_QUEUE` | `true` | Queue automatic capture candidates instead of writing notes directly. |
+
+When automatic capture is enabled, pi lifecycle events only create reviewable queue entries. They do not write durable notes until `/memento-flush-queue` or `memento_flush_queue` is used. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
+
+Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
+
+```bash
+pi -e ./extensions/memento.ts
+```
+
+Then verify `/memento-status`, `/memento-queue`, `/reload`, `/new`, `/resume`, `/fork`, `/compact`, and quit. The bridge uses short-lived `python3 -m memento.pi_bridge` calls rather than a persistent child process, so shutdown cleanup should leave no memento-owned child process behind.
 
 ### Remote vault (access from any device)
 

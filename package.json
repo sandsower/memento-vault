@@ -1,7 +1,16 @@
 {
   "name": "memento-vault-pi",
   "version": "4.0.0",
+  "type": "module",
   "private": true,
+  "files": [
+    "extensions/**/*.ts",
+    "hooks/vault-briefing.py",
+    "hooks/vault-recall.py",
+    "memento/**/*.py",
+    "README.md",
+    "LICENSE"
+  ],
   "keywords": ["pi-package"],
   "pi": {
     "extensions": ["./extensions/memento.ts"]

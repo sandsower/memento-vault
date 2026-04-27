@@ -69,6 +69,21 @@ def test_tool_context_skips_system_and_config_paths():
     assert build_tool_context("Read", "package.json", "/repo", "s1").reason == "skipped-path"
 
 
+def test_tool_context_skips_agent_skill_and_memory_files():
+    assert (
+        build_tool_context("Read", "/home/vic/.claude/skills/continue-work/SKILL.md", "/repo", "s1").reason
+        == "skipped-path"
+    )
+    assert build_tool_context("Read", "/home/vic/.agents/skills/debug/SKILL.md", "/repo", "s1").reason == "skipped-path"
+    assert build_tool_context("Read", "/home/vic/.codex/memories/MEMORY.md", "/repo", "s1").reason == "skipped-path"
+    assert build_tool_context("Read", "/repo/.pi/settings.json", "/repo", "s1").reason == "skipped-path"
+
+
+def test_tool_context_skips_memento_bridge_adapter_files():
+    assert build_tool_context("Read", "/repo/extensions/memento.ts", "/repo", "s1").reason == "skipped-path"
+    assert build_tool_context("Read", "/repo/memento/pi_bridge.py", "/repo", "s1").reason == "skipped-path"
+
+
 @patch("memento.lifecycle.has_qmd", return_value=True)
 def test_tool_context_skips_insufficient_keywords(_has_qmd):
     with patch("memento.lifecycle.load_cache", return_value={"dirs": {}, "last_qmd_call": 0, "injections": {}}):

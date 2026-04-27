@@ -1203,6 +1203,7 @@ SKIP_PREFIXES = (
 SKIP_SEGMENTS = {
     "node_modules",
     ".git",
+    ".pi",
     "dist",
     "build",
     ".next",
@@ -1252,6 +1253,8 @@ SKIP_EXTENSIONS = {
 }
 
 SKIP_FILENAMES = {
+    "SKILL.md",
+    "MEMORY.md",
     "package.json",
     "package-lock.json",
     "pnpm-lock.yaml",
@@ -1325,6 +1328,13 @@ def should_skip_tool_context_path(file_path: str) -> bool:
     if any(file_path.startswith(prefix) for prefix in SKIP_PREFIXES):
         return True
 
+    path = Path(file_path)
+    parts = path.parts
+    if path.name == "memento.ts" and "extensions" in parts:
+        return True
+    if path.name == "pi_bridge.py" and "memento" in parts:
+        return True
+
     vault = get_vault()
     try:
         if os.path.realpath(file_path).startswith(str(vault)):
@@ -1332,11 +1342,9 @@ def should_skip_tool_context_path(file_path: str) -> bool:
     except (OSError, ValueError):
         pass
 
-    parts = Path(file_path).parts
     if any(part in SKIP_SEGMENTS for part in parts):
         return True
 
-    path = Path(file_path)
     if path.suffix.lower() in SKIP_EXTENSIONS:
         return True
     return path.name in SKIP_FILENAMES
