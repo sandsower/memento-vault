@@ -11,7 +11,7 @@
 # Or with a custom vault path:
 #   MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 #
-# Install experimental modules (Tenet retrieval + Inception consolidation):
+# Install experimental modules (Tenet retrieval + Inception consolidation + orra-init skill):
 #   ./install.sh --experimental
 #
 # Install MCP server config (Claude Code, Codex, and generic MCP clients):
@@ -47,7 +47,7 @@ Memento Vault installer v${NEW_VERSION}
 Usage: ./install.sh [OPTIONS]
 
 Options:
-  --experimental  Install Tenet retrieval + Inception consolidation modules
+  --experimental  Install Tenet retrieval, Inception consolidation, and orra-init skill
   --mcp           Install MCP server config (Claude Code, Codex, generic clients)
   --remote [URL]  Connect to a remote vault (implies --mcp)
   --force         Overwrite all files, ignoring local changes
@@ -250,7 +250,7 @@ EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-too
 
 if [ "$EXPERIMENTAL" = true ]; then
     INSTALL_HOOKS="$STABLE_HOOKS $EXPERIMENTAL_HOOKS"
-    info "Experimental mode: installing Tenet + Inception"
+    info "Experimental mode: installing Tenet + Inception + orra-init"
 else
     INSTALL_HOOKS="$STABLE_HOOKS"
 fi
@@ -280,7 +280,7 @@ SKILLS_SKIPPED=0
 
 INSTALL_SKILLS="memento memento-defrag start-fresh continue-work"
 if [ "$EXPERIMENTAL" = true ]; then
-    INSTALL_SKILLS="$INSTALL_SKILLS inception"
+    INSTALL_SKILLS="$INSTALL_SKILLS inception orra-init"
 fi
 
 for skill in $INSTALL_SKILLS; do
@@ -289,6 +289,16 @@ for skill in $INSTALL_SKILLS; do
         ((SKILLS_UPDATED++)) || true
     else
         ((SKILLS_SKIPPED++)) || true
+    fi
+    # Multi-file skills may ship a templates/ directory alongside SKILL.md.
+    # Copy each template file with safe_copy so local edits are preserved.
+    if [ -d "$SCRIPT_DIR/skills/$skill/templates" ]; then
+        mkdir -p "$CLAUDE_DIR/skills/$skill/templates"
+        for tpl in "$SCRIPT_DIR/skills/$skill/templates"/*; do
+            [ -f "$tpl" ] || continue
+            tpl_name="$(basename "$tpl")"
+            safe_copy "$tpl" "$CLAUDE_DIR/skills/$skill/templates/$tpl_name" "skills/$skill/templates/$tpl_name" >/dev/null 2>&1 || true
+        done
     fi
 done
 
