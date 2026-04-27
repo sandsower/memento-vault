@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "recall_diagnostics": False,
     "recall_diagnostics_include_candidates": False,
     "recall_diagnostics_max_candidates": 10,
+    "recall_skip_broad_project_queries": True,
     "recall_skip_patterns": [
         r"^(yes|no|ok|sure|thanks|y|n|yep|nope|looks good|lgtm|ship it|continue)$",
         r"^git\s",
