@@ -1,7 +1,7 @@
 class MementoVault < Formula
   desc "Persistent memory layer for AI coding agents — hooks, skills, and a local knowledge vault"
   homepage "https://github.com/sandsower/memento-vault"
-  url "https://github.com/sandsower/memento-vault/archive/refs/tags/v3.0.0.tar.gz"
+  url "https://github.com/sandsower/memento-vault/archive/refs/tags/v4.0.0.tar.gz"
   # sha256 "UPDATE_WITH_ACTUAL_SHA256_AFTER_RELEASE"
   license "MIT"
   head "https://github.com/sandsower/memento-vault.git", branch: "main"

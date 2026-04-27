@@ -2,7 +2,7 @@
 
 Persistent knowledge capture for coding agents. Sessions get triaged, scored, and filed as searchable Zettelkasten notes. Runs locally or as a remote service accessible from any device.
 
-Works with Claude Code (native hooks), and any MCP-compatible agent (Cursor, Windsurf, Codex, etc.) via the built-in MCP server.
+Works with Claude Code (native hooks), pi (native extension), and any MCP-compatible agent (Cursor, Windsurf, Codex, etc.) via the built-in MCP server.
 
 ## What it does
 
@@ -52,6 +52,24 @@ For agents that support MCP but not native hooks (Cursor, Windsurf, etc.):
 This installs the `memento/` package, writes generic MCP server config, and registers the server with Claude Code and Codex when those CLIs are installed. The server runs over stdio via `python -m memento`. The installer verifies the `mcp` Python package is available and installs it if needed. Claude Code gets Claude-specific skills and the concierge agent under `~/.claude`; Codex gets agent-agnostic skills under `~/.codex/skills`.
 
 You can combine flags: `./install.sh --experimental --mcp` gives you hooks + retrieval + MCP.
+
+### Pi extension
+
+Memento ships a native pi extension from this repo. The extension is TypeScript, but lifecycle policy stays in Python core: pi calls a short-lived JSON adapter (`python3 -m memento.pi_bridge`) for briefing, recall, and read-tool context.
+
+For local testing:
+
+```bash
+pi -e ./extensions/memento.ts
+```
+
+For package installation from a checkout:
+
+```bash
+pi install /path/to/memento-vault
+```
+
+The pi bridge does not start a long-lived MCP child process. Automatic durable writes are not enabled by default.
 
 ### Remote vault (access from any device)
 

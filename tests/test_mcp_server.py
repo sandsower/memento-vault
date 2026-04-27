@@ -138,51 +138,30 @@ class TestMementoSearch:
 
 
 class TestLifecycleRetrievalTools:
-    @patch("memento.mcp_server.memento_search")
-    def test_briefing_formats_project_search_results(self, mock_search):
-        mock_search.return_value = [
-            {
-                "path": "notes/pi-extension.md",
-                "title": "Pi extension design",
-                "score": 0.81,
-                "snippet": "Use before_agent_start for prompt injection.",
-            }
-        ]
+    @patch("memento.mcp_server.build_briefing")
+    def test_briefing_delegates_to_lifecycle(self, mock_build_briefing):
+        expected = {
+            "should_inject": True,
+            "content": "[vault] Project: memento-vault",
+            "source": "briefing",
+            "results": [{"path": "notes/pi-extension.md"}],
+        }
+        mock_build_briefing.return_value.to_dict.return_value = expected
 
         result = mcp_server.memento_briefing(cwd="/home/vic/Projects/memento-vault", session_id="s1")
 
-        assert result["should_inject"] is True
-        assert result["source"] == "briefing"
-        assert "[vault] Project: memento-vault" in result["content"]
-        assert "Pi extension design" in result["content"]
-        mock_search.assert_called_once()
-        _, kwargs = mock_search.call_args
-        assert kwargs["limit"] == 5
-        assert kwargs["cwd"] == "/home/vic/Projects/memento-vault"
+        assert result == expected
+        mock_build_briefing.assert_called_once_with("/home/vic/Projects/memento-vault", "s1")
 
-    @patch("memento.mcp_server.memento_search")
-    def test_recall_skips_short_prompts(self, mock_search):
-        result = mcp_server.memento_recall(prompt="ok", cwd="/repo", session_id="s1")
-
-        assert result == {
-            "should_inject": False,
-            "content": "",
+    @patch("memento.mcp_server.build_recall")
+    def test_recall_delegates_to_lifecycle(self, mock_build_recall):
+        expected = {
+            "should_inject": True,
+            "content": "[vault] Related memories:",
             "source": "recall",
-            "results": [],
-            "reason": "skipped",
+            "results": [{"path": "notes/cache.md"}],
         }
-        mock_search.assert_not_called()
-
-    @patch("memento.mcp_server.memento_search")
-    def test_recall_formats_search_results(self, mock_search):
-        mock_search.return_value = [
-            {
-                "path": "notes/cache.md",
-                "title": "Redis cache TTL",
-                "score": 0.9,
-                "snippet": "Set TTL explicitly to prevent stale reads.",
-            }
-        ]
+        mock_build_recall.return_value.to_dict.return_value = expected
 
         result = mcp_server.memento_recall(
             prompt="How should we handle Redis cache invalidation?",
@@ -190,56 +169,28 @@ class TestLifecycleRetrievalTools:
             session_id="s1",
         )
 
-        assert result["should_inject"] is True
-        assert result["source"] == "recall"
-        assert result["content"].startswith("[vault] Related memories:")
-        assert "Redis cache TTL" in result["content"]
-        mock_search.assert_called_once_with(
-            query="How should we handle Redis cache invalidation?",
-            limit=3,
-            semantic=False,
-            min_score=0.4,
-            cwd="/repo",
-        )
+        assert result == expected
+        mock_build_recall.assert_called_once_with("How should we handle Redis cache invalidation?", "/repo", "s1")
 
-    @patch("memento.mcp_server.memento_search")
-    def test_tool_context_only_handles_read_tools(self, mock_search):
+    @patch("memento.mcp_server.build_tool_context")
+    def test_tool_context_delegates_to_lifecycle(self, mock_build_tool_context):
+        expected = {
+            "should_inject": True,
+            "content": "[connected-to-vault]",
+            "source": "tool-context",
+            "results": [{"path": "notes/auth-boundary.md"}],
+        }
+        mock_build_tool_context.return_value.to_dict.return_value = expected
+
         result = mcp_server.memento_tool_context(
-            tool_name="bash", file_path="src/cache.py", cwd="/repo", session_id="s1"
+            tool_name="read",
+            file_path="src/server/authMiddleware.ts",
+            cwd="/repo",
+            session_id="s1",
         )
 
-        assert result["should_inject"] is False
-        assert result["reason"] == "unsupported-tool"
-        mock_search.assert_not_called()
-
-    @patch("memento.mcp_server.memento_search")
-    def test_tool_context_extracts_path_keywords(self, mock_search):
-        mock_search.return_value = [
-            {
-                "path": "notes/auth-boundary.md",
-                "title": "Auth boundary lives in middleware",
-                "score": 0.78,
-                "snippet": "Middleware owns auth checks.",
-            }
-        ]
-
-        with patch("memento.mcp_server.get_config", return_value=dict(DEFAULT_CONFIG)):
-            result = mcp_server.memento_tool_context(
-                tool_name="read",
-                file_path="src/server/authMiddleware.ts",
-                cwd="/repo",
-                session_id="s1",
-            )
-
-        assert result["should_inject"] is True
-        assert result["source"] == "tool-context"
-        assert result["content"].startswith("[connected-to-vault]")
-        assert "Auth boundary lives in middleware" in result["content"]
-        mock_search.assert_called_once()
-        _, kwargs = mock_search.call_args
-        assert kwargs["query"] == "auth middleware"
-        assert kwargs["limit"] == 2
-        assert kwargs["min_score"] == DEFAULT_CONFIG["tool_context_min_score"]
+        assert result == expected
+        mock_build_tool_context.assert_called_once_with("read", "src/server/authMiddleware.ts", "/repo", "s1")
 
 
 # --- memento_store ---

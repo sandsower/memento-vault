@@ -14,12 +14,14 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
+from memento.lifecycle import build_briefing, build_recall, build_tool_context
 from memento.search import enhance_results, has_qmd, qmd_search_with_extras, qmd_get
 from memento.store import (
     acquire_vault_write_lock,
     log_retrieval,
     release_vault_write_lock,
     update_project_index,
+    write_daily_snapshot,
     write_note,
 )
 from memento.utils import sanitize_secrets
@@ -215,353 +217,22 @@ def memento_search(
     return output
 
 
-def _lifecycle_empty(source: str, reason: str = "no-results") -> dict:
-    return {
-        "should_inject": False,
-        "content": "",
-        "source": source,
-        "results": [],
-        "reason": reason,
-    }
-
-
-def _format_lifecycle_results(header: str, results: list[dict]) -> str:
-    lines = [header]
-    for result in results:
-        title = _strip_injection(result.get("title", ""))
-        snippet = _strip_injection((result.get("snippet") or "").strip())
-        line = f"  - {title}"
-        if snippet:
-            dot = snippet.find(".")
-            if 0 < dot < 120:
-                snippet = snippet[: dot + 1]
-            elif len(snippet) > 120:
-                snippet = snippet[:120] + "..."
-            line += f": {snippet}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def _should_skip_recall(prompt: str) -> bool:
-    prompt = (prompt or "").strip()
-    if len(prompt) < 10:
-        return True
-    if prompt.startswith("/"):
-        return True
-    if "<command-message>" in prompt or "<command-name>" in prompt:
-        return True
-    if "<task-notification>" in prompt:
-        return True
-    if prompt.startswith("# ") and len(prompt) > 200:
-        return True
-    if "You are working on" in prompt:
-        return True
-    if prompt.startswith("Continuation guidance:"):
-        return True
-    if "<local-command-caveat>" in prompt:
-        return True
-    if len(prompt) > 200:
-        return True
-
-    config = get_config()
-    prompt_lower = prompt.lower().strip()
-    for pattern in config.get("recall_skip_patterns", []):
-        try:
-            if re.match(pattern, prompt_lower, re.IGNORECASE):
-                return True
-        except re.error:
-            continue
-    return False
-
-
-_TOOL_CONTEXT_SKIP_SEGMENTS = {
-    "node_modules",
-    ".git",
-    "dist",
-    "build",
-    ".next",
-    "__pycache__",
-    ".cache",
-    "vendor",
-    ".terraform",
-    "target",
-    ".venv",
-    "venv",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    "coverage",
-    ".nyc_output",
-}
-
-_TOOL_CONTEXT_SKIP_EXTENSIONS = {
-    ".json",
-    ".lock",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".svg",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".ico",
-    ".webp",
-    ".woff",
-    ".woff2",
-    ".ttf",
-    ".eot",
-    ".map",
-    ".sum",
-    ".mod",
-    ".csv",
-    ".xml",
-    ".sql",
-    ".env",
-    ".pem",
-    ".key",
-    ".crt",
-}
-
-_TOOL_CONTEXT_SKIP_FILENAMES = {
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "tsconfig.json",
-    "tsconfig.base.json",
-    "go.mod",
-    "go.sum",
-    "Cargo.lock",
-    "Cargo.toml",
-    ".gitignore",
-    ".prettierrc",
-    ".eslintrc",
-    ".eslintrc.js",
-    "Makefile",
-    "Dockerfile",
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "jest.config.js",
-    "jest.config.ts",
-    "vitest.config.ts",
-    ".env",
-    ".env.local",
-    ".env.example",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE",
-}
-
-_TOOL_CONTEXT_STOP_SEGMENTS = {
-    "src",
-    "lib",
-    "app",
-    "apps",
-    "cmd",
-    "pkg",
-    "internal",
-    "components",
-    "utils",
-    "hooks",
-    "helpers",
-    "services",
-    "test",
-    "tests",
-    "__tests__",
-    "spec",
-    "specs",
-    "pages",
-    "views",
-    "controllers",
-    "models",
-    "resolvers",
-    "middleware",
-    "handlers",
-    "routes",
-    "api",
-    "common",
-    "shared",
-    "core",
-    "config",
-    "types",
-    "frontend",
-    "backend",
-    "server",
-    "client",
-}
-
-
-def _should_skip_tool_context_path(file_path: str) -> bool:
-    if not file_path:
-        return True
-    skip_prefixes = ("/usr/", "/etc/", "/proc/", "/sys/", "/dev/", "/tmp/", "/var/", "/snap/")
-    if any(file_path.startswith(prefix) for prefix in skip_prefixes):
-        return True
-    parts = Path(file_path).parts
-    if any(part in _TOOL_CONTEXT_SKIP_SEGMENTS for part in parts):
-        return True
-    path = Path(file_path)
-    if path.suffix.lower() in _TOOL_CONTEXT_SKIP_EXTENSIONS:
-        return True
-    return path.name in _TOOL_CONTEXT_SKIP_FILENAMES
-
-
-def _extract_tool_context_keywords(file_path: str) -> str:
-    path = file_path
-    home = str(Path.home())
-    if path.startswith(home):
-        path = path[len(home) :]
-
-    words: list[str] = []
-    for part in Path(path).parts:
-        if part.startswith(".") or part in _TOOL_CONTEXT_STOP_SEGMENTS:
-            continue
-        if part.endswith(".git"):
-            part = part[:-4]
-        if "." in part and part != part.split(".")[0]:
-            part = Path(part).stem
-        for token in re.split(r"[-_./]", part):
-            for word in re.sub(r"([a-z])([A-Z])", r"\1 \2", token).split():
-                normalized = word.lower().strip()
-                if len(normalized) > 1:
-                    words.append(normalized)
-
-    seen = set()
-    unique = []
-    for word in words:
-        if word not in seen:
-            seen.add(word)
-            unique.append(word)
-    return " ".join(unique)
-
-
 @mcp.tool()
 def memento_briefing(cwd: str = "", session_id: str = "") -> dict:
-    """Return project-aware vault context for first-turn/session briefing.
-
-    This is the MCP lifecycle equivalent of the Claude Code SessionStart
-    briefing hook. Agents should inject `content` when `should_inject` is true.
-    """
-    config = get_config()
-    if not config.get("session_briefing", True):
-        return _lifecycle_empty("briefing", "disabled")
-    if not cwd:
-        return _lifecycle_empty("briefing", "missing-cwd")
-
-    project_slug, _ticket = detect_project(cwd, None)
-    if project_slug == "unknown":
-        project_slug = slugify(Path(cwd).name) or "unknown"
-    if project_slug == "unknown":
-        return _lifecycle_empty("briefing", "unknown-project")
-
-    query = project_slug.replace("-", " ")
-    max_notes = config.get("briefing_max_notes", 5)
-    min_score = config.get("briefing_min_score", 0.3)
-    results = memento_search(query=query, limit=max_notes, semantic=True, min_score=min_score, cwd=cwd)
-    if not results:
-        return _lifecycle_empty("briefing")
-
-    header = f"[vault] Project: {project_slug}"
-    content = _format_lifecycle_results(header, results)
-    log_retrieval(
-        "mcp-lifecycle",
-        "briefing",
-        query=query,
-        session_id=session_id,
-        injected_count=len(results),
-        injected_chars=len(content),
-    )
-    return {
-        "should_inject": True,
-        "content": content,
-        "source": "briefing",
-        "results": results,
-    }
+    """Return project-aware vault context for first-turn/session briefing."""
+    return build_briefing(cwd, session_id).to_dict()
 
 
 @mcp.tool()
 def memento_recall(prompt: str, cwd: str = "", session_id: str = "") -> dict:
-    """Return just-in-time vault context for a user prompt.
-
-    This is the MCP lifecycle equivalent of the Claude Code UserPromptSubmit
-    recall hook. Agents should inject `content` when `should_inject` is true.
-    """
-    config = get_config()
-    if not config.get("prompt_recall", True):
-        return _lifecycle_empty("recall", "disabled")
-    if _should_skip_recall(prompt):
-        return _lifecycle_empty("recall", "skipped")
-
-    max_notes = config.get("recall_max_notes", 3)
-    min_score = config.get("recall_min_score", 0.4)
-    results = memento_search(query=prompt, limit=max_notes, semantic=False, min_score=min_score, cwd=cwd)
-    if not results:
-        return _lifecycle_empty("recall")
-
-    content = _format_lifecycle_results("[vault] Related memories:", results)
-    log_retrieval(
-        "mcp-lifecycle",
-        "recall",
-        query=prompt,
-        session_id=session_id,
-        injected_count=len(results),
-        injected_chars=len(content),
-    )
-    return {
-        "should_inject": True,
-        "content": content,
-        "source": "recall",
-        "results": results,
-    }
+    """Return just-in-time vault context for a user prompt."""
+    return build_recall(prompt, cwd, session_id).to_dict()
 
 
 @mcp.tool()
 def memento_tool_context(tool_name: str, file_path: str, cwd: str = "", session_id: str = "") -> dict:
-    """Return vault context for a file-read tool result.
-
-    This is the MCP lifecycle equivalent of the Claude Code PreToolUse tool
-    context hook. Pi-style agents should append `content` to read tool results
-    when `should_inject` is true.
-    """
-    config = get_config()
-    if not config.get("tool_context", True):
-        return _lifecycle_empty("tool-context", "disabled")
-    if tool_name not in {"read", "Read"}:
-        return _lifecycle_empty("tool-context", "unsupported-tool")
-    if not file_path:
-        return _lifecycle_empty("tool-context", "missing-file-path")
-
-    normalized_path = os.path.realpath(os.path.expanduser(file_path))
-    if _should_skip_tool_context_path(normalized_path):
-        return _lifecycle_empty("tool-context", "skipped-path")
-
-    query = _extract_tool_context_keywords(file_path)
-    if not query or len(query.split()) < 2:
-        return _lifecycle_empty("tool-context", "insufficient-keywords")
-
-    max_notes = config.get("tool_context_max_notes", 2)
-    min_score = config.get("tool_context_min_score", 0.75)
-    results = memento_search(query=query, limit=max_notes, semantic=False, min_score=min_score, cwd=cwd)
-    if not results:
-        return _lifecycle_empty("tool-context")
-
-    content = _format_lifecycle_results("[connected-to-vault]", results)
-    log_retrieval(
-        "mcp-lifecycle",
-        "tool-context",
-        query=query,
-        file_path=file_path,
-        session_id=session_id,
-        injected_count=len(results),
-        injected_chars=len(content),
-    )
-    return {
-        "should_inject": True,
-        "content": content,
-        "source": "tool-context",
-        "results": results,
-    }
+    """Return vault context for a file-read tool result."""
+    return build_tool_context(tool_name, file_path, cwd, session_id).to_dict()
 
 
 @mcp.tool()
@@ -665,6 +336,92 @@ def memento_store(
         log_retrieval("mcp", "store", title=title, path=str(path))
         return {"path": str(path.relative_to(vault)), "title": title.strip()}
 
+    finally:
+        release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_daily_snapshot(
+    date: str,
+    repo_slug: str,
+    content: str,
+    frontmatter_extra: dict | None = None,
+    supersede: bool = False,
+) -> dict:
+    """Write a structured per-repo daily snapshot into the vault.
+
+    Writes a deterministic-filename note at notes/daily-<date>-<repo_slug>.md
+    for integrations (like orra's vault-bridge) that need path-controlled
+    writes rather than title-slugged ones. Unlike memento_store, the filename
+    is owned by the caller via date plus repo_slug, so read-back is a plain
+    memento_get by path.
+
+    Append-only: re-writing the same (date, repo_slug) pair requires
+    supersede=True, which writes daily-<date>-<repo_slug>-v<n>.md with a
+    supersedes chain back to the original. Preserves the vault append-only
+    invariant.
+
+    Args:
+        date: ISO date string YYYY-MM-DD.
+        repo_slug: Repo identifier, matches [a-z0-9][a-z0-9_-]*
+            (e.g. care_git, fundid, memento-vault).
+        content: Markdown body (no frontmatter — the tool manages it).
+        frontmatter_extra: Optional dict of extra frontmatter fields to merge.
+            Managed keys (title, type, tags, source, certainty, date,
+            repo_slug, supersedes) are stripped if present.
+        supersede: If True and a snapshot exists for (date, repo_slug), write
+            a -v<n>.md variant with a supersedes link. If False and one exists,
+            return reason: already_exists.
+
+    Returns:
+        On success: {"path": "notes/daily-...", "supersedes": "daily-..." | None,
+        "version": 1|N}.
+        On error: {"error": "...", "reason": "invalid_date" | "invalid_repo_slug"
+        | "empty_content" | "already_exists" | "write_failed"}.
+    """
+    vault = get_vault()
+    if not vault.exists():
+        return {"error": f"Vault not found at {vault}", "reason": "vault_missing"}
+
+    if not acquire_vault_write_lock():
+        return {
+            "error": "Could not acquire vault write lock (another write in progress)",
+            "reason": "lock_timeout",
+        }
+
+    try:
+        try:
+            result = write_daily_snapshot(
+                vault_path=vault,
+                date=date,
+                repo_slug=repo_slug,
+                content=content,
+                frontmatter_extra=frontmatter_extra,
+                supersede=supersede,
+            )
+        except OSError as exc:
+            log_retrieval("mcp", "daily_snapshot_write_failed", error=str(exc))
+            return {"error": f"write failed: {exc}", "reason": "write_failed"}
+
+        if "error" in result:
+            log_retrieval(
+                "mcp",
+                "daily_snapshot_rejected",
+                date=date,
+                repo_slug=repo_slug,
+                reason=result.get("reason"),
+            )
+            return result
+
+        log_retrieval(
+            "mcp",
+            "daily_snapshot",
+            date=date,
+            repo_slug=repo_slug,
+            path=result["path"],
+            version=result["version"],
+        )
+        return result
     finally:
         release_vault_write_lock()
 
