@@ -68,11 +68,7 @@ def _note_payload_matches(
         match = re.search(r"^tags:\s*\[([^\]]*)\]", fm, re.MULTILINE)
         if not match:
             return []
-        return [
-            t.strip().strip("\"'")
-            for t in match.group(1).split(",")
-            if t.strip()
-        ]
+        return [t.strip().strip("\"'") for t in match.group(1).split(",") if t.strip()]
 
     comparisons = [
         scalar("title") == title.strip(),
@@ -217,6 +213,355 @@ def memento_search(
 
     log_retrieval("mcp", "search", query=query, results=len(output))
     return output
+
+
+def _lifecycle_empty(source: str, reason: str = "no-results") -> dict:
+    return {
+        "should_inject": False,
+        "content": "",
+        "source": source,
+        "results": [],
+        "reason": reason,
+    }
+
+
+def _format_lifecycle_results(header: str, results: list[dict]) -> str:
+    lines = [header]
+    for result in results:
+        title = _strip_injection(result.get("title", ""))
+        snippet = _strip_injection((result.get("snippet") or "").strip())
+        line = f"  - {title}"
+        if snippet:
+            dot = snippet.find(".")
+            if 0 < dot < 120:
+                snippet = snippet[: dot + 1]
+            elif len(snippet) > 120:
+                snippet = snippet[:120] + "..."
+            line += f": {snippet}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _should_skip_recall(prompt: str) -> bool:
+    prompt = (prompt or "").strip()
+    if len(prompt) < 10:
+        return True
+    if prompt.startswith("/"):
+        return True
+    if "<command-message>" in prompt or "<command-name>" in prompt:
+        return True
+    if "<task-notification>" in prompt:
+        return True
+    if prompt.startswith("# ") and len(prompt) > 200:
+        return True
+    if "You are working on" in prompt:
+        return True
+    if prompt.startswith("Continuation guidance:"):
+        return True
+    if "<local-command-caveat>" in prompt:
+        return True
+    if len(prompt) > 200:
+        return True
+
+    config = get_config()
+    prompt_lower = prompt.lower().strip()
+    for pattern in config.get("recall_skip_patterns", []):
+        try:
+            if re.match(pattern, prompt_lower, re.IGNORECASE):
+                return True
+        except re.error:
+            continue
+    return False
+
+
+_TOOL_CONTEXT_SKIP_SEGMENTS = {
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    "__pycache__",
+    ".cache",
+    "vendor",
+    ".terraform",
+    "target",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    "coverage",
+    ".nyc_output",
+}
+
+_TOOL_CONTEXT_SKIP_EXTENSIONS = {
+    ".json",
+    ".lock",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".ico",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".map",
+    ".sum",
+    ".mod",
+    ".csv",
+    ".xml",
+    ".sql",
+    ".env",
+    ".pem",
+    ".key",
+    ".crt",
+}
+
+_TOOL_CONTEXT_SKIP_FILENAMES = {
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "tsconfig.json",
+    "tsconfig.base.json",
+    "go.mod",
+    "go.sum",
+    "Cargo.lock",
+    "Cargo.toml",
+    ".gitignore",
+    ".prettierrc",
+    ".eslintrc",
+    ".eslintrc.js",
+    "Makefile",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "jest.config.js",
+    "jest.config.ts",
+    "vitest.config.ts",
+    ".env",
+    ".env.local",
+    ".env.example",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+}
+
+_TOOL_CONTEXT_STOP_SEGMENTS = {
+    "src",
+    "lib",
+    "app",
+    "apps",
+    "cmd",
+    "pkg",
+    "internal",
+    "components",
+    "utils",
+    "hooks",
+    "helpers",
+    "services",
+    "test",
+    "tests",
+    "__tests__",
+    "spec",
+    "specs",
+    "pages",
+    "views",
+    "controllers",
+    "models",
+    "resolvers",
+    "middleware",
+    "handlers",
+    "routes",
+    "api",
+    "common",
+    "shared",
+    "core",
+    "config",
+    "types",
+    "frontend",
+    "backend",
+    "server",
+    "client",
+}
+
+
+def _should_skip_tool_context_path(file_path: str) -> bool:
+    if not file_path:
+        return True
+    skip_prefixes = ("/usr/", "/etc/", "/proc/", "/sys/", "/dev/", "/tmp/", "/var/", "/snap/")
+    if any(file_path.startswith(prefix) for prefix in skip_prefixes):
+        return True
+    parts = Path(file_path).parts
+    if any(part in _TOOL_CONTEXT_SKIP_SEGMENTS for part in parts):
+        return True
+    path = Path(file_path)
+    if path.suffix.lower() in _TOOL_CONTEXT_SKIP_EXTENSIONS:
+        return True
+    return path.name in _TOOL_CONTEXT_SKIP_FILENAMES
+
+
+def _extract_tool_context_keywords(file_path: str) -> str:
+    path = file_path
+    home = str(Path.home())
+    if path.startswith(home):
+        path = path[len(home) :]
+
+    words: list[str] = []
+    for part in Path(path).parts:
+        if part.startswith(".") or part in _TOOL_CONTEXT_STOP_SEGMENTS:
+            continue
+        if part.endswith(".git"):
+            part = part[:-4]
+        if "." in part and part != part.split(".")[0]:
+            part = Path(part).stem
+        for token in re.split(r"[-_./]", part):
+            for word in re.sub(r"([a-z])([A-Z])", r"\1 \2", token).split():
+                normalized = word.lower().strip()
+                if len(normalized) > 1:
+                    words.append(normalized)
+
+    seen = set()
+    unique = []
+    for word in words:
+        if word not in seen:
+            seen.add(word)
+            unique.append(word)
+    return " ".join(unique)
+
+
+@mcp.tool()
+def memento_briefing(cwd: str = "", session_id: str = "") -> dict:
+    """Return project-aware vault context for first-turn/session briefing.
+
+    This is the MCP lifecycle equivalent of the Claude Code SessionStart
+    briefing hook. Agents should inject `content` when `should_inject` is true.
+    """
+    config = get_config()
+    if not config.get("session_briefing", True):
+        return _lifecycle_empty("briefing", "disabled")
+    if not cwd:
+        return _lifecycle_empty("briefing", "missing-cwd")
+
+    project_slug, _ticket = detect_project(cwd, None)
+    if project_slug == "unknown":
+        project_slug = slugify(Path(cwd).name) or "unknown"
+    if project_slug == "unknown":
+        return _lifecycle_empty("briefing", "unknown-project")
+
+    query = project_slug.replace("-", " ")
+    max_notes = config.get("briefing_max_notes", 5)
+    min_score = config.get("briefing_min_score", 0.3)
+    results = memento_search(query=query, limit=max_notes, semantic=True, min_score=min_score, cwd=cwd)
+    if not results:
+        return _lifecycle_empty("briefing")
+
+    header = f"[vault] Project: {project_slug}"
+    content = _format_lifecycle_results(header, results)
+    log_retrieval(
+        "mcp-lifecycle",
+        "briefing",
+        query=query,
+        session_id=session_id,
+        injected_count=len(results),
+        injected_chars=len(content),
+    )
+    return {
+        "should_inject": True,
+        "content": content,
+        "source": "briefing",
+        "results": results,
+    }
+
+
+@mcp.tool()
+def memento_recall(prompt: str, cwd: str = "", session_id: str = "") -> dict:
+    """Return just-in-time vault context for a user prompt.
+
+    This is the MCP lifecycle equivalent of the Claude Code UserPromptSubmit
+    recall hook. Agents should inject `content` when `should_inject` is true.
+    """
+    config = get_config()
+    if not config.get("prompt_recall", True):
+        return _lifecycle_empty("recall", "disabled")
+    if _should_skip_recall(prompt):
+        return _lifecycle_empty("recall", "skipped")
+
+    max_notes = config.get("recall_max_notes", 3)
+    min_score = config.get("recall_min_score", 0.4)
+    results = memento_search(query=prompt, limit=max_notes, semantic=False, min_score=min_score, cwd=cwd)
+    if not results:
+        return _lifecycle_empty("recall")
+
+    content = _format_lifecycle_results("[vault] Related memories:", results)
+    log_retrieval(
+        "mcp-lifecycle",
+        "recall",
+        query=prompt,
+        session_id=session_id,
+        injected_count=len(results),
+        injected_chars=len(content),
+    )
+    return {
+        "should_inject": True,
+        "content": content,
+        "source": "recall",
+        "results": results,
+    }
+
+
+@mcp.tool()
+def memento_tool_context(tool_name: str, file_path: str, cwd: str = "", session_id: str = "") -> dict:
+    """Return vault context for a file-read tool result.
+
+    This is the MCP lifecycle equivalent of the Claude Code PreToolUse tool
+    context hook. Pi-style agents should append `content` to read tool results
+    when `should_inject` is true.
+    """
+    config = get_config()
+    if not config.get("tool_context", True):
+        return _lifecycle_empty("tool-context", "disabled")
+    if tool_name not in {"read", "Read"}:
+        return _lifecycle_empty("tool-context", "unsupported-tool")
+    if not file_path:
+        return _lifecycle_empty("tool-context", "missing-file-path")
+
+    normalized_path = os.path.realpath(os.path.expanduser(file_path))
+    if _should_skip_tool_context_path(normalized_path):
+        return _lifecycle_empty("tool-context", "skipped-path")
+
+    query = _extract_tool_context_keywords(file_path)
+    if not query or len(query.split()) < 2:
+        return _lifecycle_empty("tool-context", "insufficient-keywords")
+
+    max_notes = config.get("tool_context_max_notes", 2)
+    min_score = config.get("tool_context_min_score", 0.75)
+    results = memento_search(query=query, limit=max_notes, semantic=False, min_score=min_score, cwd=cwd)
+    if not results:
+        return _lifecycle_empty("tool-context")
+
+    content = _format_lifecycle_results("[connected-to-vault]", results)
+    log_retrieval(
+        "mcp-lifecycle",
+        "tool-context",
+        query=query,
+        file_path=file_path,
+        session_id=session_id,
+        injected_count=len(results),
+        injected_chars=len(content),
+    )
+    return {
+        "should_inject": True,
+        "content": content,
+        "source": "tool-context",
+        "results": results,
+    }
 
 
 @mcp.tool()
@@ -428,6 +773,7 @@ def memento_get(path: str) -> dict:
 
     # Fall back to remote vault if configured
     from memento.remote_client import is_remote, get as remote_get
+
     if is_remote():
         remote_result = remote_get(path)
         if remote_result:
@@ -491,7 +837,9 @@ def memento_capture(
         # Reject transcript_path over HTTP — remote callers must not trigger
         # server-side file reads. They should send session_summary instead.
         if _active_transport != "stdio":
-            return {"error": "transcript_path is only supported in local (stdio) mode. Send session_summary for remote capture."}
+            return {
+                "error": "transcript_path is only supported in local (stdio) mode. Send session_summary for remote capture."
+            }
 
         if not os.path.exists(transcript_path):
             return {"error": f"Transcript file not found: {transcript_path}"}
@@ -793,14 +1141,16 @@ def main():
                     identity = auth_provider.authenticate(auth_header)
                     if identity is None:
                         body = b'{"error": "Unauthorized"}'
-                        await send({
-                            "type": "http.response.start",
-                            "status": 401,
-                            "headers": [
-                                [b"content-type", b"application/json"],
-                                [b"content-length", str(len(body)).encode()],
-                            ],
-                        })
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": 401,
+                                "headers": [
+                                    [b"content-type", b"application/json"],
+                                    [b"content-length", str(len(body)).encode()],
+                                ],
+                            }
+                        )
                         await send({"type": "http.response.body", "body": body})
                         return
                 await inner_app(scope, receive, send)
