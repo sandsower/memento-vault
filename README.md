@@ -2,7 +2,7 @@
 
 Persistent knowledge capture for coding agents. Sessions get triaged, scored, and filed as searchable Zettelkasten notes. Runs locally or as a remote service accessible from any device.
 
-Works with Claude Code (native hooks), and any MCP-compatible agent (Cursor, Windsurf, Codex, etc.) via the built-in MCP server.
+Works with Claude Code (native hooks), pi (native extension), and any MCP-compatible agent (Cursor, Windsurf, Codex, etc.) via the built-in MCP server.
 
 ## What it does
 
@@ -52,6 +52,73 @@ For agents that support MCP but not native hooks (Cursor, Windsurf, etc.):
 This installs the `memento/` package, writes generic MCP server config, and registers the server with Claude Code and Codex when those CLIs are installed. The server runs over stdio via `python -m memento`. The installer verifies the `mcp` Python package is available and installs it if needed. Claude Code gets Claude-specific skills and the concierge agent under `~/.claude`; Codex gets agent-agnostic skills under `~/.codex/skills`.
 
 You can combine flags: `./install.sh --experimental --mcp` gives you hooks + retrieval + MCP.
+
+### Pi extension
+
+Memento ships a native pi extension from this repo. The extension is TypeScript, but lifecycle policy stays in Python core: pi calls a short-lived JSON adapter (`python3 -m memento.pi_bridge`) for briefing, recall, and read-tool context.
+
+For local testing:
+
+```bash
+pi -e ./extensions/memento.ts
+```
+
+For package installation from a checkout:
+
+```bash
+pi install /path/to/memento-vault
+```
+
+The pi bridge does not start a long-lived MCP child process. Automatic durable writes are not enabled by default. Candidate captures can be queued for review and flushed manually.
+
+Useful pi commands/tools:
+
+- `/memento-status` or `memento_status` — bridge/vault status, lifecycle feature state, queue count.
+- `/memento-queue` or `memento_queue` — list queued pi capture candidates.
+- `/memento-flush-queue <id>` or `memento_flush_queue` — write an approved queued capture to the vault (`--all` flushes all).
+- `memento_capture` — manually write a durable note; pass `queue: true` to queue instead.
+
+Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.json`, project-local `.pi/settings.json`, or project `package.json`. The bridge reads `memento.piBridge` first, then `piBridge`, then top-level keys:
+
+```json
+{
+  "memento": {
+    "piBridge": {
+      "enabled": true,
+      "briefing": true,
+      "promptRecall": true,
+      "toolContext": false,
+      "autoCapture": false,
+      "captureQueue": true,
+      "maxInjectedChars": 4000,
+      "maxToolContextPerSession": 5
+    }
+  }
+}
+```
+
+Environment variables override file config:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MEMENTO_PI_ENABLED` | `true` | Enable/disable the extension lifecycle work. |
+| `MEMENTO_PI_BRIEFING` | `true` | First-turn project briefing. |
+| `MEMENTO_PI_PROMPT_RECALL` | `true` | Prompt recall before each agent turn. |
+| `MEMENTO_PI_TOOL_CONTEXT` | `false` | Read-tool context injection. |
+| `MEMENTO_PI_MAX_INJECTED_CHARS` | `4000` | Per-injection character cap. |
+| `MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION` | `5` | Tool-context injection cap per pi session. |
+| `MEMENTO_PI_AUTO_CAPTURE` | `false` | Queue automatic capture candidates on `agent_end`, compaction, and shutdown lifecycle events. |
+| `MEMENTO_PI_CAPTURE_QUEUE` | `true` | Queue automatic capture candidates instead of writing notes directly. |
+
+When automatic capture is enabled, pi lifecycle events only create reviewable queue entries. They do not write durable notes until `/memento-flush-queue` or `memento_flush_queue` is used. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
+
+Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
+
+```bash
+pi -e ./extensions/memento.ts
+```
+
+Then verify `/memento-status`, `/memento-queue`, `/reload`, `/new`, `/resume`, `/fork`, `/compact`, and quit. The bridge uses short-lived `python3 -m memento.pi_bridge` calls rather than a persistent child process, so shutdown cleanup should leave no memento-owned child process behind.
 
 ### Remote vault (access from any device)
 

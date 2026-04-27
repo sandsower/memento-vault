@@ -76,6 +76,11 @@ class TestLoadConfig:
         assert DEFAULT_CONFIG["llm_backend"] == "claude"
         assert DEFAULT_CONFIG["llm_model"] is None
 
+    def test_recall_diagnostics_defaults_disabled(self):
+        assert DEFAULT_CONFIG["recall_diagnostics"] is False
+        assert DEFAULT_CONFIG["recall_diagnostics_include_candidates"] is False
+        assert DEFAULT_CONFIG["recall_diagnostics_max_candidates"] == 10
+
     def test_warns_on_corrupt_config_file(self, tmp_path, capsys):
         """Regression: corrupt YAML must warn to stderr, not silently use defaults."""
         vault = tmp_path / "vault"

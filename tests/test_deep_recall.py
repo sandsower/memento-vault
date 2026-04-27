@@ -3,7 +3,6 @@
 import importlib.util as _ilu
 import json
 import os
-import sys
 import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -11,22 +10,21 @@ from unittest.mock import patch, MagicMock
 import pytest
 from memento.llm import LLMResult
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
+from memento import lifecycle
 
-# vault-recall.py has a hyphen; load it via spec_from_file_location
 _vr_spec = _ilu.spec_from_file_location(
-    "vault_recall",
+    "vault_recall_hook",
     str(Path(__file__).parent.parent / "hooks" / "vault-recall.py"),
 )
-vault_recall = _ilu.module_from_spec(_vr_spec)
-sys.modules["vault_recall"] = vault_recall
-_vr_spec.loader.exec_module(vault_recall)
+vault_recall_hook = _ilu.module_from_spec(_vr_spec)
+assert _vr_spec.loader is not None
+_vr_spec.loader.exec_module(vault_recall_hook)
 
-spawn_deep_recall = vault_recall.spawn_deep_recall
-run_deep_recall_worker = vault_recall.run_deep_recall_worker
-consume_deep_recall = vault_recall.consume_deep_recall
-_parse_deep_recall_response = vault_recall._parse_deep_recall_response
-_cleanup_deep_recall_pending = vault_recall._cleanup_deep_recall_pending
+spawn_deep_recall = lifecycle.spawn_deep_recall
+run_deep_recall_worker = lifecycle.run_deep_recall_worker
+consume_deep_recall = lifecycle.consume_deep_recall
+_parse_deep_recall_response = lifecycle._parse_deep_recall_response
+_cleanup_deep_recall_pending = lifecycle._cleanup_deep_recall_pending
 
 
 @pytest.fixture
@@ -34,8 +32,8 @@ def runtime_dir(tmp_path):
     """Point DEEP_RECALL_PENDING_PATH at a temp dir."""
     pending_path = str(tmp_path / "deep-recall-pending.json")
     with (
-        patch.object(vault_recall, "DEEP_RECALL_PENDING_PATH", pending_path),
-        patch.object(vault_recall, "RUNTIME_DIR", str(tmp_path)),
+        patch.object(lifecycle, "DEEP_RECALL_PENDING_PATH", pending_path),
+        patch.object(lifecycle, "RUNTIME_DIR", str(tmp_path)),
     ):
         yield tmp_path, pending_path
 
@@ -55,7 +53,7 @@ class TestSpawnDeepRecall:
             },
         ]
 
-        with patch("vault_recall._subprocess.Popen") as mock_popen:
+        with patch("memento.lifecycle._subprocess.Popen") as mock_popen:
             spawn_deep_recall("What changed about caching last time?", results, config)
 
         # Should have spawned a subprocess
@@ -86,7 +84,7 @@ class TestSpawnDeepRecall:
             input_file_path = cmd[3]
             return MagicMock()
 
-        with patch("vault_recall._subprocess.Popen", side_effect=capture_popen):
+        with patch("memento.lifecycle._subprocess.Popen", side_effect=capture_popen):
             spawn_deep_recall("How did we handle this before?", results, config)
 
         assert input_file_path is not None
@@ -102,7 +100,7 @@ class TestSpawnDeepRecall:
         config = {"deep_recall_backend": "codex"}
         results = [{"title": "x", "snippet": "y", "path": "p", "score": 0.3}]
 
-        with patch("vault_recall._subprocess.Popen", side_effect=OSError("fail")):
+        with patch("memento.lifecycle._subprocess.Popen", side_effect=OSError("fail")):
             spawn_deep_recall("What changed?", results, config)
 
         # Pending file should be cleaned up
@@ -113,7 +111,7 @@ class TestSpawnDeepRecall:
         config = {"deep_recall_backend": "claude"}
         results = [{"title": "x", "snippet": "y", "path": "p", "score": 0.3}]
 
-        with patch("vault_recall._subprocess.Popen") as mock_popen:
+        with patch("memento.lifecycle._subprocess.Popen") as mock_popen:
             spawn_deep_recall("What changed?", results, config)
 
         cmd = mock_popen.call_args[0][0]
@@ -314,19 +312,19 @@ class TestDeepRecallGate:
         results = [{"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.8}]
 
         with (
-            patch("vault_recall.get_config", return_value=config),
-            patch("vault_recall.get_vault", return_value=vault),
-            patch("vault_recall.has_qmd", return_value=True),
-            patch("vault_recall.read_hook_input", return_value=self._mock_hook_input("Fix the broken test")),
-            patch("vault_recall.qmd_search_with_extras", return_value=results),
-            patch("vault_recall.enhance_results", return_value=results),
-            patch("vault_recall.prf_expand_query", return_value="Fix the broken test"),
-            patch("vault_recall.detect_project", return_value=("unknown", None)),
-            patch("vault_recall.is_duplicate", return_value=False),
-            patch("vault_recall.log_retrieval"),
-            patch("vault_recall.spawn_deep_recall") as mock_spawn,
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.get_vault", return_value=vault),
+            patch("memento.lifecycle.has_qmd", return_value=True),
+            patch("memento.lifecycle.read_hook_input", return_value=self._mock_hook_input("Fix the broken test")),
+            patch("memento.lifecycle.qmd_search_with_extras", return_value=results),
+            patch("memento.lifecycle.enhance_results", return_value=results),
+            patch("memento.lifecycle.prf_expand_query", return_value="Fix the broken test"),
+            patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
+            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.log_retrieval"),
+            patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
-            vault_recall.run_recall()
+            lifecycle.run_recall()
 
         mock_spawn.assert_not_called()
 
@@ -341,22 +339,22 @@ class TestDeepRecallGate:
         results = [{"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.4}]
 
         with (
-            patch("vault_recall.get_config", return_value=config),
-            patch("vault_recall.get_vault", return_value=vault),
-            patch("vault_recall.has_qmd", return_value=True),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.get_vault", return_value=vault),
+            patch("memento.lifecycle.has_qmd", return_value=True),
             patch(
-                "vault_recall.read_hook_input",
+                "memento.lifecycle.read_hook_input",
                 return_value=self._mock_hook_input("What did we decide last time about the cache?"),
             ),
-            patch("vault_recall.qmd_search_with_extras", return_value=results),
-            patch("vault_recall.enhance_results", return_value=results),
-            patch("vault_recall.prf_expand_query", return_value="What did we decide last time about the cache?"),
-            patch("vault_recall.detect_project", return_value=("unknown", None)),
-            patch("vault_recall.is_duplicate", return_value=False),
-            patch("vault_recall.log_retrieval"),
-            patch("vault_recall.spawn_deep_recall") as mock_spawn,
+            patch("memento.lifecycle.qmd_search_with_extras", return_value=results),
+            patch("memento.lifecycle.enhance_results", return_value=results),
+            patch("memento.lifecycle.prf_expand_query", return_value="What did we decide last time about the cache?"),
+            patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
+            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.log_retrieval"),
+            patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
-            vault_recall.run_recall()
+            lifecycle.run_recall()
 
         mock_spawn.assert_called_once()
 
@@ -372,21 +370,21 @@ class TestDeepRecallGate:
         results = [{"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.8}]
 
         with (
-            patch("vault_recall.get_config", return_value=config),
-            patch("vault_recall.get_vault", return_value=vault),
-            patch("vault_recall.has_qmd", return_value=True),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.get_vault", return_value=vault),
+            patch("memento.lifecycle.has_qmd", return_value=True),
             patch(
-                "vault_recall.read_hook_input",
+                "memento.lifecycle.read_hook_input",
                 return_value=self._mock_hook_input("What did we decide last time about the cache?"),
             ),
-            patch("vault_recall.qmd_search_with_extras", return_value=results),
-            patch("vault_recall.enhance_results", return_value=results),
-            patch("vault_recall.detect_project", return_value=("unknown", None)),
-            patch("vault_recall.is_duplicate", return_value=False),
-            patch("vault_recall.log_retrieval"),
-            patch("vault_recall.spawn_deep_recall") as mock_spawn,
+            patch("memento.lifecycle.qmd_search_with_extras", return_value=results),
+            patch("memento.lifecycle.enhance_results", return_value=results),
+            patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
+            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.log_retrieval"),
+            patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
-            vault_recall.run_recall()
+            lifecycle.run_recall()
 
         mock_spawn.assert_not_called()
 
@@ -401,22 +399,22 @@ class TestDeepRecallGate:
         results = [{"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.4}]
 
         with (
-            patch("vault_recall.get_config", return_value=config),
-            patch("vault_recall.get_vault", return_value=vault),
-            patch("vault_recall.has_qmd", return_value=True),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.get_vault", return_value=vault),
+            patch("memento.lifecycle.has_qmd", return_value=True),
             patch(
-                "vault_recall.read_hook_input",
+                "memento.lifecycle.read_hook_input",
                 return_value=self._mock_hook_input("What did we decide last time about the cache?"),
             ),
-            patch("vault_recall.qmd_search_with_extras", return_value=results),
-            patch("vault_recall.enhance_results", return_value=results),
-            patch("vault_recall.prf_expand_query", return_value="What did we decide last time about the cache?"),
-            patch("vault_recall.detect_project", return_value=("unknown", None)),
-            patch("vault_recall.is_duplicate", return_value=False),
-            patch("vault_recall.log_retrieval"),
-            patch("vault_recall.spawn_deep_recall") as mock_spawn,
+            patch("memento.lifecycle.qmd_search_with_extras", return_value=results),
+            patch("memento.lifecycle.enhance_results", return_value=results),
+            patch("memento.lifecycle.prf_expand_query", return_value="What did we decide last time about the cache?"),
+            patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
+            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.log_retrieval"),
+            patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
-            vault_recall.run_recall()
+            lifecycle.run_recall()
 
         mock_spawn.assert_not_called()
 
@@ -435,22 +433,22 @@ class TestDeepRecallGate:
         results = [{"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.4}]
 
         with (
-            patch("vault_recall.get_config", return_value=config),
-            patch("vault_recall.get_vault", return_value=vault),
-            patch("vault_recall.has_qmd", return_value=True),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.get_vault", return_value=vault),
+            patch("memento.lifecycle.has_qmd", return_value=True),
             patch(
-                "vault_recall.read_hook_input",
+                "memento.lifecycle.read_hook_input",
                 return_value=self._mock_hook_input("What did we decide last time about the cache?"),
             ),
-            patch("vault_recall.qmd_search_with_extras", return_value=results),
-            patch("vault_recall.enhance_results", return_value=results),
-            patch("vault_recall.prf_expand_query", return_value="What did we decide last time about the cache?"),
-            patch("vault_recall.detect_project", return_value=("unknown", None)),
-            patch("vault_recall.is_duplicate", return_value=False),
-            patch("vault_recall.log_retrieval"),
-            patch("vault_recall.spawn_deep_recall") as mock_spawn,
+            patch("memento.lifecycle.qmd_search_with_extras", return_value=results),
+            patch("memento.lifecycle.enhance_results", return_value=results),
+            patch("memento.lifecycle.prf_expand_query", return_value="What did we decide last time about the cache?"),
+            patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
+            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.log_retrieval"),
+            patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
-            vault_recall.run_recall()
+            lifecycle.run_recall()
 
         mock_spawn.assert_not_called()
 
@@ -478,7 +476,7 @@ class TestDeepRecallWorker:
 
         codex_output = '[{"title": "Cache invalidation", "reason": "Related approach"}]'
 
-        with patch("vault_recall.llm_complete", return_value=LLMResult(text=codex_output, ok=True, error=None)):
+        with patch("memento.lifecycle.llm_complete", return_value=LLMResult(text=codex_output, ok=True, error=None)):
             run_deep_recall_worker(input_path, "codex")
 
         assert os.path.exists(pending_path)
@@ -497,7 +495,7 @@ class TestDeepRecallWorker:
         with open(input_path, "w") as f:
             json.dump({"prompt": "test", "initial_results": [], "timestamp": time.time()}, f)
 
-        with patch("vault_recall.llm_complete", return_value=LLMResult(text="[]", ok=True, error=None)):
+        with patch("memento.lifecycle.llm_complete", return_value=LLMResult(text="[]", ok=True, error=None)):
             run_deep_recall_worker(input_path, "codex")
 
         # Input file should be deleted
@@ -544,7 +542,7 @@ class TestDeepRecallWorker:
             )
 
         with patch(
-            "vault_recall.llm_complete",
+            "memento.lifecycle.llm_complete",
             return_value=LLMResult(text='[{"title": "Test", "reason": "reason"}]', ok=True, error=None),
         ) as mock_complete:
             run_deep_recall_worker(input_path, "claude")
@@ -571,15 +569,15 @@ class TestMainIntegration:
                 f,
             )
 
+        recall_result = lifecycle.LifecycleResult(True, "[vault] Related memories:\n  - Redis TTL", "recall")
         with (
-            patch("vault_recall.consume_deferred_briefing", return_value=[]),
-            patch(
-                "vault_recall.run_recall",
-                return_value=(["[vault] Related memories:", "  - Redis TTL"], "notes/redis.md"),
+            patch.object(vault_recall_hook, "consume_deferred_briefing", return_value=[]),
+            patch.object(vault_recall_hook, "build_recall", return_value=recall_result),
+            patch.object(
+                vault_recall_hook, "read_hook_input", return_value={"prompt": "cache", "cwd": "", "session_id": "s1"}
             ),
-            patch("vault_recall.record_recall"),
         ):
-            vault_recall.main()
+            vault_recall_hook.main()
 
         captured = capsys.readouterr()
         assert "Deep analysis suggests also reviewing" in captured.out
@@ -589,9 +587,9 @@ class TestMainIntegration:
     def test_main_deep_recall_worker_mode(self, runtime_dir):
         """--deep-recall flag routes to worker."""
         with (
-            patch("vault_recall.run_deep_recall_worker") as mock_worker,
+            patch.object(vault_recall_hook, "run_deep_recall_worker") as mock_worker,
             patch("sys.argv", ["vault-recall.py", "--deep-recall", "/tmp/input.json", "codex"]),
         ):
-            vault_recall.main()
+            vault_recall_hook.main()
 
         mock_worker.assert_called_once_with("/tmp/input.json", "codex")
