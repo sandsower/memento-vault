@@ -493,12 +493,99 @@ def build_briefing(cwd: str, session_id: str = "unknown") -> LifecycleResult:
     return LifecycleResult(True, "\n".join(lines), "briefing", metadata=metadata)
 
 
+RECALL_CONTROL_WORDS = {
+    "a",
+    "after",
+    "again",
+    "ahead",
+    "all",
+    "and",
+    "continue",
+    "do",
+    "for",
+    "fresh",
+    "go",
+    "it",
+    "lets",
+    "next",
+    "ok",
+    "on",
+    "one",
+    "ship",
+    "slice",
+    "start",
+    "the",
+    "this",
+    "to",
+    "what",
+    "whats",
+    "is",
+}
+
+RECALL_DOMAIN_ALLOWLIST = {
+    "backend",
+    "capture",
+    "dedup",
+    "extract",
+    "lifecycle",
+    "mcp",
+    "queue",
+    "sync",
+    "ticket",
+    "tolgee",
+}
+
+LOW_SIGNAL_RECALL_PATTERNS = (
+    r"^(ok[, ]*)?(go for it|go ahead|do it|continue|start fresh|lets start fresh|let's start fresh|ship it)$",
+    r"^(go for the )?(next|next one|next slice)$",
+    r"^what (is|'s|s) the next( slice| step| feature)?\??$",
+    r"^go for the [a-z0-9 _-]+ cleanup$",
+)
+
+
+def recall_signal_terms(prompt: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9][a-z0-9-]+", prompt.lower())
+    signal_terms = []
+    for token in tokens:
+        if token in RECALL_CONTROL_WORDS:
+            continue
+        if len(token) <= 2:
+            continue
+        signal_terms.append(token)
+    return signal_terms
+
+
+def is_low_signal_recall_prompt(prompt: str) -> bool:
+    """Return True for turn-control prompts that should not search memory."""
+    normalized = re.sub(r"\s+", " ", prompt.lower()).strip().strip(".!?")
+    if not normalized:
+        return True
+    for pattern in LOW_SIGNAL_RECALL_PATTERNS:
+        if re.match(pattern, normalized):
+            return True
+
+    signal_terms = recall_signal_terms(normalized)
+    if len(signal_terms) >= 2:
+        return False
+    if len(signal_terms) == 1 and signal_terms[0] in RECALL_DOMAIN_ALLOWLIST:
+        return False
+    return True
+
+
+def should_append_project_to_recall(prompt: str) -> bool:
+    """Only append project slug when the prompt has enough standalone signal."""
+    return not is_low_signal_recall_prompt(prompt)
+
+
 def should_skip_recall(prompt, config):
     """Relevance gate — returns True if we should skip vault injection."""
     prompt = prompt.strip()
 
     # Too short
     if len(prompt) < 10:
+        return True
+
+    if config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
         return True
 
     # Skill invocation
@@ -944,12 +1031,11 @@ def run_remote_recall(prompt, cwd, config):
 
 
 def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
-    """Run the recall search. Returns (lines, top_path, results) or ([], None, [])."""
-    _ = session_id
+    """Run the recall search. Returns (lines, top_path, results, reason)."""
     config = get_config()
 
     if not config.get("prompt_recall", True):
-        return [], None, []
+        return [], None, [], "disabled"
 
     # Try remote vault first (has cross-device data), fall through to local
     from memento.remote_client import is_remote
@@ -958,22 +1044,28 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         try:
             lines, top_path = run_remote_recall(prompt, cwd, config)
             if lines:
-                return lines, top_path, []
+                return lines, top_path, [], None
         except Exception as exc:
             print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        return [], None, []
+        return [], None, [], "vault-unavailable"
 
     if not has_qmd():
-        return [], None, []
+        return [], None, [], "qmd-unavailable"
     if not prompt:
-        return [], None, []
+        return [], None, [], "empty-prompt"
 
     if should_skip_recall(prompt, config):
         bump_prompts_since()
-        return [], None, []
+        reason = (
+            "low-signal-prompt"
+            if config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt)
+            else "skipped-prompt"
+        )
+        log_retrieval("recall", reason, query=prompt, cwd=cwd, session_id=session_id)
+        return [], None, [], reason
 
     # BM25 search against the prompt, augmented with project context
     min_score = config.get("recall_min_score", 0.4)
@@ -981,7 +1073,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     # Bias toward current project by appending project slug to query
     query = prompt
-    if cwd:
+    if cwd and should_append_project_to_recall(prompt):
         project_slug, _ = detect_project(cwd, None)
         if project_slug and project_slug != "unknown":
             query = f"{prompt} {project_slug.replace('-', ' ')}"
@@ -1100,7 +1192,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     if not results:
         bump_prompts_since()
         log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
-        return [], None, []
+        return [], None, [], "no-results"
 
     results = enhance_results(results, config, cwd=cwd)
 
@@ -1117,12 +1209,12 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     if not results:
         bump_prompts_since()
         log_retrieval("recall", "filtered-empty", query=query, results_before=results_before, latency_ms=latency_ms)
-        return [], None, []
+        return [], None, [], "filtered-empty"
 
     top_path = results[0].get("path", "")
     if is_duplicate(top_path):
         log_retrieval("recall", "dedup-skip", query=query)
-        return [], None, []
+        return [], None, [], "duplicate"
 
     lines = ["[vault] Related memories:"]
     injected = []
@@ -1146,7 +1238,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         deep_recall_spawned=deep_recall_spawned,
     )
 
-    return lines, top_path, results[:max_notes]
+    return lines, top_path, results[:max_notes], None
 
 
 def run_recall():
@@ -1157,7 +1249,7 @@ def run_recall():
         log_retrieval("recall", "hook_input_failed", error=str(exc))
         return [], None
 
-    lines, top_path, _results = _run_recall_lines(
+    lines, top_path, _results, _reason = _run_recall_lines(
         hook_input.get("prompt", ""),
         hook_input.get("cwd", ""),
         hook_input.get("session_id", "unknown"),
@@ -1167,9 +1259,9 @@ def run_recall():
 
 def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> LifecycleResult:
     """Build prompt recall content."""
-    lines, top_path, results = _run_recall_lines(prompt, cwd, session_id)
+    lines, top_path, results, reason = _run_recall_lines(prompt, cwd, session_id)
     if not lines:
-        return empty_result("recall", "no-results")
+        return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)
     if top_path:
         record_recall(top_path)

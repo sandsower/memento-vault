@@ -3,8 +3,17 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from memento.config import DEFAULT_CONFIG
-from memento.lifecycle import LifecycleResult, build_tool_context, empty_result
+from memento.lifecycle import (
+    LifecycleResult,
+    build_recall,
+    build_tool_context,
+    empty_result,
+    is_low_signal_recall_prompt,
+    should_append_project_to_recall,
+)
 
 
 def test_lifecycle_result_to_dict_includes_required_fields():
@@ -50,6 +59,51 @@ def test_empty_result_defaults_to_no_results_reason():
         "results": [],
         "reason": "no-results",
     }
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "go for it",
+        "go for the next",
+        "go for the extensions cleanup",
+        "continue",
+        "do it",
+        "what is the next slice?",
+        "ship it",
+        "start fresh",
+        "lets start fresh",
+    ],
+)
+def test_low_signal_recall_prompt_gate_matches_observed_noise(prompt):
+    assert is_low_signal_recall_prompt(prompt) is True
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "how should pi lifecycle capture queue flushing work",
+        "what did we decide about MCP lifecycle tools",
+        "continue with the dual extract and dedup",
+        "go for tolgee sync",
+        "ship DC-4956 backend ticket",
+    ],
+)
+def test_low_signal_recall_prompt_gate_allows_domain_bearing_prompts(prompt):
+    assert is_low_signal_recall_prompt(prompt) is False
+
+
+def test_project_slug_append_requires_signal():
+    assert should_append_project_to_recall("go for the extensions cleanup") is False
+    assert should_append_project_to_recall("how should pi lifecycle capture queue flushing work") is True
+
+
+@patch("memento.lifecycle.get_config", return_value={"prompt_recall": True})
+def test_build_recall_skips_low_signal_prompt(_config):
+    result = build_recall("go for the extensions cleanup", "/home/vic/Projects/memento-vault", "s1")
+
+    assert result.should_inject is False
+    assert result.reason == "low-signal-prompt"
 
 
 def test_tool_context_skips_unsupported_tool():
