@@ -88,6 +88,12 @@ recall_min_score: 0.4
 # Maximum number of notes to inject per prompt
 recall_max_notes: 3
 
+# Diagnostics for tuning recall quality. Disabled by default.
+# When enabled, writes structured decision-path events to retrieval.jsonl.
+recall_diagnostics: false
+recall_diagnostics_include_candidates: false
+recall_diagnostics_max_candidates: 10
+
 # Regex patterns for prompts that should skip recall
 # (matched case-insensitively against the full prompt)
 # recall_skip_patterns: ["^(yes|no|ok|sure|thanks)$", "^git\\s", "^run\\s"]

@@ -106,6 +106,77 @@ def test_build_recall_skips_low_signal_prompt(_config):
     assert result.reason == "low-signal-prompt"
 
 
+@patch("memento.lifecycle.log_retrieval")
+@patch("memento.lifecycle.get_config", return_value={"prompt_recall": True, "recall_diagnostics": False})
+def test_recall_diagnostics_disabled_by_default(_config, mock_log):
+    build_recall("go for the extensions cleanup", "/home/vic/Projects/memento-vault", "s1")
+
+    actions = [call.args[1] for call in mock_log.call_args_list]
+    assert "low-signal-prompt" in actions
+    assert not any(action.startswith("diagnostic-") for action in actions)
+
+
+@patch("memento.lifecycle.log_retrieval")
+@patch(
+    "memento.lifecycle.get_config",
+    return_value={"prompt_recall": True, "recall_diagnostics": True, "recall_diagnostics_include_candidates": False},
+)
+def test_recall_diagnostics_logs_skip_decision(_config, mock_log):
+    build_recall("go for the extensions cleanup", "/home/vic/Projects/memento-vault", "s1")
+
+    actions = [call.args[1] for call in mock_log.call_args_list]
+    assert "diagnostic-start" in actions
+    assert "diagnostic-skip" in actions
+    assert "diagnostic-decision" in actions
+    decision = [call.kwargs for call in mock_log.call_args_list if call.args[1] == "diagnostic-decision"][-1]
+    assert decision == {"decision": "skipped", "reason": "low-signal-prompt"}
+
+
+@patch("memento.lifecycle.log_retrieval")
+@patch("memento.lifecycle.enhance_results", side_effect=lambda results, *args, **kwargs: results)
+@patch("memento.lifecycle.qmd_search_with_extras")
+@patch("memento.lifecycle.has_qmd", return_value=True)
+@patch("memento.lifecycle.get_vault")
+@patch(
+    "memento.lifecycle.get_config",
+    return_value={
+        "prompt_recall": True,
+        "recall_diagnostics": True,
+        "recall_diagnostics_include_candidates": True,
+        "recall_diagnostics_max_candidates": 1,
+        "recall_min_score": 0.4,
+        "recall_max_notes": 3,
+        "recall_high_confidence": 0.55,
+        "concept_index_enabled": False,
+        "rrf_enabled": False,
+        "multi_hop_enabled": False,
+        "reranker_enabled": False,
+    },
+)
+def test_recall_diagnostics_candidate_logging_is_capped(
+    _config, mock_vault, _has_qmd, mock_search, _enhance, mock_log, tmp_path
+):
+    (tmp_path / "notes").mkdir()
+    mock_vault.return_value = tmp_path
+    mock_search.return_value = [
+        {"path": "notes/a.md", "title": "A", "score": 0.9, "snippet": "A"},
+        {"path": "notes/b.md", "title": "B", "score": 0.8, "snippet": "B"},
+    ]
+
+    result = build_recall("how should pi lifecycle capture queue flushing work", "/repo", "s1")
+
+    assert result.should_inject is True
+    candidate_events = [call.kwargs for call in mock_log.call_args_list if call.args[1] == "diagnostic-candidates"]
+    assert candidate_events
+    assert len(candidate_events[0]["candidates"]) == 1
+    assert candidate_events[0]["candidates"][0] == {
+        "path": "notes/a.md",
+        "title": "A",
+        "score": 0.9,
+        "decision": "candidate",
+    }
+
+
 def test_tool_context_skips_unsupported_tool():
     result = build_tool_context("bash", "src/server/authMiddleware.ts", "/repo", "s1")
 

@@ -577,6 +577,34 @@ def should_append_project_to_recall(prompt: str) -> bool:
     return not is_low_signal_recall_prompt(prompt)
 
 
+def recall_diagnostics_enabled(config: dict) -> bool:
+    return bool(config.get("recall_diagnostics", False))
+
+
+def _candidate_summary(result: dict, decision: str = "candidate") -> dict:
+    return {
+        "path": result.get("path", ""),
+        "title": _strip_injection(result.get("title", "")),
+        "score": round(float(result.get("score", 0) or 0), 4),
+        "decision": decision,
+    }
+
+
+def log_recall_diagnostic(config: dict, action: str, **kwargs) -> None:
+    """Log opt-in prompt recall diagnostics without changing recall behavior."""
+    if not recall_diagnostics_enabled(config):
+        return
+    log_retrieval("recall", f"diagnostic-{action}", **kwargs)
+
+
+def log_recall_candidates(config: dict, results: list[dict], stage: str, **kwargs) -> None:
+    if not recall_diagnostics_enabled(config) or not config.get("recall_diagnostics_include_candidates", False):
+        return
+    max_candidates = int(config.get("recall_diagnostics_max_candidates", 10) or 10)
+    candidates = [_candidate_summary(result) for result in results[: max(0, max_candidates)]]
+    log_recall_diagnostic(config, "candidates", stage=stage, candidates=candidates, **kwargs)
+
+
 def should_skip_recall(prompt, config):
     """Relevance gate — returns True if we should skip vault injection."""
     prompt = prompt.strip()
@@ -1033,30 +1061,30 @@ def run_remote_recall(prompt, cwd, config):
 def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     """Run the recall search. Returns (lines, top_path, results, reason)."""
     config = get_config()
+    project_slug = "unknown"
+    if cwd:
+        try:
+            project_slug, _ = detect_project(cwd, None)
+        except Exception:
+            project_slug = "unknown"
+
+    log_recall_diagnostic(
+        config,
+        "start",
+        prompt_len=len(prompt or ""),
+        cwd=cwd,
+        session_id=session_id,
+        project_slug=project_slug,
+        signal_terms=recall_signal_terms(prompt or ""),
+        low_signal=is_low_signal_recall_prompt(prompt or ""),
+    )
 
     if not config.get("prompt_recall", True):
+        log_recall_diagnostic(config, "decision", decision="skipped", reason="disabled")
         return [], None, [], "disabled"
-
-    # Try remote vault first (has cross-device data), fall through to local
-    from memento.remote_client import is_remote
-
-    if is_remote() and prompt:
-        try:
-            lines, top_path = run_remote_recall(prompt, cwd, config)
-            if lines:
-                return lines, top_path, [], None
-        except Exception as exc:
-            print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
-
-    vault = get_vault()
-    if not vault.exists() or not (vault / "notes").exists():
-        return [], None, [], "vault-unavailable"
-
-    if not has_qmd():
-        return [], None, [], "qmd-unavailable"
     if not prompt:
+        log_recall_diagnostic(config, "decision", decision="skipped", reason="empty-prompt")
         return [], None, [], "empty-prompt"
-
     if should_skip_recall(prompt, config):
         bump_prompts_since()
         reason = (
@@ -1065,7 +1093,30 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             else "skipped-prompt"
         )
         log_retrieval("recall", reason, query=prompt, cwd=cwd, session_id=session_id)
+        log_recall_diagnostic(config, "skip", reason=reason, normalized_prompt=re.sub(r"\s+", " ", prompt).strip())
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=reason)
         return [], None, [], reason
+
+    # Try remote vault first (has cross-device data), fall through to local
+    from memento.remote_client import is_remote
+
+    if is_remote() and prompt:
+        try:
+            lines, top_path = run_remote_recall(prompt, cwd, config)
+            if lines:
+                log_recall_diagnostic(config, "decision", decision="injected", source="remote", top_path=top_path)
+                return lines, top_path, [], None
+        except Exception as exc:
+            print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
+
+    vault = get_vault()
+    if not vault.exists() or not (vault / "notes").exists():
+        log_recall_diagnostic(config, "decision", decision="skipped", reason="vault-unavailable")
+        return [], None, [], "vault-unavailable"
+
+    if not has_qmd():
+        log_recall_diagnostic(config, "decision", decision="skipped", reason="qmd-unavailable")
+        return [], None, [], "qmd-unavailable"
 
     # BM25 search against the prompt, augmented with project context
     min_score = config.get("recall_min_score", 0.4)
@@ -1073,10 +1124,19 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     # Bias toward current project by appending project slug to query
     query = prompt
+    appended_project = False
     if cwd and should_append_project_to_recall(prompt):
-        project_slug, _ = detect_project(cwd, None)
         if project_slug and project_slug != "unknown":
             query = f"{prompt} {project_slug.replace('-', ' ')}"
+            appended_project = True
+    log_recall_diagnostic(
+        config,
+        "query",
+        original_prompt=prompt,
+        final_query=query,
+        appended_project=appended_project,
+        project_slug=project_slug,
+    )
 
     t0 = time.time()
 
@@ -1108,6 +1168,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     )
     top_score = results[0]["score"] if results else 0
     pipeline_depth = "bm25"
+    log_recall_candidates(config, results, "bm25", query=query)
 
     if top_score < high_conf and results:
         # Low confidence — try harder with PRF + RRF
@@ -1130,6 +1191,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
                         existing.add(r["path"])
                 results.sort(key=lambda r: r["score"], reverse=True)
                 pipeline_depth = "prf"
+                log_recall_candidates(config, results, "prf", query=expanded_query)
 
         # RRF: fuse with vsearch when warm
         if config.get("rrf_enabled", True) and is_vsearch_warm():
@@ -1143,6 +1205,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             if vec_results:
                 results = rrf_fuse([results, vec_results], k=config.get("rrf_k", 60))
                 pipeline_depth = "rrf"
+                log_recall_candidates(config, results, "rrf", query=query)
 
     latency_ms = int((time.time() - t0) * 1000)
     results_before = len(results)
@@ -1158,6 +1221,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
                         hit["score"] = max(hit.get("score", 0), config.get("concept_index_score", 0.5))
                         results.append(hit)
                         existing_paths.add(hit["path"])
+                log_recall_candidates(config, results, "concept-index", query=query)
         except Exception:
             pass
 
@@ -1170,6 +1234,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             results = multi_hop_search(prompt, results, config=config)
             multi_hop_added = len(results) - pre_hop_count
             pipeline_depth += "+hop"
+            log_recall_candidates(config, results, "multi-hop", query=query)
         except Exception:
             pass
 
@@ -1192,9 +1257,11 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     if not results:
         bump_prompts_since()
         log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason="no-results", latency_ms=latency_ms)
         return [], None, [], "no-results"
 
     results = enhance_results(results, config, cwd=cwd)
+    log_recall_candidates(config, results, "enhanced", query=query)
 
     # CE reranking (only on deep path)
     if top_score < high_conf and config.get("reranker_enabled", True) and len(results) > 1:
@@ -1203,17 +1270,20 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
             results = rerank(prompt, results, config)
             pipeline_depth += "+ce"
+            log_recall_candidates(config, results, "reranked", query=query)
         except Exception:
             pass
 
     if not results:
         bump_prompts_since()
         log_retrieval("recall", "filtered-empty", query=query, results_before=results_before, latency_ms=latency_ms)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason="filtered-empty", latency_ms=latency_ms)
         return [], None, [], "filtered-empty"
 
     top_path = results[0].get("path", "")
     if is_duplicate(top_path):
         log_retrieval("recall", "dedup-skip", query=query)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason="duplicate", top_path=top_path)
         return [], None, [], "duplicate"
 
     lines = ["[vault] Related memories:"]
@@ -1236,6 +1306,16 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         multi_hop_gate=multi_hop_gate,
         multi_hop_added=multi_hop_added,
         deep_recall_spawned=deep_recall_spawned,
+    )
+    log_recall_diagnostic(
+        config,
+        "decision",
+        decision="injected",
+        injected_titles=injected,
+        injected_chars=len(injected_text),
+        latency_ms=latency_ms,
+        top_path=top_path,
+        pipeline=pipeline_depth,
     )
 
     return lines, top_path, results[:max_notes], None
