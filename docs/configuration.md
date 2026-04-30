@@ -56,6 +56,7 @@ prompt_recall: true
 recall_min_score: 0.6
 recall_max_notes: 3
 recall_high_confidence: 0.55   # BM25 score above this skips deep path
+recall_skip_broad_project_queries: true  # Skip broad project/history prompts; use explicit search instead
 recall_skip_patterns:
   - "^(yes|no|ok|sure|thanks|y|n|yep|nope|looks good|lgtm|ship it|continue)$"
   - "^git\\s"
