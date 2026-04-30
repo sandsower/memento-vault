@@ -30,10 +30,40 @@ class TestCliBackends:
         )
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["claude", "--print", "--model", "sonnet"]
+        assert cmd[:11] == [
+            "claude",
+            "--print",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{}",
+            "--permission-mode",
+            "default",
+            "--disallowedTools",
+            "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch",
+        ]
+        assert cmd[-2:] == ["--model", "sonnet"]
         assert mock_run.call_args.kwargs["input"] == "test prompt"
         assert result.ok is True
         assert result.text == "claude output"
+
+    @patch("memento.llm.subprocess.run")
+    def test_claude_backend_sandboxes_headless_spawn(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}\n", stderr="")
+
+        llm_complete("transcript", {"llm_backend": "claude"})
+
+        cmd = mock_run.call_args[0][0]
+        assert "--tools" in cmd
+        assert cmd[cmd.index("--tools") + 1] == ""
+        assert "--strict-mcp-config" in cmd
+        assert cmd[cmd.index("--mcp-config") + 1] == "{}"
+        assert "--permission-mode" in cmd
+        assert cmd[cmd.index("--permission-mode") + 1] == "default"
+        denylist = cmd[cmd.index("--disallowedTools") + 1].split(",")
+        for tool in ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "Task", "Agent", "WebFetch", "WebSearch"]:
+            assert tool in denylist
 
     @patch("memento.llm.Path.read_text", return_value="codex output\n")
     @patch("memento.llm.Path.unlink")
@@ -298,7 +328,20 @@ class TestCliBackends:
             result = llm_complete("prompt")
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["claude", "--print", "--model", "haiku"]
+        assert cmd[:11] == [
+            "claude",
+            "--print",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{}",
+            "--permission-mode",
+            "default",
+            "--disallowedTools",
+            "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch",
+        ]
+        assert cmd[-2:] == ["--model", "haiku"]
         assert mock_run.call_args.kwargs["input"] == "prompt"
         assert result.ok is True
 

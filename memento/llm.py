@@ -104,11 +104,32 @@ def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
     return _success(result.stdout)
 
 
+CLAUDE_HEADLESS_DISALLOWED_TOOLS = "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch"
+
+
 def _claude_complete(prompt, model=None, timeout=30):
     # Pass the prompt over stdin instead of argv. Large transcripts (>~2MB)
     # overflow ARG_MAX and raise OSError("Argument list too long"); stdin has
     # no such ceiling.
-    cmd = ["claude", "--print"]
+    # Headless memento prompts are text-in/JSON-out. Do not inherit a user's
+    # interactive auto-permission toolbelt: SessionEnd runs detached after the
+    # human has left, so tool side effects would be surprising and hard to stop.
+    # Disable built-in tools and inherited MCP servers, with a denylist as
+    # defense-in-depth for Claude Code versions that still expose tools in
+    # --print mode despite a tighter tool configuration.
+    cmd = [
+        "claude",
+        "--print",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "{}",
+        "--permission-mode",
+        "default",
+        "--disallowedTools",
+        CLAUDE_HEADLESS_DISALLOWED_TOOLS,
+    ]
     if model:
         cmd.extend(["--model", model])
     return _run_cli(cmd, stdin_input=prompt, timeout=timeout)
