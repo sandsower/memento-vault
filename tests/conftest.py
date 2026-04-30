@@ -21,6 +21,17 @@ if _inception_spec and _inception_spec.loader:
     _inception_spec.loader.exec_module(_inception_mod)
 
 
+@pytest.fixture(autouse=True)
+def isolate_remote_vault_env(monkeypatch):
+    """Keep developer remote-vault credentials from leaking into tests.
+
+    Individual tests that cover env-based behavior set these variables with
+    monkeypatch after this fixture has cleared the ambient shell state.
+    """
+    monkeypatch.delenv("MEMENTO_API_KEY", raising=False)
+    monkeypatch.delenv("MEMENTO_VAULT_URL", raising=False)
+
+
 @pytest.fixture
 def tmp_vault(tmp_path):
     """Create a temporary vault with standard directory structure."""
