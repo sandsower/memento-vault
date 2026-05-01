@@ -3,6 +3,7 @@
 import http.server
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -33,6 +34,202 @@ def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def test_setup_cli_installs_user_local_symlink(tmp_path):
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = f"""
+set -euo pipefail
+export HOME={tmp_path}
+SCRIPT_DIR={repo}
+CLAUDE_DIR={tmp_path}/.claude
+VAULT_PATH={tmp_path}/memento
+CONFIG_DIR={tmp_path}/.config/memento-vault
+MANIFEST=$CONFIG_DIR/manifest.json
+NEW_VERSION=0.0.0
+FORCE=false
+EXPERIMENTAL=false
+MCP_INSTALL=false
+REMOTE_MODE=false
+REMOTE_URL=
+REMOTE_API_KEY=
+MANIFEST_FILES_JSON='{{}}'
+QMD_AVAILABLE=false
+source {repo}/lib/install-lib.sh >/dev/null
+setup_cli >/dev/null
+"""
+
+    subprocess.run(["bash", "-c", script], check=True, text=True, capture_output=True)
+
+    link = tmp_path / ".local" / "bin" / "memento-vault"
+    assert link.is_symlink()
+    assert os.readlink(link) == os.path.join(repo, "bin", "memento-vault")
+
+    result = subprocess.run([str(link), "version"], check=True, text=True, capture_output=True)
+    with open(os.path.join(repo, "VERSION")) as f:
+        assert result.stdout.strip() == f.read().strip()
+
+
+def test_setup_cli_skips_when_cli_is_already_on_path(tmp_path):
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    existing_dir = tmp_path / "existing"
+    existing_dir.mkdir()
+    existing = existing_dir / "memento-vault"
+    existing.write_text("#!/usr/bin/env bash\nexit 0\n")
+    existing.chmod(0o755)
+    script = f"""
+set -euo pipefail
+export HOME={tmp_path}
+export PATH={existing_dir}:/usr/bin:/bin
+SCRIPT_DIR={repo}
+CLAUDE_DIR={tmp_path}/.claude
+VAULT_PATH={tmp_path}/memento
+CONFIG_DIR={tmp_path}/.config/memento-vault
+MANIFEST=$CONFIG_DIR/manifest.json
+NEW_VERSION=0.0.0
+FORCE=false
+EXPERIMENTAL=false
+MCP_INSTALL=false
+REMOTE_MODE=false
+REMOTE_URL=
+REMOTE_API_KEY=
+MANIFEST_FILES_JSON='{{}}'
+QMD_AVAILABLE=false
+source {repo}/lib/install-lib.sh >/dev/null
+setup_cli >/dev/null
+"""
+
+    subprocess.run(["bash", "-c", script], check=True, text=True, capture_output=True)
+
+    assert not (tmp_path / ".local" / "bin" / "memento-vault").exists()
+
+
+def test_setup_cli_does_not_overwrite_regular_file(tmp_path):
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    existing = bin_dir / "memento-vault"
+    existing.write_text("custom")
+    script = f"""
+set -euo pipefail
+export HOME={tmp_path}
+SCRIPT_DIR={repo}
+CLAUDE_DIR={tmp_path}/.claude
+VAULT_PATH={tmp_path}/memento
+CONFIG_DIR={tmp_path}/.config/memento-vault
+MANIFEST=$CONFIG_DIR/manifest.json
+NEW_VERSION=0.0.0
+FORCE=false
+EXPERIMENTAL=false
+MCP_INSTALL=false
+REMOTE_MODE=false
+REMOTE_URL=
+REMOTE_API_KEY=
+MANIFEST_FILES_JSON='{{}}'
+QMD_AVAILABLE=false
+source {repo}/lib/install-lib.sh >/dev/null
+setup_cli >/dev/null
+"""
+
+    subprocess.run(["bash", "-c", script], check=True, text=True, capture_output=True)
+
+    assert not existing.is_symlink()
+    assert existing.read_text() == "custom"
+
+
+def test_shell_warmup_snippet_uses_memento_cli_without_shell_job_control():
+    """The login-shell warmup must not own a background qmd job."""
+    install_lib = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "lib",
+        "install-lib.sh",
+    )
+    with open(install_lib) as f:
+        contents = f.read()
+
+    assert 'qmd vsearch "warmup" -c memento -n 1 &>/dev/null &' not in re.search(
+        r"cat >> \"\$shell_rc\" << WARMUP_EOF\n(?P<body>.*?)\nWARMUP_EOF", contents, re.S
+    ).group("body")
+    assert 'local warmup_cli="$SCRIPT_DIR/bin/memento-vault"' in contents
+    assert "$warmup_cli_quoted warmup >/dev/null 2>&1" in contents
+
+
+def test_shell_warmup_upgrades_inline_python_snippet(tmp_path):
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    shell_rc = tmp_path / ".bashrc"
+    shell_rc.write_text(
+        "# Warm QMD embedding model on shell startup (detached, silent)\n"
+        "command -v python3 >/dev/null 2>&1 && python3 -c 'import shutil, subprocess; q = shutil.which(\"qmd\"); q and subprocess.Popen([q, \"vsearch\", \"warmup\", \"-c\", \"memento\", \"-n\", \"1\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)' >/dev/null 2>&1\n"
+    )
+    script = f"""
+set -euo pipefail
+export HOME={tmp_path}
+export SHELL=/bin/bash
+SCRIPT_DIR={repo}
+CLAUDE_DIR={tmp_path}/.claude
+VAULT_PATH={tmp_path}/memento
+CONFIG_DIR={tmp_path}/.config/memento-vault
+MANIFEST=$CONFIG_DIR/manifest.json
+NEW_VERSION=0.0.0
+FORCE=false
+EXPERIMENTAL=true
+MCP_INSTALL=false
+REMOTE_MODE=false
+REMOTE_URL=
+REMOTE_API_KEY=
+MANIFEST_FILES_JSON='{{}}'
+QMD_AVAILABLE=true
+source {repo}/lib/install-lib.sh >/dev/null
+setup_shell_warmup >/dev/null
+"""
+
+    subprocess.run(["bash", "-c", script], check=True, text=True, capture_output=True)
+
+    contents = shell_rc.read_text()
+    assert "python3 -c" not in contents
+    assert "memento-vault warmup" in contents
+    assert contents.count("Warm QMD embedding model") == 1
+
+
+def test_memento_vault_warmup_returns_success_without_qmd(tmp_path):
+    cli = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bin",
+        "memento-vault",
+    )
+    env = os.environ.copy()
+    env["PATH"] = "/usr/bin:/bin"
+
+    result = subprocess.run([cli, "warmup"], capture_output=True, text=True, env=env, timeout=5)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_memento_vault_warmup_starts_qmd_detached(tmp_path):
+    cli = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bin",
+        "memento-vault",
+    )
+    log = tmp_path / "qmd.log"
+    qmd = tmp_path / "qmd"
+    qmd.write_text(f"#!/usr/bin/env bash\necho \"$@\" >> {log}\n")
+    qmd.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
+
+    result = subprocess.run([cli, "warmup"], capture_output=True, text=True, env=env, timeout=5)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    for _ in range(20):
+        if log.exists():
+            break
+        time.sleep(0.05)
+    assert log.read_text().strip() == 'vsearch warmup -c memento -n 1'
 
 
 # ---------------------------------------------------------------------------

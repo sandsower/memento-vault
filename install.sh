@@ -355,6 +355,11 @@ if safe_copy "$SCRIPT_DIR/agents/concierge.md" "$CLAUDE_DIR/agents/concierge.md"
     info "Concierge agent installed to $CLAUDE_DIR/agents/"
 fi
 
+# --- Install CLI ---
+
+step "Installing memento-vault CLI..."
+setup_cli
+
 # --- Install memento package ---
 
 step "Installing memento package..."

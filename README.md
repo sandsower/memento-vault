@@ -26,6 +26,8 @@ Custom vault path:
 MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 ```
 
+The installer also links the `memento-vault` CLI into `~/.local/bin` when possible, so future updates can use `memento-vault update`. If `~/.local/bin` is not on your `PATH`, either add it or run the repository-local `./bin/memento-vault` directly.
+
 ### Full install (hooks + retrieval + consolidation)
 
 The base install captures knowledge. To also inject knowledge back into active sessions and enable background consolidation:
@@ -517,7 +519,13 @@ Tenet's deferred briefing search uses vector search, which requires loading an e
 
 ```bash
 # Added to .zshrc/.bashrc by the installer (optional)
-command -v qmd &>/dev/null && qmd vsearch "warmup" -c memento -n 1 &>/dev/null &
+[ -x /path/to/memento-vault/bin/memento-vault ] && /path/to/memento-vault/bin/memento-vault warmup >/dev/null 2>&1
+```
+
+You can also run it manually:
+
+```bash
+memento-vault warmup
 ```
 
 ## Obsidian (optional)

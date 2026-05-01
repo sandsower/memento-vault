@@ -6,11 +6,21 @@
 #   memento-vault install [--experimental] [--mcp] [--remote URL] [--force]
 #   memento-vault uninstall
 #   memento-vault update          # git pull + reinstall
+#   memento-vault warmup          # warm optional local dependencies quietly
 #   memento-vault version
 set -euo pipefail
 
-# Resolve the repo root (bin/ lives one level below it)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve the repo root (bin/ lives one level below it), following symlinks.
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_LINK_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_TARGET="$(readlink "$SCRIPT_PATH")"
+    case "$SCRIPT_TARGET" in
+        /*) SCRIPT_PATH="$SCRIPT_TARGET" ;;
+        *) SCRIPT_PATH="$SCRIPT_LINK_DIR/$SCRIPT_TARGET" ;;
+    esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 
 # Homebrew installs to a prefix — check both layouts
 if [ ! -f "$SCRIPT_DIR/install.sh" ]; then
@@ -30,6 +40,7 @@ usage() {
     echo "  install     Install hooks, skills, and agents into Claude Code"
     echo "  uninstall   Remove memento-vault from Claude Code"
     echo "  update      Pull latest version and reinstall"
+    echo "  warmup      Warm optional local dependencies quietly (defaults to QMD)"
     echo "  version     Show installed version"
     echo ""
     echo "Install options:"
@@ -59,6 +70,30 @@ case "$cmd" in
             echo "Error: not a git checkout — reinstall via brew or bootstrap" >&2
             exit 1
         fi
+        ;;
+    warmup)
+        for opt in "$@"; do
+            case "$opt" in
+                --qmd|--quiet|-q) ;;
+                --help|-h)
+                    echo "Usage: memento-vault warmup [--qmd] [--quiet]"
+                    echo ""
+                    echo "Warms optional local dependencies quietly. Defaults to QMD."
+                    exit 0
+                    ;;
+                *)
+                    echo "Unknown warmup option: $opt" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+
+        if ! qmd_path="$(command -v qmd 2>/dev/null)"; then
+            exit 0
+        fi
+
+        nohup "$qmd_path" vsearch "warmup" -c "${MEMENTO_QMD_COLLECTION:-memento}" -n 1 </dev/null >/dev/null 2>&1 &
+        exit 0
         ;;
     version|-v|--version)
         cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown"

@@ -89,6 +89,41 @@ save_manifest() {
     python3 "$HELPER" manifest-save "$MANIFEST_FILES_JSON" "$NEW_VERSION" "$VAULT_PATH" "$MANIFEST" "$opts"
 }
 
+# --- CLI setup ---
+
+setup_cli() {
+    local cli_src="$SCRIPT_DIR/bin/memento-vault"
+    local cli_bin_dir="${MEMENTO_CLI_BIN_DIR:-$HOME/.local/bin}"
+    local cli_dest="$cli_bin_dir/memento-vault"
+
+    if [ ! -x "$cli_src" ]; then
+        warn "memento-vault CLI not found at $cli_src; skipping CLI install"
+        return
+    fi
+
+    local existing_cli
+    existing_cli=$(command -v memento-vault 2>/dev/null || true)
+    if [ -n "$existing_cli" ] && [ "$existing_cli" != "$cli_dest" ]; then
+        info "CLI already available at $existing_cli"
+        return
+    fi
+
+    mkdir -p "$cli_bin_dir"
+
+    if [ -e "$cli_dest" ] && [ ! -L "$cli_dest" ]; then
+        warn "CLI already exists at $cli_dest and is not a symlink; leaving it unchanged"
+        return
+    fi
+
+    ln -sfn "$cli_src" "$cli_dest"
+    info "CLI linked to $cli_dest"
+
+    case ":$PATH:" in
+        *":$cli_bin_dir:"*) ;;
+        *) warn "$cli_bin_dir is not on PATH; use $cli_dest or add it to your shell profile" ;;
+    esac
+}
+
 # --- Base copy storage ---
 
 BASE_DIR="$CONFIG_DIR/base"
@@ -481,18 +516,40 @@ setup_shell_warmup() {
         fish) shell_rc="$HOME/.config/fish/config.fish" ;;
     esac
 
-    local warmup_marker="qmd vsearch.*warmup"
+    local warmup_marker="qmd vsearch.*warmup|python3 -c .*qmd.*vsearch.*warmup|memento-vault warmup"
+    local warmup_cli="$SCRIPT_DIR/bin/memento-vault"
+    local warmup_cli_quoted
+    printf -v warmup_cli_quoted '%q' "$warmup_cli"
+    local warmup_block="# Warm QMD embedding model on shell startup (detached, silent)
+[ -x $warmup_cli_quoted ] && $warmup_cli_quoted warmup >/dev/null 2>&1"
+
     if [ -n "$shell_rc" ] && [ -f "$shell_rc" ]; then
         if grep -qE "$warmup_marker" "$shell_rc" 2>/dev/null; then
+            python3 - "$shell_rc" "$warmup_block" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+new_block = sys.argv[2]
+text = path.read_text()
+patterns = [
+    r'# Warm QMD embedding model on shell startup \([^)]+\)\n[^\n]*qmd vsearch "warmup"[^\n]*',
+    r'# Warm QMD embedding model on shell startup \([^)]+\)\n[^\n]*python3 -c .*qmd.*vsearch.*warmup[^\n]*',
+    r'# Warm QMD embedding model on shell startup \([^)]+\)\n[^\n]*memento-vault warmup[^\n]*',
+]
+for pattern in patterns:
+    text = re.sub(pattern, new_block, text)
+path.write_text(text)
+PY
             info "QMD model warmup already in $shell_rc"
         else
             echo ""
             read -rp "Add QMD model warmup to $shell_rc? (faster session briefings) [Y/n] " warmup
             if [[ ! "$warmup" =~ ^[Nn] ]]; then
-                cat >> "$shell_rc" << 'WARMUP_EOF'
+                cat >> "$shell_rc" << WARMUP_EOF
 
-# Warm QMD embedding model on shell startup (background, silent)
-command -v qmd &>/dev/null && qmd vsearch "warmup" -c memento -n 1 &>/dev/null &
+$warmup_block
 WARMUP_EOF
                 info "Added QMD warmup to $shell_rc"
             fi
