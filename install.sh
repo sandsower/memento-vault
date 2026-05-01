@@ -20,8 +20,11 @@
 # Connect to a remote vault (Docker or hosted):
 #   ./install.sh --remote https://vault.example.com:8745
 #
-# Force overwrite all files (ignore local changes):
-#   ./install.sh --force
+# Safely rerun same-version install:
+#   ./install.sh --reinstall
+#
+# Dangerously overwrite all files (ignore local changes):
+#   MEMENTO_FORCE=1 ./install.sh --force
 
 set -euo pipefail
 
@@ -32,6 +35,7 @@ CONFIG_DIR="$HOME/.config/memento-vault"
 MANIFEST="$CONFIG_DIR/manifest.json"
 NEW_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 FORCE=false
+REINSTALL=false
 EXPERIMENTAL=false
 MCP_INSTALL=false
 REMOTE_URL=""
@@ -50,7 +54,8 @@ Options:
   --experimental  Install Tenet retrieval, Inception consolidation, and orra-init skill
   --mcp           Install MCP server config (Claude Code, Codex, generic clients)
   --remote [URL]  Connect to a remote vault (implies --mcp)
-  --force         Overwrite all files, ignoring local changes
+  --reinstall     Safely rerun same-version install using local-edit protection
+  --force         DANGEROUS: overwrite memento-managed files, discarding local edits
   --help          Show this help message
 
 Environment:
@@ -72,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --help|-h) usage ;;
         --force) FORCE=true; shift ;;
+        --reinstall) REINSTALL=true; shift ;;
         --experimental) EXPERIMENTAL=true; CLI_EXPERIMENTAL=true; shift ;;
         --mcp) MCP_INSTALL=true; CLI_MCP=true; shift ;;
         --remote)
@@ -155,12 +161,29 @@ if [ "$REMOTE_MODE" = true ]; then
     MCP_INSTALL=true
 fi
 
+if [ "$FORCE" = true ]; then
+    warn "--force overwrites local edits to memento-managed files. Prefer --reinstall for a safe refresh."
+    if [ "${MEMENTO_FORCE:-}" != "1" ]; then
+        if [ -t 0 ]; then
+            read -rp "Continue with destructive force install? [y/N] " force_confirm
+            if [[ ! "$force_confirm" =~ ^[Yy] ]]; then
+                exit 0
+            fi
+        else
+            error "Refusing non-interactive --force without MEMENTO_FORCE=1. Use --reinstall for a safe refresh."
+            exit 1
+        fi
+    fi
+fi
+
 if [ -n "$INSTALLED_VERSION" ]; then
     if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ] && [ "$FORCE" != true ]; then
         info "Memento Vault v${NEW_VERSION} is already installed."
-        read -rp "Reinstall anyway? [y/N] " reinstall
-        if [[ ! "$reinstall" =~ ^[Yy] ]]; then
-            exit 0
+        if [ "$REINSTALL" != true ]; then
+            read -rp "Reinstall safely using local-edit protection? [y/N] " reinstall
+            if [[ ! "$reinstall" =~ ^[Yy] ]]; then
+                exit 0
+            fi
         fi
     else
         info "Upgrading Memento Vault: v${INSTALLED_VERSION} -> v${NEW_VERSION}"

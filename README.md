@@ -38,6 +38,14 @@ MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 
 The installer also links the `memento-vault` CLI into `~/.local/bin` when possible, so future updates can use `memento-vault update`. If `~/.local/bin` is not on your `PATH`, either add it or run the repository-local `./bin/memento-vault` directly.
 
+To safely rerun setup for the same version without discarding local edits:
+
+```bash
+memento-vault install --reinstall
+```
+
+`--force` is reserved for recovery from broken installed files. It overwrites memento-managed files and requires confirmation, or `MEMENTO_FORCE=1` in non-interactive environments.
+
 ### Full install (hooks + retrieval + consolidation)
 
 The base install captures knowledge. To also inject knowledge back into active sessions and enable background consolidation:

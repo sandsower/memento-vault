@@ -3,7 +3,7 @@
 # Entry point for Homebrew and manual installations.
 #
 # Usage:
-#   memento-vault install [--experimental] [--mcp] [--remote URL] [--force]
+#   memento-vault install [--experimental] [--mcp] [--remote URL] [--reinstall] [--force]
 #   memento-vault uninstall
 #   memento-vault update          # git pull + reinstall
 #   memento-vault warmup          # warm optional local dependencies quietly
@@ -47,7 +47,8 @@ usage() {
     echo "  --experimental   Enable Tenet retrieval + Inception consolidation"
     echo "  --mcp            Install MCP server config"
     echo "  --remote URL     Connect to a remote vault"
-    echo "  --force          Force overwrite all files"
+    echo "  --reinstall      Safely rerun same-version install"
+    echo "  --force          DANGEROUS: overwrite local edits to memento-managed files"
 }
 
 cmd="${1:-}"

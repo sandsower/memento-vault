@@ -36,11 +36,54 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def test_install_help_documents_safe_reinstall_and_dangerous_force():
+    installer = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "install.sh",
+    )
+
+    result = subprocess.run([installer, "--help"], check=True, text=True, capture_output=True)
+
+    assert "--reinstall" in result.stdout
+    assert "Safely rerun same-version install" in result.stdout
+    assert "DANGEROUS" in result.stdout
+    assert "discarding local edits" in result.stdout
+
+
+def test_cli_help_documents_safe_reinstall_and_dangerous_force():
+    cli = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bin",
+        "memento-vault",
+    )
+
+    result = subprocess.run([cli, "help"], check=True, text=True, capture_output=True)
+
+    assert "--reinstall" in result.stdout
+    assert "Safely rerun same-version install" in result.stdout
+    assert "DANGEROUS" in result.stdout
+
+
+def test_noninteractive_force_requires_explicit_env():
+    installer = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "install.sh",
+    )
+    env = os.environ.copy()
+    env.pop("MEMENTO_FORCE", None)
+
+    result = subprocess.run([installer, "--force"], input="", text=True, capture_output=True, env=env, timeout=5)
+
+    assert result.returncode == 1
+    assert "Refusing non-interactive --force without MEMENTO_FORCE=1" in result.stdout
+
+
 def test_setup_cli_installs_user_local_symlink(tmp_path):
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     script = f"""
 set -euo pipefail
 export HOME={tmp_path}
+export PATH=/usr/bin:/bin
 SCRIPT_DIR={repo}
 CLAUDE_DIR={tmp_path}/.claude
 VAULT_PATH={tmp_path}/memento
