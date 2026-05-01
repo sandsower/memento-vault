@@ -505,10 +505,6 @@ setup_qmd() {
 # --- setup_shell_warmup ---
 
 setup_shell_warmup() {
-    if [ "$QMD_AVAILABLE" != true ] || [ "$EXPERIMENTAL" != true ] || [ "$REMOTE_MODE" = true ]; then
-        return
-    fi
-
     local shell_rc=""
     case "$(basename "${SHELL:-/bin/bash}")" in
         zsh)  shell_rc="$HOME/.zshrc" ;;
@@ -542,8 +538,8 @@ for pattern in patterns:
     text = re.sub(pattern, new_block, text)
 path.write_text(text)
 PY
-            info "QMD model warmup already in $shell_rc"
-        else
+            info "Updated QMD model warmup in $shell_rc"
+        elif [ "$QMD_AVAILABLE" = true ] && [ "$EXPERIMENTAL" = true ] && [ "$REMOTE_MODE" != true ]; then
             echo ""
             read -rp "Add QMD model warmup to $shell_rc? (faster session briefings) [Y/n] " warmup
             if [[ ! "$warmup" =~ ^[Nn] ]]; then

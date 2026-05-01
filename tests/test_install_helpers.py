@@ -197,6 +197,44 @@ def test_shell_warmup_snippet_uses_memento_cli_without_shell_job_control():
     assert "$warmup_cli_quoted warmup >/dev/null 2>&1" in contents
 
 
+def test_shell_warmup_upgrades_legacy_snippet_even_in_remote_mode(tmp_path):
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    shell_rc = tmp_path / ".zshrc"
+    shell_rc.write_text(
+        "# Warm QMD embedding model on shell startup (background, silent)\n"
+        'command -v qmd &>/dev/null && qmd vsearch "warmup" -c memento -n 1 &>/dev/null &\n'
+    )
+    script = f"""
+set -euo pipefail
+export HOME={tmp_path}
+export SHELL=/bin/zsh
+SCRIPT_DIR={repo}
+CLAUDE_DIR={tmp_path}/.claude
+VAULT_PATH={tmp_path}/memento
+CONFIG_DIR={tmp_path}/.config/memento-vault
+MANIFEST=$CONFIG_DIR/manifest.json
+NEW_VERSION=0.0.0
+FORCE=false
+REINSTALL=false
+EXPERIMENTAL=true
+MCP_INSTALL=true
+REMOTE_MODE=true
+REMOTE_URL=https://example.test
+REMOTE_API_KEY=
+MANIFEST_FILES_JSON='{{}}'
+QMD_AVAILABLE=true
+source {repo}/lib/install-lib.sh >/dev/null
+setup_shell_warmup >/dev/null
+"""
+
+    subprocess.run(["bash", "-c", script], check=True, text=True, capture_output=True)
+
+    contents = shell_rc.read_text()
+    assert 'qmd vsearch "warmup"' not in contents
+    assert "memento-vault warmup" in contents
+    assert contents.count("Warm QMD embedding model") == 1
+
+
 def test_shell_warmup_upgrades_inline_python_snippet(tmp_path):
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     shell_rc = tmp_path / ".bashrc"
