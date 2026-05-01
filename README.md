@@ -12,6 +12,16 @@ For agents without native hook support, the MCP server exposes the same operatio
 
 ## Install
 
+### Homebrew tap
+
+```bash
+brew tap sandsower/tap
+brew install memento-vault
+memento-vault install
+```
+
+### Git/manual install
+
 ```bash
 git clone https://github.com/sandsower/memento-vault.git
 cd memento-vault
