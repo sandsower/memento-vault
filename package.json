@@ -13,7 +13,8 @@
   ],
   "keywords": ["pi-package"],
   "pi": {
-    "extensions": ["./extensions/memento.ts"]
+    "extensions": ["./extensions/memento.ts"],
+    "skills": ["skills/generic"]
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*"
