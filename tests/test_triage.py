@@ -445,12 +445,19 @@ class TestSpawnMementoAgent:
             patch("memento_triage.get_vault", return_value=tmp_vault),
             patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="codex timed out")),
             patch("memento_triage.log_retrieval") as mock_log,
+            patch("memento_triage.log_triage_health") as mock_health,
         ):
             written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
 
         assert written == 0
         mock_log.assert_any_call(
             "triage",
+            "structured_notes_llm_failed",
+            session_id="sess-123",
+            project="api-service",
+            error="codex timed out",
+        )
+        mock_health.assert_any_call(
             "structured_notes_llm_failed",
             session_id="sess-123",
             project="api-service",
@@ -584,3 +591,71 @@ class TestSpawnMementoAgent:
             session_id="sess-123",
             project="api-service",
         )
+
+
+class TestMainHealthLogging:
+    def test_main_logs_parse_failure_to_triage_health(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("not-json\n")
+
+        with (
+            patch("memento_triage.read_hook_input", return_value={"session_id": "sess-parse", "transcript_path": str(transcript)}),
+            patch("memento_triage.parse_transcript", side_effect=RuntimeError("bad transcript")),
+            patch("memento_triage.log_retrieval") as mock_log,
+            patch("memento_triage.log_triage_health") as mock_health,
+        ):
+            try:
+                _mod.main()
+            except SystemExit as exc:
+                assert exc.code == 0
+
+        mock_log.assert_any_call("triage", "parse_transcript_failed", error="bad transcript", session_id="sess-parse")
+        mock_health.assert_any_call("parse_transcript_failed", session_id="sess-parse", error="bad transcript")
+
+    def test_worker_does_not_double_count_generic_empty_in_triage_health(self, tmp_path):
+        payload = tmp_path / "payload.json"
+        payload.write_text(
+            json.dumps(
+                {
+                    "session_id": "sess-123",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                    "meta": {"cwd": "/home/vic/Projects/memento-vault", "git_branch": "main"},
+                    "project_slug": "memento-vault",
+                }
+            )
+        )
+        sentinel = tmp_path / "done.sentinel"
+
+        with (
+            patch("memento_triage.process_structured_notes", return_value=0),
+            patch("memento_triage.log_retrieval") as mock_log,
+            patch("memento_triage.log_triage_health") as mock_health,
+        ):
+            run_structured_notes_worker(str(payload), str(sentinel))
+
+        assert sentinel.exists()
+        mock_log.assert_any_call(
+            "triage",
+            "structured_notes_empty",
+            session_id="sess-123",
+            project="memento-vault",
+        )
+        assert not any(call.args[0] == "structured_notes_empty" for call in mock_health.call_args_list)
+
+    def test_worker_logs_unreadable_payload_to_triage_health(self, tmp_path):
+        payload = tmp_path / "payload.json"
+        payload.write_text("not json")
+        sentinel = tmp_path / "done.sentinel"
+
+        with (
+            patch("memento_triage.log_retrieval") as mock_log,
+            patch("memento_triage.log_triage_health") as mock_health,
+        ):
+            run_structured_notes_worker(str(payload), str(sentinel))
+
+        assert sentinel.exists()
+        mock_log.assert_any_call("triage", "structured_notes_payload_unreadable", error=mock_log.call_args_list[0].kwargs["error"])
+        action_call = mock_health.call_args_list[0]
+        assert action_call.args[0] == "structured_notes_payload_unreadable"
+        assert action_call.kwargs["session_id"] == "unknown"
+        assert action_call.kwargs["error"]

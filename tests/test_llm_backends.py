@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from memento.llm import LLMResult, llm_complete, preflight_check
@@ -30,14 +31,14 @@ class TestCliBackends:
         )
 
         cmd = mock_run.call_args[0][0]
-        assert cmd[:11] == [
-            "claude",
+        assert cmd[0].endswith("claude")
+        assert cmd[1:11] == [
             "--print",
             "--tools",
             "",
             "--strict-mcp-config",
             "--mcp-config",
-            "{}",
+            '{"mcpServers": {}}',
             "--permission-mode",
             "default",
             "--disallowedTools",
@@ -58,7 +59,7 @@ class TestCliBackends:
         assert "--tools" in cmd
         assert cmd[cmd.index("--tools") + 1] == ""
         assert "--strict-mcp-config" in cmd
-        assert cmd[cmd.index("--mcp-config") + 1] == "{}"
+        assert cmd[cmd.index("--mcp-config") + 1] == '{"mcpServers": {}}'
         assert "--permission-mode" in cmd
         assert cmd[cmd.index("--permission-mode") + 1] == "default"
         denylist = cmd[cmd.index("--disallowedTools") + 1].split(",")
@@ -328,14 +329,14 @@ class TestCliBackends:
             result = llm_complete("prompt")
 
         cmd = mock_run.call_args[0][0]
-        assert cmd[:11] == [
-            "claude",
+        assert cmd[0].endswith("claude")
+        assert cmd[1:11] == [
             "--print",
             "--tools",
             "",
             "--strict-mcp-config",
             "--mcp-config",
-            "{}",
+            '{"mcpServers": {}}',
             "--permission-mode",
             "default",
             "--disallowedTools",
@@ -390,7 +391,35 @@ class TestCliBackends:
         assert ok is True
         assert "claude" in message.lower()
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["claude", "--version"]
+        assert cmd[0].endswith("claude")
+        assert cmd[1:] == ["--version"]
+
+    @patch("memento.llm.Path.exists")
+    @patch("memento.llm.shutil.which", return_value=None)
+    @patch("memento.llm.subprocess.run")
+    def test_claude_backend_falls_back_to_user_local_binary(self, mock_run, _which, mock_exists):
+        mock_exists.side_effect = lambda: True
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n", stderr="")
+
+        with patch("memento.llm.Path.home", return_value=Path("/home/user")):
+            result = llm_complete("prompt", {"llm_backend": "claude"})
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "/home/user/.local/bin/claude"
+        assert result.ok is True
+
+    @patch("memento.llm.Path.exists")
+    @patch("memento.llm.shutil.which", return_value=None)
+    @patch("memento.llm.subprocess.run")
+    def test_preflight_check_claude_uses_user_local_binary(self, mock_run, _which, mock_exists):
+        mock_exists.side_effect = lambda: True
+        mock_run.return_value = MagicMock(returncode=0, stdout="1.0.0\n", stderr="")
+
+        with patch("memento.llm.Path.home", return_value=Path("/home/user")):
+            ok, _message = preflight_check({"llm_backend": "claude"})
+
+        assert ok is True
+        assert mock_run.call_args[0][0] == ["/home/user/.local/bin/claude", "--version"]
 
 
 class TestApiBackends:

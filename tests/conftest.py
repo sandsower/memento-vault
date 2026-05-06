@@ -32,6 +32,14 @@ def isolate_remote_vault_env(monkeypatch):
     monkeypatch.delenv("MEMENTO_VAULT_URL", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def isolate_triage_health_log(monkeypatch, tmp_path):
+    """Keep always-on triage health telemetry out of the user's real config dir."""
+    health_log = tmp_path / "triage-health.jsonl"
+    monkeypatch.setattr("memento.store.TRIAGE_HEALTH_LOG_PATH", str(health_log), raising=False)
+    monkeypatch.setattr("memento.lifecycle.TRIAGE_HEALTH_LOG_PATH", str(health_log), raising=False)
+
+
 @pytest.fixture
 def tmp_vault(tmp_path):
     """Create a temporary vault with standard directory structure."""

@@ -24,6 +24,7 @@ from memento.store import (  # noqa: E402
     acquire_vault_write_lock,
     load_inception_state,
     log_retrieval,
+    log_triage_health,
     release_vault_write_lock,
     update_project_index,
     write_note,
@@ -368,11 +369,17 @@ def _parse_structured_notes_response(raw):
 def process_structured_notes(session_id, transcript_path, meta, project_slug):
     """Read transcript, call the shared LLM, and write structured notes."""
     vault = get_vault()
+    log_triage_health("structured_notes_attempt", session_id=session_id, project=project_slug)
     try:
         transcript_text = sanitize_secrets(Path(transcript_path).read_text())
     except OSError:
         log_retrieval(
             "triage",
+            "structured_notes_transcript_unreadable",
+            session_id=session_id,
+            project=project_slug,
+        )
+        log_triage_health(
             "structured_notes_transcript_unreadable",
             session_id=session_id,
             project=project_slug,
@@ -403,12 +410,19 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
 
     result = llm_complete(prompt)
     if not result.ok:
+        error = result.error or "unknown llm error"
         log_retrieval(
             "triage",
             "structured_notes_llm_failed",
             session_id=session_id,
             project=project_slug,
-            error=result.error or "unknown llm error",
+            error=error,
+        )
+        log_triage_health(
+            "structured_notes_llm_failed",
+            session_id=session_id,
+            project=project_slug,
+            error=error,
         )
         return 0
 
@@ -421,12 +435,22 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             project=project_slug,
             raw_preview=result.text[:200] if result.text else "",
         )
+        log_triage_health(
+            "structured_notes_parse_empty",
+            session_id=session_id,
+            project=project_slug,
+        )
         return 0
 
     summary = build_session_summary(meta)
     if not acquire_vault_write_lock():
         log_retrieval(
             "triage",
+            "structured_notes_lock_timeout",
+            session_id=session_id,
+            project=project_slug,
+        )
+        log_triage_health(
             "structured_notes_lock_timeout",
             session_id=session_id,
             project=project_slug,
@@ -450,6 +474,12 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             )
             update_project_index(vault, project_slug, path.stem, f"`{session_id}` — {summary}")
             written += 1
+        log_triage_health(
+            "structured_notes_written",
+            session_id=session_id,
+            project=project_slug,
+            notes_written=written,
+        )
         return written
     finally:
         release_vault_write_lock()
@@ -460,8 +490,11 @@ def _run_structured_notes_worker(payload_path, sentinel_path):
     try:
         with open(payload_path) as f:
             payload = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
         payload = None
+        error = str(exc)
+        log_retrieval("triage", "structured_notes_payload_unreadable", error=error)
+        log_triage_health("structured_notes_payload_unreadable", session_id="unknown", error=error)
     finally:
         try:
             os.unlink(payload_path)
@@ -487,6 +520,12 @@ def _run_structured_notes_worker(payload_path, sentinel_path):
             except Exception as exc:
                 log_retrieval(
                     "triage",
+                    "structured_notes_failed",
+                    session_id=payload["session_id"],
+                    error=str(exc),
+                    project=payload["project_slug"],
+                )
+                log_triage_health(
                     "structured_notes_failed",
                     session_id=payload["session_id"],
                     error=str(exc),
@@ -678,19 +717,24 @@ def main():
     try:
         hook_input = read_hook_input()
     except Exception as exc:
-        log_retrieval("triage", "hook_input_failed", error=str(exc))
+        error = str(exc)
+        log_retrieval("triage", "hook_input_failed", error=error)
+        log_triage_health("hook_input_failed", session_id="unknown", error=error)
         sys.exit(0)
 
     session_id = hook_input.get("session_id", "unknown")
     transcript_path = hook_input.get("transcript_path")
 
     if not transcript_path or not os.path.exists(transcript_path):
+        log_triage_health("missing_transcript", session_id=session_id)
         sys.exit(0)
 
     try:
         meta = parse_transcript(transcript_path)
     except Exception as exc:
-        log_retrieval("triage", "parse_transcript_failed", error=str(exc), session_id=session_id)
+        error = str(exc)
+        log_retrieval("triage", "parse_transcript_failed", error=error, session_id=session_id)
+        log_triage_health("parse_transcript_failed", session_id=session_id, error=error)
         sys.exit(0)
 
     if not meta["cwd"]:

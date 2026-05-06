@@ -13,6 +13,15 @@ id_pattern: '^#?\d+$'
 link_template: 'https://github.com/sandsower/memento-vault/issues/{id}'
 ```
 
+## Quality gates
+
+```beislid:gates
+- name: targeted-tests
+  command: '.venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py'
+- name: claude-sandbox-smoke
+  command: '.venv/bin/python scripts/claude_sandbox_smoke.py'
+```
+
 ## Probe cache
 
 ```beislid:probe_cache

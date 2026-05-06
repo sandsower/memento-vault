@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
@@ -105,6 +106,28 @@ def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
 
 
 CLAUDE_HEADLESS_DISALLOWED_TOOLS = "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch"
+CLAUDE_EMPTY_MCP_CONFIG = '{"mcpServers": {}}'
+
+
+def _resolve_cli_binary(binary):
+    resolved = shutil.which(binary)
+    if resolved:
+        return resolved
+
+    candidates = []
+    if binary == "claude":
+        candidates.extend(
+            [
+                Path.home() / ".local" / "bin" / "claude",
+                Path("/opt/homebrew/bin/claude"),
+                Path("/usr/local/bin/claude"),
+            ]
+        )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return binary
 
 
 def _claude_complete(prompt, model=None, timeout=30):
@@ -118,13 +141,13 @@ def _claude_complete(prompt, model=None, timeout=30):
     # defense-in-depth for Claude Code versions that still expose tools in
     # --print mode despite a tighter tool configuration.
     cmd = [
-        "claude",
+        _resolve_cli_binary("claude"),
         "--print",
         "--tools",
         "",
         "--strict-mcp-config",
         "--mcp-config",
-        "{}",
+        CLAUDE_EMPTY_MCP_CONFIG,
         "--permission-mode",
         "default",
         "--disallowedTools",
@@ -250,7 +273,7 @@ def preflight_check(config=None):
     if backend in {"claude", "codex", "gemini"}:
         binary = {"claude": "claude", "codex": "codex", "gemini": "gemini"}[backend]
         try:
-            result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
+            result = subprocess.run([_resolve_cli_binary(binary), "--version"], capture_output=True, text=True, timeout=10)
         except subprocess.TimeoutExpired:
             return False, f"{binary} preflight timed out"
         except FileNotFoundError as exc:

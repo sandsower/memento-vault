@@ -1,5 +1,6 @@
 """Tests for note writing and store helpers."""
 
+import json
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -7,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from memento.store import (
     acquire_vault_write_lock,
     find_dedup_candidates,
+    log_triage_health,
     release_vault_write_lock,
     update_project_index,
     write_note,
@@ -310,3 +312,34 @@ class TestVaultWriteLock:
         release_vault_write_lock(lock_path=str(lock_path))
         assert acquire_vault_write_lock(lock_path=str(lock_path), timeout=0.1, poll_interval=0.01) is True
         release_vault_write_lock(lock_path=str(lock_path))
+
+
+class TestTriageHealthLog:
+    def test_log_triage_health_ignores_retrieval_log_config(self, tmp_path):
+        health_log = tmp_path / "triage-health.jsonl"
+
+        with (
+            patch("memento.store.TRIAGE_HEALTH_LOG_PATH", str(health_log)),
+            patch("memento.store.get_config", return_value={"retrieval_log": False}),
+        ):
+            log_triage_health("structured_notes_llm_failed", session_id="sess-123", project="api-service", error="boom")
+
+        payload = json.loads(health_log.read_text().strip())
+        assert payload["hook"] == "triage"
+        assert payload["action"] == "structured_notes_llm_failed"
+        assert payload["session_id"] == "sess-123"
+        assert payload["project"] == "api-service"
+        assert payload["error"] == "boom"
+
+    def test_log_triage_health_sanitizes_and_truncates_errors(self, tmp_path):
+        health_log = tmp_path / "triage-health.jsonl"
+        secret = "sk-" + "a" * 30
+        long_error = f"failed with {secret} " + ("x" * 600)
+
+        with patch("memento.store.TRIAGE_HEALTH_LOG_PATH", str(health_log)):
+            log_triage_health("structured_notes_llm_failed", session_id="sess-123", error=long_error)
+
+        payload = json.loads(health_log.read_text().strip())
+        assert secret not in payload["error"]
+        assert "[REDACTED_API_KEY]" in payload["error"]
+        assert len(payload["error"]) <= 503
