@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, slugify
@@ -26,7 +27,7 @@ from memento.search import (
     qmd_search_with_extras,
     rrf_fuse,
 )
-from memento.store import RETRIEVAL_LOG_PATH, log_retrieval
+from memento.store import RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, log_retrieval
 from memento.utils import read_hook_input
 
 TRIAGE_HEALTH_WINDOW_HOURS = 24
@@ -68,51 +69,82 @@ def empty_result(source: str, reason: str = "no-results") -> LifecycleResult:
     )
 
 
-def triage_health_warning():
-    """Return a one-line warning if SessionEnd triage is silently failing.
+TRIAGE_HEALTH_SUCCESS_ACTIONS = {"structured_notes_written"}
+TRIAGE_HEALTH_FAILURE_ACTIONS = {
+    "hook_input_failed",
+    "missing_transcript",
+    "parse_transcript_failed",
+    "structured_notes_failed",
+    "structured_notes_llm_failed",
+    "structured_notes_lock_timeout",
+    "structured_notes_parse_empty",
+    "structured_notes_payload_unreadable",
+    "structured_notes_transcript_unreadable",
+}
 
-    Scans retrieval.jsonl for the last 24h of triage events and flags when
-    the failure ratio crosses TRIAGE_HEALTH_FAIL_RATIO. Returns None when
-    healthy or when there isn't enough data to judge.
-    """
-    try:
-        from datetime import datetime, timedelta
 
-        if not os.path.exists(RETRIEVAL_LOG_PATH):
-            return None
+def _scan_triage_health_log(path, cutoff, mode="health"):
+    if not os.path.exists(path):
+        return 0, 0
 
-        cutoff = datetime.now() - timedelta(hours=TRIAGE_HEALTH_WINDOW_HOURS)
-        total = 0
-        failed = 0
-        with open(RETRIEVAL_LOG_PATH) as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("hook") != "triage":
-                    continue
-                ts_raw = rec.get("ts")
-                if not ts_raw:
-                    continue
-                try:
-                    ts = datetime.fromisoformat(ts_raw)
-                except ValueError:
-                    continue
-                if ts < cutoff:
-                    continue
-                action = rec.get("action") or ""
+    total = 0
+    failed = 0
+    with open(path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("hook") != "triage":
+                continue
+            ts_raw = rec.get("ts")
+            if not ts_raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_raw)
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+            action = rec.get("action") or ""
+            if mode == "legacy":
                 if action not in ("decision", "parse_transcript_failed", "structured_notes_llm_failed"):
                     continue
                 total += 1
                 if action != "decision":
                     failed += 1
+                continue
+
+            if action in TRIAGE_HEALTH_SUCCESS_ACTIONS:
+                total += 1
+            elif action in TRIAGE_HEALTH_FAILURE_ACTIONS:
+                total += 1
+                failed += 1
+    return total, failed
+
+
+def triage_health_warning():
+    """Return a one-line warning if SessionEnd triage is silently failing.
+
+    Scans the always-on triage health log first, falling back to legacy
+    retrieval.jsonl diagnostics for older installs. Returns None when healthy
+    or when there isn't enough data to judge.
+    """
+    try:
+        cutoff = datetime.now() - timedelta(hours=TRIAGE_HEALTH_WINDOW_HOURS)
+        log_path = TRIAGE_HEALTH_LOG_PATH
+        total, failed = _scan_triage_health_log(log_path, cutoff)
+        if total < TRIAGE_HEALTH_MIN_EVENTS:
+            legacy_total, legacy_failed = _scan_triage_health_log(RETRIEVAL_LOG_PATH, cutoff, mode="legacy")
+            if legacy_total >= total:
+                total, failed = legacy_total, legacy_failed
+                log_path = RETRIEVAL_LOG_PATH
 
         if total < TRIAGE_HEALTH_MIN_EVENTS:
             return None
         if (failed / total) < TRIAGE_HEALTH_FAIL_RATIO:
             return None
-        return f"[vault] WARN: triage failing {failed}/{total} in last {TRIAGE_HEALTH_WINDOW_HOURS}h — check {RETRIEVAL_LOG_PATH}"
+        return f"[vault] WARN: triage failing {failed}/{total} in last {TRIAGE_HEALTH_WINDOW_HOURS}h — check {log_path}"
     except Exception:
         return None
 

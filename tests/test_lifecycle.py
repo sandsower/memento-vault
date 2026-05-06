@@ -16,6 +16,7 @@ from memento.lifecycle import (
     is_broad_project_history_query,
     is_low_signal_recall_prompt,
     should_append_project_to_recall,
+    triage_health_warning,
 )
 
 
@@ -642,3 +643,24 @@ def test_tool_context_hook_adapter_outputs_claude_json(capsys):
             "additionalContext": "[connected-to-vault]\n  - Auth boundary",
         }
     }
+
+
+def test_triage_health_warning_reads_always_on_health_log(tmp_path):
+    health_log = tmp_path / "triage-health.jsonl"
+    health_log.write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": "2999-01-01T00:00:00", "hook": "triage", "action": "structured_notes_llm_failed"}),
+                json.dumps({"ts": "2999-01-01T00:00:01", "hook": "triage", "action": "parse_transcript_failed"}),
+                json.dumps({"ts": "2999-01-01T00:00:02", "hook": "triage", "action": "structured_notes_parse_empty"}),
+            ]
+        )
+        + "\n"
+    )
+
+    with patch("memento.lifecycle.TRIAGE_HEALTH_LOG_PATH", str(health_log)):
+        warning = triage_health_warning()
+
+    assert warning is not None
+    assert "triage failing 3/3" in warning
+    assert str(health_log) in warning

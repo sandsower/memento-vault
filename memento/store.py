@@ -15,6 +15,12 @@ RETRIEVAL_LOG_PATH = os.path.join(
     "retrieval.jsonl",
 )
 
+TRIAGE_HEALTH_LOG_PATH = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
+    "memento-vault",
+    "triage-health.jsonl",
+)
+
 INCEPTION_STATE_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
     "memento-vault",
@@ -32,6 +38,20 @@ def _should_log():
     return get_config().get("retrieval_log", False)
 
 
+def _append_jsonl(path, entry, warn_attr):
+    try:
+        log_dir = os.path.dirname(path)
+        os.makedirs(log_dir, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        if not getattr(_append_jsonl, warn_attr, False):
+            import sys as _sys
+
+            print(f"[memento] warning: cannot write log {path}: {exc}", file=_sys.stderr)
+            setattr(_append_jsonl, warn_attr, True)
+
+
 def log_retrieval(hook, action, **kwargs):
     """Append a structured log entry to the retrieval log."""
     if not _should_log():
@@ -43,18 +63,38 @@ def log_retrieval(hook, action, **kwargs):
         "action": action,
     }
     entry.update(kwargs)
+    _append_jsonl(RETRIEVAL_LOG_PATH, entry, "_retrieval_warned")
 
+
+def _sanitize_health_error(error):
     try:
-        log_dir = os.path.dirname(RETRIEVAL_LOG_PATH)
-        os.makedirs(log_dir, exist_ok=True)
-        with open(RETRIEVAL_LOG_PATH, "a") as f:
-            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
-    except OSError as exc:
-        if not getattr(log_retrieval, "_warned", False):
-            import sys as _sys
+        from memento.utils import sanitize_secrets
 
-            print(f"[memento] warning: cannot write retrieval log: {exc}", file=_sys.stderr)
-            log_retrieval._warned = True
+        sanitized = sanitize_secrets(str(error))
+    except Exception:
+        sanitized = str(error)
+    if len(sanitized) > 500:
+        return sanitized[:500] + "..."
+    return sanitized
+
+
+def log_triage_health(action, **kwargs):
+    """Append minimal always-on SessionEnd extraction health telemetry.
+
+    This is intentionally separate from retrieval diagnostics. It records only
+    operational metadata needed to detect silent triage failures, never
+    transcript text or generated note bodies.
+    """
+    if "error" in kwargs:
+        kwargs = dict(kwargs)
+        kwargs["error"] = _sanitize_health_error(kwargs["error"])
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "hook": "triage",
+        "action": action,
+    }
+    entry.update(kwargs)
+    _append_jsonl(TRIAGE_HEALTH_LOG_PATH, entry, "_triage_health_warned")
 
 
 def load_inception_state(state_path=None):
