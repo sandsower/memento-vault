@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -7,13 +9,12 @@ from pathlib import Path
 import pytest
 
 from memento import health
-from memento.config import reset_config
 
 
 def _make_vault(path: Path):
     for dirname in ("notes", "fleeting", "projects", "archive"):
         (path / dirname).mkdir(parents=True, exist_ok=True)
-    (path / ".git").mkdir()
+    (path / ".git").mkdir(exist_ok=True)
     return path
 
 
@@ -30,9 +31,7 @@ def isolate_health(monkeypatch, tmp_path):
     monkeypatch.setattr(health, "INCEPTION_STATE_PATH", str(tmp_path / "inception-state.json"))
     monkeypatch.setattr(health, "VAULT_WRITE_LOCK_PATH", str(tmp_path / "vault-write.lock"))
     monkeypatch.setattr(health, "INCEPTION_LOCK_PATH", str(tmp_path / "inception.lock"))
-    reset_config()
     yield
-    reset_config()
 
 
 def test_health_json_outputs_report_and_default_allows_warnings(capsys):
@@ -167,7 +166,6 @@ def test_config_parse_failure_is_fail(tmp_path):
     config_dir = Path.home() / ".config" / "memento-vault"
     config_dir.mkdir(parents=True)
     (config_dir / "memento.yml").write_text("vault_path: [unterminated\n")
-    reset_config()
 
     report = health.build_report()
     check = next(check for check in report.checks if check.name == "config")
@@ -178,7 +176,6 @@ def test_config_parse_failure_is_fail(tmp_path):
 
 def test_explicit_qmd_backend_missing_is_fail(monkeypatch):
     monkeypatch.setenv("MEMENTO_SEARCH_BACKEND", "qmd")
-    reset_config()
 
     real_which = health.shutil.which
 
@@ -207,3 +204,52 @@ def test_stale_live_lock_is_fail(monkeypatch):
 
     assert check.status == "fail"
     assert "long-running live pid" in check.message
+
+
+def test_health_subprocess_does_not_create_runtime_or_cache_dirs(tmp_path):
+    vault = _make_vault(tmp_path / "vault")
+    home = tmp_path / "home"
+    runtime = tmp_path / "runtime"
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+    env["XDG_RUNTIME_DIR"] = str(runtime)
+    env["MEMENTO_VAULT_PATH"] = str(vault)
+    env["MEMENTO_SEARCH_BACKEND"] = "grep"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "memento.health", "--json"],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["status"] in {"pass", "warn"}
+    assert not (home / ".cache" / "memento-vault").exists()
+    assert not (runtime / "memento-vault").exists()
+
+
+def test_unreadable_mcp_config_reports_failure():
+    config_path = Path.home() / ".claude" / "mcp-servers.json"
+    config_path.mkdir(parents=True)
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "mcp config")
+
+    assert check.status == "fail"
+    assert "cannot read MCP config" in check.message
+
+
+def test_human_report_does_not_truncate_away_later_checks():
+    checks = [
+        health.CheckResult("first", "warn", "x" * 1200),
+        health.CheckResult("last-check", "pass", "still visible"),
+    ]
+    report = health.HealthReport(status="warn", summary={"pass": 1, "warn": 1, "fail": 0}, checks=checks)
+
+    rendered = health.render_human(report)
+
+    assert "last-check" in rendered
+    assert "still visible" in rendered

@@ -12,16 +12,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from memento.config import DEFAULT_CONFIG, get_config, get_vault, _parse_simple_yaml
-from memento.llm import is_invalid_mcp_config_error
-from memento.store import (
-    INCEPTION_LOCK_PATH,
-    INCEPTION_STATE_PATH,
-    RETRIEVAL_LOG_PATH,
-    TRIAGE_HEALTH_LOG_PATH,
-    VAULT_WRITE_LOCK_PATH,
-)
-from memento.utils import sanitize_secrets
 
 PASS = "pass"
 WARN = "warn"
@@ -36,6 +26,39 @@ _STALE_MCP_HINT = (
     "likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
     'copied hooks should use {"mcpServers": {}} for --mcp-config'
 )
+_DEFAULT_CONFIG = {
+    "vault_path": str(Path.home() / "memento"),
+    "auto_commit": True,
+    "search_backend": "auto",
+    "search_db_path": ".search/search.db",
+    "inception_enabled": False,
+}
+RETRIEVAL_LOG_PATH = str(
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memento-vault" / "retrieval.jsonl"
+)
+TRIAGE_HEALTH_LOG_PATH = str(
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memento-vault" / "triage-health.jsonl"
+)
+INCEPTION_STATE_PATH = str(
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memento-vault" / "inception-state.json"
+)
+_DEFAULT_RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", Path.home() / ".cache")) / "memento-vault"
+VAULT_WRITE_LOCK_PATH = str(_DEFAULT_RUNTIME_DIR / "vault-write.lock")
+INCEPTION_LOCK_PATH = str(_DEFAULT_RUNTIME_DIR / "inception.lock")
+
+_SECRET_PATTERNS = [
+    (r"(sk-[a-zA-Z0-9]{20,})", "[REDACTED_API_KEY]"),
+    (r"(sk-proj-[a-zA-Z0-9_-]{20,})", "[REDACTED_API_KEY]"),
+    (r"(ghp_[a-zA-Z0-9]{36,})", "[REDACTED_GITHUB_TOKEN]"),
+    (r"(gho_[a-zA-Z0-9]{36,})", "[REDACTED_GITHUB_TOKEN]"),
+    (r"(github_pat_[a-zA-Z0-9_]{20,})", "[REDACTED_GITHUB_TOKEN]"),
+    (r"(xox[bp]-[a-zA-Z0-9\-]+)", "[REDACTED_SLACK_TOKEN]"),
+    (r"(AKIA[0-9A-Z]{16})", "[REDACTED_AWS_KEY]"),
+    (r"(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,})", "[REDACTED_JWT]"),
+    (r'((?:postgres|mysql|mongodb|redis)://[^\s"\'`]+)', "[REDACTED_CONNECTION_STRING]"),
+    (r"(Bearer\s+[a-zA-Z0-9_\-.]{20,})", "Bearer [REDACTED_TOKEN]"),
+    (r'(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_PASS)\s*[=:]\s*["\']?([a-zA-Z0-9_\-/.]{20,})["\']?', "[REDACTED_SECRET]"),
+]
 
 
 @dataclass
@@ -78,7 +101,7 @@ def build_report() -> HealthReport:
     config_check, config = _check_config_parse()
     checks.append(config_check)
 
-    vault = Path(config.get("vault_path") or get_vault()).expanduser()
+    vault = Path(config.get("vault_path") or _DEFAULT_CONFIG["vault_path"]).expanduser()
     checks.append(_check_vault_dirs(vault))
     checks.append(_check_git(vault, config))
     checks.append(_check_search_backend(vault, config))
@@ -105,7 +128,7 @@ def render_human(report: HealthReport, verbose: bool = False) -> str:
             for key, value in sorted(check.details.items()):
                 rendered = json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else str(value)
                 lines.append(f"  - {key}: {_safe_text(rendered)}")
-    return _safe_text("\n".join(lines))
+    return "\n".join(lines)
 
 
 def exit_code(report: HealthReport, strict: bool = False) -> int:
@@ -133,21 +156,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _check_config_parse() -> tuple[CheckResult, dict[str, Any]]:
-    config = get_config()
-    config_path = _first_config_path(config)
+    config_path = _first_config_path()
     if not config_path:
+        config = _apply_env_overrides(dict(_DEFAULT_CONFIG))
         return CheckResult("config", PASS, "using default config", {"vault_path": config.get("vault_path")}), config
 
+    config = _apply_env_overrides(dict(_DEFAULT_CONFIG))
     try:
         parsed = _read_config_file(config_path)
-        merged = dict(DEFAULT_CONFIG)
-        merged.update({k: v for k, v in parsed.items() if v is not None})
-        if os.environ.get("MEMENTO_VAULT_PATH"):
-            merged["vault_path"] = os.environ["MEMENTO_VAULT_PATH"]
-        if os.environ.get("MEMENTO_SEARCH_BACKEND"):
-            merged["search_backend"] = os.environ["MEMENTO_SEARCH_BACKEND"]
-        merged["vault_path"] = str(Path(str(merged["vault_path"])).expanduser())
-        return CheckResult("config", PASS, f"parsed {config_path}", {"path": str(config_path)}), merged
+        config.update({k: v for k, v in parsed.items() if v is not None})
+        config = _apply_env_overrides(config)
+        config["vault_path"] = str(Path(str(config["vault_path"])).expanduser())
+        return CheckResult("config", PASS, f"parsed {config_path}", {"path": str(config_path)}), config
     except Exception as exc:
         return (
             CheckResult(
@@ -157,9 +177,18 @@ def _check_config_parse() -> tuple[CheckResult, dict[str, Any]]:
         )
 
 
-def _first_config_path(config: dict[str, Any]) -> Path | None:
+def _apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
+    if os.environ.get("MEMENTO_VAULT_PATH"):
+        config["vault_path"] = os.environ["MEMENTO_VAULT_PATH"]
+    if os.environ.get("MEMENTO_SEARCH_BACKEND"):
+        config["search_backend"] = os.environ["MEMENTO_SEARCH_BACKEND"]
+    config["vault_path"] = str(Path(str(config["vault_path"])).expanduser())
+    return config
+
+
+def _first_config_path() -> Path | None:
     candidates = []
-    vault_path = Path(str(config.get("vault_path", DEFAULT_CONFIG["vault_path"]))).expanduser()
+    vault_path = Path(os.environ.get("MEMENTO_VAULT_PATH", _DEFAULT_CONFIG["vault_path"])).expanduser()
     if vault_path.exists():
         candidates.append(vault_path / "memento.yml")
     candidates.extend(
@@ -185,6 +214,34 @@ def _read_config_file(path: Path) -> dict[str, Any]:
         return data
     except ImportError:
         return _parse_simple_yaml(path)
+
+
+def _parse_simple_yaml(path: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    with path.open() as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            key = key.strip()
+            value = value.strip()
+            if value.lower() in ("true", "yes"):
+                parsed: Any = True
+            elif value.lower() in ("false", "no"):
+                parsed = False
+            elif value.isdigit():
+                parsed = int(value)
+            elif value.startswith("[") and value.endswith("]"):
+                parsed = [v.strip().strip('"').strip("'") for v in value[1:-1].split(",")]
+            elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                parsed = value[1:-1]
+            else:
+                parsed = value
+            result[key] = parsed
+    return result
 
 
 def _check_vault_dirs(vault: Path) -> CheckResult:
@@ -267,6 +324,15 @@ def _check_mcp_config() -> list[CheckResult]:
         except json.JSONDecodeError as exc:
             checks.append(
                 CheckResult("mcp config", FAIL, f"invalid JSON at {config_path}: {exc}", {"path": str(config_path)})
+            )
+        except (OSError, UnicodeError) as exc:
+            checks.append(
+                CheckResult(
+                    "mcp config",
+                    FAIL,
+                    f"cannot read MCP config at {config_path}: {exc}",
+                    {"path": str(config_path), "error": str(exc)},
+                )
             )
     else:
         checks.append(CheckResult("mcp config", WARN, "Claude MCP config not found", {"path": str(config_path)}))
@@ -371,7 +437,7 @@ def _scan_triage_log(path: Path, cutoff: datetime, legacy: bool) -> tuple[str | 
             error = str(rec.get("error") or "")
             if error:
                 last_error = error
-                invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(error)
+                invalid_mcp_failed = invalid_mcp_failed or _is_invalid_mcp_config_error(error)
     return (str(path), total, failed, invalid_mcp_failed, last_error)
 
 
@@ -528,8 +594,23 @@ def _parse_ts(raw: Any) -> datetime | None:
         return None
 
 
+def _is_invalid_mcp_config_error(message: str) -> bool:
+    normalized = (message or "").lower()
+    return "invalid mcp configuration" in normalized or ("mcpservers" in normalized and "schema" in normalized)
+
+
+def _sanitize_secrets(text: str) -> str:
+    import re
+
+    if not text:
+        return text
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text
+
+
 def _safe_text(text: str) -> str:
-    text = sanitize_secrets(str(text))
+    text = _sanitize_secrets(str(text))
     if len(text) > 1000:
         return text[:1000] + "..."
     return text
