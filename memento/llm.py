@@ -43,6 +43,28 @@ def _error(message):
     return LLMResult(text="", ok=False, error=message)
 
 
+def is_invalid_mcp_config_error(message):
+    """Return True when a CLI error looks like Claude rejecting MCP config schema."""
+    normalized = (message or "").lower()
+    return "invalid mcp configuration" in normalized or (
+        "mcpservers" in normalized and "schema" in normalized
+    )
+
+
+def _with_invalid_mcp_config_hint(message):
+    if not is_invalid_mcp_config_error(message):
+        return message
+    hint = (
+        "Memento hint: Claude rejected the headless MCP config; this is often caused by "
+        "a stale headless Claude MCP config in installed hooks. Rerun ./install.sh --reinstall; "
+        "if using copied hooks, ensure installed memento/llm.py passes "
+        "{\"mcpServers\": {}} to --mcp-config, not {}."
+    )
+    if hint in message:
+        return message
+    return f"{message}\n\n{hint}"
+
+
 def _success(text):
     stripped = text.strip()
     if not stripped:
@@ -88,7 +110,8 @@ def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
                 return _success(text)
             if result.stdout.strip():
                 return _success(result.stdout)
-        return _error(result.stderr.strip() or f"LLM command failed with exit code {result.returncode}")
+        message = result.stderr.strip() or f"LLM command failed with exit code {result.returncode}"
+        return _error(_with_invalid_mcp_config_hint(message))
 
     if output_path is not None:
         try:

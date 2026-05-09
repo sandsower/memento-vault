@@ -1,7 +1,6 @@
 """Tests for the remote vault client."""
 
 import json
-import pytest
 from unittest.mock import patch, MagicMock
 
 from memento.remote_client import is_remote, list_notes, search, get, store, capture, status
@@ -55,6 +54,37 @@ class TestCallTool:
         assert body["method"] == "tools/call"
         assert body["params"]["name"] == "memento_search"
         assert body["params"]["arguments"]["query"] == "test query"
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_search_prefers_structured_content_result(self, mock_urlopen, mock_url):
+        mcp_response = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"path": "notes/foo.md", "title": "Foo", "score": 0.9}),
+                    }
+                ],
+                "structuredContent": {
+                    "result": [
+                        {"path": "notes/foo.md", "title": "Foo", "score": 0.9},
+                    ]
+                },
+            },
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(mcp_response).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        found = search("test query")
+
+        assert len(found) == 1
+        assert found[0]["title"] == "Foo"
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")

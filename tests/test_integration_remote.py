@@ -7,7 +7,6 @@ Skipped in CI (needs a free port). Run locally with:
     pytest tests/test_integration_remote.py -v
 """
 
-import json
 import os
 import signal
 import socket

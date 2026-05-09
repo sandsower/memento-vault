@@ -235,6 +235,37 @@ safe_copy() {
     return 1
 }
 
+repair_stale_headless_mcp_config() {
+    local target="$1" key="${2:-}"
+    [ -f "$target" ] || return 1
+
+    local repaired
+    repaired=$(python3 - "$target" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+old = '        "--mcp-config",\n        "{}",'
+new = '        "--mcp-config",\n        \'{"mcpServers": {}}\','
+if old not in text:
+    print("no")
+    raise SystemExit(1)
+path.write_text(text.replace(old, new, 1))
+print("yes")
+PY
+) || return 1
+
+    if [ "$repaired" = "yes" ]; then
+        if [ -n "$key" ]; then
+            record_file "$key" "$target"
+        fi
+        info "Repaired stale headless Claude MCP config in $target"
+        return 0
+    fi
+    return 1
+}
+
 # --- setup_vault ---
 # Creates the vault directory, git repo, and optionally Obsidian views.
 # Sets global OBSIDIAN_INSTALLED for use by print_summary.

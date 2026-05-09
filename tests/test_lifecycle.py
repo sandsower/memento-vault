@@ -664,3 +664,68 @@ def test_triage_health_warning_reads_always_on_health_log(tmp_path):
     assert warning is not None
     assert "triage failing 3/3" in warning
     assert str(health_log) in warning
+
+
+def test_triage_health_warning_falls_back_to_legacy_retrieval_log(tmp_path):
+    health_log = tmp_path / "missing-triage-health.jsonl"
+    retrieval_log = tmp_path / "retrieval.jsonl"
+    invalid_mcp_error = "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    retrieval_log.write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": "2999-01-01T00:00:00", "hook": "triage", "action": "decision"}),
+                json.dumps(
+                    {
+                        "ts": "2999-01-01T00:00:01",
+                        "hook": "triage",
+                        "action": "structured_notes_llm_failed",
+                        "error": invalid_mcp_error,
+                    }
+                ),
+                json.dumps({"ts": "2999-01-01T00:00:02", "hook": "triage", "action": "parse_transcript_failed"}),
+            ]
+        )
+        + "\n"
+    )
+
+    with (
+        patch("memento.lifecycle.TRIAGE_HEALTH_LOG_PATH", str(health_log)),
+        patch("memento.lifecycle.RETRIEVAL_LOG_PATH", str(retrieval_log)),
+    ):
+        warning = triage_health_warning()
+
+    assert warning is not None
+    assert "triage failing 2/3" in warning
+    assert str(retrieval_log) in warning
+    assert "stale headless Claude MCP config" in warning
+
+
+def test_triage_health_warning_adds_invalid_mcp_hint(tmp_path):
+    health_log = tmp_path / "triage-health.jsonl"
+    invalid_mcp_error = "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    health_log.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2999-01-01T00:00:00",
+                        "hook": "triage",
+                        "action": "structured_notes_llm_failed",
+                        "error": invalid_mcp_error,
+                    }
+                ),
+                json.dumps({"ts": "2999-01-01T00:00:01", "hook": "triage", "action": "structured_notes_llm_failed"}),
+                json.dumps({"ts": "2999-01-01T00:00:02", "hook": "triage", "action": "structured_notes_parse_empty"}),
+            ]
+        )
+        + "\n"
+    )
+
+    with patch("memento.lifecycle.TRIAGE_HEALTH_LOG_PATH", str(health_log)):
+        warning = triage_health_warning()
+
+    assert warning is not None
+    assert "triage failing 3/3" in warning
+    assert "stale headless Claude MCP config" in warning
+    assert "./install.sh --reinstall" in warning
+    assert '{"mcpServers": {}}' in warning

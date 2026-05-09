@@ -73,6 +73,13 @@ def _call_tool(tool_name: str, arguments: dict, timeout: int = 30) -> dict:
         return {"error": body["error"].get("message", str(body["error"]))}
 
     result = body.get("result", {})
+    # Newer FastMCP streamable-http responses include typed structuredContent.
+    # Prefer it so list-returning tools do not get collapsed into a single dict
+    # when content is rendered as one text block per item.
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict) and "result" in structured:
+        return structured["result"]
+
     # MCP tools/call returns {content: [{type: "text", text: "..."}]}
     # FastMCP serializes list results as multiple text content blocks,
     # so we collect all parseable items and return a list if there are many.
