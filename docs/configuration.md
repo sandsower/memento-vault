@@ -70,6 +70,27 @@ tool_context_max_injections: 5
 tool_context_cooldown: 1       # seconds between QMD calls
 ```
 
+## Health diagnostics
+
+Run read-only operational checks with:
+
+```bash
+memento-vault health
+memento-vault doctor   # alias
+```
+
+Default checks are cheap and local: config parse, vault directory structure, git/auto-commit readiness, selected search backend availability, MCP config JSON validity, stale headless Claude MCP config detection, recent triage health, basic retrieval log health, lock files, and basic Inception state when enabled.
+
+Options:
+
+```bash
+memento-vault health --json     # structured report
+memento-vault health --verbose  # include sanitized details in human output
+memento-vault health --strict   # exit nonzero on warnings
+```
+
+Exit codes: failures always exit 1; warnings exit 0 unless `--strict` is set. The command never repairs state or prints secrets.
+
 ## Project rules
 
 Map working directories to project slugs and ticket patterns. Without rules, the slug is the directory name and tickets are extracted by a generic `[a-z]+-\d+` regex.

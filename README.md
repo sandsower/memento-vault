@@ -44,6 +44,16 @@ To safely rerun setup for the same version without discarding local edits:
 memento-vault install --reinstall
 ```
 
+Check local vault/install health at any time:
+
+```bash
+memento-vault health        # concise read-only diagnostics
+memento-vault doctor        # alias for health
+memento-vault health --json # structured output for automation
+```
+
+Warnings exit 0 by default; failures exit 1. Use `--strict` if automation should fail on warnings too. The command is read-only: it reports suggested repairs such as `./install.sh --reinstall`, but does not modify vault/config files.
+
 `--force` is reserved for recovery from broken installed files. It overwrites memento-managed files and requires confirmation, or `MEMENTO_FORCE=1` in non-interactive environments.
 
 ### Full install (hooks + retrieval + consolidation)
@@ -189,7 +199,7 @@ The MCP server exposes 5 tools over stdio (local) or HTTP (remote). Any MCP-comp
 | `memento_store` | Write a single knowledge note with frontmatter and project indexing |
 | `memento_capture` | End-of-session triage: parse transcript or accept a summary, write fleeting + atomic note |
 | `memento_get` | Read a specific note by name or path |
-| `memento_status` | Vault health: note count, project count, config summary |
+| `memento_status` | Vault status: note count, project count, config summary |
 | `memento_reindex` | Rebuild the search index from all markdown files (after bulk adds, git pull, Obsidian sync) |
 
 Run manually:

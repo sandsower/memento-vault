@@ -62,6 +62,33 @@ def test_cli_help_documents_safe_reinstall_and_dangerous_force():
     assert "--reinstall" in result.stdout
     assert "Safely rerun same-version install" in result.stdout
     assert "DANGEROUS" in result.stdout
+    assert "health" in result.stdout
+    assert "doctor" in result.stdout
+
+
+def test_cli_health_delegates_to_python_module(tmp_path):
+    cli = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bin",
+        "memento-vault",
+    )
+    vault = tmp_path / "vault"
+    for dirname in ("notes", "fleeting", "projects", "archive"):
+        (vault / dirname).mkdir(parents=True, exist_ok=True)
+    (vault / ".git").mkdir()
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path / "home")
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+    env["XDG_RUNTIME_DIR"] = str(tmp_path / "runtime")
+    env["MEMENTO_VAULT_PATH"] = str(vault)
+    env["MEMENTO_SEARCH_BACKEND"] = "grep"
+
+    result = subprocess.run([cli, "health", "--json"], text=True, capture_output=True, env=env, timeout=10)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] in {"pass", "warn"}
+    assert any(check["name"] == "vault" for check in payload["checks"])
 
 
 def test_noninteractive_force_requires_explicit_env():
