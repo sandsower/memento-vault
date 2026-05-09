@@ -7,13 +7,10 @@ the recovery command — without aborting the whole install via `set -e`.
 """
 
 import os
-import shutil
 import stat
 import subprocess
 import sys
 import textwrap
-
-import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib", "install-lib.sh")
@@ -38,6 +35,11 @@ def _run_register(tmp_path, claude_body, codex_body, env_overrides=None):
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    os.symlink("/bin/bash", bin_dir / "bash")
+    os.symlink(sys.executable, bin_dir / "python3")
+    os.symlink("/usr/bin/dirname", bin_dir / "dirname")
+    os.symlink("/usr/bin/sed", bin_dir / "sed")
+    os.symlink("/usr/bin/grep", bin_dir / "grep")
     if claude_body is not None:
         _write_shim(str(bin_dir), "claude", claude_body)
     if codex_body is not None:
@@ -70,10 +72,11 @@ def _run_register(tmp_path, claude_body, codex_body, env_overrides=None):
         echo "SCRIPT_REACHED_END"
     """)
 
-    # Isolate PATH to bin_dir + minimal system dirs so the real `claude`/`codex`
-    # CLIs on the developer's machine cannot leak into the test.
+    # Isolate PATH to bin_dir only so real `claude`/`codex` CLIs on the
+    # developer's machine cannot leak into the test. bash/python3 are symlinked
+    # above because register_mcp_cli legitimately needs them.
     env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+    env["PATH"] = str(bin_dir)
     if env_overrides:
         env.update(env_overrides)
 

@@ -60,11 +60,25 @@ class TestCliBackends:
         assert cmd[cmd.index("--tools") + 1] == ""
         assert "--strict-mcp-config" in cmd
         assert cmd[cmd.index("--mcp-config") + 1] == '{"mcpServers": {}}'
+        assert "{}" not in cmd
         assert "--permission-mode" in cmd
         assert cmd[cmd.index("--permission-mode") + 1] == "default"
         denylist = cmd[cmd.index("--disallowedTools") + 1].split(",")
         for tool in ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "Task", "Agent", "WebFetch", "WebSearch"]:
             assert tool in denylist
+
+    @patch("memento.llm.subprocess.run")
+    def test_claude_backend_adds_actionable_invalid_mcp_hint(self, mock_run):
+        stderr = "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr=stderr)
+
+        result = llm_complete("transcript", {"llm_backend": "claude"})
+
+        assert result.ok is False
+        assert stderr in result.error
+        assert "stale headless Claude MCP config" in result.error
+        assert "./install.sh --reinstall" in result.error
+        assert '{"mcpServers": {}}' in result.error
 
     @patch("memento.llm.Path.read_text", return_value="codex output\n")
     @patch("memento.llm.Path.unlink")

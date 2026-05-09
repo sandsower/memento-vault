@@ -113,6 +113,48 @@ setup_cli >/dev/null
         assert result.stdout.strip() == f.read().strip()
 
 
+def test_repair_stale_headless_mcp_config_patches_known_bad_installed_copy(tmp_path):
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    target = tmp_path / "llm.py"
+    target.write_text(
+        "# local edit preserved\n"
+        "cmd = [\n"
+        "        \"claude\",\n"
+        "        \"--strict-mcp-config\",\n"
+        "        \"--mcp-config\",\n"
+        "        \"{}\",\n"
+        "]\n"
+    )
+    script = f"""
+set -euo pipefail
+export HOME={tmp_path}
+SCRIPT_DIR={repo}
+CLAUDE_DIR={tmp_path}/.claude
+VAULT_PATH={tmp_path}/memento
+CONFIG_DIR={tmp_path}/.config/memento-vault
+MANIFEST=$CONFIG_DIR/manifest.json
+NEW_VERSION=0.0.0
+FORCE=false
+EXPERIMENTAL=false
+MCP_INSTALL=false
+REMOTE_MODE=false
+REMOTE_URL=
+REMOTE_API_KEY=
+MANIFEST_FILES_JSON='{{}}'
+QMD_AVAILABLE=false
+source {repo}/lib/install-lib.sh >/dev/null
+repair_stale_headless_mcp_config {target} memento/llm.py
+"""
+
+    result = subprocess.run(["bash", "-c", script], check=True, text=True, capture_output=True)
+
+    repaired = target.read_text()
+    assert "# local edit preserved" in repaired
+    assert '"{}"' not in repaired
+    assert '\'{"mcpServers": {}}\'' in repaired
+    assert "Repaired stale headless Claude MCP config" in result.stdout
+
+
 def test_setup_cli_skips_when_cli_is_already_on_path(tmp_path):
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     existing_dir = tmp_path / "existing"

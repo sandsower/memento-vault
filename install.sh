@@ -427,6 +427,11 @@ else
     info "Package: $PKG_COPIED files installed to $MEMENTO_PKG_DIR"
 fi
 
+# Repair a known stale installed headless Claude config shape even when local
+# edits caused safe_copy to skip the package file. Claude Code 2.1.123 rejects
+# `--mcp-config {}`; the accepted empty config is `{"mcpServers": {}}`.
+repair_stale_headless_mcp_config "$MEMENTO_PKG_DIR/llm.py" "memento/llm.py" || true
+
 # --- Embedded search backend (optional) ---
 
 step "Checking embedded search backend..."
