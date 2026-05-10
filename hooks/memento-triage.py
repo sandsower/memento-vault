@@ -394,6 +394,7 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
         "Read this session transcript and return JSON only.\n"
         'Return either a JSON array of notes or {"notes": [...]}.\n'
         "Each note must include: title, body, type, tags, certainty.\n"
+        "certainty must be an integer from 1 to 5, not a word such as confirmed.\n"
         "Optional fields: validity_context, supersedes.\n"
         "Do not include any prose outside JSON.\n\n"
         f"Session ID: {session_id}\n"
@@ -648,9 +649,7 @@ def run_remote_triage(hook_input):
                 "captured": ts,
             }
             fm_lines = "\n".join(f"{k}: {json.dumps(v)}" for k, v in fm.items())
-            spool_file.write_text(
-                f"---\n{fm_lines}\n---\n\n{sanitized_summary}\n"
-            )
+            spool_file.write_text(f"---\n{fm_lines}\n---\n\n{sanitized_summary}\n")
             legacy_spool_path = str(spool_file)
             print(f"[memento] spooled session to {spool_file} for later reconciliation", file=sys.stderr)
         except Exception as fallback_exc:
@@ -672,9 +671,7 @@ def run_remote_triage(hook_input):
                     "agent": "claude",
                     "fleeting_only": not (substantial and new_insight),
                 }
-                retry_spool_path = str(sync_ledger.spool_payload(
-                    vault, "capture", source, json.dumps(envelope)
-                ))
+                retry_spool_path = str(sync_ledger.spool_payload(vault, "capture", source, json.dumps(envelope)))
             except Exception as exc:
                 print(f"[memento] retry spool failed: {exc}", file=sys.stderr)
 

@@ -308,6 +308,39 @@ class TestProcessStructuredNotes:
         assert project_file.exists()
         assert "[[redis-cache-keys-need-explicit-ttl]]" in project_file.read_text()
 
+    def test_triage_coerces_word_certainty(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+        llm_payload = json.dumps(
+            [
+                {
+                    "title": "Redis cache keys need explicit TTL",
+                    "body": "Keys without TTL caused stale reads.",
+                    "type": "bugfix",
+                    "tags": ["redis", "caching"],
+                    "certainty": "confirmed",
+                }
+            ]
+        )
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text=llm_payload, ok=True, error=None)),
+        ):
+            written = process_structured_notes("sess-123", str(transcript), meta, "api-service")
+
+        assert written == 1
+        note = tmp_vault / "notes" / "redis-cache-keys-need-explicit-ttl.md"
+        assert "certainty: 4" in note.read_text()
+
     def test_triage_handles_malformed_json(self, tmp_vault, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
         transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
@@ -629,7 +662,10 @@ class TestMainHealthLogging:
         transcript.write_text("not-json\n")
 
         with (
-            patch("memento_triage.read_hook_input", return_value={"session_id": "sess-parse", "transcript_path": str(transcript)}),
+            patch(
+                "memento_triage.read_hook_input",
+                return_value={"session_id": "sess-parse", "transcript_path": str(transcript)},
+            ),
             patch("memento_triage.parse_transcript", side_effect=RuntimeError("bad transcript")),
             patch("memento_triage.log_retrieval") as mock_log,
             patch("memento_triage.log_triage_health") as mock_health,
@@ -684,7 +720,9 @@ class TestMainHealthLogging:
             run_structured_notes_worker(str(payload), str(sentinel))
 
         assert sentinel.exists()
-        mock_log.assert_any_call("triage", "structured_notes_payload_unreadable", error=mock_log.call_args_list[0].kwargs["error"])
+        mock_log.assert_any_call(
+            "triage", "structured_notes_payload_unreadable", error=mock_log.call_args_list[0].kwargs["error"]
+        )
         action_call = mock_health.call_args_list[0]
         assert action_call.args[0] == "structured_notes_payload_unreadable"
         assert action_call.kwargs["session_id"] == "unknown"

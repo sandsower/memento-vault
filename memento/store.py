@@ -302,6 +302,40 @@ def find_dedup_candidates(vault_path, title, tags, limit=5):
     return [path for _, path in ranked[:limit]]
 
 
+_CERTAINTY_LABELS = {
+    "speculation": 1,
+    "speculative": 1,
+    "uncertain": 2,
+    "low": 2,
+    "medium": 3,
+    "moderate": 3,
+    "likely": 3,
+    "confirmed": 4,
+    "certain": 4,
+    "high": 4,
+    "proven": 5,
+    "verified": 5,
+}
+
+
+def _coerce_certainty(certainty):
+    """Return a schema-valid certainty int, or None for unusable input."""
+    if certainty is None or certainty == "":
+        return None
+    if isinstance(certainty, str):
+        label = certainty.strip().lower()
+        if label in _CERTAINTY_LABELS:
+            return _CERTAINTY_LABELS[label]
+        certainty = label
+    try:
+        value = int(certainty)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= value <= 5:
+        return value
+    return None
+
+
 def write_note(
     vault_path,
     title,
@@ -345,8 +379,9 @@ def write_note(
         f"tags: [{', '.join(safe_tags)}]",
         f"source: {safe_source}",
     ]
-    if certainty is not None:
-        lines.append(f"certainty: {int(certainty)}")
+    certainty_value = _coerce_certainty(certainty)
+    if certainty_value is not None:
+        lines.append(f"certainty: {certainty_value}")
     if validity_context:
         lines.append(f"validity-context: {_safe_yaml_scalar(validity_context)}")
     if supersedes:

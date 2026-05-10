@@ -2,7 +2,7 @@
 
 ## Version tag
 
-1. Make sure `VERSION`, `package.json`, and `Formula/memento-vault.rb` agree on the release version.
+1. Make sure `VERSION`, `package.json`, `memento/__init__.py`, and `Formula/memento-vault.rb` agree on the release version.
 2. Merge the release PR to `main`.
 3. Tag the release from `main`:
 
