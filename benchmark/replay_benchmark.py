@@ -272,6 +272,10 @@ def percentile(lst, p):
 def print_report(all_stats):
     """Print comprehensive benchmark report."""
     n = len(all_stats)
+    if n == 0:
+        print("\nNo sessions to report.")
+        return
+
     total_prompts = sum(s["prompt_count"] for s in all_stats)
     total_reads = sum(s["read_count"] for s in all_stats)
 

@@ -157,9 +157,11 @@ def index_collection(collection, vault_path):
     subprocess.run(
         ["qmd", "update", "-c", collection, "--path", str(vault_path), "--pattern", "**/*.md"],
         capture_output=True,
+        text=True,
         timeout=300,
+        check=True,
     )
-    subprocess.run(["qmd", "embed"], capture_output=True, timeout=300)
+    subprocess.run(["qmd", "embed"], capture_output=True, text=True, timeout=300, check=True)
 
 
 def remove_collection(collection):
@@ -276,7 +278,9 @@ def run(multipliers):
             subprocess.run(
                 ["qmd", "vsearch", "warmup", "-c", collection, "-n", "1"],
                 capture_output=True,
+                text=True,
                 timeout=30,
+                check=True,
             )
 
             # Measure

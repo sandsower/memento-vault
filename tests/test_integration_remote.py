@@ -114,9 +114,6 @@ class TestRemoteIntegration:
         assert any(
             "integration" in r.get("title", "").lower() or "xylophone" in r.get("content", "").lower() for r in results
         )
-        assert any(
-            "integration" in r.get("title", "").lower() or "xylophone" in r.get("content", "").lower() for r in results
-        )
 
     def test_search_returns_content(self):
         from memento.remote_client import search

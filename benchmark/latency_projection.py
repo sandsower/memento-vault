@@ -106,9 +106,11 @@ def setup_qmd_collection(vault_path, collection_name):
     subprocess.run(
         ["qmd", "update", "-c", collection_name, "--path", str(vault_path), "--pattern", "**/*.md"],
         capture_output=True,
+        text=True,
         timeout=60,
+        check=True,
     )
-    subprocess.run(["qmd", "embed"], capture_output=True, timeout=120)
+    subprocess.run(["qmd", "embed"], capture_output=True, text=True, timeout=120, check=True)
 
 
 def measure_latency(collection_name, queries, semantic=False):
@@ -177,7 +179,9 @@ def run_projection(max_notes=3000, step=500):
                 subprocess.run(
                     ["qmd", "update", "-c", collection, "--path", str(vault_path), "--pattern", "**/*.md"],
                     capture_output=True,
+                    text=True,
                     timeout=120,
+                    check=True,
                 )
 
                 # Measure BM25 latency
