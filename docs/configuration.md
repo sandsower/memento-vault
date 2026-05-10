@@ -56,6 +56,7 @@ prompt_recall: true
 recall_min_score: 0.6
 recall_max_notes: 3
 recall_high_confidence: 0.55   # BM25 score above this skips deep path
+recall_skip_broad_project_queries: true  # Skip broad project/history prompts; use explicit search instead
 recall_skip_patterns:
   - "^(yes|no|ok|sure|thanks|y|n|yep|nope|looks good|lgtm|ship it|continue)$"
   - "^git\\s"
@@ -68,6 +69,27 @@ tool_context_max_notes: 2
 tool_context_max_injections: 5
 tool_context_cooldown: 1       # seconds between QMD calls
 ```
+
+## Health diagnostics
+
+Run read-only operational checks with:
+
+```bash
+memento-vault health
+memento-vault doctor   # alias
+```
+
+Default checks are cheap and local: config parse, vault directory structure, git/auto-commit readiness, selected search backend availability, MCP config JSON validity, stale headless Claude MCP config detection, recent triage health, basic retrieval log health, lock files, and basic Inception state when enabled.
+
+Options:
+
+```bash
+memento-vault health --json     # structured report
+memento-vault health --verbose  # include sanitized details in human output
+memento-vault health --strict   # exit nonzero on warnings
+```
+
+Exit codes: failures always exit 1; warnings exit 0 unless `--strict` is set. The command never repairs state or prints secrets.
 
 ## Project rules
 

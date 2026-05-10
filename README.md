@@ -2,7 +2,7 @@
 
 Persistent knowledge capture for coding agents. Sessions get triaged, scored, and filed as searchable Zettelkasten notes. Runs locally or as a remote service accessible from any device.
 
-Works with Claude Code (native hooks), and any MCP-compatible agent (Cursor, Windsurf, Codex, etc.) via the built-in MCP server.
+Works with Claude Code (native hooks), pi (native extension), and any MCP-compatible agent (Cursor, Windsurf, Codex, etc.) via the built-in MCP server.
 
 ## What it does
 
@@ -11,6 +11,16 @@ When a coding session ends, the triage pipeline reads the transcript and decides
 For agents without native hook support, the MCP server exposes the same operations as tools: search the vault, store notes, capture sessions, read specific notes.
 
 ## Install
+
+### Homebrew tap
+
+```bash
+brew tap sandsower/tap
+brew install memento-vault
+memento-vault install
+```
+
+### Git/manual install
 
 ```bash
 git clone https://github.com/sandsower/memento-vault.git
@@ -25,6 +35,26 @@ Custom vault path:
 ```bash
 MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 ```
+
+The installer also links the `memento-vault` CLI into `~/.local/bin` when possible, so future updates can use `memento-vault update`. If `~/.local/bin` is not on your `PATH`, either add it or run the repository-local `./bin/memento-vault` directly.
+
+To safely rerun setup for the same version without discarding local edits:
+
+```bash
+memento-vault install --reinstall
+```
+
+Check local vault/install health at any time:
+
+```bash
+memento-vault health        # concise read-only diagnostics
+memento-vault doctor        # alias for health
+memento-vault health --json # structured output for automation
+```
+
+Warnings exit 0 by default; failures exit 1. Use `--strict` if automation should fail on warnings too. The command is read-only: it reports suggested repairs such as `./install.sh --reinstall`, but does not modify vault/config files.
+
+`--force` is reserved for recovery from broken installed files. It overwrites memento-managed files and requires confirmation, or `MEMENTO_FORCE=1` in non-interactive environments.
 
 ### Full install (hooks + retrieval + consolidation)
 
@@ -52,6 +82,73 @@ For agents that support MCP but not native hooks (Cursor, Windsurf, etc.):
 This installs the `memento/` package, writes generic MCP server config, and registers the server with Claude Code and Codex when those CLIs are installed. The server runs over stdio via `python -m memento`. The installer verifies the `mcp` Python package is available and installs it if needed. Claude Code gets Claude-specific skills and the concierge agent under `~/.claude`; Codex gets agent-agnostic skills under `~/.codex/skills`.
 
 You can combine flags: `./install.sh --experimental --mcp` gives you hooks + retrieval + MCP.
+
+### Pi extension
+
+Memento ships a native pi extension from this repo. The extension is TypeScript, but lifecycle policy stays in Python core: pi calls a short-lived JSON adapter (`python3 -m memento.pi_bridge`) for briefing, recall, and read-tool context.
+
+For local testing:
+
+```bash
+pi -e ./extensions/memento.ts
+```
+
+For package installation from a checkout:
+
+```bash
+pi install /path/to/memento-vault
+```
+
+The pi bridge does not start a long-lived MCP child process. Automatic durable writes are not enabled by default. Candidate captures can be queued for review and flushed manually.
+
+Useful pi commands/tools:
+
+- `/memento-status` or `memento_status` — bridge/vault status, lifecycle feature state, queue count.
+- `/memento-queue` or `memento_queue` — list queued pi capture candidates.
+- `/memento-flush-queue <id>` or `memento_flush_queue` — write an approved queued capture to the vault (`--all` flushes all).
+- `memento_capture` — manually write a durable note; pass `queue: true` to queue instead.
+
+Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.json`, project-local `.pi/settings.json`, or project `package.json`. The bridge reads `memento.piBridge` first, then `piBridge`, then top-level keys:
+
+```json
+{
+  "memento": {
+    "piBridge": {
+      "enabled": true,
+      "briefing": true,
+      "promptRecall": true,
+      "toolContext": false,
+      "autoCapture": false,
+      "captureQueue": true,
+      "maxInjectedChars": 4000,
+      "maxToolContextPerSession": 5
+    }
+  }
+}
+```
+
+Environment variables override file config:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MEMENTO_PI_ENABLED` | `true` | Enable/disable the extension lifecycle work. |
+| `MEMENTO_PI_BRIEFING` | `true` | First-turn project briefing. |
+| `MEMENTO_PI_PROMPT_RECALL` | `true` | Prompt recall before each agent turn. |
+| `MEMENTO_PI_TOOL_CONTEXT` | `false` | Read-tool context injection. |
+| `MEMENTO_PI_MAX_INJECTED_CHARS` | `4000` | Per-injection character cap. |
+| `MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION` | `5` | Tool-context injection cap per pi session. |
+| `MEMENTO_PI_AUTO_CAPTURE` | `false` | Queue automatic capture candidates on `agent_end`, compaction, and shutdown lifecycle events. |
+| `MEMENTO_PI_CAPTURE_QUEUE` | `true` | Queue automatic capture candidates instead of writing notes directly. |
+
+When automatic capture is enabled, pi lifecycle events only create reviewable queue entries. They do not write durable notes until `/memento-flush-queue` or `memento_flush_queue` is used. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
+
+Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
+
+```bash
+pi -e ./extensions/memento.ts
+```
+
+Then verify `/memento-status`, `/memento-queue`, `/reload`, `/new`, `/resume`, `/fork`, `/compact`, and quit. The bridge uses short-lived `python3 -m memento.pi_bridge` calls rather than a persistent child process, so shutdown cleanup should leave no memento-owned child process behind.
 
 ### Remote vault (access from any device)
 
@@ -102,7 +199,7 @@ The MCP server exposes 5 tools over stdio (local) or HTTP (remote). Any MCP-comp
 | `memento_store` | Write a single knowledge note with frontmatter and project indexing |
 | `memento_capture` | End-of-session triage: parse transcript or accept a summary, write fleeting + atomic note |
 | `memento_get` | Read a specific note by name or path |
-| `memento_status` | Vault health: note count, project count, config summary |
+| `memento_status` | Vault status: note count, project count, config summary |
 | `memento_reindex` | Rebuild the search index from all markdown files (after bulk adds, git pull, Obsidian sync) |
 
 Run manually:
@@ -450,7 +547,13 @@ Tenet's deferred briefing search uses vector search, which requires loading an e
 
 ```bash
 # Added to .zshrc/.bashrc by the installer (optional)
-command -v qmd &>/dev/null && qmd vsearch "warmup" -c memento -n 1 &>/dev/null &
+[ -x /path/to/memento-vault/bin/memento-vault ] && /path/to/memento-vault/bin/memento-vault warmup >/dev/null 2>&1
+```
+
+You can also run it manually:
+
+```bash
+memento-vault warmup
 ```
 
 ## Obsidian (optional)

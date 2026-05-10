@@ -1,5 +1,6 @@
 """Tests for note writing and store helpers."""
 
+import json
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -7,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from memento.store import (
     acquire_vault_write_lock,
     find_dedup_candidates,
+    log_triage_health,
     release_vault_write_lock,
     update_project_index,
     write_note,
@@ -142,6 +144,41 @@ class TestWriteNote:
         assert path.exists()
         assert "Note must persist" in path.read_text()
         mock_backend.index_note.assert_called_once()
+
+    def test_write_note_appends_related_when_body_lacks_one(self, tmp_vault):
+        """Bodies without a ``## Related`` section get the canonical placeholder."""
+        path = write_note(
+            tmp_vault,
+            title="No related in body",
+            body="Just a plain body.",
+            note_type="discovery",
+            tags=["test"],
+        )
+
+        text = path.read_text()
+        assert text.count("## Related") == 1
+        assert text.rstrip().endswith("## Related")
+
+    def test_write_note_skips_related_when_body_has_one(self, tmp_vault):
+        """Regression: bodies with their own ``## Related`` section must not get a duplicate."""
+        body = (
+            "Body content with cross-references.\n\n"
+            "## Related\n"
+            "- [[note-a]]\n"
+            "- [[note-b]]\n"
+        )
+        path = write_note(
+            tmp_vault,
+            title="Related in body",
+            body=body,
+            note_type="pattern",
+            tags=["test"],
+        )
+
+        text = path.read_text()
+        assert text.count("## Related") == 1
+        assert "[[note-a]]" in text
+        assert "[[note-b]]" in text
 
     def test_write_note_does_not_overwrite_existing(self, tmp_vault):
         """Regression: slug collision must not silently replace an existing note."""
@@ -442,3 +479,34 @@ class TestVaultWriteLock:
         release_vault_write_lock(lock_path=str(lock_path))
         assert acquire_vault_write_lock(lock_path=str(lock_path), timeout=0.1, poll_interval=0.01) is True
         release_vault_write_lock(lock_path=str(lock_path))
+
+
+class TestTriageHealthLog:
+    def test_log_triage_health_ignores_retrieval_log_config(self, tmp_path):
+        health_log = tmp_path / "triage-health.jsonl"
+
+        with (
+            patch("memento.store.TRIAGE_HEALTH_LOG_PATH", str(health_log)),
+            patch("memento.store.get_config", return_value={"retrieval_log": False}),
+        ):
+            log_triage_health("structured_notes_llm_failed", session_id="sess-123", project="api-service", error="boom")
+
+        payload = json.loads(health_log.read_text().strip())
+        assert payload["hook"] == "triage"
+        assert payload["action"] == "structured_notes_llm_failed"
+        assert payload["session_id"] == "sess-123"
+        assert payload["project"] == "api-service"
+        assert payload["error"] == "boom"
+
+    def test_log_triage_health_sanitizes_and_truncates_errors(self, tmp_path):
+        health_log = tmp_path / "triage-health.jsonl"
+        secret = "sk-" + "a" * 30
+        long_error = f"failed with {secret} " + ("x" * 600)
+
+        with patch("memento.store.TRIAGE_HEALTH_LOG_PATH", str(health_log)):
+            log_triage_health("structured_notes_llm_failed", session_id="sess-123", error=long_error)
+
+        payload = json.loads(health_log.read_text().strip())
+        assert secret not in payload["error"]
+        assert "[REDACTED_API_KEY]" in payload["error"]
+        assert len(payload["error"]) <= 503

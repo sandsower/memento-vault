@@ -73,6 +73,13 @@ def _call_tool(tool_name: str, arguments: dict, timeout: int = 30) -> dict:
         return {"error": body["error"].get("message", str(body["error"]))}
 
     result = body.get("result", {})
+    # Newer FastMCP streamable-http responses include typed structuredContent.
+    # Prefer it so list-returning tools do not get collapsed into a single dict
+    # when content is rendered as one text block per item.
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict) and "result" in structured:
+        return structured["result"]
+
     # MCP tools/call returns {content: [{type: "text", text: "..."}]}
     # FastMCP serializes list results as multiple text content blocks,
     # so we collect all parseable items and return a list if there are many.
@@ -110,20 +117,31 @@ def list_notes(include_hash: bool = True) -> list[dict] | None:
     return None
 
 
-def search(query: str, limit: int = 5, semantic: bool = False, min_score: float = 0.0, cwd: str = "") -> list[dict]:
-    """Search the remote vault."""
+def search_envelope(query: str, limit: int = 5, semantic: bool = False, min_score: float = 0.0, cwd: str = "") -> dict:
+    """Search the remote vault, preserving structured miss metadata when present."""
     result = _call_tool(
         "memento_search",
         {"query": query, "limit": limit, "semantic": semantic, "min_score": min_score, "cwd": cwd},
     )
     if isinstance(result, list):
-        return result
-    if isinstance(result, dict) and "error" in result:
-        import sys
+        return {"results": result}
+    if isinstance(result, dict):
+        if "error" in result:
+            import sys
 
-        print(f"[memento] remote search error: {result['error']}", file=sys.stderr)
-        return []
-    return []
+            print(f"[memento] remote search error: {result['error']}", file=sys.stderr)
+            return {"results": [], "error": result["error"]}
+        envelope_results = result.get("results")
+        if isinstance(envelope_results, list):
+            return result
+    return {"results": []}
+
+
+def search(query: str, limit: int = 5, semantic: bool = False, min_score: float = 0.0, cwd: str = "") -> list[dict]:
+    """Search the remote vault, returning only results for legacy callers."""
+    envelope = search_envelope(query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd)
+    results = envelope.get("results")
+    return results if isinstance(results, list) else []
 
 
 def get(path: str) -> dict | None:

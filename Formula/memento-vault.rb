@@ -1,18 +1,19 @@
 class MementoVault < Formula
-  desc "Persistent memory layer for AI coding agents — hooks, skills, and a local knowledge vault"
+  desc "Persistent memory layer for AI coding agents"
   homepage "https://github.com/sandsower/memento-vault"
-  url "https://github.com/sandsower/memento-vault/archive/refs/tags/v3.0.0.tar.gz"
+  url "https://github.com/sandsower/memento-vault/archive/refs/tags/v4.0.1.tar.gz"
   # sha256 "UPDATE_WITH_ACTUAL_SHA256_AFTER_RELEASE"
   license "MIT"
   head "https://github.com/sandsower/memento-vault.git", branch: "main"
 
-  depends_on "python@3"
   depends_on "git"
+  depends_on "python@3"
 
   def install
     # Install the full project tree into libexec
+    ignored_hidden_files = %w[. .. .git]
     libexec.install Dir["*"]
-    libexec.install Dir[".*"].reject { |f| %w[. .. .git].include?(File.basename(f)) }
+    libexec.install Dir[".*"].reject { |f| ignored_hidden_files.include?(File.basename(f)) }
 
     # Link the CLI wrapper
     bin.install_symlink libexec/"bin/memento-vault"
@@ -34,5 +35,6 @@ class MementoVault < Formula
 
   test do
     assert_match version.to_s, shell_output("#{bin}/memento-vault version").strip
+    assert_match "Usage: memento-vault warmup", shell_output("#{bin}/memento-vault warmup --help")
   end
 end

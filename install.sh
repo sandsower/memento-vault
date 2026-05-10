@@ -11,7 +11,7 @@
 # Or with a custom vault path:
 #   MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 #
-# Install experimental modules (Tenet retrieval + Inception consolidation):
+# Install experimental modules (Tenet retrieval + Inception consolidation + orra-init skill):
 #   ./install.sh --experimental
 #
 # Install MCP server config (Claude Code, Codex, and generic MCP clients):
@@ -20,8 +20,11 @@
 # Connect to a remote vault (Docker or hosted):
 #   ./install.sh --remote https://vault.example.com:8745
 #
-# Force overwrite all files (ignore local changes):
-#   ./install.sh --force
+# Safely rerun same-version install:
+#   ./install.sh --reinstall
+#
+# Dangerously overwrite all files (ignore local changes):
+#   MEMENTO_FORCE=1 ./install.sh --force
 
 set -euo pipefail
 
@@ -32,6 +35,7 @@ CONFIG_DIR="$HOME/.config/memento-vault"
 MANIFEST="$CONFIG_DIR/manifest.json"
 NEW_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 FORCE=false
+REINSTALL=false
 EXPERIMENTAL=false
 MCP_INSTALL=false
 REMOTE_URL=""
@@ -47,10 +51,11 @@ Memento Vault installer v${NEW_VERSION}
 Usage: ./install.sh [OPTIONS]
 
 Options:
-  --experimental  Install Tenet retrieval + Inception consolidation modules
+  --experimental  Install Tenet retrieval, Inception consolidation, and orra-init skill
   --mcp           Install MCP server config (Claude Code, Codex, generic clients)
   --remote [URL]  Connect to a remote vault (implies --mcp)
-  --force         Overwrite all files, ignoring local changes
+  --reinstall     Safely rerun same-version install using local-edit protection
+  --force         DANGEROUS: overwrite memento-managed files, discarding local edits
   --help          Show this help message
 
 Environment:
@@ -72,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --help|-h) usage ;;
         --force) FORCE=true; shift ;;
+        --reinstall) REINSTALL=true; shift ;;
         --experimental) EXPERIMENTAL=true; CLI_EXPERIMENTAL=true; shift ;;
         --mcp) MCP_INSTALL=true; CLI_MCP=true; shift ;;
         --remote)
@@ -155,12 +161,29 @@ if [ "$REMOTE_MODE" = true ]; then
     MCP_INSTALL=true
 fi
 
+if [ "$FORCE" = true ]; then
+    warn "--force overwrites local edits to memento-managed files. Prefer --reinstall for a safe refresh."
+    if [ "${MEMENTO_FORCE:-}" != "1" ]; then
+        if [ -t 0 ]; then
+            read -rp "Continue with destructive force install? [y/N] " force_confirm
+            if [[ ! "$force_confirm" =~ ^[Yy] ]]; then
+                exit 0
+            fi
+        else
+            error "Refusing non-interactive --force without MEMENTO_FORCE=1. Use --reinstall for a safe refresh."
+            exit 1
+        fi
+    fi
+fi
+
 if [ -n "$INSTALLED_VERSION" ]; then
     if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ] && [ "$FORCE" != true ]; then
         info "Memento Vault v${NEW_VERSION} is already installed."
-        read -rp "Reinstall anyway? [y/N] " reinstall
-        if [[ ! "$reinstall" =~ ^[Yy] ]]; then
-            exit 0
+        if [ "$REINSTALL" != true ]; then
+            read -rp "Reinstall safely using local-edit protection? [y/N] " reinstall
+            if [[ ! "$reinstall" =~ ^[Yy] ]]; then
+                exit 0
+            fi
         fi
     else
         info "Upgrading Memento Vault: v${INSTALLED_VERSION} -> v${NEW_VERSION}"
@@ -250,7 +273,7 @@ EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-too
 
 if [ "$EXPERIMENTAL" = true ]; then
     INSTALL_HOOKS="$STABLE_HOOKS $EXPERIMENTAL_HOOKS"
-    info "Experimental mode: installing Tenet + Inception"
+    info "Experimental mode: installing Tenet + Inception + orra-init"
 else
     INSTALL_HOOKS="$STABLE_HOOKS"
 fi
@@ -280,7 +303,7 @@ SKILLS_SKIPPED=0
 
 INSTALL_SKILLS="memento memento-defrag start-fresh continue-work"
 if [ "$EXPERIMENTAL" = true ]; then
-    INSTALL_SKILLS="$INSTALL_SKILLS inception"
+    INSTALL_SKILLS="$INSTALL_SKILLS inception orra-init"
 fi
 
 for skill in $INSTALL_SKILLS; do
@@ -289,6 +312,16 @@ for skill in $INSTALL_SKILLS; do
         ((SKILLS_UPDATED++)) || true
     else
         ((SKILLS_SKIPPED++)) || true
+    fi
+    # Multi-file skills may ship a templates/ directory alongside SKILL.md.
+    # Copy each template file with safe_copy so local edits are preserved.
+    if [ -d "$SCRIPT_DIR/skills/$skill/templates" ]; then
+        mkdir -p "$CLAUDE_DIR/skills/$skill/templates"
+        for tpl in "$SCRIPT_DIR/skills/$skill/templates"/*; do
+            [ -f "$tpl" ] || continue
+            tpl_name="$(basename "$tpl")"
+            safe_copy "$tpl" "$CLAUDE_DIR/skills/$skill/templates/$tpl_name" "skills/$skill/templates/$tpl_name" >/dev/null 2>&1 || true
+        done
     fi
 done
 
@@ -345,6 +378,11 @@ if safe_copy "$SCRIPT_DIR/agents/concierge.md" "$CLAUDE_DIR/agents/concierge.md"
     info "Concierge agent installed to $CLAUDE_DIR/agents/"
 fi
 
+# --- Install CLI ---
+
+step "Installing memento-vault CLI..."
+setup_cli
+
 # --- Install memento package ---
 
 step "Installing memento package..."
@@ -355,7 +393,7 @@ mkdir -p "$MEMENTO_PKG_DIR/adapters"
 PKG_COPIED=0
 PKG_SKIPPED=0
 
-for mod in __init__.py config.py utils.py search.py search_backend.py graph.py store.py llm.py types.py mcp_server.py __main__.py auth.py remote_client.py embedded_search.py embedding.py indexer.py sync_ledger.py; do
+for mod in __init__.py config.py utils.py search.py search_backend.py graph.py store.py llm.py types.py lifecycle.py mcp_server.py pi_bridge.py __main__.py auth.py remote_client.py embedded_search.py embedding.py indexer.py sync_ledger.py; do
     if [ -f "$SCRIPT_DIR/memento/$mod" ]; then
         if safe_copy "$SCRIPT_DIR/memento/$mod" "$MEMENTO_PKG_DIR/$mod" "memento/$mod"; then
             ((PKG_COPIED++)) || true
@@ -375,7 +413,7 @@ for mod in __init__.py claude.py; do
     fi
 done
 
-for critical in __init__.py config.py utils.py store.py search.py adapters/__init__.py adapters/claude.py; do
+for critical in __init__.py config.py utils.py store.py search.py lifecycle.py pi_bridge.py adapters/__init__.py adapters/claude.py; do
     if [ ! -f "$MEMENTO_PKG_DIR/$critical" ]; then
         error "Critical file missing: $MEMENTO_PKG_DIR/$critical"
         error "Hooks will not work. Rerun with --force or fix permissions."
@@ -388,6 +426,11 @@ if [ "$PKG_SKIPPED" -gt 0 ]; then
 else
     info "Package: $PKG_COPIED files installed to $MEMENTO_PKG_DIR"
 fi
+
+# Repair a known stale installed headless Claude config shape even when local
+# edits caused safe_copy to skip the package file. Claude Code 2.1.123 rejects
+# `--mcp-config {}`; the accepted empty config is `{"mcpServers": {}}`.
+repair_stale_headless_mcp_config "$MEMENTO_PKG_DIR/llm.py" "memento/llm.py" || true
 
 # --- Embedded search backend (optional) ---
 

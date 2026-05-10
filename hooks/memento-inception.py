@@ -192,15 +192,27 @@ def collect_eligible_notes(config, state, full=False):
         if not full and record.stem in processed:
             continue
 
-        # For incremental runs, only include notes newer than last run
-        if not full and last_run and record.date:
+        # For incremental runs, only include notes newer than last run.
+        # Falls back to file mtime when frontmatter date is missing or
+        # unparseable — otherwise an unconsolidated note with a bad date
+        # would re-enter every incremental run forever.
+        if not full and last_run:
             try:
-                note_dt = datetime.fromisoformat(record.date)
+                if record.date:
+                    note_dt = datetime.fromisoformat(record.date)
+                else:
+                    note_dt = datetime.fromtimestamp(md_file.stat().st_mtime)
                 last_dt = datetime.fromisoformat(last_run)
                 if note_dt <= last_dt:
                     continue
-            except ValueError:
-                pass  # include notes with unparseable dates
+            except (ValueError, OSError):
+                try:
+                    note_dt = datetime.fromtimestamp(md_file.stat().st_mtime)
+                    last_dt = datetime.fromisoformat(last_run)
+                    if note_dt <= last_dt:
+                        continue
+                except (ValueError, OSError):
+                    pass  # include notes where both sources failed
 
         notes.append(record)
 
@@ -813,7 +825,7 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         if len(all_notes) < config.get("inception_min_cluster_size", 3):
             if args.verbose:
                 print("Not enough notes to cluster", file=sys.stderr)
-            _update_state(state, _state_path, new_notes, 0, 0, args.dry_run)
+            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run)
             return 0
 
         # Build notes dict for lookups (all notes)
@@ -851,7 +863,7 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
             print(f"Found {len(clusters)} total clusters", file=sys.stderr)
 
         if not clusters:
-            _update_state(state, _state_path, new_notes, 0, 0, args.dry_run)
+            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run)
             return 0
 
         # Filter: only clusters containing at least 1 new note OR
@@ -872,7 +884,7 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
             print(f"Clusters with new notes or refresh candidates: {len(relevant_clusters)}", file=sys.stderr)
 
         if not relevant_clusters:
-            _update_state(state, _state_path, new_notes, 0, 0, args.dry_run)
+            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run)
             return 0
 
         # Score, rank, and cap at max_clusters
@@ -889,6 +901,9 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         notes_refreshed = 0
         clusters_processed = 0
         written_pattern_paths = []
+        # Stems that are genuinely consolidated this run — only these are
+        # added to processed_notes. See _mark_consolidated.
+        consolidated_stems: set[str] = set()
 
         # --- Phase 1: collect clusters that need LLM synthesis ---
         synthesis_queue = []  # (cid, stems, score, prompt, action, merge_target)
@@ -901,6 +916,9 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
             if action == "skip":
                 if args.verbose:
                     print(f"  Cluster {cid}: skipped (already consolidated)", file=sys.stderr)
+                # Ledger confirmed these stems are already in another
+                # pattern's synthesized_from — genuinely consolidated.
+                consolidated_stems.update(stems)
                 continue
 
             if args.dry_run:
@@ -964,12 +982,32 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
                     if args.verbose:
                         print(f"  Wrote: {note_path.name}", file=sys.stderr)
                 all_existing_stems.append(note_path.stem)
+                consolidated_stems.update(stems)
 
                 # Backlink
                 backlink_sources(note_path.stem, stems, vault_path)
 
                 # Track for pre-reasoning
                 written_pattern_paths.append(note_path)
+            elif action != "merge":
+                # write_pattern_note returns None when the target slug
+                # already exists (line ~585). If that existing file is
+                # itself an inception pattern, our cluster was subsumed —
+                # mark stems consolidated to avoid a reprocess loop.
+                new_slug = slugify(synthesis["title"])
+                existing_path = vault_path / "notes" / f"{new_slug}.md"
+                if existing_path.exists():
+                    try:
+                        existing_rec = parse_note(existing_path)
+                        if existing_rec and existing_rec.source == "inception":
+                            if args.verbose:
+                                print(
+                                    f"  Cluster {cid}: subsumed by existing pattern {new_slug}",
+                                    file=sys.stderr,
+                                )
+                            consolidated_stems.update(stems)
+                    except Exception:
+                        pass  # best-effort — leave stems eligible
 
         # Sleep-time pre-reasoning
         if not args.dry_run and written_pattern_paths:
@@ -986,8 +1024,11 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
                 except Exception:
                     pass  # Non-fatal
 
-        # Update state (only mark new notes as processed)
-        _update_state(state, _state_path, new_notes, clusters_processed, notes_written, args.dry_run)
+        # Always record run metadata; only mark notes that were actually
+        # consolidated (ledger-skip, written, or subsumed by existing pattern).
+        _record_run(state, _state_path, len(new_notes), clusters_processed, notes_written, args.dry_run)
+        if not args.dry_run and consolidated_stems:
+            _mark_consolidated(state, _state_path, consolidated_stems)
 
         # Commit and reindex
         total_changes = notes_written + notes_refreshed
@@ -1023,11 +1064,15 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         release_inception_lock(lock_path=_lock_path)
 
 
-def _update_state(state, state_path, notes, clusters_processed, notes_written, dry_run):
-    """Update and save the Inception state file."""
+def _record_run(state, state_path, note_count, clusters_processed, notes_written, dry_run):
+    """Update run metadata. Always called on exit, regardless of outcome.
+
+    Does NOT touch processed_notes — that is the job of _mark_consolidated,
+    which is only invoked when pattern notes were actually written.
+    """
     now = datetime.now().isoformat(timespec="seconds")
     state["last_run_iso"] = now
-    state["last_run_note_count"] = len(notes)
+    state["last_run_note_count"] = note_count
     state.setdefault("runs", []).append(
         {
             "iso": now,
@@ -1036,7 +1081,23 @@ def _update_state(state, state_path, notes, clusters_processed, notes_written, d
             "dry_run": dry_run,
         }
     )
-    state["processed_notes"] = list(set(state.get("processed_notes", []) + [n.stem for n in notes]))
+    save_inception_state(state, state_path=state_path)
+
+
+def _mark_consolidated(state, state_path, stems):
+    """Extend processed_notes with stems that were actually consolidated.
+
+    A stem is consolidated when it appears in a pattern note's
+    synthesized_from list — either because this run wrote/refreshed that
+    pattern, or because the ledger confirmed the cluster was already fully
+    represented (check_ledger_dedup → "skip").
+
+    No-op when stems is empty, so callers can pass an unfiltered set.
+    """
+    if not stems:
+        return
+    merged = set(state.get("processed_notes", [])) | set(stems)
+    state["processed_notes"] = sorted(merged)
     save_inception_state(state, state_path=state_path)
 
 

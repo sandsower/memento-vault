@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from memento.config import RUNTIME_DIR, get_config, get_vault
 from memento.search_backend import _clean_snippet, get_backend  # noqa: F401 (_clean_snippet re-exported for compat)
@@ -16,6 +17,83 @@ from memento.graph import (
     ppr_expand,
     read_note_metadata,
 )
+
+
+MISS_RECOVERY_HINTS = {
+    "no_exact_match": ["Try a broader or narrower query."],
+    "backend_unavailable": ["Check memento_status for search backend health.", "Run memento_reindex if the index is stale."],
+    "threshold_too_high": ["Lower min_score."],
+    "project_filter_removed_all": ["Remove or change the cwd project filter."],
+    "query_too_broad": ["Try a narrower query with concrete terms."],
+    "literal_mode_auto_selected": [
+        "Try a more descriptive natural-language query.",
+        "Call memento_get if the note path is known.",
+    ],
+    "semantic_mode_not_available": ["Try semantic=false.", "Run memento_reindex if index state looks stale."],
+    "empty_vault": ["Capture or sync notes first.", "Run memento_status to verify the vault path."],
+    "index_stale_or_missing": ["Run memento_reindex if index state looks stale."],
+}
+
+_REASON_ALIASES = {
+    "qmd-unavailable": "backend_unavailable",
+    "vault-unavailable": "empty_vault",
+    "project-mismatch-filtered-empty": "project_filter_removed_all",
+    "filtered-empty": "no_exact_match",
+    "no-results": "no_exact_match",
+    "broad-project-query": "query_too_broad",
+    "skipped-prompt": "query_too_broad",
+    "low-signal-prompt": "query_too_broad",
+}
+
+
+def build_search_miss(reason: str, details: Optional[dict] = None, recovery_hints: Optional[list[str]] = None) -> dict:
+    """Build structured metadata for a retrieval miss."""
+    hints = (
+        list(recovery_hints)
+        if recovery_hints is not None
+        else list(MISS_RECOVERY_HINTS.get(reason, MISS_RECOVERY_HINTS["no_exact_match"]))
+    )
+    miss = {
+        "reason": reason,
+        "recovery_hints": hints,
+    }
+    if details:
+        miss["details"] = details
+    return miss
+
+
+def miss_envelope(reason: str, details: Optional[dict] = None, recovery_hints: Optional[list[str]] = None) -> dict:
+    """Return the structured empty search envelope used by agent-facing surfaces."""
+    return {"results": [], "miss": build_search_miss(reason, details=details, recovery_hints=recovery_hints)}
+
+
+def is_literal_like_query(query: str) -> bool:
+    """Return True for conservative path/identifier/symbol-looking queries."""
+    text = (query or "").strip()
+    if not text:
+        return False
+    if (text.startswith("'") and text.endswith("'")) or (text.startswith('"') and text.endswith('"')):
+        return True
+    if re.search(r"[\w.-]+/[\w./-]+", text):
+        return True
+    if re.search(r"\b[\w.-]+\.(py|ts|tsx|js|jsx|md|json|ya?ml|toml|sh|rb|go|rs)\b", text, re.I):
+        return True
+    tokens = text.split()
+    if len(tokens) <= 3 and any(
+        "_" in token or "::" in token or re.search(r"[a-z][A-Z]", token) or re.search(r"\d", token)
+        for token in tokens
+    ):
+        return True
+    return False
+
+
+def normalize_miss_reason(reason: Optional[str], query: str = "") -> str:
+    """Map legacy retrieval skip reasons onto agent-facing miss reason codes."""
+    normalized = _REASON_ALIASES.get(reason or "", reason or "no_exact_match")
+    if normalized == "no_exact_match" and is_literal_like_query(query):
+        return "literal_mode_auto_selected"
+    return normalized
+
 
 # --- Backend-delegating wrappers (backward compat) ---
 

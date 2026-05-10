@@ -15,6 +15,12 @@ RETRIEVAL_LOG_PATH = os.path.join(
     "retrieval.jsonl",
 )
 
+TRIAGE_HEALTH_LOG_PATH = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
+    "memento-vault",
+    "triage-health.jsonl",
+)
+
 INCEPTION_STATE_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
     "memento-vault",
@@ -32,6 +38,20 @@ def _should_log():
     return get_config().get("retrieval_log", False)
 
 
+def _append_jsonl(path, entry, warn_attr):
+    try:
+        log_dir = os.path.dirname(path)
+        os.makedirs(log_dir, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        if not getattr(_append_jsonl, warn_attr, False):
+            import sys as _sys
+
+            print(f"[memento] warning: cannot write log {path}: {exc}", file=_sys.stderr)
+            setattr(_append_jsonl, warn_attr, True)
+
+
 def log_retrieval(hook, action, **kwargs):
     """Append a structured log entry to the retrieval log."""
     if not _should_log():
@@ -43,18 +63,38 @@ def log_retrieval(hook, action, **kwargs):
         "action": action,
     }
     entry.update(kwargs)
+    _append_jsonl(RETRIEVAL_LOG_PATH, entry, "_retrieval_warned")
 
+
+def _sanitize_health_error(error):
     try:
-        log_dir = os.path.dirname(RETRIEVAL_LOG_PATH)
-        os.makedirs(log_dir, exist_ok=True)
-        with open(RETRIEVAL_LOG_PATH, "a") as f:
-            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
-    except OSError as exc:
-        if not getattr(log_retrieval, "_warned", False):
-            import sys as _sys
+        from memento.utils import sanitize_secrets
 
-            print(f"[memento] warning: cannot write retrieval log: {exc}", file=_sys.stderr)
-            log_retrieval._warned = True
+        sanitized = sanitize_secrets(str(error))
+    except Exception:
+        sanitized = str(error)
+    if len(sanitized) > 500:
+        return sanitized[:500] + "..."
+    return sanitized
+
+
+def log_triage_health(action, **kwargs):
+    """Append minimal always-on SessionEnd extraction health telemetry.
+
+    This is intentionally separate from retrieval diagnostics. It records only
+    operational metadata needed to detect silent triage failures, never
+    transcript text or generated note bodies.
+    """
+    if "error" in kwargs:
+        kwargs = dict(kwargs)
+        kwargs["error"] = _sanitize_health_error(kwargs["error"])
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "hook": "triage",
+        "action": action,
+    }
+    entry.update(kwargs)
+    _append_jsonl(TRIAGE_HEALTH_LOG_PATH, entry, "_triage_health_warned")
 
 
 def load_inception_state(state_path=None):
@@ -177,6 +217,11 @@ def _safe_yaml_scalar(value):
 
 def _tokenize_for_match(text):
     return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _body_has_related_heading(body):
+    """Return True when the body already contains a top-level ``## Related`` heading."""
+    return any(line.strip() == "## Related" for line in body.splitlines())
 
 
 def _find_heading_match(content, heading):
@@ -313,7 +358,15 @@ def write_note(
     lines.append(f"date: {now}")
     if session_id:
         lines.append(f"session_id: {_safe_yaml_scalar(session_id)}")
-    lines.extend(["---", "", body.strip(), "", "## Related", ""])
+
+    # Append the canonical "## Related" placeholder only if the body doesn't
+    # already contain one — otherwise callers that include their own ## Related
+    # section produce duplicate (often empty) headers.
+    body_stripped = body.strip()
+    if _body_has_related_heading(body_stripped):
+        lines.extend(["---", "", body_stripped, ""])
+    else:
+        lines.extend(["---", "", body_stripped, "", "## Related", ""])
 
     tmp.write_text("\n".join(lines))
     os.replace(tmp, target)
@@ -331,6 +384,151 @@ def write_note(
         pass  # Indexing failure must not block note storage
 
     return target
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_REPO_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_DAILY_VERSION_RE = re.compile(r"^daily-\d{4}-\d{2}-\d{2}-[a-z0-9_-]+-v(\d+)\.md$")
+
+_MANAGED_DAILY_KEYS = {
+    "title",
+    "type",
+    "tags",
+    "source",
+    "certainty",
+    "date",
+    "repo_slug",
+    "supersedes",
+}
+
+
+def _next_daily_version(notes_dir, base_slug):
+    """Return the next version number for a daily snapshot supersede chain."""
+    highest = 1
+    prefix = f"{base_slug}-v"
+    for existing in notes_dir.glob(f"{base_slug}-v*.md"):
+        match = _DAILY_VERSION_RE.match(existing.name)
+        if not match:
+            continue
+        if not existing.name.startswith(prefix):
+            continue
+        n = int(match.group(1))
+        if n > highest:
+            highest = n
+    return highest + 1
+
+
+def write_daily_snapshot(
+    vault_path,
+    date,
+    repo_slug,
+    content,
+    frontmatter_extra=None,
+    supersede=False,
+):
+    """Write a structured per-repo daily snapshot into notes/.
+
+    Returns a dict with keys:
+        path: str, relative to vault_path
+        supersedes: str | None (title of the superseded note)
+        version: int (1 for first write, n for v<n>)
+
+    Or an error dict with 'error' and 'reason' keys.
+    """
+    if not isinstance(date, str) or not _DATE_RE.match(date):
+        return {"error": "date must be YYYY-MM-DD", "reason": "invalid_date"}
+    if not isinstance(repo_slug, str) or not _REPO_SLUG_RE.match(repo_slug):
+        return {
+            "error": "repo_slug must match [a-z0-9][a-z0-9_-]*",
+            "reason": "invalid_repo_slug",
+        }
+    if not content or not content.strip():
+        return {"error": "content is required", "reason": "empty_content"}
+
+    notes_dir = Path(vault_path) / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+
+    base_slug = f"daily-{date}-{repo_slug}"
+    base_file = notes_dir / f"{base_slug}.md"
+
+    supersedes_title = None
+    version = 1
+    if base_file.exists():
+        if not supersede:
+            return {
+                "error": f"daily snapshot already exists for {date} {repo_slug}",
+                "reason": "already_exists",
+                "existing_path": str(base_file.relative_to(Path(vault_path))),
+            }
+        version = _next_daily_version(notes_dir, base_slug)
+        target = notes_dir / f"{base_slug}-v{version}.md"
+        supersedes_title = base_slug
+    else:
+        target = base_file
+
+    # Sanitize body before writing
+    from memento.utils import sanitize_secrets
+
+    sanitized = sanitize_secrets(content)
+
+    extras = dict(frontmatter_extra or {})
+    for key in _MANAGED_DAILY_KEYS:
+        extras.pop(key, None)
+
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    safe_repo = _safe_yaml_scalar(repo_slug)
+
+    lines = [
+        "---",
+        f"title: Daily {date} {safe_repo}",
+        "type: daily",
+        f"tags: [daily, {safe_repo}]",
+        "source: orra",
+        "certainty: 2",
+        f"date: {now_ts}",
+        f"repo_slug: {safe_repo}",
+    ]
+    if supersedes_title:
+        lines.append(f'supersedes: "[[{_safe_yaml_scalar(supersedes_title)}]]"')
+
+    for key, value in extras.items():
+        if value is None:
+            continue
+        safe_key = _safe_yaml_scalar(key)
+        if not safe_key:
+            continue
+        if isinstance(value, list):
+            safe_items = [_safe_yaml_scalar(v) for v in value]
+            lines.append(f"{safe_key}: [{', '.join(safe_items)}]")
+        else:
+            lines.append(f"{safe_key}: {_safe_yaml_scalar(value)}")
+
+    body = sanitized.strip()
+    if _body_has_related_heading(body):
+        lines.extend(["---", "", body, ""])
+    else:
+        lines.extend(["---", "", body, "", "## Related", ""])
+
+    tmp = notes_dir / f".tmp-{target.name}"
+    tmp.write_text("\n".join(lines))
+    os.replace(tmp, target)
+
+    try:
+        from memento.search_backend import get_backend
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        backend = get_backend()
+        if isinstance(backend, EmbeddedSearchBackend):
+            rel_path = str(target.relative_to(Path(vault_path)))
+            backend.index_note(rel_path)
+    except Exception:
+        pass
+
+    return {
+        "path": str(target.relative_to(Path(vault_path))),
+        "supersedes": supersedes_title,
+        "version": version,
+    }
 
 
 def update_project_index(vault_path, project_slug, note_name, session_summary):

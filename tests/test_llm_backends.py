@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from memento.llm import LLMResult, llm_complete, preflight_check
@@ -30,9 +31,54 @@ class TestCliBackends:
         )
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["claude", "--print", "--model", "sonnet", "-p", "test prompt"]
+        assert cmd[0].endswith("claude")
+        assert cmd[1:11] == [
+            "--print",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            '{"mcpServers": {}}',
+            "--permission-mode",
+            "default",
+            "--disallowedTools",
+            "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch",
+        ]
+        assert cmd[-2:] == ["--model", "sonnet"]
+        assert mock_run.call_args.kwargs["input"] == "test prompt"
         assert result.ok is True
         assert result.text == "claude output"
+
+    @patch("memento.llm.subprocess.run")
+    def test_claude_backend_sandboxes_headless_spawn(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}\n", stderr="")
+
+        llm_complete("transcript", {"llm_backend": "claude"})
+
+        cmd = mock_run.call_args[0][0]
+        assert "--tools" in cmd
+        assert cmd[cmd.index("--tools") + 1] == ""
+        assert "--strict-mcp-config" in cmd
+        assert cmd[cmd.index("--mcp-config") + 1] == '{"mcpServers": {}}'
+        assert "{}" not in cmd
+        assert "--permission-mode" in cmd
+        assert cmd[cmd.index("--permission-mode") + 1] == "default"
+        denylist = cmd[cmd.index("--disallowedTools") + 1].split(",")
+        for tool in ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "Task", "Agent", "WebFetch", "WebSearch"]:
+            assert tool in denylist
+
+    @patch("memento.llm.subprocess.run")
+    def test_claude_backend_adds_actionable_invalid_mcp_hint(self, mock_run):
+        stderr = "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr=stderr)
+
+        result = llm_complete("transcript", {"llm_backend": "claude"})
+
+        assert result.ok is False
+        assert stderr in result.error
+        assert "stale headless Claude MCP config" in result.error
+        assert "./install.sh --reinstall" in result.error
+        assert '{"mcpServers": {}}' in result.error
 
     @patch("memento.llm.Path.read_text", return_value="codex output\n")
     @patch("memento.llm.Path.unlink")
@@ -297,7 +343,57 @@ class TestCliBackends:
             result = llm_complete("prompt")
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["claude", "--print", "--model", "haiku", "-p", "prompt"]
+        assert cmd[0].endswith("claude")
+        assert cmd[1:11] == [
+            "--print",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            '{"mcpServers": {}}',
+            "--permission-mode",
+            "default",
+            "--disallowedTools",
+            "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch",
+        ]
+        assert cmd[-2:] == ["--model", "haiku"]
+        assert mock_run.call_args.kwargs["input"] == "prompt"
+        assert result.ok is True
+
+    @patch("memento.llm.Path.read_text", return_value="ok\n")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_agent_model_does_not_leak_into_codex(self, mock_run, mock_unlink, mock_read):
+        """agent_model (a claude model name) must not be passed to codex as --model."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        # Global config has agent_model=sonnet (claude name). Caller selects
+        # codex via the overriding config dict without setting llm_model.
+        with patch(
+            "memento.llm.get_config",
+            return_value={"llm_backend": "claude", "agent_model": "sonnet"},
+        ):
+            result = llm_complete("prompt", {"llm_backend": "codex", "llm_model": None})
+
+        cmd = mock_run.call_args[0][0]
+        assert "--model" not in cmd
+        assert "sonnet" not in cmd
+        assert result.ok is True
+
+    @patch("memento.llm.Path.read_text", return_value="ok\n")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_explicit_llm_model_still_passes_to_codex(self, mock_run, mock_unlink, mock_read):
+        """When llm_model is set explicitly for codex, it passes through."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("memento.llm.get_config", return_value={"agent_model": "sonnet"}):
+            result = llm_complete("prompt", {"llm_backend": "codex", "llm_model": "gpt-5"})
+
+        cmd = mock_run.call_args[0][0]
+        assert "--model" in cmd
+        assert "gpt-5" in cmd
+        assert "sonnet" not in cmd
         assert result.ok is True
 
     @patch("memento.llm.subprocess.run")
@@ -309,7 +405,35 @@ class TestCliBackends:
         assert ok is True
         assert "claude" in message.lower()
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["claude", "--version"]
+        assert cmd[0].endswith("claude")
+        assert cmd[1:] == ["--version"]
+
+    @patch("memento.llm.Path.exists")
+    @patch("memento.llm.shutil.which", return_value=None)
+    @patch("memento.llm.subprocess.run")
+    def test_claude_backend_falls_back_to_user_local_binary(self, mock_run, _which, mock_exists):
+        mock_exists.side_effect = lambda: True
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n", stderr="")
+
+        with patch("memento.llm.Path.home", return_value=Path("/home/user")):
+            result = llm_complete("prompt", {"llm_backend": "claude"})
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "/home/user/.local/bin/claude"
+        assert result.ok is True
+
+    @patch("memento.llm.Path.exists")
+    @patch("memento.llm.shutil.which", return_value=None)
+    @patch("memento.llm.subprocess.run")
+    def test_preflight_check_claude_uses_user_local_binary(self, mock_run, _which, mock_exists):
+        mock_exists.side_effect = lambda: True
+        mock_run.return_value = MagicMock(returncode=0, stdout="1.0.0\n", stderr="")
+
+        with patch("memento.llm.Path.home", return_value=Path("/home/user")):
+            ok, _message = preflight_check({"llm_backend": "claude"})
+
+        assert ok is True
+        assert mock_run.call_args[0][0] == ["/home/user/.local/bin/claude", "--version"]
 
 
 class TestApiBackends:

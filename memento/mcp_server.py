@@ -14,13 +14,15 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
-from memento.search import enhance_results, has_qmd, qmd_search_with_extras, qmd_get
+from memento.lifecycle import build_briefing, build_recall, build_tool_context
+from memento.search import enhance_results, has_qmd, miss_envelope, normalize_miss_reason, qmd_search_with_extras, qmd_get
 from memento.store import (
     acquire_vault_write_lock,
     append_project_session_line,
     log_retrieval,
     release_vault_write_lock,
     update_project_index,
+    write_daily_snapshot,
     write_note,
 )
 from memento.utils import sanitize_secrets
@@ -69,11 +71,7 @@ def _note_payload_matches(
         match = re.search(r"^tags:\s*\[([^\]]*)\]", fm, re.MULTILINE)
         if not match:
             return []
-        return [
-            t.strip().strip("\"'")
-            for t in match.group(1).split(",")
-            if t.strip()
-        ]
+        return [t.strip().strip("\"'") for t in match.group(1).split(",") if t.strip()]
 
     comparisons = [
         scalar("title") == title.strip(),
@@ -111,12 +109,18 @@ def _build_server() -> FastMCP:
     kwargs = {
         "name": "memento-vault",
         "instructions": (
-            "Memento Vault is a persistent knowledge store for coding agents. "
-            "Use memento_search to find past decisions, discoveries, and session notes. "
-            "Use memento_store to write a single knowledge note. "
-            "Use memento_capture at session end to triage and capture the full session. "
-            "Use memento_get to read a specific note by path. "
-            "Use memento_status to check vault health and stats."
+            "Memento Vault is a persistent knowledge store for coding agents.\n\n"
+            "Reads: use memento_search to find past decisions, discoveries, and "
+            "session notes; memento_get to read a specific note; memento_status "
+            "for vault health; memento_list for sync/inventory.\n\n"
+            "Writes: if your agent has a `memento` skill or `SessionEnd` hook, "
+            "use it — the skill is local-first (writes to the git-backed vault, "
+            "commits, then syncs here), which avoids duplicate notes and keeps "
+            "the local vault canonical. memento_store and memento_capture are "
+            "low-level primitives intended for automated sync scripts (e.g., "
+            "memento-remote-sync.py) and agents without skill/hook support "
+            "(Windsurf, some Cursor configs). Do not call them from interactive "
+            "Claude Code or Codex sessions — use the /memento skill instead."
         ),
         "host": host,
         "port": port,
@@ -151,7 +155,7 @@ def memento_search(
     semantic: bool = False,
     min_score: float = 0.0,
     cwd: str = "",
-) -> list[dict]:
+) -> object:
     """Search the memento vault for relevant notes.
 
     Args:
@@ -162,10 +166,13 @@ def memento_search(
         cwd: Current working directory -- used to filter results by project scope.
 
     Returns:
-        List of matching notes with path, title, score, and snippet.
+        List of matching notes on hits. On misses, an envelope with
+        results=[] and structured miss metadata.
     """
     if not query or not query.strip():
-        return []
+        miss = miss_envelope("query_too_broad", details={"query": query})
+        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
+        return miss
 
     # Clamp limit to prevent DoS via unbounded scans
     try:
@@ -175,18 +182,47 @@ def memento_search(
 
     vault = get_vault()
     if not vault.exists() or not any((vault / d).exists() for d in ("notes", "fleeting", "projects")):
-        return []
+        miss = miss_envelope("empty_vault", details={"vault": str(vault)})
+        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
+        return miss
 
-    results = qmd_search_with_extras(
+    if not has_qmd():
+        miss = miss_envelope("backend_unavailable")
+        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
+        return miss
+
+    raw_results = qmd_search_with_extras(
         query,
         limit=limit + 3,
         semantic=semantic,
         timeout=10,
         min_score=min_score,
     )
+    results = raw_results
 
     if results:
         results = enhance_results(results, cwd=cwd or None)
+
+    if not results:
+        if raw_results:
+            reason = "project_filter_removed_all"
+            details = {"cwd": cwd} if cwd else None
+        elif min_score > 0:
+            low_threshold_results = qmd_search_with_extras(
+                query,
+                limit=1,
+                semantic=semantic,
+                timeout=10,
+                min_score=0.0,
+            )
+            reason = "threshold_too_high" if low_threshold_results else normalize_miss_reason("no-results", query)
+            details = {"min_score": min_score} if reason == "threshold_too_high" else None
+        else:
+            reason = normalize_miss_reason("no-results", query)
+            details = None
+        miss = miss_envelope(reason, details=details)
+        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
+        return miss
 
     output = []
     for r in results[:limit]:
@@ -215,6 +251,24 @@ def memento_search(
 
 
 @mcp.tool()
+def memento_briefing(cwd: str = "", session_id: str = "") -> dict:
+    """Return project-aware vault context for first-turn/session briefing."""
+    return build_briefing(cwd, session_id).to_dict()
+
+
+@mcp.tool()
+def memento_recall(prompt: str, cwd: str = "", session_id: str = "") -> dict:
+    """Return just-in-time vault context for a user prompt."""
+    return build_recall(prompt, cwd, session_id).to_dict()
+
+
+@mcp.tool()
+def memento_tool_context(tool_name: str, file_path: str, cwd: str = "", session_id: str = "") -> dict:
+    """Return vault context for a file-read tool result."""
+    return build_tool_context(tool_name, file_path, cwd, session_id).to_dict()
+
+
+@mcp.tool()
 def memento_store(
     title: str,
     body: str,
@@ -227,7 +281,14 @@ def memento_store(
     validity_context: str | None = None,
     supersedes: str | None = None,
 ) -> dict:
-    """Store a new note in the memento vault.
+    """Store a new note in the memento vault (low-level primitive).
+
+    Prefer the `/memento` skill in interactive Claude Code / Codex sessions —
+    the skill writes the note to the local git-backed vault first, commits, and
+    then syncs here via memento-remote-sync.py. Calling this tool directly from
+    an interactive session skips the local vault and creates orphaned remote
+    notes that the skill may later duplicate. This tool is intended for
+    automated sync scripts and agents without skill support.
 
     Args:
         title: Note title (used as the filename slug).
@@ -308,6 +369,92 @@ def memento_store(
         log_retrieval("mcp", "store", title=title, path=str(path))
         return {"path": str(path.relative_to(vault)), "title": title.strip()}
 
+    finally:
+        release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_daily_snapshot(
+    date: str,
+    repo_slug: str,
+    content: str,
+    frontmatter_extra: dict | None = None,
+    supersede: bool = False,
+) -> dict:
+    """Write a structured per-repo daily snapshot into the vault.
+
+    Writes a deterministic-filename note at notes/daily-<date>-<repo_slug>.md
+    for integrations (like orra's vault-bridge) that need path-controlled
+    writes rather than title-slugged ones. Unlike memento_store, the filename
+    is owned by the caller via date plus repo_slug, so read-back is a plain
+    memento_get by path.
+
+    Append-only: re-writing the same (date, repo_slug) pair requires
+    supersede=True, which writes daily-<date>-<repo_slug>-v<n>.md with a
+    supersedes chain back to the original. Preserves the vault append-only
+    invariant.
+
+    Args:
+        date: ISO date string YYYY-MM-DD.
+        repo_slug: Repo identifier, matches [a-z0-9][a-z0-9_-]*
+            (e.g. care_git, fundid, memento-vault).
+        content: Markdown body (no frontmatter — the tool manages it).
+        frontmatter_extra: Optional dict of extra frontmatter fields to merge.
+            Managed keys (title, type, tags, source, certainty, date,
+            repo_slug, supersedes) are stripped if present.
+        supersede: If True and a snapshot exists for (date, repo_slug), write
+            a -v<n>.md variant with a supersedes link. If False and one exists,
+            return reason: already_exists.
+
+    Returns:
+        On success: {"path": "notes/daily-...", "supersedes": "daily-..." | None,
+        "version": 1|N}.
+        On error: {"error": "...", "reason": "invalid_date" | "invalid_repo_slug"
+        | "empty_content" | "already_exists" | "write_failed"}.
+    """
+    vault = get_vault()
+    if not vault.exists():
+        return {"error": f"Vault not found at {vault}", "reason": "vault_missing"}
+
+    if not acquire_vault_write_lock():
+        return {
+            "error": "Could not acquire vault write lock (another write in progress)",
+            "reason": "lock_timeout",
+        }
+
+    try:
+        try:
+            result = write_daily_snapshot(
+                vault_path=vault,
+                date=date,
+                repo_slug=repo_slug,
+                content=content,
+                frontmatter_extra=frontmatter_extra,
+                supersede=supersede,
+            )
+        except OSError as exc:
+            log_retrieval("mcp", "daily_snapshot_write_failed", error=str(exc))
+            return {"error": f"write failed: {exc}", "reason": "write_failed"}
+
+        if "error" in result:
+            log_retrieval(
+                "mcp",
+                "daily_snapshot_rejected",
+                date=date,
+                repo_slug=repo_slug,
+                reason=result.get("reason"),
+            )
+            return result
+
+        log_retrieval(
+            "mcp",
+            "daily_snapshot",
+            date=date,
+            repo_slug=repo_slug,
+            path=result["path"],
+            version=result["version"],
+        )
+        return result
     finally:
         release_vault_write_lock()
 
@@ -416,6 +563,7 @@ def memento_get(path: str) -> dict:
 
     # Fall back to remote vault if configured
     from memento.remote_client import is_remote, get as remote_get
+
     if is_remote():
         remote_result = remote_get(path)
         if remote_result:
@@ -439,10 +587,12 @@ def memento_capture(
     agent: str = "unknown",
     fleeting_only: bool = False,
 ) -> dict:
-    """Capture a session's knowledge into the vault.
+    """Capture a session's knowledge into the vault (low-level primitive).
 
     This is the MCP equivalent of the SessionEnd hook. Use it when your agent
-    doesn't have native hook support (Cursor, Windsurf, etc.).
+    doesn't have native hook support (Cursor, Windsurf, etc.). Do not call this
+    from Claude Code or Codex — those have SessionEnd hooks and the `/memento`
+    skill that handle capture via the local-first flow.
 
     Two modes:
     - Provide session_summary with context fields for direct note creation.
@@ -477,7 +627,9 @@ def memento_capture(
         # Reject transcript_path over HTTP — remote callers must not trigger
         # server-side file reads. They should send session_summary instead.
         if _active_transport != "stdio":
-            return {"error": "transcript_path is only supported in local (stdio) mode. Send session_summary for remote capture."}
+            return {
+                "error": "transcript_path is only supported in local (stdio) mode. Send session_summary for remote capture."
+            }
 
         if not os.path.exists(transcript_path):
             return {"error": f"Transcript file not found: {transcript_path}"}
@@ -775,14 +927,16 @@ def main():
                     identity = auth_provider.authenticate(auth_header)
                     if identity is None:
                         body = b'{"error": "Unauthorized"}'
-                        await send({
-                            "type": "http.response.start",
-                            "status": 401,
-                            "headers": [
-                                [b"content-type", b"application/json"],
-                                [b"content-length", str(len(body)).encode()],
-                            ],
-                        })
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": 401,
+                                "headers": [
+                                    [b"content-type", b"application/json"],
+                                    [b"content-length", str(len(body)).encode()],
+                                ],
+                            }
+                        )
                         await send({"type": "http.response.body", "body": body})
                         return
                 await inner_app(scope, receive, send)

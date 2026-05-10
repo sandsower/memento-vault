@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
@@ -29,12 +30,39 @@ def _resolved_config(config=None):
     if config:
         merged.update(config)
     if merged.get("llm_model") is None:
-        merged["llm_model"] = merged.get("agent_model")
+        # `agent_model` predates multi-backend support and holds a claude
+        # model name (sonnet/opus/haiku). Only fall back to it for the
+        # claude backend — passing it to codex/gemini causes the provider
+        # to reject the model and silently return no output.
+        if merged.get("llm_backend") == "claude":
+            merged["llm_model"] = merged.get("agent_model")
     return merged
 
 
 def _error(message):
     return LLMResult(text="", ok=False, error=message)
+
+
+def is_invalid_mcp_config_error(message):
+    """Return True when a CLI error looks like Claude rejecting MCP config schema."""
+    normalized = (message or "").lower()
+    return "invalid mcp configuration" in normalized or (
+        "mcpservers" in normalized and "schema" in normalized
+    )
+
+
+def _with_invalid_mcp_config_hint(message):
+    if not is_invalid_mcp_config_error(message):
+        return message
+    hint = (
+        "Memento hint: Claude rejected the headless MCP config; this is often caused by "
+        "a stale headless Claude MCP config in installed hooks. Rerun ./install.sh --reinstall; "
+        "if using copied hooks, ensure installed memento/llm.py passes "
+        "{\"mcpServers\": {}} to --mcp-config, not {}."
+    )
+    if hint in message:
+        return message
+    return f"{message}\n\n{hint}"
 
 
 def _success(text):
@@ -44,14 +72,25 @@ def _success(text):
     return LLMResult(text=stripped, ok=True, error=None)
 
 
-def _run_cli(cmd, output_path=None, timeout=30):
+def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        if stdin_input is None:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
+            )
+        else:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, input=stdin_input
+            )
     except subprocess.TimeoutExpired:
         if output_path:
             output_path.unlink(missing_ok=True)
         return _error("LLM command timed out")
     except FileNotFoundError as exc:
+        if output_path:
+            output_path.unlink(missing_ok=True)
+        return _error(str(exc))
+    except OSError as exc:
         if output_path:
             output_path.unlink(missing_ok=True)
         return _error(str(exc))
@@ -71,7 +110,8 @@ def _run_cli(cmd, output_path=None, timeout=30):
                 return _success(text)
             if result.stdout.strip():
                 return _success(result.stdout)
-        return _error(result.stderr.strip() or f"LLM command failed with exit code {result.returncode}")
+        message = result.stderr.strip() or f"LLM command failed with exit code {result.returncode}"
+        return _error(_with_invalid_mcp_config_hint(message))
 
     if output_path is not None:
         try:
@@ -88,12 +128,57 @@ def _run_cli(cmd, output_path=None, timeout=30):
     return _success(result.stdout)
 
 
-def _claude_complete(prompt, model=None):
-    cmd = ["claude", "--print"]
+CLAUDE_HEADLESS_DISALLOWED_TOOLS = "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch"
+CLAUDE_EMPTY_MCP_CONFIG = '{"mcpServers": {}}'
+
+
+def _resolve_cli_binary(binary):
+    resolved = shutil.which(binary)
+    if resolved:
+        return resolved
+
+    candidates = []
+    if binary == "claude":
+        candidates.extend(
+            [
+                Path.home() / ".local" / "bin" / "claude",
+                Path("/opt/homebrew/bin/claude"),
+                Path("/usr/local/bin/claude"),
+            ]
+        )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return binary
+
+
+def _claude_complete(prompt, model=None, timeout=30):
+    # Pass the prompt over stdin instead of argv. Large transcripts (>~2MB)
+    # overflow ARG_MAX and raise OSError("Argument list too long"); stdin has
+    # no such ceiling.
+    # Headless memento prompts are text-in/JSON-out. Do not inherit a user's
+    # interactive auto-permission toolbelt: SessionEnd runs detached after the
+    # human has left, so tool side effects would be surprising and hard to stop.
+    # Disable built-in tools and inherited MCP servers, with a denylist as
+    # defense-in-depth for Claude Code versions that still expose tools in
+    # --print mode despite a tighter tool configuration.
+    cmd = [
+        _resolve_cli_binary("claude"),
+        "--print",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--mcp-config",
+        CLAUDE_EMPTY_MCP_CONFIG,
+        "--permission-mode",
+        "default",
+        "--disallowedTools",
+        CLAUDE_HEADLESS_DISALLOWED_TOOLS,
+    ]
     if model:
         cmd.extend(["--model", model])
-    cmd.extend(["-p", prompt])
-    return _run_cli(cmd)
+    return _run_cli(cmd, stdin_input=prompt, timeout=timeout)
 
 
 def _codex_complete(prompt, model=None):
@@ -180,13 +265,18 @@ def _openai_compat_complete(prompt, model, api_key, base_url):
     )
 
 
-def llm_complete(prompt, config=None):
+def llm_complete(prompt, config=None, timeout=None):
     resolved = _resolved_config(config)
     backend = resolved.get("llm_backend", "claude")
     model = resolved.get("llm_model")
+    # Scale timeout with prompt size. Baseline 60s covers short completions;
+    # add 1s per 5KB of prompt so a 500KB transcript gets ~160s, capped at 300s.
+    effective_timeout = (
+        timeout if timeout is not None else max(60, min(300, 60 + len(prompt) // 5_000))
+    )
 
     if backend == "claude":
-        return _claude_complete(prompt, model)
+        return _claude_complete(prompt, model, timeout=effective_timeout)
     if backend == "codex":
         return _codex_complete(prompt, model)
     if backend == "gemini":
@@ -206,7 +296,7 @@ def preflight_check(config=None):
     if backend in {"claude", "codex", "gemini"}:
         binary = {"claude": "claude", "codex": "codex", "gemini": "gemini"}[backend]
         try:
-            result = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
+            result = subprocess.run([_resolve_cli_binary(binary), "--version"], capture_output=True, text=True, timeout=10)
         except subprocess.TimeoutExpired:
             return False, f"{binary} preflight timed out"
         except FileNotFoundError as exc:
