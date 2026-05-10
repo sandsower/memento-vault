@@ -39,6 +39,37 @@ def test_pi_bridge_tool_context_outputs_lifecycle_json(capsys):
     assert json.loads(capsys.readouterr().out) == result.to_dict()
 
 
+def test_pi_bridge_session_context_outputs_json(capsys):
+    expected = {
+        "should_inject": True,
+        "content": "[vault] Project: repo",
+        "source": "session-context",
+        "sections": {},
+        "results": [],
+        "metadata": {"truncated": False},
+    }
+
+    with patch("memento.pi_bridge.build_session_context", return_value=expected) as mock_build:
+        code = pi_bridge.main(
+            [
+                "session-context",
+                "--cwd",
+                "/repo",
+                "--prompt",
+                "cache",
+                "--session-id",
+                "s1",
+                "--token-budget",
+                "500",
+                "--include-tool-context-preview",
+            ]
+        )
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out) == expected
+    mock_build.assert_called_once_with("/repo", "cache", "s1", 500, True, True, True, True)
+
+
 def test_pi_bridge_status_outputs_json(capsys, tmp_path):
     with (
         patch("memento.pi_bridge.get_vault", return_value=tmp_path),

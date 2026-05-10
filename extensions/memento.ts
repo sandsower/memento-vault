@@ -357,6 +357,41 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "memento_session_context",
+		label: "Memento Session Context",
+		description: "Build a one-call budgeted memento session context packet with briefing, prompt recall, vault health, queue status, and expandable note paths. Host-adapter primitive for startup/context injection; use memento_search and memento_get for explicit user recall questions.",
+		parameters: Type.Object({
+			prompt: Type.Optional(Type.String({ description: "Current user prompt for optional recall context" })),
+			session_id: Type.Optional(Type.String({ description: "Session identifier, defaults to the current pi session file" })),
+			token_budget: Type.Optional(Type.Number({ description: "Approximate token budget for returned content, default 2000" })),
+			include_status: Type.Optional(Type.Boolean({ description: "Include vault health and pi capture queue status, default true" })),
+			include_recent: Type.Optional(Type.Boolean({ description: "Include project briefing/recent context, default true" })),
+			include_recall: Type.Optional(Type.Boolean({ description: "Include prompt recall when prompt is supplied, default true" })),
+			include_tool_context_preview: Type.Optional(Type.Boolean({ description: "Include tool-context preview metadata, default false" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const sessionFile = params.session_id ?? ctx.sessionManager.getSessionFile() ?? "unknown";
+			const args = [
+				"session-context",
+				"--cwd",
+				ctx.cwd,
+				"--prompt",
+				params.prompt ?? "",
+				"--session-id",
+				sessionFile,
+				"--token-budget",
+				String(params.token_budget ?? 2000),
+			];
+			if (params.include_status === false) args.push("--no-include-status");
+			if (params.include_recent === false) args.push("--no-include-recent");
+			if (params.include_recall === false) args.push("--no-include-recall");
+			if (params.include_tool_context_preview) args.push("--include-tool-context-preview");
+			const payload = await runJson(pi, ctx, args);
+			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+		},
+	});
+
+	pi.registerTool({
 		name: "memento_search",
 		label: "Memento Search",
 		description: "Search memento vault notes before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Use memento_get after search when you need full content for a returned path; do not use search to read a known note path.",

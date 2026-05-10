@@ -1640,6 +1640,137 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> Lif
     )
 
 
+def _session_context_char_budget(token_budget: int | None) -> tuple[int, int]:
+    """Return normalized token and character budgets for session context."""
+    try:
+        normalized_tokens = int(token_budget) if token_budget is not None else 2000
+    except (TypeError, ValueError):
+        normalized_tokens = 2000
+    normalized_tokens = max(1, normalized_tokens)
+    return normalized_tokens, normalized_tokens * 4
+
+
+def _queue_capture_count(vault: Path) -> int:
+    queue_path = vault / "queue" / "pi-captures.jsonl"
+    if not queue_path.exists():
+        return 0
+    try:
+        return sum(1 for line in queue_path.read_text(errors="replace").splitlines() if line.strip())
+    except OSError:
+        return 0
+
+
+def _unique_result_paths(results: list[dict]) -> list[str]:
+    paths = []
+    seen = set()
+    for result in results:
+        path = result.get("path") if isinstance(result, dict) else None
+        if path and path not in seen:
+            paths.append(path)
+            seen.add(path)
+    return paths
+
+
+def _truncate_session_context(content: str, char_budget: int) -> tuple[str, bool]:
+    if len(content) <= char_budget:
+        return content, False
+    suffix = "\n[vault] truncated; see expandable_paths for full notes"
+    if char_budget <= len(suffix):
+        return content[:char_budget], True
+    return content[: char_budget - len(suffix)].rstrip() + suffix, True
+
+
+def build_session_context(
+    cwd: str = "",
+    prompt: str = "",
+    session_id: str = "unknown",
+    token_budget: int | None = None,
+    include_status: bool = True,
+    include_recent: bool = True,
+    include_recall: bool = True,
+    include_tool_context_preview: bool = False,
+) -> dict:
+    """Build a one-call, budgeted session initialization/context packet."""
+    token_budget, char_budget = _session_context_char_budget(token_budget)
+    sections: dict[str, object] = {}
+    results: list[dict] = []
+    content_blocks: list[str] = []
+    warnings: list[str] = []
+
+    if include_recent:
+        briefing = build_briefing(cwd, session_id)
+        sections["briefing"] = briefing.to_dict()
+        if briefing.content:
+            content_blocks.append(briefing.content)
+        results.extend(briefing.results or [])
+
+    if include_recall and prompt:
+        recall = build_recall(prompt, cwd, session_id)
+        sections["recall"] = recall.to_dict()
+        if recall.content:
+            content_blocks.append(recall.content)
+        results.extend(recall.results or [])
+
+    if include_status:
+        vault = get_vault()
+        notes_dir = vault / "notes"
+        projects_dir = vault / "projects"
+        warning = triage_health_warning()
+        if warning:
+            warnings.append(warning)
+        status = {
+            "vault_exists": vault.exists(),
+            "qmd_available": has_qmd(),
+            "note_count": len(list(notes_dir.glob("*.md"))) if notes_dir.exists() else 0,
+            "project_count": len(list(projects_dir.glob("*.md"))) if projects_dir.exists() else 0,
+        }
+        sections["status"] = status
+        if warning and all(warning not in block for block in content_blocks):
+            content_blocks.append(warning)
+        content_blocks.append(
+            f"[vault] Status: {status['note_count']} notes, qmd {'available' if status['qmd_available'] else 'unavailable'}"
+        )
+
+        queued_capture_count = _queue_capture_count(vault)
+        queue = {"queued_capture_count": queued_capture_count, "queue_path": str(vault / "queue" / "pi-captures.jsonl")}
+        sections["queue"] = queue
+        if queued_capture_count:
+            content_blocks.append(f"[vault] Capture queue: {queued_capture_count} queued pi capture(s)")
+
+    if include_tool_context_preview:
+        sections["tool_context_preview"] = {
+            "available": False,
+            "reason": "file_path_required",
+            "hint": "Call memento_tool_context with a concrete file path when handling read-tool results.",
+        }
+
+    raw_content = "\n\n".join(block for block in content_blocks if block).strip()
+    content, truncated = _truncate_session_context(raw_content, char_budget)
+    expandable_paths = _unique_result_paths(results)
+    budget_notes = []
+    if truncated:
+        budget_notes.append("content truncated to token_budget; use expandable_paths with memento_get for full notes")
+
+    return {
+        "should_inject": bool(content),
+        "content": content,
+        "source": "session-context",
+        "sections": sections,
+        "results": results,
+        "metadata": {
+            "cwd": cwd,
+            "session_id": session_id,
+            "token_budget": token_budget,
+            "char_budget": char_budget,
+            "used_chars": len(content),
+            "truncated": truncated,
+            "expandable_paths": expandable_paths,
+            "warnings": warnings,
+            "budget_notes": budget_notes,
+        },
+    }
+
+
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
 DEEP_RECALL_PENDING_PATH = os.path.join(RUNTIME_DIR, "deep-recall-pending.json")

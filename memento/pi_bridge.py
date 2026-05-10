@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from memento.config import detect_project, get_config, get_vault
-from memento.lifecycle import build_briefing, build_recall, build_tool_context, strip_injection
+from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context, strip_injection
 from memento.search import (
     enhance_results,
     filter_by_project,
@@ -359,6 +359,16 @@ def build_parser() -> argparse.ArgumentParser:
     recall.add_argument("--cwd", default="")
     recall.add_argument("--session-id", default="unknown")
 
+    session_context = sub.add_parser("session-context", help="Build budgeted session context packet")
+    session_context.add_argument("--cwd", default="")
+    session_context.add_argument("--prompt", default="")
+    session_context.add_argument("--session-id", default="unknown")
+    session_context.add_argument("--token-budget", type=int, default=2000)
+    session_context.add_argument("--include-status", action=argparse.BooleanOptionalAction, default=True)
+    session_context.add_argument("--include-recent", action=argparse.BooleanOptionalAction, default=True)
+    session_context.add_argument("--include-recall", action=argparse.BooleanOptionalAction, default=True)
+    session_context.add_argument("--include-tool-context-preview", action="store_true")
+
     tool_context = sub.add_parser("tool-context", help="Build read-tool context")
     tool_context.add_argument("--tool-name", default="")
     tool_context.add_argument("--file-path", default="")
@@ -404,6 +414,19 @@ def main(argv: list[str] | None = None) -> int:
         return _run_lifecycle("briefing", build_briefing, args.cwd, args.session_id)
     if args.command == "recall":
         return _run_lifecycle("recall", build_recall, args.prompt, args.cwd, args.session_id)
+    if args.command == "session-context":
+        return _run_json(
+            "session-context",
+            build_session_context,
+            args.cwd,
+            args.prompt,
+            args.session_id,
+            args.token_budget,
+            args.include_status,
+            args.include_recent,
+            args.include_recall,
+            args.include_tool_context_preview,
+        )
     if args.command == "tool-context":
         return _run_lifecycle(
             "tool-context",
