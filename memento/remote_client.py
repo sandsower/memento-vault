@@ -125,11 +125,15 @@ def search(query: str, limit: int = 5, semantic: bool = False, min_score: float 
     )
     if isinstance(result, list):
         return result
-    if isinstance(result, dict) and "error" in result:
-        import sys
+    if isinstance(result, dict):
+        if "error" in result:
+            import sys
 
-        print(f"[memento] remote search error: {result['error']}", file=sys.stderr)
-        return []
+            print(f"[memento] remote search error: {result['error']}", file=sys.stderr)
+            return []
+        envelope_results = result.get("results")
+        if isinstance(envelope_results, list):
+            return envelope_results
     return []
 
 

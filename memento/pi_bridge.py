@@ -17,11 +17,11 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_tool_context, strip_injection
-from memento.search import enhance_results, has_qmd, qmd_get, qmd_search_with_extras
+from memento.search import enhance_results, has_qmd, miss_envelope, normalize_miss_reason, qmd_get, qmd_search_with_extras
 from memento.remote_client import get as remote_get
 from memento.remote_client import is_remote, search as remote_search, status as remote_status
 from memento.store import write_note
@@ -138,17 +138,25 @@ def _status(cwd: str = "") -> dict[str, Any]:
     }
 
 
+def _search_miss(reason: str, details: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    payload = miss_envelope(reason, details=details)
+    payload["reason"] = reason
+    return payload
+
+
 def _search(query: str, limit: int, cwd: str = "") -> dict[str, Any]:
     if not query.strip():
-        return {"results": [], "reason": "empty-query"}
+        return _search_miss("query_too_broad", {"query": query})
     if not has_qmd():
         if is_remote():
             results = remote_search(query=query, limit=limit, cwd=cwd)
-            return {"results": results, "source": "remote"} if results else {"results": [], "reason": "no-results"}
-        return {"results": [], "reason": "qmd-unavailable"}
+            return {"results": results, "source": "remote"} if results else _search_miss("no_exact_match")
+        return _search_miss("backend_unavailable")
     limit = max(1, min(int(limit), 20))
     results = qmd_search_with_extras(query, limit=limit, semantic=False, timeout=10, min_score=0.0)
     results = enhance_results(results, cwd=cwd or None) if results else []
+    if not results:
+        return _search_miss(normalize_miss_reason("no-results", query))
     sanitized = []
     for result in results[:limit]:
         sanitized.append(

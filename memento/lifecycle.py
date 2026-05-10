@@ -17,11 +17,13 @@ from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, s
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
 from memento.llm import is_invalid_mcp_config_error, llm_complete
 from memento.search import (
+    build_search_miss,
     enhance_results,
     has_qmd,
     is_vsearch_warm,
     mark_vsearch_warm,
     multi_hop_search,
+    normalize_miss_reason,
     prf_expand_query,
     qmd_search,
     qmd_search_with_extras,
@@ -1472,10 +1474,38 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             pass
 
     if not results:
+        if min_score > 0:
+            threshold_probe = qmd_search_with_extras(
+                query,
+                limit=1,
+                semantic=False,
+                timeout=5,
+                min_score=0.0,
+            )
+            if threshold_probe:
+                bump_prompts_since()
+                log_retrieval(
+                    "recall",
+                    "threshold_too_high",
+                    query=query,
+                    min_score=min_score,
+                    latency_ms=latency_ms,
+                    pipeline=pipeline_depth,
+                )
+                log_recall_diagnostic(
+                    config,
+                    "decision",
+                    decision="skipped",
+                    reason="threshold_too_high",
+                    min_score=min_score,
+                    latency_ms=latency_ms,
+                )
+                return [], None, [], "threshold_too_high"
         bump_prompts_since()
-        log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="no-results", latency_ms=latency_ms)
-        return [], None, [], "no-results"
+        miss_reason = normalize_miss_reason("no-results", prompt)
+        log_retrieval("recall", miss_reason, query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=miss_reason, latency_ms=latency_ms)
+        return [], None, [], miss_reason
 
     results = enhance_results(results, config, cwd=cwd)
     log_recall_candidates(config, results, "enhanced", query=query)
@@ -1564,6 +1594,27 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> Lif
     """Build prompt recall content."""
     lines, top_path, results, reason = _run_recall_lines(prompt, cwd, session_id)
     if not lines:
+        retrieval_miss_reasons = {
+            "qmd-unavailable",
+            "vault-unavailable",
+            "project-mismatch-filtered-empty",
+            "filtered-empty",
+            "no-results",
+            "threshold_too_high",
+            "literal_mode_auto_selected",
+            "backend_unavailable",
+            "empty_vault",
+            "project_filter_removed_all",
+            "no_exact_match",
+        }
+        if reason in retrieval_miss_reasons:
+            normalized = normalize_miss_reason(reason, prompt)
+            details = None
+            if normalized == "threshold_too_high":
+                details = {"min_score": get_config().get("recall_min_score", 0.4)}
+            result = empty_result("recall", normalized)
+            result.metadata = {"miss": build_search_miss(normalized, details=details)}
+            return result
         return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)
     if top_path:

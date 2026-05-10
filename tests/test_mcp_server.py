@@ -68,15 +68,25 @@ class TestStripInjection:
 
 
 class TestMementoSearch:
-    def test_empty_query_returns_empty(self):
-        assert memento_search("") == []
-        assert memento_search("   ") == []
+    def test_empty_query_returns_structured_miss(self):
+        assert memento_search("") == {
+            "results": [],
+            "miss": {
+                "reason": "query_too_broad",
+                "recovery_hints": ["Try a narrower query with concrete terms."],
+                "details": {"query": ""},
+            },
+        }
+        assert memento_search("   ")["miss"]["reason"] == "query_too_broad"
 
+    @patch("memento.mcp_server.log_retrieval")
     @patch("memento.mcp_server.get_vault")
-    def test_no_vault_returns_empty(self, mock_vault, tmp_path):
+    def test_no_vault_returns_structured_miss(self, mock_vault, _log, tmp_path):
         mock_vault.return_value = tmp_path / "nonexistent"
         result = memento_search("redis cache")
-        assert result == []
+        assert result["results"] == []
+        assert result["miss"]["reason"] == "empty_vault"
+        assert "memento_status" in result["miss"]["recovery_hints"][1]
 
     @patch("memento.mcp_server.log_retrieval")
     @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
@@ -127,11 +137,73 @@ class TestMementoSearch:
     @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
     @patch("memento.mcp_server.qmd_search_with_extras", return_value=[])
     @patch("memento.mcp_server.has_qmd", return_value=True)
-    def test_no_results(self, _qmd, _search, _enhance, _log, tmp_vault):
+    def test_no_results_returns_structured_miss(self, _qmd, _search, _enhance, _log, tmp_vault):
         with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
             results = memento_search("nonexistent topic xyz")
 
-        assert results == []
+        assert results == {
+            "results": [],
+            "miss": {
+                "reason": "no_exact_match",
+                "recovery_hints": ["Try a broader or narrower query."],
+            },
+        }
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.has_qmd", return_value=False)
+    def test_backend_unavailable_returns_structured_miss(self, _qmd, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("redis cache")
+
+        assert result["results"] == []
+        assert result["miss"]["reason"] == "backend_unavailable"
+        assert "memento_status" in result["miss"]["recovery_hints"][0]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        side_effect=[[], [{"path": "notes/redis.md", "title": "Redis", "score": 0.2, "snippet": ""}]],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_threshold_miss_returns_structured_miss(self, _qmd, mock_search, _enhance, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("redis cache", min_score=0.9)
+
+        assert result["results"] == []
+        assert result["miss"] == {
+            "reason": "threshold_too_high",
+            "recovery_hints": ["Lower min_score."],
+            "details": {"min_score": 0.9},
+        }
+        assert mock_search.call_args_list[1].kwargs["min_score"] == 0.0
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", return_value=[])
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[{"path": "notes/dala.md", "title": "Dala", "score": 0.9, "snippet": ""}],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_project_filter_empty_returns_structured_miss(self, _qmd, _search, _enhance, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("fundid email", cwd="/repo/fundid")
+
+        assert result["results"] == []
+        assert result["miss"]["reason"] == "project_filter_removed_all"
+        assert result["miss"]["details"] == {"cwd": "/repo/fundid"}
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch("memento.mcp_server.qmd_search_with_extras", return_value=[])
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_literal_mode_miss_returns_structured_miss(self, _qmd, _search, _enhance, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("memento_search")
+
+        assert result["results"] == []
+        assert result["miss"]["reason"] == "literal_mode_auto_selected"
+        assert "memento_get" in result["miss"]["recovery_hints"][1]
 
 
 # --- lifecycle retrieval tools ---

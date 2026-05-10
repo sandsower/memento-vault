@@ -88,6 +88,20 @@ class TestCallTool:
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")
+    def test_search_unwraps_structured_result_envelope(self, mock_urlopen, mock_url):
+        mock_urlopen.return_value = self._mock_response(
+            {
+                "results": [{"path": "notes/foo.md", "title": "Foo", "score": 0.9, "snippet": "test"}],
+                "miss": None,
+            }
+        )
+
+        found = search("test query")
+
+        assert found == [{"path": "notes/foo.md", "title": "Foo", "score": 0.9, "snippet": "test"}]
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
     def test_get(self, mock_urlopen, mock_url):
         note = {"path": "notes/foo.md", "title": "Foo", "content": "Body"}
         mock_urlopen.return_value = self._mock_response(note)

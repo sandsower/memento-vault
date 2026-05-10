@@ -544,6 +544,95 @@ def test_run_recall_lines_project_filter_logs_candidate_diagnostics_when_enabled
     )
 
 
+@patch("memento.remote_client.is_remote", return_value=False)
+@patch("memento.lifecycle.has_qmd", return_value=False)
+@patch("memento.lifecycle.get_vault")
+@patch("memento.lifecycle.get_config", return_value={"prompt_recall": True, "recall_diagnostics": True})
+def test_build_recall_backend_unavailable_includes_miss_metadata(_config, mock_vault, _has_qmd, _is_remote, tmp_path):
+    (tmp_path / "notes").mkdir()
+    mock_vault.return_value = tmp_path
+
+    result = build_recall("how should cache invalidation work?", str(tmp_path), "s1")
+
+    assert result.should_inject is False
+    assert result.reason == "backend_unavailable"
+    assert result.metadata["miss"]["reason"] == "backend_unavailable"
+    assert "memento_status" in result.metadata["miss"]["recovery_hints"][0]
+
+
+@patch("memento.remote_client.is_remote", return_value=False)
+@patch("memento.lifecycle.log_retrieval")
+@patch("memento.lifecycle.qmd_search_with_extras")
+@patch("memento.lifecycle.has_qmd", return_value=True)
+@patch("memento.lifecycle.get_vault")
+@patch(
+    "memento.lifecycle.get_config",
+    return_value={
+        "prompt_recall": True,
+        "recall_diagnostics": True,
+        "recall_min_score": 0.9,
+        "recall_max_notes": 3,
+        "recall_high_confidence": 0.55,
+        "concept_index_enabled": False,
+        "rrf_enabled": False,
+        "multi_hop_enabled": False,
+        "reranker_enabled": False,
+    },
+)
+def test_build_recall_threshold_miss_includes_miss_metadata(
+    _config, mock_vault, _has_qmd, mock_search, _log, _is_remote, tmp_path
+):
+    (tmp_path / "notes").mkdir()
+    mock_vault.return_value = tmp_path
+    mock_search.side_effect = [[], [{"path": "notes/cache.md", "title": "Cache", "score": 0.2, "snippet": ""}]]
+
+    result = build_recall("how should cache invalidation work?", str(tmp_path), "s1")
+
+    assert result.should_inject is False
+    assert result.reason == "threshold_too_high"
+    assert result.metadata["miss"] == {
+        "reason": "threshold_too_high",
+        "recovery_hints": ["Lower min_score."],
+        "details": {"min_score": 0.9},
+    }
+
+
+@patch("memento.remote_client.is_remote", return_value=False)
+@patch("memento.lifecycle.log_retrieval")
+@patch("memento.lifecycle.enhance_results", side_effect=lambda results, *args, **kwargs: results)
+@patch("memento.lifecycle.qmd_search_with_extras")
+@patch("memento.lifecycle.has_qmd", return_value=True)
+@patch("memento.lifecycle.get_vault")
+@patch(
+    "memento.lifecycle.get_config",
+    return_value={
+        "prompt_recall": True,
+        "recall_diagnostics": True,
+        "recall_diagnostics_include_candidates": False,
+        "recall_min_score": 0.4,
+        "recall_max_notes": 3,
+        "recall_high_confidence": 0.55,
+        "concept_index_enabled": False,
+        "rrf_enabled": False,
+        "multi_hop_enabled": False,
+        "reranker_enabled": False,
+    },
+)
+def test_build_recall_project_filter_empty_includes_miss_metadata(
+    _config, mock_vault, _has_qmd, mock_search, _enhance, _log, _is_remote, tmp_path
+):
+    (tmp_path / "notes").mkdir()
+    mock_vault.return_value = tmp_path
+    mock_search.return_value = [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}]
+
+    result = build_recall("what did we decide about Fundid server-side email dispatch?", str(tmp_path), "s1")
+
+    assert result.should_inject is False
+    assert result.reason == "project_filter_removed_all"
+    assert result.metadata["miss"]["reason"] == "project_filter_removed_all"
+    assert "cwd" not in result.metadata["miss"].get("details", {})
+
+
 def test_tool_context_skips_unsupported_tool():
     result = build_tool_context("bash", "src/server/authMiddleware.ts", "/repo", "s1")
 
