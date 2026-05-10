@@ -285,7 +285,7 @@ codex mcp add memento-vault \
 
 > **Note:** Claude Code ignores `~/.claude/mcp-servers.json`. You must use `claude mcp add` to register servers. Codex uses `codex mcp add`. The JSON config above is for other MCP clients only.
 
-After connecting, the 6 tools listed above are available. Search returns full note content inline (no extra round-trip needed). Restart your agent session after adding the config.
+After connecting, the tools listed above are available. Search returns full note content inline (no extra round-trip needed). Restart your agent session after adding the config.
 
 ## Tenet
 
@@ -488,7 +488,7 @@ memento/
   utils.py           Secret sanitization, tag normalization
   types.py           TypedDict definitions (SearchResult, NoteMetadata, SessionMeta)
   adapters/          Transcript parsing (Claude adapter, pluggable for others)
-  mcp_server.py      MCP server (6 tools, stdio + HTTP transport)
+  mcp_server.py      MCP server (read/lifecycle/write/maintenance tools, stdio + HTTP transport)
 ```
 
 LLM backend is configurable:
