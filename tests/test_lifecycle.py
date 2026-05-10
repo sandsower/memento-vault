@@ -557,7 +557,7 @@ def test_build_recall_backend_unavailable_includes_miss_metadata(_config, mock_v
     assert result.should_inject is False
     assert result.reason == "backend_unavailable"
     assert result.metadata["miss"]["reason"] == "backend_unavailable"
-    assert "memento_status" in result.metadata["miss"]["recovery_hints"][0]
+    assert any("memento_status" in hint for hint in result.metadata["miss"]["recovery_hints"])
 
 
 @patch("memento.remote_client.is_remote", return_value=False)
@@ -659,10 +659,14 @@ def test_build_recall_preserves_remote_structured_miss_when_local_unavailable(
         result = build_recall("how should cache invalidation work?", str(tmp_path), "s1")
 
     assert result.should_inject is False
-    assert result.reason == "backend_unavailable"
-    assert result.metadata["miss"]["reason"] == "backend_unavailable"
+    assert result.reason == "threshold_too_high"
+    assert result.metadata["miss"] == {
+        "reason": "threshold_too_high",
+        "recovery_hints": ["Lower min_score."],
+        "details": {"min_score": 0.9},
+    }
     decisions = [call.kwargs for call in mock_log.call_args_list if call.args[1] == "diagnostic-decision"]
-    assert decisions[-1]["reason"] == "backend_unavailable"
+    assert decisions[-1]["reason"] == "threshold_too_high"
 
 
 @patch("memento.remote_client.is_remote", return_value=True)

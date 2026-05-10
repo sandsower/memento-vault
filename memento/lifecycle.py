@@ -17,6 +17,7 @@ from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, s
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
 from memento.llm import is_invalid_mcp_config_error, llm_complete
 from memento.search import (
+    MISS_RECOVERY_HINTS,
     build_search_miss,
     enhance_results,
     has_qmd,
@@ -1339,12 +1340,14 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="empty_vault")
-        return [], None, [], "empty_vault"
+        reason = normalize_miss_reason(fallback_remote_reason or "empty_vault", prompt)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=reason)
+        return [], None, [], reason
 
     if not has_qmd():
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="backend_unavailable")
-        return [], None, [], "backend_unavailable"
+        reason = normalize_miss_reason(fallback_remote_reason or "backend_unavailable", prompt)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=reason)
+        return [], None, [], reason
 
     # BM25 search against the prompt, augmented with project context
     min_score = config.get("recall_min_score", 0.4)
@@ -1603,21 +1606,10 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> Lif
     """Build prompt recall content."""
     lines, top_path, results, reason = _run_recall_lines(prompt, cwd, session_id)
     if not lines:
-        retrieval_miss_reasons = {
-            "qmd-unavailable",
-            "vault-unavailable",
-            "project-mismatch-filtered-empty",
-            "filtered-empty",
-            "no-results",
-            "threshold_too_high",
-            "literal_mode_auto_selected",
-            "backend_unavailable",
-            "empty_vault",
-            "project_filter_removed_all",
-            "no_exact_match",
-        }
-        if reason in retrieval_miss_reasons:
-            normalized = normalize_miss_reason(reason, prompt)
+        if reason in ("broad-project-query", "skipped-prompt", "low-signal-prompt"):
+            return empty_result("recall", reason)
+        normalized = normalize_miss_reason(reason, prompt)
+        if normalized in MISS_RECOVERY_HINTS:
             details = None
             if normalized == "threshold_too_high":
                 details = {"min_score": get_config().get("recall_min_score", 0.4)}

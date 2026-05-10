@@ -48,9 +48,14 @@ _REASON_ALIASES = {
 
 def build_search_miss(reason: str, details: Optional[dict] = None, recovery_hints: Optional[list[str]] = None) -> dict:
     """Build structured metadata for a retrieval miss."""
+    hints = (
+        list(recovery_hints)
+        if recovery_hints is not None
+        else list(MISS_RECOVERY_HINTS.get(reason, MISS_RECOVERY_HINTS["no_exact_match"]))
+    )
     miss = {
         "reason": reason,
-        "recovery_hints": recovery_hints or MISS_RECOVERY_HINTS.get(reason, MISS_RECOVERY_HINTS["no_exact_match"]),
+        "recovery_hints": hints,
     }
     if details:
         miss["details"] = details

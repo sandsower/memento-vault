@@ -7,6 +7,7 @@ import pytest
 
 from memento import mcp_server
 from memento.config import DEFAULT_CONFIG
+from memento.search import MISS_RECOVERY_HINTS, build_search_miss
 from memento.mcp_server import (
     _strip_injection,
     memento_capture,
@@ -65,6 +66,14 @@ class TestStripInjection:
 
 
 # --- memento_search ---
+
+
+def test_build_search_miss_copies_recovery_hints():
+    miss = build_search_miss("backend_unavailable")
+
+    miss["recovery_hints"].append("mutated")
+
+    assert "mutated" not in MISS_RECOVERY_HINTS["backend_unavailable"]
 
 
 class TestMementoSearch:

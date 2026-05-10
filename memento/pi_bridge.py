@@ -150,6 +150,8 @@ def _search(query: str, limit: int, cwd: str = "") -> dict[str, Any]:
     if not has_qmd():
         if is_remote():
             envelope = remote_search_envelope(query=query, limit=limit, cwd=cwd)
+            if envelope.get("error"):
+                return _search_miss("backend_unavailable", {"error": envelope["error"]})
             results = envelope.get("results", [])
             if results:
                 return {"results": results, "source": "remote"}
@@ -159,9 +161,11 @@ def _search(query: str, limit: int, cwd: str = "") -> dict[str, Any]:
             return _search_miss("no_exact_match")
         return _search_miss("backend_unavailable")
     limit = max(1, min(int(limit), 20))
-    results = qmd_search_with_extras(query, limit=limit, semantic=False, timeout=10, min_score=0.0)
-    results = enhance_results(results, cwd=cwd or None) if results else []
+    raw_results = qmd_search_with_extras(query, limit=limit, semantic=False, timeout=10, min_score=0.0)
+    results = enhance_results(raw_results, cwd=cwd or None) if raw_results else []
     if not results:
+        if raw_results:
+            return _search_miss("project_filter_removed_all", {"cwd": cwd} if cwd else None)
         return _search_miss(normalize_miss_reason("no-results", query))
     sanitized = []
     for result in results[:limit]:
