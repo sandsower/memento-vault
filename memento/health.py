@@ -797,20 +797,15 @@ def _check_triage_health() -> CheckResult:
             "triage", WARN, "no recent triage health events found", {"window_hours": _HEALTH_WINDOW_HOURS}
         )
     failure_threshold_met = total >= 3 and failed / total >= 0.5
-    if failure_threshold_met and invalid_mcp_failed:
-        return CheckResult(
-            "triage",
-            FAIL,
-            f"triage failing {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h — {_STALE_MCP_HINT}",
-            {"log_path": log_path, "failed": failed, "total": total, "last_error": last_error},
-        )
     if failure_threshold_met:
         message = f"triage failing {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h"
+        if invalid_mcp_failed:
+            message += f" — {_STALE_MCP_HINT}"
         if stale_certainty_failed:
             message += f" — {_STALE_CERTAINTY_HINT}"
         return CheckResult(
             "triage",
-            WARN,
+            FAIL if invalid_mcp_failed else WARN,
             message,
             {"log_path": log_path, "failed": failed, "total": total, "last_error": last_error},
         )
