@@ -174,6 +174,16 @@ def test_config_parse_failure_is_fail(tmp_path):
     assert "cannot parse" in check.message
 
 
+def test_simple_yaml_parser_handles_empty_and_spaced_lists(tmp_path):
+    config = tmp_path / "memento.yml"
+    config.write_text("extra_qmd_collections: []\nrecall_skip_patterns: [ \"a\", 'b' ]\n")
+
+    parsed = health._parse_simple_yaml(config)
+
+    assert parsed["extra_qmd_collections"] == []
+    assert parsed["recall_skip_patterns"] == ["a", "b"]
+
+
 def test_explicit_qmd_backend_missing_is_fail(monkeypatch):
     monkeypatch.setenv("MEMENTO_SEARCH_BACKEND", "qmd")
 

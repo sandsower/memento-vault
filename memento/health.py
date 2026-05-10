@@ -235,7 +235,8 @@ def _parse_simple_yaml(path: Path) -> dict[str, Any]:
             elif value.isdigit():
                 parsed = int(value)
             elif value.startswith("[") and value.endswith("]"):
-                parsed = [v.strip().strip('"').strip("'") for v in value[1:-1].split(",")]
+                inner = value[1:-1].strip()
+                parsed = [v.strip().strip('"').strip("'") for v in inner.split(",")] if inner else []
             elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
                 parsed = value[1:-1]
             else:
