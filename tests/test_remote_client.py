@@ -111,6 +111,16 @@ class TestCallTool:
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")
+    def test_list_notes_preserves_single_content_block_result_as_list(self, mock_urlopen, mock_url):
+        inventory = {"path": "notes/foo.md", "title": "Foo", "hash": "abc123"}
+        mock_urlopen.return_value = self._mock_response(inventory)
+
+        result = list_notes()
+
+        assert result == [inventory]
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
     def test_search_unwraps_structured_result_envelope(self, mock_urlopen, mock_url):
         mock_urlopen.return_value = self._mock_response(
             {

@@ -195,7 +195,7 @@ The MCP server exposes 5 tools over stdio (local) or HTTP (remote). Any MCP-comp
 
 | Tool | What it does |
 |------|-------------|
-| `memento_search` | Search vault notes (BM25, semantic, RRF fusion, temporal decay, PageRank boost; `concrete: auto|true|false` for exact identifiers and quoted phrases) |
+| `memento_search` | Search vault notes (BM25, semantic, RRF fusion, temporal decay, PageRank boost; `concrete: auto\|true\|false` for exact identifiers and quoted phrases) |
 | `memento_store` | Write a single knowledge note with frontmatter and project indexing |
 | `memento_capture` | End-of-session triage: parse transcript or accept a summary, write fleeting + atomic note |
 | `memento_get` | Read a specific note by name or path |

@@ -94,7 +94,7 @@ def _call_tool(tool_name: str, arguments: dict, timeout: int = 30) -> dict:
                     parsed.append({"text": item.get("text", "")})
         if len(parsed) == 1:
             item = parsed[0]
-            if tool_name == "memento_search" and isinstance(item, dict) and "path" in item:
+            if tool_name in {"memento_search", "memento_list"} and isinstance(item, dict) and "path" in item:
                 return parsed
             return item
         if parsed:
