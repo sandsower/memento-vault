@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import shutil
@@ -560,8 +561,10 @@ def _pid_is_live(pid: int | None) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except OSError:
-        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        return exc.errno == errno.EPERM
 
 
 def _check_inception(config: dict[str, Any]) -> CheckResult:

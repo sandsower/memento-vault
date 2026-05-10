@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import subprocess
@@ -328,3 +329,21 @@ def test_lock_check_inspects_temp_fallback_path(tmp_path, monkeypatch):
 
     assert check.status == "fail"
     assert str(lock) in json.dumps(check.details)
+
+
+def test_pid_is_live_treats_permission_error_as_live(monkeypatch):
+    def deny_signal(pid, sig):
+        raise PermissionError(errno.EPERM, "operation not permitted")
+
+    monkeypatch.setattr(health.os, "kill", deny_signal)
+
+    assert health._pid_is_live(12345) is True
+
+
+def test_pid_is_live_returns_false_for_missing_process(monkeypatch):
+    def missing_process(pid, sig):
+        raise OSError(errno.ESRCH, "no such process")
+
+    monkeypatch.setattr(health.os, "kill", missing_process)
+
+    assert health._pid_is_live(12345) is False
