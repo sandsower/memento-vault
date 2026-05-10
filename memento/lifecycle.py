@@ -1778,6 +1778,27 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
     while expandable_paths and len(json.dumps(payload)) > packet_char_budget:
         expandable_paths.pop()
         payload["metadata"]["omitted_expandable_paths_count"] = payload["metadata"].get("omitted_expandable_paths_count", 0) + 1
+
+    if len(json.dumps(payload)) > packet_char_budget:
+        payload["metadata"].pop("cwd", None)
+        payload["metadata"].pop("session_id", None)
+        payload["metadata"].pop("warnings", None)
+        payload["metadata"]["omitted_metadata"] = True
+
+    if len(json.dumps(payload)) > packet_char_budget and "queue" in payload.get("sections", {}):
+        payload["sections"]["queue"].pop("queue_path", None)
+
+    if len(json.dumps(payload)) > packet_char_budget:
+        payload["content"] = ""
+        payload["metadata"]["used_chars"] = 0
+
+    if len(json.dumps(payload)) > packet_char_budget:
+        payload["sections"] = {key: value for key, value in payload.get("sections", {}).items() if key in {"status", "queue"}}
+        payload["results"] = []
+        payload["metadata"]["expandable_paths"] = []
+        payload["metadata"]["omitted_results"] = True
+
+    payload["should_inject"] = bool(payload.get("content"))
     return payload
 
 

@@ -166,6 +166,24 @@ def test_build_session_context_compacts_structured_payload_under_budget_overhead
     assert payload["metadata"]["expandable_paths"] == ["notes/long.md"]
 
 
+def test_build_session_context_final_budget_fallback_handles_long_metadata(tmp_path):
+    (tmp_path / "notes").mkdir()
+    long_value = "x" * 5000
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: " + long_value),
+    ):
+        payload = build_session_context(long_value, "", long_value, token_budget=100, include_recall=False)
+
+    assert len(json.dumps(payload)) <= payload["metadata"]["packet_char_budget"]
+    assert payload["should_inject"] == bool(payload["content"])
+    assert payload["metadata"]["truncated"] is True
+    assert payload["metadata"].get("omitted_metadata") is True
+
+
 @pytest.mark.parametrize(
     "prompt",
     [
