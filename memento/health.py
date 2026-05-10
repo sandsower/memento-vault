@@ -325,11 +325,23 @@ def _check_search_backend(vault: Path, config: dict[str, Any]) -> CheckResult:
 
 
 def _config_dir() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "memento-vault"
+
+
+def _home_config_dir() -> Path:
     return Path.home() / ".config" / "memento-vault"
 
 
+def _config_file_path(filename: str) -> Path:
+    xdg_path = _config_dir() / filename
+    home_path = _home_config_dir() / filename
+    if xdg_path.exists() or xdg_path == home_path:
+        return xdg_path
+    return home_path
+
+
 def _install_manifest_path() -> Path:
-    return _config_dir() / "manifest.json"
+    return _config_file_path("manifest.json")
 
 
 def _check_install_manifest() -> tuple[CheckResult, dict[str, Any] | None]:
@@ -635,7 +647,8 @@ def _check_mcp_registration() -> CheckResult:
             worst = WARN
             continue
         if completed.returncode != 0:
-            results.append({"client": client, "status": WARN, "reason": "registration not found"})
+            reason = _safe_text((completed.stderr or completed.stdout).strip()) or "registration lookup failed"
+            results.append({"client": client, "status": WARN, "reason": reason})
             worst = WARN
             continue
         shape = _mcp_registration_shape(completed.stdout)
@@ -724,7 +737,7 @@ _PI_INT_KEYS = {"maxInjectedChars", "maxToolContextPerSession"}
 
 
 def _check_pi_bridge_config() -> CheckResult:
-    path = _config_dir() / "pi-bridge.json"
+    path = _config_file_path("pi-bridge.json")
     if not path.exists():
         return CheckResult("pi bridge", PASS, "Pi bridge config not found (optional)", {"path": str(path)})
     try:

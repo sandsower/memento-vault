@@ -48,13 +48,25 @@ def test_health_json_outputs_report_and_default_allows_warnings(capsys):
     assert any(check["name"] == "vault" for check in payload["checks"])
 
 
-def test_health_uses_installer_config_dir_when_xdg_config_home_is_set(tmp_path):
+def test_health_prefers_xdg_config_dir_when_file_exists(tmp_path):
     home_config = Path.home() / ".config" / "memento-vault"
     xdg_config = Path(os.environ["XDG_CONFIG_HOME"]) / "memento-vault"
     home_config.mkdir(parents=True)
     xdg_config.mkdir(parents=True)
     (home_config / "manifest.json").write_text(json.dumps({"version": "home", "files": {}}))
     (xdg_config / "manifest.json").write_text(json.dumps({"version": "xdg", "files": {}}))
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "install manifest")
+
+    assert check.details["path"] == str(xdg_config / "manifest.json")
+    assert check.details["version"] == "xdg"
+
+
+def test_health_falls_back_to_installer_config_dir_when_xdg_file_missing(tmp_path):
+    home_config = Path.home() / ".config" / "memento-vault"
+    home_config.mkdir(parents=True)
+    (home_config / "manifest.json").write_text(json.dumps({"version": "home", "files": {}}))
 
     report = health.build_report()
     check = next(check for check in report.checks if check.name == "install manifest")
@@ -233,6 +245,26 @@ def test_mcp_registration_warns_when_cli_registration_missing(monkeypatch):
     assert "./install.sh --mcp" in check.message
     assert check.details["registrations"][0]["client"] == "claude"
     assert check.details["registrations"][0]["status"] == "warn"
+    assert check.details["registrations"][0]["reason"] == "not found"
+
+
+def test_mcp_registration_error_reason_is_redacted(monkeypatch):
+    token = "ghp_" + "a" * 36
+
+    def fake_which(binary):
+        return f"/usr/bin/{binary}" if binary == "claude" else None
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=2, stdout="", stderr=f"auth failed {token}")
+
+    monkeypatch.setattr(health.shutil, "which", fake_which)
+    monkeypatch.setattr(health.subprocess, "run", fake_run)
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "mcp registration")
+
+    assert check.status == "warn"
+    assert check.details["registrations"][0]["reason"] == "auth failed [REDACTED_GITHUB_TOKEN]"
 
 
 def test_mcp_registration_passes_when_cli_registration_exists(monkeypatch):
