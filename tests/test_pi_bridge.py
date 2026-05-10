@@ -74,6 +74,26 @@ def test_pi_bridge_search_reports_backend_unavailable_with_miss(capsys):
     }
 
 
+def test_pi_bridge_search_preserves_remote_miss(capsys):
+    remote_miss = {
+        "results": [],
+        "miss": {"reason": "threshold_too_high", "recovery_hints": ["Lower min_score."]},
+    }
+    with (
+        patch("memento.pi_bridge.has_qmd", return_value=False),
+        patch("memento.pi_bridge.is_remote", return_value=True),
+        patch("memento.pi_bridge.remote_search_envelope", return_value=remote_miss),
+    ):
+        code = pi_bridge.main(["search", "--query", "cache"])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "results": [],
+        "miss": {"reason": "threshold_too_high", "recovery_hints": ["Lower min_score."]},
+        "reason": "threshold_too_high",
+    }
+
+
 def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     (tmp_path / "notes").mkdir()
     with (

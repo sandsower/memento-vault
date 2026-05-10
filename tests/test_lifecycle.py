@@ -250,7 +250,7 @@ def test_run_recall_lines_remote_broad_project_skip_does_not_search(_config, moc
 
 @patch("memento.remote_client.is_remote", return_value=True)
 @patch("memento.lifecycle.is_duplicate", return_value=False)
-@patch("memento.remote_client.search")
+@patch("memento.remote_client.search_envelope")
 @patch("memento.lifecycle.has_qmd")
 @patch(
     "memento.lifecycle.get_config",
@@ -265,9 +265,9 @@ def test_run_recall_lines_remote_broad_project_skip_does_not_search(_config, moc
 def test_run_recall_lines_remote_specific_project_prompt_injects_match(
     _config, mock_has_qmd, mock_remote_search, _is_duplicate, _is_remote
 ):
-    mock_remote_search.return_value = [
-        {"path": "notes/fundid.md", "title": "Fundid email", "score": 0.9, "project": "fundid"}
-    ]
+    mock_remote_search.return_value = {
+        "results": [{"path": "notes/fundid.md", "title": "Fundid email", "score": 0.9, "project": "fundid"}]
+    }
 
     lines, top_path, results, reason = _run_recall_lines(
         "what did we decide about Fundid server-side email dispatch?", "/repo", "s1"
@@ -282,7 +282,7 @@ def test_run_recall_lines_remote_specific_project_prompt_injects_match(
 
 @patch("memento.remote_client.is_remote", return_value=True)
 @patch("memento.lifecycle.log_retrieval")
-@patch("memento.remote_client.search")
+@patch("memento.remote_client.search_envelope")
 @patch("memento.lifecycle.has_qmd")
 @patch(
     "memento.lifecycle.get_config",
@@ -297,9 +297,9 @@ def test_run_recall_lines_remote_specific_project_prompt_injects_match(
 def test_run_recall_lines_remote_project_mismatch_skips_without_candidate_diagnostics(
     _config, mock_has_qmd, mock_remote_search, mock_log, _is_remote
 ):
-    mock_remote_search.return_value = [
-        {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}
-    ]
+    mock_remote_search.return_value = {
+        "results": [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}]
+    }
 
     lines, top_path, results, reason = _run_recall_lines(
         "what did we decide about fundid server-side email dispatch?", "/repo", "s1"
@@ -316,7 +316,7 @@ def test_run_recall_lines_remote_project_mismatch_skips_without_candidate_diagno
 
 @patch("memento.remote_client.is_remote", return_value=True)
 @patch("memento.lifecycle.log_retrieval")
-@patch("memento.remote_client.search")
+@patch("memento.remote_client.search_envelope")
 @patch(
     "memento.lifecycle.get_config",
     return_value={
@@ -331,9 +331,9 @@ def test_run_recall_lines_remote_project_mismatch_skips_without_candidate_diagno
 def test_run_recall_lines_remote_project_filter_logs_candidate_diagnostics_when_enabled(
     _config, mock_remote_search, mock_log, _is_remote
 ):
-    mock_remote_search.return_value = [
-        {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}
-    ]
+    mock_remote_search.return_value = {
+        "results": [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}]
+    }
 
     _run_recall_lines("what did we decide about Fundid server-side email dispatch?", "/repo", "s1")
 
@@ -631,6 +631,40 @@ def test_build_recall_project_filter_empty_includes_miss_metadata(
     assert result.reason == "project_filter_removed_all"
     assert result.metadata["miss"]["reason"] == "project_filter_removed_all"
     assert "cwd" not in result.metadata["miss"].get("details", {})
+
+
+@patch("memento.remote_client.is_remote", return_value=True)
+@patch("memento.lifecycle.log_retrieval")
+@patch("memento.remote_client.search_envelope")
+@patch("memento.lifecycle.has_qmd")
+@patch(
+    "memento.lifecycle.get_config",
+    return_value={
+        "prompt_recall": True,
+        "recall_diagnostics": True,
+        "recall_diagnostics_include_candidates": False,
+        "recall_min_score": 0.9,
+        "recall_max_notes": 3,
+    },
+)
+def test_build_recall_preserves_remote_structured_miss(_config, mock_has_qmd, mock_remote_search, mock_log, _is_remote):
+    mock_remote_search.return_value = {
+        "results": [],
+        "miss": {"reason": "threshold_too_high", "recovery_hints": ["Lower min_score."]},
+    }
+
+    result = build_recall("how should cache invalidation work?", "/repo", "s1")
+
+    assert result.should_inject is False
+    assert result.reason == "threshold_too_high"
+    assert result.metadata["miss"] == {
+        "reason": "threshold_too_high",
+        "recovery_hints": ["Lower min_score."],
+        "details": {"min_score": 0.9},
+    }
+    mock_has_qmd.assert_not_called()
+    decisions = [call.kwargs for call in mock_log.call_args_list if call.args[1] == "diagnostic-decision"]
+    assert decisions[-1]["reason"] == "threshold_too_high"
 
 
 def test_tool_context_skips_unsupported_tool():

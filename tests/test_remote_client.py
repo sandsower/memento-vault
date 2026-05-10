@@ -3,7 +3,7 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from memento.remote_client import is_remote, list_notes, search, get, store, capture, status
+from memento.remote_client import is_remote, list_notes, search, search_envelope, get, store, capture, status
 
 
 class TestIsRemote:
@@ -99,6 +99,14 @@ class TestCallTool:
         found = search("test query")
 
         assert found == [{"path": "notes/foo.md", "title": "Foo", "score": 0.9, "snippet": "test"}]
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_search_envelope_preserves_structured_miss(self, mock_urlopen, mock_url):
+        miss = {"results": [], "miss": {"reason": "threshold_too_high", "recovery_hints": ["Lower min_score."]}}
+        mock_urlopen.return_value = self._mock_response(miss)
+
+        assert search_envelope("test query") == miss
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")

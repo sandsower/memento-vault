@@ -203,6 +203,7 @@ class TestMementoSearch:
 
         assert result["results"] == []
         assert result["miss"]["reason"] == "literal_mode_auto_selected"
+        assert "natural-language" in result["miss"]["recovery_hints"][0]
         assert "memento_get" in result["miss"]["recovery_hints"][1]
 
 

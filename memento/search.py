@@ -25,7 +25,10 @@ MISS_RECOVERY_HINTS = {
     "threshold_too_high": ["Lower min_score."],
     "project_filter_removed_all": ["Remove or change the cwd project filter."],
     "query_too_broad": ["Try a narrower query with concrete terms."],
-    "literal_mode_auto_selected": ["Try concrete=false for conceptual search.", "Call memento_get if the note path is known."],
+    "literal_mode_auto_selected": [
+        "Try a more descriptive natural-language query.",
+        "Call memento_get if the note path is known.",
+    ],
     "semantic_mode_not_available": ["Try semantic=false.", "Run memento_reindex if index state looks stale."],
     "empty_vault": ["Capture or sync notes first.", "Run memento_status to verify the vault path."],
     "index_stale_or_missing": ["Run memento_reindex if index state looks stale."],

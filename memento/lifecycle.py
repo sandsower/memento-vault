@@ -1232,7 +1232,7 @@ def run_remote_recall(prompt, cwd, config):
     an explicit project mismatch is a terminal skip because local fallback would
     risk injecting the unrelated context the filter just removed.
     """
-    from memento.remote_client import search as remote_search
+    from memento.remote_client import search_envelope as remote_search_envelope
 
     if should_skip_recall(prompt, config):
         reason = "broad-project-query" if is_broad_project_history_query(prompt) else "skipped-prompt"
@@ -1241,10 +1241,16 @@ def run_remote_recall(prompt, cwd, config):
     max_notes = config.get("recall_max_notes", 3)
     min_score = config.get("recall_min_score", 0.4)
 
-    raw_results = remote_search(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd)
+    envelope = remote_search_envelope(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd)
+    raw_results = envelope.get("results", [])
     results, project_decisions = filter_recall_results_by_explicit_project(prompt, raw_results)
     if not results:
-        reason = "project-mismatch-filtered-empty" if project_decisions else "no-results"
+        if project_decisions:
+            reason = "project-mismatch-filtered-empty"
+        elif isinstance(envelope.get("miss"), dict):
+            reason = envelope["miss"].get("reason") or "no-results"
+        else:
+            reason = "no-results"
         return [], None, [], reason, project_decisions
 
     top_path = results[0].get("path", "")
@@ -1322,7 +1328,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             if lines:
                 log_recall_diagnostic(config, "decision", decision="injected", source="remote", top_path=top_path)
                 return lines, top_path, remote_results, None
-            if remote_reason in ("project-mismatch-filtered-empty", "duplicate"):
+            if remote_reason and remote_reason != "no-results":
                 log_recall_diagnostic(config, "decision", decision="skipped", source="remote", reason=remote_reason)
                 return [], None, [], remote_reason
         except Exception as exc:
@@ -1330,12 +1336,12 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="vault-unavailable")
-        return [], None, [], "vault-unavailable"
+        log_recall_diagnostic(config, "decision", decision="skipped", reason="empty_vault")
+        return [], None, [], "empty_vault"
 
     if not has_qmd():
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="qmd-unavailable")
-        return [], None, [], "qmd-unavailable"
+        log_recall_diagnostic(config, "decision", decision="skipped", reason="backend_unavailable")
+        return [], None, [], "backend_unavailable"
 
     # BM25 search against the prompt, augmented with project context
     min_score = config.get("recall_min_score", 0.4)

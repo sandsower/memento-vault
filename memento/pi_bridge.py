@@ -23,7 +23,7 @@ from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_tool_context, strip_injection
 from memento.search import enhance_results, has_qmd, miss_envelope, normalize_miss_reason, qmd_get, qmd_search_with_extras
 from memento.remote_client import get as remote_get
-from memento.remote_client import is_remote, search as remote_search, status as remote_status
+from memento.remote_client import is_remote, search_envelope as remote_search_envelope, status as remote_status
 from memento.store import write_note
 
 
@@ -149,8 +149,14 @@ def _search(query: str, limit: int, cwd: str = "") -> dict[str, Any]:
         return _search_miss("query_too_broad", {"query": query})
     if not has_qmd():
         if is_remote():
-            results = remote_search(query=query, limit=limit, cwd=cwd)
-            return {"results": results, "source": "remote"} if results else _search_miss("no_exact_match")
+            envelope = remote_search_envelope(query=query, limit=limit, cwd=cwd)
+            results = envelope.get("results", [])
+            if results:
+                return {"results": results, "source": "remote"}
+            if isinstance(envelope.get("miss"), dict):
+                payload = {"results": [], "miss": envelope["miss"], "reason": envelope["miss"].get("reason", "no_exact_match")}
+                return payload
+            return _search_miss("no_exact_match")
         return _search_miss("backend_unavailable")
     limit = max(1, min(int(limit), 20))
     results = qmd_search_with_extras(query, limit=limit, semantic=False, timeout=10, min_score=0.0)
