@@ -1,9 +1,11 @@
 import errno
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +26,7 @@ def isolate_health(monkeypatch, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     vault = _make_vault(tmp_path / "vault")
     monkeypatch.setenv("MEMENTO_VAULT_PATH", str(vault))
     monkeypatch.setenv("MEMENTO_SEARCH_BACKEND", "grep")
@@ -43,6 +46,117 @@ def test_health_json_outputs_report_and_default_allows_warnings(capsys):
     assert payload["status"] in {"pass", "warn"}
     assert "checks" in payload
     assert any(check["name"] == "vault" for check in payload["checks"])
+
+
+def test_health_prefers_xdg_config_dir_when_file_exists(tmp_path):
+    home_config = Path.home() / ".config" / "memento-vault"
+    xdg_config = Path(os.environ["XDG_CONFIG_HOME"]) / "memento-vault"
+    home_config.mkdir(parents=True)
+    xdg_config.mkdir(parents=True)
+    (home_config / "manifest.json").write_text(json.dumps({"version": "home", "files": {}}))
+    (xdg_config / "manifest.json").write_text(json.dumps({"version": "xdg", "files": {}}))
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "install manifest")
+
+    assert check.details["path"] == str(xdg_config / "manifest.json")
+    assert check.details["version"] == "xdg"
+
+
+def test_health_falls_back_to_installer_config_dir_when_xdg_file_missing(tmp_path):
+    home_config = Path.home() / ".config" / "memento-vault"
+    home_config.mkdir(parents=True)
+    (home_config / "manifest.json").write_text(json.dumps({"version": "home", "files": {}}))
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "install manifest")
+
+    assert check.details["path"] == str(home_config / "manifest.json")
+    assert check.details["version"] == "home"
+
+
+def test_install_manifest_health_reports_present_manifest(tmp_path):
+    config_dir = health._config_dir()
+    config_dir.mkdir(parents=True)
+    manifest = config_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": "4.1.0",
+                "vault_path": str(tmp_path / "vault"),
+                "options": {"experimental": True, "mcp": True},
+                "files": {"hooks/memento-triage.py": "abc123"},
+            }
+        )
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "install manifest")
+
+    assert check.status == "pass"
+    assert "4.1.0" in check.message
+    assert check.details["file_count"] == 1
+    assert check.details["options"] == ["experimental", "mcp"]
+    assert "vault_path" not in check.details
+
+
+def test_install_manifest_health_warns_when_missing():
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "install manifest")
+
+    assert check.status == "warn"
+    assert "./install.sh --reinstall" in check.message
+
+
+def test_health_warns_on_non_utf8_manifest_settings_and_pi_config():
+    config_dir = health._config_dir()
+    config_dir.mkdir(parents=True)
+    (config_dir / "manifest.json").write_bytes(b"\xff")
+    (config_dir / "pi-bridge.json").write_bytes(b"\xff")
+    settings = Path.home() / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_bytes(b"\xff")
+
+    report = health.build_report()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["install manifest"].status == "warn"
+    assert checks["claude hooks"].status == "warn"
+    assert checks["pi bridge"].status == "warn"
+
+
+def test_managed_file_drift_reports_stale_local_and_missing_critical():
+    def sha(text: str) -> str:
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    claude_hooks = Path.home() / ".claude" / "hooks"
+    claude_hooks.mkdir(parents=True)
+    (claude_hooks / "memento-triage.py").write_text("old managed copy")
+    (claude_hooks / "vault-commit.sh").write_text("local edited hook")
+
+    config_dir = health._config_dir()
+    config_dir.mkdir(parents=True)
+    (config_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "4.1.0",
+                "files": {
+                    "hooks/memento-triage.py": sha("old managed copy"),
+                    "hooks/vault-commit.sh": sha("previous managed copy"),
+                    "memento/config.py": sha("previous package copy"),
+                },
+            }
+        )
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "managed files")
+
+    assert check.status == "fail"
+    assert "./install.sh --reinstall" in check.message
+    assert "hooks/memento-triage.py" in check.details["stale_managed"]
+    assert "hooks/vault-commit.sh" in check.details["locally_modified"]
+    assert "memento/config.py" in check.details["missing_critical"]
 
 
 def test_strict_exits_nonzero_on_warnings():
@@ -65,6 +179,165 @@ def test_failures_always_exit_nonzero():
 
     assert health.exit_code(report, strict=False) == 1
     assert health.exit_code(report, strict=True) == 1
+
+
+def test_claude_hook_registration_warns_when_expected_hook_missing():
+    config_dir = health._config_dir()
+    config_dir.mkdir(parents=True)
+    (config_dir / "manifest.json").write_text(json.dumps({"version": "4.1.0", "options": {"experimental": True}, "files": {}}))
+    settings = Path.home() / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {"SessionEnd": []}}))
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "claude hooks")
+
+    assert check.status == "warn"
+    assert "./install.sh --reinstall" in check.message
+    assert "SessionEnd/memento-triage.py" in check.details["missing"]
+    assert "SessionStart/vault-briefing.py" in check.details["missing"]
+
+
+def test_mcp_remote_shape_valid_and_redacts_headers(capsys):
+    token = "sk-" + "a" * 24
+    config_path = Path.home() / ".claude" / "mcp-servers.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "memento-vault": {
+                    "type": "http",
+                    "url": "https://vault.example.com/mcp",
+                    "headers": {"Authorization": f"Bearer {token}"},
+                }
+            }
+        )
+    )
+
+    code = health.main(["--json"])
+    payload = json.loads(capsys.readouterr().out)
+    check = next(check for check in payload["checks"] if check["name"] == "mcp config")
+
+    assert code == 0
+    assert check["status"] == "pass"
+    assert check["details"]["memento_vault"] == "remote http"
+    assert token not in json.dumps(payload)
+
+
+def test_mcp_registration_warns_when_cli_registration_missing(monkeypatch):
+    config_path = Path.home() / ".claude" / "mcp-servers.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"memento-vault": {"type": "http", "url": "https://vault.example.com/mcp"}}))
+
+    def fake_which(binary):
+        return f"/usr/bin/{binary}" if binary == "claude" else None
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="not found")
+
+    monkeypatch.setattr(health.shutil, "which", fake_which)
+    monkeypatch.setattr(health.subprocess, "run", fake_run)
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "mcp registration")
+
+    assert check.status == "warn"
+    assert "./install.sh --mcp" in check.message
+    assert check.details["registrations"][0]["client"] == "claude"
+    assert check.details["registrations"][0]["status"] == "warn"
+    assert check.details["registrations"][0]["reason"] == "not found"
+
+
+def test_mcp_registration_error_reason_is_redacted(monkeypatch):
+    token = "ghp_" + "a" * 36
+
+    def fake_which(binary):
+        return f"/usr/bin/{binary}" if binary == "claude" else None
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=2, stdout="", stderr=f"auth failed {token}")
+
+    monkeypatch.setattr(health.shutil, "which", fake_which)
+    monkeypatch.setattr(health.subprocess, "run", fake_run)
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "mcp registration")
+
+    assert check.status == "warn"
+    assert check.details["registrations"][0]["reason"] == "auth failed [REDACTED_GITHUB_TOKEN]"
+
+
+def test_mcp_registration_passes_when_cli_registration_exists(monkeypatch):
+    def fake_which(binary):
+        return f"/usr/bin/{binary}" if binary == "codex" else None
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="memento-vault: http https://vault.example.com/mcp", stderr="")
+
+    monkeypatch.setattr(health.shutil, "which", fake_which)
+    monkeypatch.setattr(health.subprocess, "run", fake_run)
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "mcp registration")
+
+    assert check.status == "pass"
+    assert {"client": "codex", "status": "pass", "shape": "remote http"} in check.details["registrations"]
+
+
+def test_mcp_local_stdio_shape_valid():
+    config_path = Path.home() / ".claude" / "mcp-servers.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "memento-vault": {
+                    "command": "python3",
+                    "args": ["-m", "memento"],
+                    "env": {"PYTHONPATH": str(Path.home() / ".claude" / "hooks")},
+                }
+            }
+        )
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "mcp config")
+
+    assert check.status == "pass"
+    assert check.details["memento_vault"] == "local stdio"
+
+
+def test_mcp_registration_shape_rejects_wrong_python_module():
+    assert health._mcp_registration_shape("memento-vault: stdio python3 -m other_module") == "invalid"
+    assert health._mcp_registration_shape("memento-vault: stdio python3 /tmp/server.py") == "invalid"
+    assert health._mcp_registration_shape("memento-vault: stdio python3 -m memento") == "local stdio"
+    assert health._mcp_registration_shape("memento-vault\n  Command: python3\n  Args: -m memento") == "local stdio"
+    assert health._mcp_registration_shape("memento-vault: http https://vault.example.com") == "invalid"
+    assert health._mcp_registration_shape("memento-vault: http https://vault.example.com/mcp") == "remote http"
+
+
+def test_mcp_local_stdio_shape_rejects_reordered_args():
+    assert health._mcp_entry_shape(
+        {
+            "memento-vault": {
+                "command": "python3",
+                "args": ["memento", "-m"],
+                "env": {"PYTHONPATH": "/tmp/hooks"},
+            }
+        }
+    )[0] == "invalid"
+
+
+def test_invalid_pi_bridge_config_warns():
+    config_path = health._config_dir() / "pi-bridge.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"piBridge": {"enabled": "yes", "maxInjectedChars": -1}}))
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "pi bridge")
+
+    assert check.status == "warn"
+    assert "enabled" in check.details["invalid_keys"]
+    assert "maxInjectedChars" in check.details["invalid_keys"]
 
 
 def test_stale_headless_mcp_config_static_check_warns(tmp_path):
