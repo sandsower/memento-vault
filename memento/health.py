@@ -338,7 +338,7 @@ def _check_install_manifest() -> tuple[CheckResult, dict[str, Any] | None]:
         return CheckResult("install manifest", WARN, f"install manifest not found; {_REINSTALL_HINT}", {"path": str(path)}), None
     try:
         manifest = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return (
             CheckResult(
                 "install manifest",
@@ -537,7 +537,7 @@ def _check_claude_hooks(manifest: dict[str, Any] | None) -> CheckResult:
         )
     try:
         settings = json.loads(settings_path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return CheckResult(
             "claude hooks",
             WARN,
@@ -729,7 +729,7 @@ def _check_pi_bridge_config() -> CheckResult:
         return CheckResult("pi bridge", PASS, "Pi bridge config not found (optional)", {"path": str(path)})
     try:
         raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return CheckResult("pi bridge", WARN, f"cannot read Pi bridge config at {path}: {exc}", {"path": str(path), "error": str(exc)})
     if not isinstance(raw, dict):
         return CheckResult("pi bridge", WARN, "Pi bridge config root must be an object", {"path": str(path)})

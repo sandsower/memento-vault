@@ -96,6 +96,23 @@ def test_install_manifest_health_warns_when_missing():
     assert "./install.sh --reinstall" in check.message
 
 
+def test_health_warns_on_non_utf8_manifest_settings_and_pi_config():
+    config_dir = health._config_dir()
+    config_dir.mkdir(parents=True)
+    (config_dir / "manifest.json").write_bytes(b"\xff")
+    (config_dir / "pi-bridge.json").write_bytes(b"\xff")
+    settings = Path.home() / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_bytes(b"\xff")
+
+    report = health.build_report()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["install manifest"].status == "warn"
+    assert checks["claude hooks"].status == "warn"
+    assert checks["pi bridge"].status == "warn"
+
+
 def test_managed_file_drift_reports_stale_local_and_missing_critical():
     def sha(text: str) -> str:
         return hashlib.sha256(text.encode()).hexdigest()
