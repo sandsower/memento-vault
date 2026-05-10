@@ -1340,10 +1340,10 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             if lines:
                 log_recall_diagnostic(config, "decision", decision="injected", source="remote", top_path=top_path)
                 return lines, top_path, remote_results, None
-            if remote_reason in ("project-mismatch-filtered-empty", "duplicate"):
+            if remote_reason == "duplicate":
                 log_recall_diagnostic(config, "decision", decision="skipped", source="remote", reason=remote_reason)
                 return [], None, [], remote_reason
-            if remote_reason and remote_reason != "no-results":
+            if remote_reason and remote_reason not in ("no-results", "project-mismatch-filtered-empty"):
                 fallback_remote_reason = remote_reason
         except Exception as exc:
             print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
