@@ -224,6 +224,48 @@ def _body_has_related_heading(body):
     return any(line.strip() == "## Related" for line in body.splitlines())
 
 
+def _find_heading_match(content, heading):
+    """Return a match for an exact level-2 heading line."""
+    return re.search(rf"^{re.escape(heading)}[ \t]*$", content, re.MULTILINE)
+
+
+def _has_heading(content, heading):
+    """Return True when ``content`` contains ``heading`` as its own heading line."""
+    return _find_heading_match(content, heading) is not None
+
+
+def _append_under_heading(content, heading, line):
+    """Insert ``line`` at the end of the ``heading`` section's body.
+
+    The section ends at the next level-2 heading or end-of-file. Trailing
+    blank lines inside the section are collapsed before the line is added.
+    """
+    line = line.rstrip("\n")
+    heading_match = _find_heading_match(content, heading)
+    if heading_match is None:
+        return content.rstrip() + "\n\n" + heading + "\n\n" + line + "\n"
+
+    body_start = heading_match.end()
+    next_heading_match = re.search(r"^## [^\n]*$", content[body_start:], re.MULTILINE)
+    end = len(content) if next_heading_match is None else body_start + next_heading_match.start()
+
+    section = content[body_start:end].rstrip()
+    separator = "\n\n" if not section.strip() else "\n"
+    new_section = section + separator + line + "\n"
+    return content[:body_start] + new_section + content[end:]
+
+
+def append_project_session_line(content, line):
+    """Append an auto-captured session line to the preferred project section.
+
+    Hubs that have opted into ``## Activity log`` keep auto-captures there.
+    Older hubs continue to receive entries under ``## Sessions``.
+    """
+    if _has_heading(content, "## Activity log"):
+        return _append_under_heading(content, "## Activity log", line)
+    return _append_under_heading(content, "## Sessions", line)
+
+
 def find_dedup_candidates(vault_path, title, tags, limit=5):
     """Find notes with title/tag overlap likely to cover the same topic."""
     notes_dir = Path(vault_path) / "notes"
@@ -514,24 +556,14 @@ def update_project_index(vault_path, project_slug, note_name, session_summary):
 
     note_line = f"- [[{note_name}]]"
     if note_line not in content:
-        if "## Notes" in content:
-            notes_pos = content.index("## Notes") + len("## Notes")
-            sessions_pos = content.find("\n## Sessions", notes_pos)
-            if sessions_pos == -1:
-                content = content.rstrip() + "\n" + note_line + "\n"
-            else:
-                before = content[:sessions_pos].rstrip()
-                after = content[sessions_pos:]
-                content = before + "\n" + note_line + "\n\n" + after.lstrip("\n")
+        if _has_heading(content, "## Notes"):
+            content = _append_under_heading(content, "## Notes", note_line)
         else:
             content = content.rstrip() + "\n\n## Notes\n\n" + note_line + "\n"
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     session_line = f"- {today} {session_summary}"
     if session_line not in content:
-        if "## Sessions" in content:
-            content = content.rstrip() + "\n" + session_line + "\n"
-        else:
-            content = content.rstrip() + "\n\n## Sessions\n\n" + session_line + "\n"
+        content = append_project_session_line(content, session_line)
 
     project_file.write_text(content)

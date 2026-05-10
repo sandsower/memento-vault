@@ -67,6 +67,7 @@ from memento.store import (  # noqa: E402, F401
     _should_log,
     acquire_inception_lock,
     acquire_vault_write_lock,
+    append_project_session_line,
     find_dedup_candidates,
     load_inception_state,
     log_retrieval,

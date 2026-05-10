@@ -18,6 +18,7 @@ from memento.lifecycle import build_briefing, build_recall, build_tool_context
 from memento.search import enhance_results, has_qmd, miss_envelope, normalize_miss_reason, qmd_search_with_extras, qmd_get
 from memento.store import (
     acquire_vault_write_lock,
+    append_project_session_line,
     log_retrieval,
     release_vault_write_lock,
     update_project_index,
@@ -739,14 +740,10 @@ def memento_capture(
                     project_file.write_text(
                         f"---\ntitle: {project_slug}\nproject: {project_slug}\n---\n\n## Notes\n\n## Sessions\n\n"
                     )
-                session_line = f"- {today} `{session_id}` — {sanitized_summary[:80]}\n"
+                session_line = f"- {today} `{session_id}` — {sanitized_summary[:80]}"
                 content = project_file.read_text()
                 if session_id not in content:
-                    if "## Sessions" in content:
-                        idx = content.index("## Sessions") + len("## Sessions")
-                        content = content[:idx] + "\n" + session_line + content[idx:]
-                    else:
-                        content = content.rstrip("\n") + "\n\n## Sessions\n" + session_line
+                    content = append_project_session_line(content, session_line)
                     project_file.write_text(content)
 
             log_retrieval("mcp", "capture_fleeting", session_id=session_id, agent=agent, project=project_slug)

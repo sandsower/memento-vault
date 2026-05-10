@@ -20,6 +20,7 @@ _spec.loader.exec_module(_mod)
 parse_transcript = _mod.parse_transcript
 is_substantial = _mod.is_substantial
 write_fleeting = _mod.write_fleeting
+append_session_to_project = _mod.append_session_to_project
 process_structured_notes = _mod.process_structured_notes
 run_structured_notes_worker = _mod._run_structured_notes_worker
 spawn_memento_agent = _mod.spawn_memento_agent
@@ -236,6 +237,35 @@ class TestWriteFleeting:
         fleeting_files = list((tmp_vault / "fleeting").glob("*.md"))
         content = fleeting_files[0].read_text()
         assert "→" not in content
+
+
+class TestAppendSessionToProject:
+    def test_routes_auto_sessions_to_activity_log_when_present(self, tmp_vault):
+        project_file = tmp_vault / "projects" / "api-service.md"
+        project_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "title: api-service",
+                    "---",
+                    "",
+                    "## Sessions",
+                    "",
+                    "- 2026-04-01 — handwritten entry",
+                    "",
+                    "## Activity log",
+                    "",
+                ]
+            )
+        )
+
+        append_session_to_project(project_file, "sess-123", "Triage summary")
+
+        text = project_file.read_text()
+        activity_pos = text.index("## Activity log")
+        new_line_pos = text.index("`sess-123` — Triage summary")
+        assert activity_pos < new_line_pos
+        assert "## Activity log\n\n- " in text
 
 
 class TestProcessStructuredNotes:
