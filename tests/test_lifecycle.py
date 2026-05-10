@@ -138,6 +138,34 @@ def test_build_session_context_respects_budget_and_reports_expandable_paths(tmp_
     assert "truncated" in payload["metadata"]["budget_notes"][0]
 
 
+def test_build_session_context_compacts_structured_payload_under_budget_overhead(tmp_path):
+    (tmp_path / "notes").mkdir()
+    long_text = "x" * 2000
+    recall = LifecycleResult(
+        True,
+        "[vault] Related memories:\n  - " + long_text,
+        "recall",
+        results=[{"path": "notes/long.md", "title": "Long memory", "snippet": long_text, "content": long_text}],
+        metadata={"diagnostic": long_text},
+    )
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.build_recall", return_value=recall),
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "memory", "s1", token_budget=30)
+
+    serialized = json.dumps(payload)
+    assert len(serialized) <= payload["metadata"]["packet_char_budget"]
+    assert "content" not in payload["sections"]["recall"]
+    assert "content" not in payload["results"][0]
+    assert payload["metadata"]["truncated"] is True
+    assert payload["metadata"]["expandable_paths"] == ["notes/long.md"]
+
+
 @pytest.mark.parametrize(
     "prompt",
     [

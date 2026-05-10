@@ -1695,6 +1695,38 @@ def _queue_capture_count(vault: Path) -> int:
         return 0
 
 
+def _compact_session_result(result: dict) -> dict:
+    """Return bounded result metadata for session-context structured payloads."""
+    compact = {
+        "path": result.get("path", ""),
+        "title": strip_injection(str(result.get("title", ""))),
+    }
+    if result.get("score") is not None:
+        compact["score"] = result.get("score")
+    snippet = strip_injection(str(result.get("snippet", "")).strip())
+    if snippet:
+        compact["snippet"] = snippet[:160] + ("..." if len(snippet) > 160 else "")
+    return compact
+
+
+def _compact_lifecycle_section(result: LifecycleResult) -> dict:
+    """Return lifecycle result metadata without duplicating unbounded content."""
+    section = {
+        "should_inject": result.should_inject,
+        "source": result.source,
+        "result_count": len(result.results or []),
+    }
+    if result.reason is not None:
+        section["reason"] = result.reason
+    top_path = result.metadata.get("top_path") if isinstance(result.metadata, dict) else None
+    if top_path:
+        section["top_path"] = top_path
+    miss = result.metadata.get("miss") if isinstance(result.metadata, dict) else None
+    if isinstance(miss, dict):
+        section["miss"] = {"reason": miss.get("reason"), "recovery_hints": miss.get("recovery_hints", [])[:2]}
+    return section
+
+
 def _unique_result_paths(results: list[dict]) -> list[str]:
     paths = []
     seen = set()
@@ -1715,6 +1747,40 @@ def _truncate_session_context(content: str, char_budget: int) -> tuple[str, bool
     return content[: char_budget - len(suffix)].rstrip() + suffix, True
 
 
+def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict:
+    """Keep the serialized session-context packet within budget plus metadata overhead."""
+    if len(json.dumps(payload)) <= packet_char_budget:
+        return payload
+
+    payload["metadata"]["truncated"] = True
+    notes = payload["metadata"].setdefault("budget_notes", [])
+    if "structured payload compacted to fit packet budget" not in notes:
+        notes.append("structured payload compacted to fit packet budget")
+
+    content = payload.get("content", "")
+    if content:
+        overage = len(json.dumps(payload)) - packet_char_budget
+        new_len = max(0, len(content) - overage - 80)
+        payload["content"] = content[:new_len].rstrip()
+        payload["metadata"]["used_chars"] = len(payload["content"])
+
+    if len(json.dumps(payload)) <= packet_char_budget:
+        return payload
+
+    for result in payload.get("results", []):
+        if "snippet" in result and len(result["snippet"]) > 40:
+            result["snippet"] = result["snippet"][:40] + "..."
+
+    if len(json.dumps(payload)) <= packet_char_budget:
+        return payload
+
+    expandable_paths = payload["metadata"].get("expandable_paths", [])
+    while expandable_paths and len(json.dumps(payload)) > packet_char_budget:
+        expandable_paths.pop()
+        payload["metadata"]["omitted_expandable_paths_count"] = payload["metadata"].get("omitted_expandable_paths_count", 0) + 1
+    return payload
+
+
 def build_session_context(
     cwd: str = "",
     prompt: str = "",
@@ -1727,24 +1793,25 @@ def build_session_context(
 ) -> dict:
     """Build a one-call, budgeted session initialization/context packet."""
     token_budget, char_budget = _session_context_char_budget(token_budget)
+    packet_char_budget = char_budget + 1200
     sections: dict[str, object] = {}
-    results: list[dict] = []
+    raw_results: list[dict] = []
     content_blocks: list[str] = []
     warnings: list[str] = []
 
     if include_recent:
         briefing = build_briefing(cwd, session_id)
-        sections["briefing"] = briefing.to_dict()
+        sections["briefing"] = _compact_lifecycle_section(briefing)
         if briefing.content:
             content_blocks.append(briefing.content)
-        results.extend(briefing.results or [])
+        raw_results.extend(briefing.results or [])
 
     if include_recall and prompt:
         recall = build_recall(prompt, cwd, session_id)
-        sections["recall"] = recall.to_dict()
+        sections["recall"] = _compact_lifecycle_section(recall)
         if recall.content:
             content_blocks.append(recall.content)
-        results.extend(recall.results or [])
+        raw_results.extend(recall.results or [])
 
     if include_status:
         vault = get_vault()
@@ -1781,22 +1848,23 @@ def build_session_context(
 
     raw_content = "\n\n".join(block for block in content_blocks if block).strip()
     content, truncated = _truncate_session_context(raw_content, char_budget)
-    expandable_paths = _unique_result_paths(results)
+    expandable_paths = _unique_result_paths(raw_results)
     budget_notes = []
     if truncated:
         budget_notes.append("content truncated to token_budget; use expandable_paths with memento_get for full notes")
 
-    return {
+    payload = {
         "should_inject": bool(content),
         "content": content,
         "source": "session-context",
         "sections": sections,
-        "results": results,
+        "results": [_compact_session_result(result) for result in raw_results],
         "metadata": {
             "cwd": cwd,
             "session_id": session_id,
             "token_budget": token_budget,
             "char_budget": char_budget,
+            "packet_char_budget": packet_char_budget,
             "used_chars": len(content),
             "truncated": truncated,
             "expandable_paths": expandable_paths,
@@ -1804,6 +1872,7 @@ def build_session_context(
             "budget_notes": budget_notes,
         },
     }
+    return _fit_session_context_payload(payload, packet_char_budget)
 
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
