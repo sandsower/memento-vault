@@ -17,11 +17,14 @@ from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, s
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
 from memento.llm import is_invalid_mcp_config_error, llm_complete
 from memento.search import (
+    MISS_RECOVERY_HINTS,
+    build_search_miss,
     enhance_results,
     has_qmd,
     is_vsearch_warm,
     mark_vsearch_warm,
     multi_hop_search,
+    normalize_miss_reason,
     prf_expand_query,
     qmd_search,
     qmd_search_with_extras,
@@ -58,6 +61,15 @@ class LifecycleResult:
         if self.metadata:
             payload["metadata"] = self.metadata
         return payload
+
+
+class StructuredMissReason(str):
+    """String reason that carries a structured miss payload through recall internals."""
+
+    def __new__(cls, reason: str, miss: dict):
+        obj = str.__new__(cls, reason)
+        obj.miss = miss
+        return obj
 
 
 def empty_result(source: str, reason: str = "no-results") -> LifecycleResult:
@@ -1225,12 +1237,12 @@ def consume_deep_recall():
 def run_remote_recall(prompt, cwd, config):
     """Run recall via the remote vault client.
 
-    Returns (lines, top_path, results, reason, project_decisions). A plain
-    remote miss keeps reason="no-results" so callers may fall back to local;
-    an explicit project mismatch is a terminal skip because local fallback would
-    risk injecting the unrelated context the filter just removed.
+    Returns (lines, top_path, results, reason, project_decisions). A non-terminal
+    remote miss may carry a structured reason; callers may still fall back to
+    local search. An explicit project mismatch is terminal because local fallback
+    would risk injecting the unrelated context the filter just removed.
     """
-    from memento.remote_client import search as remote_search
+    from memento.remote_client import search_envelope as remote_search_envelope
 
     if should_skip_recall(prompt, config):
         reason = "broad-project-query" if is_broad_project_history_query(prompt) else "skipped-prompt"
@@ -1239,10 +1251,17 @@ def run_remote_recall(prompt, cwd, config):
     max_notes = config.get("recall_max_notes", 3)
     min_score = config.get("recall_min_score", 0.4)
 
-    raw_results = remote_search(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd)
+    envelope = remote_search_envelope(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd)
+    raw_results = envelope.get("results", [])
     results, project_decisions = filter_recall_results_by_explicit_project(prompt, raw_results)
     if not results:
-        reason = "project-mismatch-filtered-empty" if project_decisions else "no-results"
+        if project_decisions:
+            reason = "project-mismatch-filtered-empty"
+        elif isinstance(envelope.get("miss"), dict):
+            reason = envelope["miss"].get("reason") or "no-results"
+            reason = StructuredMissReason(reason, envelope["miss"])
+        else:
+            reason = "no-results"
         return [], None, [], reason, project_decisions
 
     top_path = results[0].get("path", "")
@@ -1306,6 +1325,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     # Try remote vault first (has cross-device data), fall through to local
     from memento.remote_client import is_remote
 
+    fallback_remote_reason = None
     if is_remote() and prompt:
         try:
             lines, top_path, remote_results, remote_reason, project_decisions = run_remote_recall(prompt, cwd, config)
@@ -1320,20 +1340,24 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             if lines:
                 log_recall_diagnostic(config, "decision", decision="injected", source="remote", top_path=top_path)
                 return lines, top_path, remote_results, None
-            if remote_reason in ("project-mismatch-filtered-empty", "duplicate"):
+            if remote_reason == "duplicate":
                 log_recall_diagnostic(config, "decision", decision="skipped", source="remote", reason=remote_reason)
                 return [], None, [], remote_reason
+            if remote_reason and remote_reason not in ("no-results", "project-mismatch-filtered-empty"):
+                fallback_remote_reason = remote_reason
         except Exception as exc:
             print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="vault-unavailable")
-        return [], None, [], "vault-unavailable"
+        reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "empty_vault", prompt)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
+        return [], None, [], reason
 
     if not has_qmd():
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="qmd-unavailable")
-        return [], None, [], "qmd-unavailable"
+        reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "backend_unavailable", prompt)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
+        return [], None, [], reason
 
     # BM25 search against the prompt, augmented with project context
     min_score = config.get("recall_min_score", 0.4)
@@ -1472,10 +1496,38 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             pass
 
     if not results:
+        if min_score > 0:
+            threshold_probe = qmd_search_with_extras(
+                query,
+                limit=1,
+                semantic=False,
+                timeout=5,
+                min_score=0.0,
+            )
+            if threshold_probe:
+                bump_prompts_since()
+                log_retrieval(
+                    "recall",
+                    "threshold_too_high",
+                    query=query,
+                    min_score=min_score,
+                    latency_ms=latency_ms,
+                    pipeline=pipeline_depth,
+                )
+                log_recall_diagnostic(
+                    config,
+                    "decision",
+                    decision="skipped",
+                    reason="threshold_too_high",
+                    min_score=min_score,
+                    latency_ms=latency_ms,
+                )
+                return [], None, [], "threshold_too_high"
         bump_prompts_since()
-        log_retrieval("recall", "no-results", query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="no-results", latency_ms=latency_ms)
-        return [], None, [], "no-results"
+        miss_reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "no-results", prompt)
+        log_retrieval("recall", str(miss_reason), query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=str(miss_reason), latency_ms=latency_ms)
+        return [], None, [], miss_reason
 
     results = enhance_results(results, config, cwd=cwd)
     log_recall_candidates(config, results, "enhanced", query=query)
@@ -1564,6 +1616,17 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> Lif
     """Build prompt recall content."""
     lines, top_path, results, reason = _run_recall_lines(prompt, cwd, session_id)
     if not lines:
+        if reason in ("broad-project-query", "skipped-prompt", "low-signal-prompt"):
+            return empty_result("recall", reason)
+        normalized = normalize_miss_reason(reason, prompt)
+        if normalized in MISS_RECOVERY_HINTS:
+            remote_miss = getattr(reason, "miss", None)
+            details = None
+            if normalized == "threshold_too_high" and not isinstance(remote_miss, dict):
+                details = {"min_score": get_config().get("recall_min_score", 0.4)}
+            result = empty_result("recall", normalized)
+            result.metadata = {"miss": remote_miss if isinstance(remote_miss, dict) else build_search_miss(normalized, details=details)}
+            return result
         return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)
     if top_path:

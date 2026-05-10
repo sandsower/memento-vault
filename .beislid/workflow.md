@@ -13,6 +13,11 @@ id_pattern: '^#?\d+$'
 link_template: 'https://github.com/sandsower/memento-vault/issues/{id}'
 ```
 
+```beislid:ticket_update
+type: cli
+comment_command: 'gh issue comment {id} --body-file {body_file}'
+```
+
 ## PR reviews
 
 ```beislid:pr_review_source

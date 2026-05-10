@@ -56,7 +56,7 @@ def test_pi_bridge_status_outputs_json(capsys, tmp_path):
     assert payload["queued_capture_count"] == 0
 
 
-def test_pi_bridge_search_reports_qmd_unavailable(capsys):
+def test_pi_bridge_search_reports_backend_unavailable_with_miss(capsys):
     with (
         patch("memento.pi_bridge.has_qmd", return_value=False),
         patch("memento.pi_bridge.is_remote", return_value=False),
@@ -64,7 +64,68 @@ def test_pi_bridge_search_reports_qmd_unavailable(capsys):
         code = pi_bridge.main(["search", "--query", "cache"])
 
     assert code == 0
-    assert json.loads(capsys.readouterr().out) == {"results": [], "reason": "qmd-unavailable"}
+    assert json.loads(capsys.readouterr().out) == {
+        "results": [],
+        "miss": {
+            "reason": "backend_unavailable",
+            "recovery_hints": ["Check memento_status for search backend health.", "Run memento_reindex if the index is stale."],
+        },
+        "reason": "backend_unavailable",
+    }
+
+
+def test_pi_bridge_search_preserves_remote_miss(capsys):
+    remote_miss = {
+        "results": [],
+        "miss": {"reason": "threshold_too_high", "recovery_hints": ["Lower min_score."]},
+    }
+    with (
+        patch("memento.pi_bridge.has_qmd", return_value=False),
+        patch("memento.pi_bridge.is_remote", return_value=True),
+        patch("memento.pi_bridge.remote_search_envelope", return_value=remote_miss),
+    ):
+        code = pi_bridge.main(["search", "--query", "cache"])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "results": [],
+        "miss": {"reason": "threshold_too_high", "recovery_hints": ["Lower min_score."]},
+        "reason": "threshold_too_high",
+    }
+
+
+def test_pi_bridge_search_reports_remote_error_as_backend_unavailable(capsys):
+    with (
+        patch("memento.pi_bridge.has_qmd", return_value=False),
+        patch("memento.pi_bridge.is_remote", return_value=True),
+        patch("memento.pi_bridge.remote_search_envelope", return_value={"results": [], "error": "boom"}),
+    ):
+        code = pi_bridge.main(["search", "--query", "cache"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["results"] == []
+    assert payload["reason"] == "backend_unavailable"
+    assert payload["miss"]["reason"] == "backend_unavailable"
+    assert payload["miss"]["details"] == {"error": "boom"}
+
+
+def test_pi_bridge_search_reports_project_filter_removed_all(capsys):
+    with (
+        patch("memento.pi_bridge.has_qmd", return_value=True),
+        patch(
+            "memento.pi_bridge.qmd_search_with_extras",
+            return_value=[{"path": "notes/dala.md", "title": "Dala", "score": 0.9, "snippet": ""}],
+        ),
+        patch("memento.pi_bridge.enhance_results", return_value=[]),
+    ):
+        code = pi_bridge.main(["search", "--query", "fundid email", "--cwd", "/repo/fundid"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["results"] == []
+    assert payload["reason"] == "project_filter_removed_all"
+    assert payload["miss"]["details"] == {"cwd": "/repo/fundid"}
 
 
 def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):

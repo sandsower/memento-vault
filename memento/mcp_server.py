@@ -15,7 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
 from memento.lifecycle import build_briefing, build_recall, build_tool_context
-from memento.search import enhance_results, has_qmd, qmd_search_with_extras, qmd_get
+from memento.search import enhance_results, has_qmd, miss_envelope, normalize_miss_reason, qmd_search_with_extras, qmd_get
 from memento.store import (
     acquire_vault_write_lock,
     log_retrieval,
@@ -154,7 +154,7 @@ def memento_search(
     semantic: bool = False,
     min_score: float = 0.0,
     cwd: str = "",
-) -> list[dict]:
+) -> object:
     """Search the memento vault for relevant notes.
 
     Args:
@@ -165,10 +165,13 @@ def memento_search(
         cwd: Current working directory -- used to filter results by project scope.
 
     Returns:
-        List of matching notes with path, title, score, and snippet.
+        List of matching notes on hits. On misses, an envelope with
+        results=[] and structured miss metadata.
     """
     if not query or not query.strip():
-        return []
+        miss = miss_envelope("query_too_broad", details={"query": query})
+        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
+        return miss
 
     # Clamp limit to prevent DoS via unbounded scans
     try:
@@ -178,18 +181,47 @@ def memento_search(
 
     vault = get_vault()
     if not vault.exists() or not any((vault / d).exists() for d in ("notes", "fleeting", "projects")):
-        return []
+        miss = miss_envelope("empty_vault", details={"vault": str(vault)})
+        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
+        return miss
 
-    results = qmd_search_with_extras(
+    if not has_qmd():
+        miss = miss_envelope("backend_unavailable")
+        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
+        return miss
+
+    raw_results = qmd_search_with_extras(
         query,
         limit=limit + 3,
         semantic=semantic,
         timeout=10,
         min_score=min_score,
     )
+    results = raw_results
 
     if results:
         results = enhance_results(results, cwd=cwd or None)
+
+    if not results:
+        if raw_results:
+            reason = "project_filter_removed_all"
+            details = {"cwd": cwd} if cwd else None
+        elif min_score > 0:
+            low_threshold_results = qmd_search_with_extras(
+                query,
+                limit=1,
+                semantic=semantic,
+                timeout=10,
+                min_score=0.0,
+            )
+            reason = "threshold_too_high" if low_threshold_results else normalize_miss_reason("no-results", query)
+            details = {"min_score": min_score} if reason == "threshold_too_high" else None
+        else:
+            reason = normalize_miss_reason("no-results", query)
+            details = None
+        miss = miss_envelope(reason, details=details)
+        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
+        return miss
 
     output = []
     for r in results[:limit]:
