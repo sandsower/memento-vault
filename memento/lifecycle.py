@@ -1747,10 +1747,16 @@ def _truncate_session_context(content: str, char_budget: int) -> tuple[str, bool
     return content[: char_budget - len(suffix)].rstrip() + suffix, True
 
 
+def _finalize_session_context_payload(payload: dict) -> dict:
+    payload["metadata"]["used_chars"] = len(payload.get("content", ""))
+    payload["should_inject"] = bool(payload.get("content"))
+    return payload
+
+
 def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict:
     """Keep the serialized session-context packet within budget plus metadata overhead."""
     if len(json.dumps(payload)) <= packet_char_budget:
-        return payload
+        return _finalize_session_context_payload(payload)
 
     payload["metadata"]["truncated"] = True
     notes = payload["metadata"].setdefault("budget_notes", [])
@@ -1762,17 +1768,16 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
         overage = len(json.dumps(payload)) - packet_char_budget
         new_len = max(0, len(content) - overage - 80)
         payload["content"] = content[:new_len].rstrip()
-        payload["metadata"]["used_chars"] = len(payload["content"])
 
     if len(json.dumps(payload)) <= packet_char_budget:
-        return payload
+        return _finalize_session_context_payload(payload)
 
     for result in payload.get("results", []):
         if "snippet" in result and len(result["snippet"]) > 40:
             result["snippet"] = result["snippet"][:40] + "..."
 
     if len(json.dumps(payload)) <= packet_char_budget:
-        return payload
+        return _finalize_session_context_payload(payload)
 
     expandable_paths = payload["metadata"].get("expandable_paths", [])
     while expandable_paths and len(json.dumps(payload)) > packet_char_budget:
@@ -1790,7 +1795,6 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
 
     if len(json.dumps(payload)) > packet_char_budget:
         payload["content"] = ""
-        payload["metadata"]["used_chars"] = 0
 
     if len(json.dumps(payload)) > packet_char_budget:
         payload["sections"] = {key: value for key, value in payload.get("sections", {}).items() if key in {"status", "queue"}}
@@ -1798,8 +1802,7 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
         payload["metadata"]["expandable_paths"] = []
         payload["metadata"]["omitted_results"] = True
 
-    payload["should_inject"] = bool(payload.get("content"))
-    return payload
+    return _finalize_session_context_payload(payload)
 
 
 def build_session_context(

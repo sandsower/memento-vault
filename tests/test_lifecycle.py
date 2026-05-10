@@ -184,6 +184,24 @@ def test_build_session_context_final_budget_fallback_handles_long_metadata(tmp_p
     assert payload["metadata"].get("omitted_metadata") is True
 
 
+def test_build_session_context_recomputes_should_inject_on_early_fit(tmp_path):
+    (tmp_path / "notes").mkdir()
+    briefing = LifecycleResult(True, "short context", "briefing")
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=briefing),
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: " + ("x" * 1000)),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=50, include_recall=False)
+
+    assert len(json.dumps(payload)) <= payload["metadata"]["packet_char_budget"]
+    assert payload["content"] == ""
+    assert payload["should_inject"] is False
+    assert payload["metadata"]["used_chars"] == 0
+
+
 @pytest.mark.parametrize(
     "prompt",
     [
