@@ -1227,10 +1227,10 @@ def consume_deep_recall():
 def run_remote_recall(prompt, cwd, config):
     """Run recall via the remote vault client.
 
-    Returns (lines, top_path, results, reason, project_decisions). A plain
-    remote miss keeps reason="no-results" so callers may fall back to local;
-    an explicit project mismatch is a terminal skip because local fallback would
-    risk injecting the unrelated context the filter just removed.
+    Returns (lines, top_path, results, reason, project_decisions). A non-terminal
+    remote miss may carry a structured reason; callers may still fall back to
+    local search. An explicit project mismatch is terminal because local fallback
+    would risk injecting the unrelated context the filter just removed.
     """
     from memento.remote_client import search_envelope as remote_search_envelope
 
@@ -1314,6 +1314,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     # Try remote vault first (has cross-device data), fall through to local
     from memento.remote_client import is_remote
 
+    fallback_remote_reason = None
     if is_remote() and prompt:
         try:
             lines, top_path, remote_results, remote_reason, project_decisions = run_remote_recall(prompt, cwd, config)
@@ -1328,9 +1329,11 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             if lines:
                 log_recall_diagnostic(config, "decision", decision="injected", source="remote", top_path=top_path)
                 return lines, top_path, remote_results, None
-            if remote_reason and remote_reason != "no-results":
+            if remote_reason in ("project-mismatch-filtered-empty", "duplicate"):
                 log_recall_diagnostic(config, "decision", decision="skipped", source="remote", reason=remote_reason)
                 return [], None, [], remote_reason
+            if remote_reason and remote_reason != "no-results":
+                fallback_remote_reason = remote_reason
         except Exception as exc:
             print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
 
@@ -1508,7 +1511,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
                 )
                 return [], None, [], "threshold_too_high"
         bump_prompts_since()
-        miss_reason = normalize_miss_reason("no-results", prompt)
+        miss_reason = normalize_miss_reason(fallback_remote_reason or "no-results", prompt)
         log_retrieval("recall", miss_reason, query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
         log_recall_diagnostic(config, "decision", decision="skipped", reason=miss_reason, latency_ms=latency_ms)
         return [], None, [], miss_reason

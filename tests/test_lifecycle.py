@@ -636,7 +636,7 @@ def test_build_recall_project_filter_empty_includes_miss_metadata(
 @patch("memento.remote_client.is_remote", return_value=True)
 @patch("memento.lifecycle.log_retrieval")
 @patch("memento.remote_client.search_envelope")
-@patch("memento.lifecycle.has_qmd")
+@patch("memento.lifecycle.has_qmd", return_value=False)
 @patch(
     "memento.lifecycle.get_config",
     return_value={
@@ -647,24 +647,62 @@ def test_build_recall_project_filter_empty_includes_miss_metadata(
         "recall_max_notes": 3,
     },
 )
-def test_build_recall_preserves_remote_structured_miss(_config, mock_has_qmd, mock_remote_search, mock_log, _is_remote):
+def test_build_recall_preserves_remote_structured_miss_when_local_unavailable(
+    _config, _has_qmd, mock_remote_search, mock_log, _is_remote, tmp_path
+):
+    (tmp_path / "notes").mkdir()
     mock_remote_search.return_value = {
         "results": [],
         "miss": {"reason": "threshold_too_high", "recovery_hints": ["Lower min_score."]},
     }
-
-    result = build_recall("how should cache invalidation work?", "/repo", "s1")
+    with patch("memento.lifecycle.get_vault", return_value=tmp_path):
+        result = build_recall("how should cache invalidation work?", str(tmp_path), "s1")
 
     assert result.should_inject is False
-    assert result.reason == "threshold_too_high"
-    assert result.metadata["miss"] == {
-        "reason": "threshold_too_high",
-        "recovery_hints": ["Lower min_score."],
-        "details": {"min_score": 0.9},
-    }
-    mock_has_qmd.assert_not_called()
+    assert result.reason == "backend_unavailable"
+    assert result.metadata["miss"]["reason"] == "backend_unavailable"
     decisions = [call.kwargs for call in mock_log.call_args_list if call.args[1] == "diagnostic-decision"]
-    assert decisions[-1]["reason"] == "threshold_too_high"
+    assert decisions[-1]["reason"] == "backend_unavailable"
+
+
+@patch("memento.remote_client.is_remote", return_value=True)
+@patch("memento.lifecycle.is_duplicate", return_value=False)
+@patch("memento.lifecycle.enhance_results", side_effect=lambda results, *args, **kwargs: results)
+@patch("memento.lifecycle.qmd_search_with_extras")
+@patch("memento.lifecycle.has_qmd", return_value=True)
+@patch("memento.lifecycle.get_vault")
+@patch("memento.remote_client.search_envelope")
+@patch(
+    "memento.lifecycle.get_config",
+    return_value={
+        "prompt_recall": True,
+        "recall_diagnostics": True,
+        "recall_min_score": 0.4,
+        "recall_max_notes": 3,
+        "recall_high_confidence": 0.55,
+        "concept_index_enabled": False,
+        "rrf_enabled": False,
+        "multi_hop_enabled": False,
+        "reranker_enabled": False,
+    },
+)
+def test_remote_no_exact_match_falls_back_to_local_recall(
+    _config, mock_remote_search, mock_vault, _has_qmd, mock_search, _enhance, _is_duplicate, _is_remote, tmp_path
+):
+    (tmp_path / "notes").mkdir()
+    mock_vault.return_value = tmp_path
+    mock_remote_search.return_value = {
+        "results": [],
+        "miss": {"reason": "no_exact_match", "recovery_hints": ["Try a broader query."]},
+    }
+    mock_search.return_value = [{"path": "notes/cache.md", "title": "Cache policy", "score": 0.9}]
+
+    lines, top_path, results, reason = _run_recall_lines("how should cache invalidation work?", str(tmp_path), "s1")
+
+    assert reason is None
+    assert top_path == "notes/cache.md"
+    assert results == [{"path": "notes/cache.md", "title": "Cache policy", "score": 0.9}]
+    assert lines == ["[vault] Related memories:", "  - Cache policy"]
 
 
 def test_tool_context_skips_unsupported_tool():
