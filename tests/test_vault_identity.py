@@ -1,11 +1,9 @@
 """Tests for vault identity generation and persistence."""
 
 import json
-import pytest
-from pathlib import Path
 from unittest.mock import patch
 
-from memento.config import get_vault_id, _vault_identity_path, _legacy_vault_identity_path
+from memento.config import get_vault_id
 
 
 def _patch_identity(tmp_path):
@@ -67,7 +65,7 @@ class TestVaultIdentity:
         # Override to a deep nested path
         deep_path = tmp_path / "deep" / "nested" / "vault-identity.json"
         with patch("memento.config._vault_identity_path", return_value=deep_path), p2:
-            vault_id = get_vault_id()
+            get_vault_id()
             assert deep_path.exists()
 
     def test_migrates_from_legacy_location(self, tmp_path):

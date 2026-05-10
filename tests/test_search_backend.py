@@ -249,7 +249,10 @@ class TestEmbeddedBackendDetection:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("memento.search_backend.QMDBackend.is_available", lambda self: False)
             mp.setattr("memento.config.get_vault", lambda: vault)
-            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "auto", "search_db_path": ".search/search.db"})
+            mp.setattr(
+                "memento.config.get_config",
+                lambda: {"vault_path": str(vault), "search_backend": "auto", "search_db_path": ".search/search.db"},
+            )
             reset_backend()
             backend = get_backend()
             assert isinstance(backend, EmbeddedSearchBackend)
@@ -263,7 +266,10 @@ class TestEmbeddedBackendDetection:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("memento.search_backend.QMDBackend.is_available", lambda self: True)
             mp.setattr("memento.config.get_vault", lambda: vault)
-            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "auto", "search_db_path": ".search/search.db"})
+            mp.setattr(
+                "memento.config.get_config",
+                lambda: {"vault_path": str(vault), "search_backend": "auto", "search_db_path": ".search/search.db"},
+            )
             reset_backend()
             backend = get_backend()
             assert isinstance(backend, QMDBackend)
@@ -279,7 +285,10 @@ class TestEmbeddedBackendDetection:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("memento.search_backend.QMDBackend.is_available", lambda self: True)
             mp.setattr("memento.config.get_vault", lambda: vault)
-            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "embedded", "search_db_path": ".search/search.db"})
+            mp.setattr(
+                "memento.config.get_config",
+                lambda: {"vault_path": str(vault), "search_backend": "embedded", "search_db_path": ".search/search.db"},
+            )
             reset_backend()
             backend = get_backend()
             assert isinstance(backend, EmbeddedSearchBackend)
@@ -292,7 +301,10 @@ class TestEmbeddedBackendDetection:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("memento.config.get_vault", lambda: vault)
-            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "grep", "search_db_path": ".search/search.db"})
+            mp.setattr(
+                "memento.config.get_config",
+                lambda: {"vault_path": str(vault), "search_backend": "grep", "search_db_path": ".search/search.db"},
+            )
             reset_backend()
             backend = get_backend()
             assert isinstance(backend, GrepBackend)
@@ -303,7 +315,10 @@ class TestEmbeddedBackendDetection:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("memento.search_backend.QMDBackend.is_available", lambda self: False)
             mp.setattr("memento.config.get_vault", lambda: vault)
-            mp.setattr("memento.config.get_config", lambda: {"vault_path": str(vault), "search_backend": "auto", "search_db_path": ".search/search.db"})
+            mp.setattr(
+                "memento.config.get_config",
+                lambda: {"vault_path": str(vault), "search_backend": "auto", "search_db_path": ".search/search.db"},
+            )
             reset_backend()
             backend = get_backend()
             assert isinstance(backend, GrepBackend)

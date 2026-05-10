@@ -84,8 +84,8 @@ def patch_file(file_path, key, new_value, fmt, dry_run=False):
     if old_value_str == formatted:
         return True, f"{key}: {formatted} (unchanged)"
 
-    new_line = f'{match.group(1)}{formatted}{match.group(3)}'
-    new_content = content[:match.start()] + new_line + content[match.end():]
+    new_line = f"{match.group(1)}{formatted}{match.group(3)}"
+    new_content = content[: match.start()] + new_line + content[match.end() :]
 
     if not dry_run:
         file_path.write_text(new_content)

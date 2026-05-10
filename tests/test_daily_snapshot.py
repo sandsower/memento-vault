@@ -88,9 +88,7 @@ class TestWriteDailySnapshotWrite:
 
     def test_supersede_writes_v2(self, tmp_vault):
         write_daily_snapshot(tmp_vault, "2026-04-23", "care_git", "first")
-        result = write_daily_snapshot(
-            tmp_vault, "2026-04-23", "care_git", "updated", supersede=True
-        )
+        result = write_daily_snapshot(tmp_vault, "2026-04-23", "care_git", "updated", supersede=True)
 
         assert result["path"] == "notes/daily-2026-04-23-care_git-v2.md"
         assert result["version"] == 2
@@ -105,9 +103,7 @@ class TestWriteDailySnapshotWrite:
     def test_third_write_supersedes_to_v3(self, tmp_vault):
         write_daily_snapshot(tmp_vault, "2026-04-23", "care_git", "first")
         write_daily_snapshot(tmp_vault, "2026-04-23", "care_git", "second", supersede=True)
-        result = write_daily_snapshot(
-            tmp_vault, "2026-04-23", "care_git", "third", supersede=True
-        )
+        result = write_daily_snapshot(tmp_vault, "2026-04-23", "care_git", "third", supersede=True)
 
         assert result["path"] == "notes/daily-2026-04-23-care_git-v3.md"
         assert result["version"] == 3
@@ -219,33 +215,23 @@ class TestMementoDailySnapshotTool:
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_invalid_date_returns_error(self, tmp_vault):
-        result = memento_daily_snapshot(
-            date="not-a-date", repo_slug="care_git", content="body"
-        )
+        result = memento_daily_snapshot(date="not-a-date", repo_slug="care_git", content="body")
         assert result["reason"] == "invalid_date"
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_invalid_repo_slug_returns_error(self, tmp_vault):
-        result = memento_daily_snapshot(
-            date="2026-04-23", repo_slug="Care/Git!", content="body"
-        )
+        result = memento_daily_snapshot(date="2026-04-23", repo_slug="Care/Git!", content="body")
         assert result["reason"] == "invalid_repo_slug"
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_already_exists(self, tmp_vault):
-        memento_daily_snapshot(
-            date="2026-04-23", repo_slug="care_git", content="first"
-        )
-        result = memento_daily_snapshot(
-            date="2026-04-23", repo_slug="care_git", content="second"
-        )
+        memento_daily_snapshot(date="2026-04-23", repo_slug="care_git", content="first")
+        result = memento_daily_snapshot(date="2026-04-23", repo_slug="care_git", content="second")
         assert result["reason"] == "already_exists"
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_supersede(self, tmp_vault):
-        memento_daily_snapshot(
-            date="2026-04-23", repo_slug="care_git", content="first"
-        )
+        memento_daily_snapshot(date="2026-04-23", repo_slug="care_git", content="first")
         result = memento_daily_snapshot(
             date="2026-04-23",
             repo_slug="care_git",
@@ -262,17 +248,13 @@ class TestMementoDailySnapshotTool:
     def test_missing_vault(self, tmp_path):
         missing = tmp_path / "nonexistent"
         with patch("memento.mcp_server.get_vault", return_value=missing):
-            result = memento_daily_snapshot(
-                date="2026-04-23", repo_slug="care_git", content="body"
-            )
+            result = memento_daily_snapshot(date="2026-04-23", repo_slug="care_git", content="body")
         assert result["reason"] == "vault_missing"
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_lock_timeout(self, tmp_vault):
         with patch("memento.mcp_server.acquire_vault_write_lock", return_value=False):
-            result = memento_daily_snapshot(
-                date="2026-04-23", repo_slug="care_git", content="body"
-            )
+            result = memento_daily_snapshot(date="2026-04-23", repo_slug="care_git", content="body")
         assert result["reason"] == "lock_timeout"
 
     @pytest.mark.usefixtures("_use_vault_config")

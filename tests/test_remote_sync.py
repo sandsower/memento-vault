@@ -4,7 +4,7 @@ import hashlib
 import importlib.util
 import sys
 from pathlib import Path
-from unittest.mock import patch, call
+from unittest.mock import patch
 
 import pytest
 
@@ -24,15 +24,7 @@ def _load_remote_sync_module():
 
 def _write_note(path: Path, *, title: str, body: str = "Body.") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "---\n"
-        f"title: {title}\n"
-        "type: discovery\n"
-        "tags: [sync]\n"
-        "certainty: 3\n"
-        "---\n\n"
-        f"{body}\n"
-    )
+    path.write_text(f"---\ntitle: {title}\ntype: discovery\ntags: [sync]\ncertainty: 3\n---\n\n{body}\n")
 
 
 def _file_hash(path: Path) -> str:
@@ -338,8 +330,12 @@ class TestCatchUp:
         parsed = mod.parse_note(note)
         chash = mod.sync_ledger.content_hash(mod._sync_payload(parsed))
         mod.sync_ledger.record(
-            vault, "note", "notes/synced-note.md",
-            status="ok", content_hash=chash, remote_path="notes/synced-note.md",
+            vault,
+            "note",
+            "notes/synced-note.md",
+            status="ok",
+            content_hash=chash,
+            remote_path="notes/synced-note.md",
         )
 
         with (
@@ -395,8 +391,12 @@ class TestCatchUp:
         parsed_v1 = mod.parse_note(note)
         chash_v1 = mod.sync_ledger.content_hash(mod._sync_payload(parsed_v1))
         mod.sync_ledger.record(
-            vault, "note", "notes/evolved.md",
-            status="ok", content_hash=chash_v1, remote_path="notes/evolved.md",
+            vault,
+            "note",
+            "notes/evolved.md",
+            status="ok",
+            content_hash=chash_v1,
+            remote_path="notes/evolved.md",
         )
 
         # Local content changed to version 2
@@ -441,8 +441,12 @@ class TestCatchUp:
         parsed = mod.parse_note(note)
         chash = mod.sync_ledger.content_hash(mod._sync_payload(parsed))
         mod.sync_ledger.record(
-            vault, "note", "notes/local-name.md",
-            status="ok", content_hash=chash, remote_path="notes/local-name-2.md",
+            vault,
+            "note",
+            "notes/local-name.md",
+            status="ok",
+            content_hash=chash,
+            remote_path="notes/local-name-2.md",
         )
 
         with (
@@ -470,8 +474,12 @@ class TestCatchUp:
         parsed_v1 = mod.parse_note(note)
         chash_v1 = mod.sync_ledger.content_hash(mod._sync_payload(parsed_v1))
         mod.sync_ledger.record(
-            vault, "note", "notes/evolving-note.md",
-            status="ok", content_hash=chash_v1, remote_path="notes/evolving-note.md",
+            vault,
+            "note",
+            "notes/evolving-note.md",
+            status="ok",
+            content_hash=chash_v1,
+            remote_path="notes/evolving-note.md",
         )
 
         # Now update the local note
@@ -503,8 +511,12 @@ class TestCatchUp:
         parsed_v1 = mod.parse_note(note)
         chash_v1 = mod.sync_ledger.content_hash(mod._sync_payload(parsed_v1))
         mod.sync_ledger.record(
-            vault, "note", "notes/diverged-note.md",
-            status="ok", content_hash=chash_v1, remote_path="notes/diverged-note-2.md",
+            vault,
+            "note",
+            "notes/diverged-note.md",
+            status="ok",
+            content_hash=chash_v1,
+            remote_path="notes/diverged-note-2.md",
         )
 
         # Now update the local note

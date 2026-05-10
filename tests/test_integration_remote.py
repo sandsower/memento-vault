@@ -56,8 +56,7 @@ def server(tmp_path_factory):
     # Force GrepBackend so the server searches the temp vault
     # instead of the real QMD collection which doesn't have our test notes
     clean_path = os.pathsep.join(
-        p for p in os.environ.get("PATH", "").split(os.pathsep)
-        if not os.path.isfile(os.path.join(p, "qmd"))
+        p for p in os.environ.get("PATH", "").split(os.pathsep) if not os.path.isfile(os.path.join(p, "qmd"))
     )
     env = {
         **os.environ,
@@ -112,8 +111,9 @@ class TestRemoteIntegration:
 
         results = search("xylophone")
         assert len(results) >= 1
-        assert any("integration" in r.get("title", "").lower() or "xylophone" in r.get("content", "").lower() for r in results)
-        assert any("integration" in r.get("title", "").lower() or "xylophone" in r.get("content", "").lower() for r in results)
+        assert any(
+            "integration" in r.get("title", "").lower() or "xylophone" in r.get("content", "").lower() for r in results
+        )
 
     def test_search_returns_content(self):
         from memento.remote_client import search

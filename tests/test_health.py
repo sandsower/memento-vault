@@ -184,7 +184,9 @@ def test_failures_always_exit_nonzero():
 def test_claude_hook_registration_warns_when_expected_hook_missing():
     config_dir = health._config_dir()
     config_dir.mkdir(parents=True)
-    (config_dir / "manifest.json").write_text(json.dumps({"version": "4.1.0", "options": {"experimental": True}, "files": {}}))
+    (config_dir / "manifest.json").write_text(
+        json.dumps({"version": "4.1.0", "options": {"experimental": True}, "files": {}})
+    )
     settings = Path.home() / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True)
     settings.write_text(json.dumps({"hooks": {"SessionEnd": []}}))
@@ -316,15 +318,18 @@ def test_mcp_registration_shape_rejects_wrong_python_module():
 
 
 def test_mcp_local_stdio_shape_rejects_reordered_args():
-    assert health._mcp_entry_shape(
-        {
-            "memento-vault": {
-                "command": "python3",
-                "args": ["memento", "-m"],
-                "env": {"PYTHONPATH": "/tmp/hooks"},
+    assert (
+        health._mcp_entry_shape(
+            {
+                "memento-vault": {
+                    "command": "python3",
+                    "args": ["memento", "-m"],
+                    "env": {"PYTHONPATH": "/tmp/hooks"},
+                }
             }
-        }
-    )[0] == "invalid"
+        )[0]
+        == "invalid"
+    )
 
 
 def test_invalid_pi_bridge_config_warns():

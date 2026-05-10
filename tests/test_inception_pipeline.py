@@ -148,9 +148,7 @@ class TestMainPipeline:
         # With LLM returning empty, synthesis fails and nothing gets written.
         with _force_cluster(["zustand-state-reset", "react-query-wrapper"]):
             with patch("memento_inception.call_llm", return_value=""):
-                result = _run_main(
-                    mock_config, inception_state_path, ["--full"], db_path=str(mock_qmd_db)
-                )
+                result = _run_main(mock_config, inception_state_path, ["--full"], db_path=str(mock_qmd_db))
         assert result == 0
         state = json.loads(inception_state_path.read_text())
         assert "zustand-state-reset" not in state["processed_notes"]
@@ -164,9 +162,7 @@ class TestMainPipeline:
         (tmp_vault / "notes" / "existing-pattern.md").unlink()
         with _force_cluster(["redis-cache-ttl", "redis-eviction-policy", "redis-cache-invalidation"]):
             with _mock_llm_response():
-                result = _run_main(
-                    mock_config, inception_state_path, ["--full"], db_path=str(mock_qmd_db)
-                )
+                result = _run_main(mock_config, inception_state_path, ["--full"], db_path=str(mock_qmd_db))
         assert result == 0
         state = json.loads(inception_state_path.read_text())
         processed = set(state["processed_notes"])
@@ -181,9 +177,7 @@ class TestMainPipeline:
         # that exact set → check_ledger_dedup returns ("skip", None) → stems
         # get added to consolidated_stems without any LLM call.
         with _force_cluster(["redis-cache-ttl", "redis-eviction-policy"]):
-            result = _run_main(
-                mock_config, inception_state_path, ["--full"], db_path=str(mock_qmd_db)
-            )
+            result = _run_main(mock_config, inception_state_path, ["--full"], db_path=str(mock_qmd_db))
         assert result == 0
         state = json.loads(inception_state_path.read_text())
         processed = set(state["processed_notes"])

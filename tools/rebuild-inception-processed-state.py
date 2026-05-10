@@ -96,8 +96,7 @@ def main() -> int:
 
         if malformed and not args.force:
             print(
-                f"error: {len(malformed)} pattern notes have missing/empty "
-                "synthesized_from:",
+                f"error: {len(malformed)} pattern notes have missing/empty synthesized_from:",
                 file=sys.stderr,
             )
             for name in malformed:
@@ -113,10 +112,7 @@ def main() -> int:
         shutil.copy2(state_path, backup_path)
 
         print(f"backup: {backup_path}")
-        print(
-            f"processed_notes: before={before_count} "
-            f"after={after_count} removed={before_count - after_count}"
-        )
+        print(f"processed_notes: before={before_count} after={after_count} removed={before_count - after_count}")
         if malformed:
             print(f"warning: {len(malformed)} pattern notes had empty synthesized_from (--force)")
 

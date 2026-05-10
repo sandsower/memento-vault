@@ -85,14 +85,7 @@ class TestNormalizeNoteTags:
     def test_title_containing_triple_dash(self, tmp_path):
         """Frontmatter with --- in a value must not corrupt the note."""
         note = tmp_path / "dash-title.md"
-        note.write_text(
-            "---\n"
-            "title: foo --- bar\n"
-            "tags: [k8s, redis]\n"
-            "date: 2026-01-01\n"
-            "---\n\n"
-            "Body text."
-        )
+        note.write_text("---\ntitle: foo --- bar\ntags: [k8s, redis]\ndate: 2026-01-01\n---\n\nBody text.")
         with patch("memento.utils.get_config", return_value=_TEST_CONFIG):
             changed = normalize_note_tags(note)
         assert changed is True
@@ -110,14 +103,7 @@ class TestNormalizeNoteTags:
     def test_body_containing_triple_dash(self, tmp_path):
         """--- in the body must not confuse the parser."""
         note = tmp_path / "body-dash.md"
-        note.write_text(
-            "---\n"
-            "title: Normal title\n"
-            "tags: [k8s]\n"
-            "date: 2026-01-01\n"
-            "---\n\n"
-            "Some text\n---\nMore text."
-        )
+        note.write_text("---\ntitle: Normal title\ntags: [k8s]\ndate: 2026-01-01\n---\n\nSome text\n---\nMore text.")
         with patch("memento.utils.get_config", return_value=_TEST_CONFIG):
             changed = normalize_note_tags(note)
         assert changed is True

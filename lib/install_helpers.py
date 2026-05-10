@@ -5,6 +5,7 @@ Consolidates all JSON manipulation needed by install.sh into a single
 script with subcommand dispatch. Called via:
     python3 lib/install_helpers.py <subcommand> [args...]
 """
+
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import tempfile
 
 
 # --- Manifest operations ---
+
 
 def manifest_load(manifest_path):
     """Print 'version\\nvault_path\\noptions_json' from the manifest file."""
@@ -54,6 +56,7 @@ def manifest_save(json_acc, version, vault_path, manifest_path, options_json="{}
 
 # --- MCP configuration ---
 
+
 def mcp_config(remote_mode, claude_dir, remote_url, api_key):
     """Build MCP entry and write/merge mcp-servers.json."""
     remote = remote_mode == "true"
@@ -65,9 +68,7 @@ def mcp_config(remote_mode, claude_dir, remote_url, api_key):
             url += "/mcp"
         entry = {"memento-vault": {"type": "http", "url": url}}
         if api_key:
-            entry["memento-vault"]["headers"] = {
-                "Authorization": f"Bearer {api_key}"
-            }
+            entry["memento-vault"]["headers"] = {"Authorization": f"Bearer {api_key}"}
     else:
         entry = {
             "memento-vault": {
@@ -90,15 +91,14 @@ def mcp_config(remote_mode, claude_dir, remote_url, api_key):
     else:
         data = entry
 
-    fd, tmp = tempfile.mkstemp(
-        dir=os.path.dirname(config_path), suffix=".json"
-    )
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(config_path), suffix=".json")
     with os.fdopen(fd, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, config_path)
 
 
 # --- Remote environment file ---
+
 
 def remote_env(env_file_path, remote_url, api_key):
     """Write the remote environment file (key=value format)."""
@@ -111,6 +111,7 @@ def remote_env(env_file_path, remote_url, api_key):
 
 
 # --- Settings.json merge ---
+
 
 def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env_prefix):
     """Inject hooks and permissions into Claude Code settings.json."""
@@ -178,9 +179,7 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
     for event, entry in wanted.items():
         event_hooks = hooks.setdefault(event, [])
         hook_script = entry["hooks"][0]["command"]
-        script_name = (
-            hook_script.rsplit("/", 1)[-1] if "/" in hook_script else hook_script
-        )
+        script_name = hook_script.rsplit("/", 1)[-1] if "/" in hook_script else hook_script
         already = any(
             script_name in h.get("command", "")
             for item in event_hooks
@@ -195,16 +194,12 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
         if not isinstance(entries, list):
             continue
         for entry in entries:
-            hook_list = (
-                entry.get("hooks", [entry]) if isinstance(entry, dict) else []
-            )
+            hook_list = entry.get("hooks", [entry]) if isinstance(entry, dict) else []
             for hook in hook_list:
                 cmd = hook.get("command", "")
                 if hooks_dir not in cmd:
                     continue
-                match = re.search(
-                    r"(python3\s+" + re.escape(hooks_dir) + r".*)", cmd
-                )
+                match = re.search(r"(python3\s+" + re.escape(hooks_dir) + r".*)", cmd)
                 cleaned = match.group(1) if match else cmd
                 hook["command"] = prefix + cleaned
 
@@ -222,9 +217,7 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
             perms.append(rule)
 
     # Write atomically
-    fd, tmp = tempfile.mkstemp(
-        dir=os.path.dirname(settings_path), suffix=".json"
-    )
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(settings_path), suffix=".json")
     with os.fdopen(fd, "w") as f:
         json.dump(cfg, f, indent=2)
     os.replace(tmp, settings_path)
@@ -237,6 +230,7 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
 
 # --- MCP URL helper (for bash to capture) ---
 
+
 def mcp_url(remote_url):
     """Normalize remote URL to MCP endpoint and print it."""
     url = remote_url.rstrip("/")
@@ -246,6 +240,7 @@ def mcp_url(remote_url):
 
 
 # --- MCP warmup (wake suspended/stopped Fly.io machines) ---
+
 
 def warmup(remote_url, api_key):
     """Ping the remote vault with retries to wake it from suspend/stop.
@@ -259,16 +254,18 @@ def warmup(remote_url, api_key):
     if not url.endswith("/mcp"):
         url += "/mcp"
 
-    payload = json.dumps({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "memento-installer", "version": "1.0.0"},
-        },
-    }).encode()
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "memento-installer", "version": "1.0.0"},
+            },
+        }
+    ).encode()
 
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if api_key:
@@ -277,9 +274,7 @@ def warmup(remote_url, api_key):
     max_attempts = 5
     for attempt in range(max_attempts):
         try:
-            req = urllib.request.Request(
-                url, data=payload, headers=headers, method="POST"
-            )
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=15) as resp:
                 result = json.loads(resp.read())
             if "result" in result:
@@ -296,6 +291,7 @@ def warmup(remote_url, api_key):
 
 
 # --- Clear stale MCP auth cache ---
+
 
 def clear_auth_cache(claude_dir, server_name):
     """Remove a server from Claude Code's mcp-needs-auth-cache.json."""
@@ -318,27 +314,25 @@ def clear_auth_cache(claude_dir, server_name):
 COMMANDS = {
     "manifest-load": lambda: manifest_load(sys.argv[2]),
     "manifest-hash": lambda: manifest_hash(sys.argv[2], sys.argv[3]),
-    "manifest-record": lambda: manifest_record(
-        sys.argv[2], sys.argv[3], sys.argv[4]
-    ),
+    "manifest-record": lambda: manifest_record(sys.argv[2], sys.argv[3], sys.argv[4]),
     "manifest-save": lambda: manifest_save(
-        sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5],
+        sys.argv[2],
+        sys.argv[3],
+        sys.argv[4],
+        sys.argv[5],
         sys.argv[6] if len(sys.argv) > 6 else "{}",
     ),
-    "mcp-config": lambda: mcp_config(
-        sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-    ),
+    "mcp-config": lambda: mcp_config(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]),
     "merge-settings": lambda: merge_settings(
-        sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5],
+        sys.argv[2],
+        sys.argv[3],
+        sys.argv[4],
+        sys.argv[5],
         sys.argv[6] if len(sys.argv) > 6 else "",
     ),
-    "remote-env": lambda: remote_env(
-        sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else ""
-    ),
+    "remote-env": lambda: remote_env(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else ""),
     "mcp-url": lambda: mcp_url(sys.argv[2]),
-    "warmup": lambda: warmup(
-        sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ""
-    ),
+    "warmup": lambda: warmup(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ""),
     "clear-auth-cache": lambda: clear_auth_cache(sys.argv[2], sys.argv[3]),
 }
 

@@ -103,7 +103,6 @@ class TestWriteNote:
         assert "source: session" in text
         assert "date: " in text
 
-
     def test_write_note_triggers_indexing(self, tmp_vault):
         """When embedded backend is active, index_note is called after write."""
         from memento.embedded_search import EmbeddedSearchBackend
@@ -161,12 +160,7 @@ class TestWriteNote:
 
     def test_write_note_skips_related_when_body_has_one(self, tmp_vault):
         """Regression: bodies with their own ``## Related`` section must not get a duplicate."""
-        body = (
-            "Body content with cross-references.\n\n"
-            "## Related\n"
-            "- [[note-a]]\n"
-            "- [[note-b]]\n"
-        )
+        body = "Body content with cross-references.\n\n## Related\n- [[note-a]]\n- [[note-b]]\n"
         path = write_note(
             tmp_vault,
             title="Related in body",
@@ -291,7 +285,6 @@ class TestUpdateProjectIndex:
         text = project_file.read_text()
         assert text.count("- 2026-04-01 `sess-123` Fixed cache invalidation") == 1
         assert text.count("- [[redis-cache-ttl]]") == 1
-
 
     def test_update_project_index_routes_to_activity_log_when_present(self, tmp_vault):
         """When the hub splits Sessions from Activity log, auto-captures land in Activity log."""

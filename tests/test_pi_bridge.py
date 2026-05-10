@@ -68,7 +68,10 @@ def test_pi_bridge_search_reports_backend_unavailable_with_miss(capsys):
         "results": [],
         "miss": {
             "reason": "backend_unavailable",
-            "recovery_hints": ["Check memento_status for search backend health.", "Run memento_reindex if the index is stale."],
+            "recovery_hints": [
+                "Check memento_status for search backend health.",
+                "Run memento_reindex if the index is stale.",
+            ],
         },
         "reason": "backend_unavailable",
     }

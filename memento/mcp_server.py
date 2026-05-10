@@ -252,7 +252,11 @@ def memento_search(
                 min_score=0.0,
                 concrete=concrete_enabled,
             )
-            reason = "threshold_too_high" if low_threshold_results else ("no_concrete_match" if concrete_enabled else conceptual_miss_reason)
+            reason = (
+                "threshold_too_high"
+                if low_threshold_results
+                else ("no_concrete_match" if concrete_enabled else conceptual_miss_reason)
+            )
             details = {"min_score": min_score} if reason == "threshold_too_high" else None
         else:
             reason = "no_concrete_match" if concrete_enabled else conceptual_miss_reason

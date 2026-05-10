@@ -165,7 +165,11 @@ def _search(query: str, limit: int, cwd: str = "", concrete: object = "auto") ->
             if results:
                 return {"results": results, "source": "remote"}
             if isinstance(envelope.get("miss"), dict):
-                payload = {"results": [], "miss": envelope["miss"], "reason": envelope["miss"].get("reason", "no_exact_match")}
+                payload = {
+                    "results": [],
+                    "miss": envelope["miss"],
+                    "reason": envelope["miss"].get("reason", "no_exact_match"),
+                }
                 return payload
             return _search_miss("no_exact_match")
         return _search_miss("backend_unavailable")

@@ -46,9 +46,7 @@ def _error(message):
 def is_invalid_mcp_config_error(message):
     """Return True when a CLI error looks like Claude rejecting MCP config schema."""
     normalized = (message or "").lower()
-    return "invalid mcp configuration" in normalized or (
-        "mcpservers" in normalized and "schema" in normalized
-    )
+    return "invalid mcp configuration" in normalized or ("mcpservers" in normalized and "schema" in normalized)
 
 
 def _with_invalid_mcp_config_hint(message):
@@ -58,7 +56,7 @@ def _with_invalid_mcp_config_hint(message):
         "Memento hint: Claude rejected the headless MCP config; this is often caused by "
         "a stale headless Claude MCP config in installed hooks. Rerun ./install.sh --reinstall; "
         "if using copied hooks, ensure installed memento/llm.py passes "
-        "{\"mcpServers\": {}} to --mcp-config, not {}."
+        '{"mcpServers": {}} to --mcp-config, not {}.'
     )
     if hint in message:
         return message
@@ -75,13 +73,9 @@ def _success(text):
 def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
     try:
         if stdin_input is None:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         else:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, input=stdin_input
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=stdin_input)
     except subprocess.TimeoutExpired:
         if output_path:
             output_path.unlink(missing_ok=True)
@@ -271,9 +265,7 @@ def llm_complete(prompt, config=None, timeout=None):
     model = resolved.get("llm_model")
     # Scale timeout with prompt size. Baseline 60s covers short completions;
     # add 1s per 5KB of prompt so a 500KB transcript gets ~160s, capped at 300s.
-    effective_timeout = (
-        timeout if timeout is not None else max(60, min(300, 60 + len(prompt) // 5_000))
-    )
+    effective_timeout = timeout if timeout is not None else max(60, min(300, 60 + len(prompt) // 5_000))
 
     if backend == "claude":
         return _claude_complete(prompt, model, timeout=effective_timeout)
@@ -296,7 +288,9 @@ def preflight_check(config=None):
     if backend in {"claude", "codex", "gemini"}:
         binary = {"claude": "claude", "codex": "codex", "gemini": "gemini"}[backend]
         try:
-            result = subprocess.run([_resolve_cli_binary(binary), "--version"], capture_output=True, text=True, timeout=10)
+            result = subprocess.run(
+                [_resolve_cli_binary(binary), "--version"], capture_output=True, text=True, timeout=10
+            )
         except subprocess.TimeoutExpired:
             return False, f"{binary} preflight timed out"
         except FileNotFoundError as exc:

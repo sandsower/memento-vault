@@ -35,8 +35,7 @@ def embedded_vault(tmp_path):
     )
     # Note 4: fleeting note
     (vault / "fleeting" / "2026-03-15-session.md").write_text(
-        "---\ntitle: Session log\ndate: 2026-03-15\n---\n\n"
-        "Worked on Redis caching and API endpoints today.\n"
+        "---\ntitle: Session log\ndate: 2026-03-15\n---\n\nWorked on Redis caching and API endpoints today.\n"
     )
 
     search_dir = vault / ".search"
@@ -127,8 +126,7 @@ class TestEmbeddedSearchReindex:
         # Modify a note
         note = vault / "notes" / "redis-cache-ttl.md"
         note.write_text(
-            "---\ntitle: Redis cache requires explicit TTL\n---\n\n"
-            "Updated content about Redis TTL and expiration.\n"
+            "---\ntitle: Redis cache requires explicit TTL\n---\n\nUpdated content about Redis TTL and expiration.\n"
         )
         backend.reindex("memento")
 
@@ -198,12 +196,10 @@ class TestEmbeddedSearchFTS5:
     def test_concrete_search_ranks_exact_identifier_first(self, backend, embedded_vault):
         vault, _ = embedded_vault
         (vault / "notes" / "aa-substring-env-var.md").write_text(
-            "---\ntitle: Configure suffix env var\n---\n\n"
-            "Set MY_MEMENTO_VAULT_PATH_SUFFIX before launching the hook.\n"
+            "---\ntitle: Configure suffix env var\n---\n\nSet MY_MEMENTO_VAULT_PATH_SUFFIX before launching the hook.\n"
         )
         (vault / "notes" / "zz-exact-env-var.md").write_text(
-            "---\ntitle: Configure exact env var\n---\n\n"
-            "Set MEMENTO_VAULT_PATH before launching the hook.\n"
+            "---\ntitle: Configure exact env var\n---\n\nSet MEMENTO_VAULT_PATH before launching the hook.\n"
         )
         backend.reindex("memento")
 
@@ -215,8 +211,7 @@ class TestEmbeddedSearchFTS5:
     def test_concrete_search_matches_path_substring(self, backend, embedded_vault):
         vault, _ = embedded_vault
         (vault / "notes" / "path-note.md").write_text(
-            "---\ntitle: Auth middleware path\n---\n\n"
-            "The file lives at src/server/authMiddleware.ts.\n"
+            "---\ntitle: Auth middleware path\n---\n\nThe file lives at src/server/authMiddleware.ts.\n"
         )
         backend.reindex("memento")
 
@@ -228,8 +223,7 @@ class TestEmbeddedSearchFTS5:
         vault, _ = embedded_vault
         uuid = "550e8400-e29b-41d4-a716-446655440000"
         (vault / "notes" / "uuid-note.md").write_text(
-            "---\ntitle: Literal UUID\n---\n\n"
-            f"Trace id {uuid} identifies the failed sync.\n"
+            f"---\ntitle: Literal UUID\n---\n\nTrace id {uuid} identifies the failed sync.\n"
         )
         backend.reindex("memento")
 
@@ -240,8 +234,7 @@ class TestEmbeddedSearchFTS5:
     def test_concrete_search_matches_quoted_phrase(self, backend, embedded_vault):
         vault, _ = embedded_vault
         (vault / "notes" / "phrase-note.md").write_text(
-            "---\ntitle: Literal phrase\n---\n\n"
-            "Remember the exact words blue comet protocol for rollout.\n"
+            "---\ntitle: Literal phrase\n---\n\nRemember the exact words blue comet protocol for rollout.\n"
         )
         backend.reindex("memento")
 
@@ -283,8 +276,7 @@ class TestEmbeddedSearchIndexNote:
         # Write a new note
         new_note = vault / "notes" / "new-discovery.md"
         new_note.write_text(
-            "---\ntitle: New discovery about PostgreSQL\n---\n\n"
-            "PostgreSQL JSONB indexes are faster than expected.\n"
+            "---\ntitle: New discovery about PostgreSQL\n---\n\nPostgreSQL JSONB indexes are faster than expected.\n"
         )
         backend.index_note("notes/new-discovery.md")
 
@@ -299,8 +291,7 @@ class TestEmbeddedSearchIndexNote:
         # Update note content
         note = vault / "notes" / "redis-cache-ttl.md"
         note.write_text(
-            "---\ntitle: Redis cache requires explicit TTL\n---\n\n"
-            "Completely new content about memcached instead.\n"
+            "---\ntitle: Redis cache requires explicit TTL\n---\n\nCompletely new content about memcached instead.\n"
         )
         backend.index_note("notes/redis-cache-ttl.md")
 
@@ -329,6 +320,7 @@ class MockEmbeddingProvider:
 
     def _hash_embed(self, text: str) -> list[float]:
         import math
+
         vec = [0.0] * 8
         for word in text.lower().split():
             h = hash(word) & 0xFFFFFFFF
@@ -457,22 +449,26 @@ class TestMCPEndToEnd:
         set_backend(b)
 
         # Patch config._CONFIG directly so all importers see it
-        monkeypatch.setattr(config, "_CONFIG", {
-            "vault_path": str(vault),
-            "qmd_collection": "memento",
-            "extra_qmd_collections": [],
-            "search_backend": "embedded",
-            "search_db_path": str(db_path),
-            "prf_enabled": False,
-            "temporal_decay": False,
-            "wikilink_expansion": False,
-            "ppr_enabled": False,
-            "pagerank_boost_weight": 0,
-            "project_maps_enabled": False,
-            "concept_index_enabled": False,
-            "rrf_enabled": False,
-            "retrieval_log": False,
-        })
+        monkeypatch.setattr(
+            config,
+            "_CONFIG",
+            {
+                "vault_path": str(vault),
+                "qmd_collection": "memento",
+                "extra_qmd_collections": [],
+                "search_backend": "embedded",
+                "search_db_path": str(db_path),
+                "prf_enabled": False,
+                "temporal_decay": False,
+                "wikilink_expansion": False,
+                "ppr_enabled": False,
+                "pagerank_boost_weight": 0,
+                "project_maps_enabled": False,
+                "concept_index_enabled": False,
+                "rrf_enabled": False,
+                "retrieval_log": False,
+            },
+        )
 
     def test_mcp_search_uses_embedded_backend(self):
         """Prove the full path: memento_search → qmd_search_with_extras → EmbeddedSearchBackend."""

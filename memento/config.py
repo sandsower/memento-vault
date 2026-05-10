@@ -279,7 +279,16 @@ def get_vault_id() -> str | None:
                 # Copy to new location
                 path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps({"vault_id": vault_id, "created": data.get("created", _iso_now()), "migrated_from": str(legacy)}, indent=2))
+                tmp.write_text(
+                    json.dumps(
+                        {
+                            "vault_id": vault_id,
+                            "created": data.get("created", _iso_now()),
+                            "migrated_from": str(legacy),
+                        },
+                        indent=2,
+                    )
+                )
                 os.replace(tmp, path)
                 return vault_id
         except (json.JSONDecodeError, OSError):

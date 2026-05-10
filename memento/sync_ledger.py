@@ -111,11 +111,7 @@ def last_success_hash(vault: Path, kind: str, source: str) -> str | None:
     """
     last: str | None = None
     for entry in iter_entries(vault):
-        if (
-            entry.get("kind") == kind
-            and entry.get("source") == source
-            and entry.get("status") == "ok"
-        ):
+        if entry.get("kind") == kind and entry.get("source") == source and entry.get("status") == "ok":
             last = entry.get("content_hash") or last
     return last
 

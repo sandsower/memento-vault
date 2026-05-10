@@ -56,9 +56,7 @@ class TestEmbeddingProviderABC:
         # subclass should work — verify via the ABC's required methods.
         methods = {"embed", "embed_query", "dimensions", "is_available"}
         abc_methods = {
-            name
-            for name, val in vars(EmbeddingProvider).items()
-            if getattr(val, "__isabstractmethod__", False)
+            name for name, val in vars(EmbeddingProvider).items() if getattr(val, "__isabstractmethod__", False)
         }
         assert methods == abc_methods
 
@@ -474,9 +472,7 @@ class TestVoyageProvider:
     def test_embed_query(self):
         from memento.embedding import VoyageProvider
 
-        fake_response = {
-            "data": [{"embedding": [0.7, 0.8, 0.9]}]
-        }
+        fake_response = {"data": [{"embedding": [0.7, 0.8, 0.9]}]}
         mock_resp = _fake_urlopen(fake_response)
 
         p = VoyageProvider(api_key="voy-key", dimensions=3)
@@ -496,13 +492,16 @@ class TestVoyageProvider:
         import urllib.error
 
         p = VoyageProvider(api_key="voy-key")
-        with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
-            url="https://api.voyageai.com/v1/embeddings",
-            code=401,
-            msg="Unauthorized",
-            hdrs=None,
-            fp=io.BytesIO(b'{"error": "invalid key"}'),
-        )):
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.HTTPError(
+                url="https://api.voyageai.com/v1/embeddings",
+                code=401,
+                msg="Unauthorized",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error": "invalid key"}'),
+            ),
+        ):
             with pytest.raises(RuntimeError, match="Voyage API error"):
                 p.embed(["test"])
 
@@ -598,9 +597,7 @@ class TestOpenAIProvider:
     def test_embed_query(self):
         from memento.embedding import OpenAIProvider
 
-        fake_response = {
-            "data": [{"embedding": [0.7, 0.8, 0.9]}]
-        }
+        fake_response = {"data": [{"embedding": [0.7, 0.8, 0.9]}]}
         mock_resp = _fake_urlopen(fake_response)
 
         p = OpenAIProvider(api_key="sk-key", dimensions=3)
@@ -620,13 +617,16 @@ class TestOpenAIProvider:
         import urllib.error
 
         p = OpenAIProvider(api_key="sk-key")
-        with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
-            url="https://api.openai.com/v1/embeddings",
-            code=429,
-            msg="Rate limited",
-            hdrs=None,
-            fp=io.BytesIO(b'{"error": {"message": "rate limited"}}'),
-        )):
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.HTTPError(
+                url="https://api.openai.com/v1/embeddings",
+                code=429,
+                msg="Rate limited",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error": {"message": "rate limited"}}'),
+            ),
+        ):
             with pytest.raises(RuntimeError, match="OpenAI API error"):
                 p.embed(["test"])
 
@@ -693,9 +693,7 @@ class TestGoogleProvider:
     def test_embed_sends_correct_request(self):
         from memento.embedding import GoogleProvider
 
-        fake_response = {
-            "embedding": {"values": [0.1, 0.2, 0.3]}
-        }
+        fake_response = {"embedding": {"values": [0.1, 0.2, 0.3]}}
         mock_resp = _fake_urlopen(fake_response)
 
         p = GoogleProvider(api_key="goog-key", dimensions=3)
@@ -732,9 +730,7 @@ class TestGoogleProvider:
     def test_embed_query(self):
         from memento.embedding import GoogleProvider
 
-        fake_response = {
-            "embedding": {"values": [0.7, 0.8, 0.9]}
-        }
+        fake_response = {"embedding": {"values": [0.7, 0.8, 0.9]}}
         mock_resp = _fake_urlopen(fake_response)
 
         p = GoogleProvider(api_key="goog-key", dimensions=3)
@@ -754,13 +750,16 @@ class TestGoogleProvider:
         import urllib.error
 
         p = GoogleProvider(api_key="goog-key")
-        with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
-            url="https://generativelanguage.googleapis.com/...",
-            code=403,
-            msg="Forbidden",
-            hdrs=None,
-            fp=io.BytesIO(b'{"error": {"message": "forbidden"}}'),
-        )):
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.HTTPError(
+                url="https://generativelanguage.googleapis.com/...",
+                code=403,
+                msg="Forbidden",
+                hdrs=None,
+                fp=io.BytesIO(b'{"error": {"message": "forbidden"}}'),
+            ),
+        ):
             with pytest.raises(RuntimeError, match="Google API error"):
                 p.embed(["test"])
 

@@ -35,8 +35,20 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
 ## Quality gates
 
 ```beislid:gates
+- name: ruff-check
+  command: '.venv/bin/python -m ruff check .'
+- name: ruff-format-check
+  command: '.venv/bin/python -m ruff format --check .'
+- name: python-compileall
+  command: '.venv/bin/python -m compileall -q memento hooks scripts'
 - name: targeted-tests
   command: '.venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py'
+- name: retrieval-tests
+  command: '.venv/bin/python -m pytest tests/test_tenet_*.py tests/test_multi_hop.py tests/test_deep_recall.py'
+- name: mcp-server-tests
+  command: '.venv/bin/python -m pytest tests/test_mcp_server.py tests/test_remote_client.py tests/test_integration_remote.py'
+- name: install-tests
+  command: '.venv/bin/python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py'
 - name: claude-sandbox-smoke
   command: '.venv/bin/python scripts/claude_sandbox_smoke.py'
 ```
