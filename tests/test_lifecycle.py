@@ -895,3 +895,63 @@ def test_triage_health_warning_adds_invalid_mcp_hint(tmp_path):
     assert "stale headless Claude MCP config" in warning
     assert "./install.sh --reinstall" in warning
     assert '{"mcpServers": {}}' in warning
+
+
+def test_triage_health_warning_adds_stale_certainty_hint(tmp_path):
+    health_log = tmp_path / "triage-health.jsonl"
+    certainty_error = "invalid literal for int() with base 10: 'confirmed'"
+    health_log.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2999-01-01T00:00:00",
+                        "hook": "triage",
+                        "action": "structured_notes_failed",
+                        "error": certainty_error,
+                    }
+                ),
+                json.dumps({"ts": "2999-01-01T00:00:01", "hook": "triage", "action": "structured_notes_failed"}),
+                json.dumps({"ts": "2999-01-01T00:00:02", "hook": "triage", "action": "structured_notes_parse_empty"}),
+            ]
+        )
+        + "\n"
+    )
+
+    with patch("memento.lifecycle.TRIAGE_HEALTH_LOG_PATH", str(health_log)):
+        warning = triage_health_warning()
+
+    assert warning is not None
+    assert "triage failing 3/3" in warning
+    assert "stale installed memento package" in warning
+    assert "./install.sh --reinstall" in warning
+    assert "certainty labels like confirmed" in warning
+
+
+def test_triage_health_warning_detects_other_accepted_certainty_labels(tmp_path):
+    health_log = tmp_path / "triage-health.jsonl"
+    certainty_error = "invalid literal for int() with base 10: 'verified'"
+    health_log.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2999-01-01T00:00:00",
+                        "hook": "triage",
+                        "action": "structured_notes_failed",
+                        "error": certainty_error,
+                    }
+                ),
+                json.dumps({"ts": "2999-01-01T00:00:01", "hook": "triage", "action": "structured_notes_failed"}),
+                json.dumps({"ts": "2999-01-01T00:00:02", "hook": "triage", "action": "structured_notes_parse_empty"}),
+            ]
+        )
+        + "\n"
+    )
+
+    with patch("memento.lifecycle.TRIAGE_HEALTH_LOG_PATH", str(health_log)):
+        warning = triage_health_warning()
+
+    assert warning is not None
+    assert "stale installed memento package" in warning
+    assert "./install.sh --reinstall" in warning
