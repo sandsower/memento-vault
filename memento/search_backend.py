@@ -12,6 +12,113 @@ import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+def _literal_terms(query: str) -> tuple[str, list[str]]:
+    literal = (query or "").strip()
+    quoted = re.search(r'"(.+?)"', literal) or re.search(r"(?<!\w)'(.+?)'(?!\w)", literal)
+    if quoted:
+        literal = quoted.group(1).strip()
+    elif len(literal) >= 2 and literal[0] == literal[-1] and literal[0] in "'\"":
+        literal = literal[1:-1].strip()
+    terms = [t.lower() for t in re.findall(r"[A-Za-z0-9_.:/-]+", literal) if t]
+    return literal, terms
+
+
+def _frontmatter_title(content: str, fallback: str) -> str:
+    for line in content.splitlines()[:10]:
+        stripped = line.strip()
+        if stripped.lower().startswith("title:"):
+            return stripped[6:].strip().strip("\"'")
+    return fallback
+
+
+def _has_identifier_boundary_match(haystack: str, needle: str) -> bool:
+    if not needle:
+        return False
+    pattern = rf"(?<![A-Za-z0-9_]){re.escape(needle)}(?![A-Za-z0-9_])"
+    return re.search(pattern, haystack) is not None
+
+
+def _literal_score(query: str, path: str, title: str, content: str) -> float:
+    literal, terms = _literal_terms(query)
+    literal_lower = literal.lower()
+    path_lower = path.lower()
+    title_lower = title.lower()
+    content_lower = content.lower()
+
+    if literal_lower:
+        if literal_lower == path_lower or literal_lower == Path(path_lower).stem:
+            return 1.0
+        if literal_lower in path_lower:
+            return 0.98
+        if literal_lower == title_lower:
+            return 0.96
+        if _has_identifier_boundary_match(title_lower, literal_lower):
+            return 0.94
+        if literal_lower in title_lower:
+            return 0.91
+        if _has_identifier_boundary_match(content_lower, literal_lower):
+            return 0.93
+        if literal_lower in content_lower:
+            return 0.9
+
+    if terms:
+        haystack = f"{path_lower}\n{title_lower}\n{content_lower}"
+        matched = sum(1 for term in terms if term in haystack)
+        if matched == len(terms):
+            return 0.7
+    return 0.0
+
+
+def _literal_snippet(query: str, content: str) -> str:
+    literal, terms = _literal_terms(query)
+    needles = [literal.lower()] if literal else []
+    needles.extend(terms)
+    for line in content.splitlines():
+        lower = line.lower()
+        if any(needle and needle in lower for needle in needles):
+            return line.strip()[:200]
+    return _clean_snippet(content)
+
+
+def _literal_file_search(vault: Path, query: str, limit: int, timeout: int = 10, min_score: float = 0.0) -> list[dict]:
+    """Literal substring search over vault markdown files."""
+    if not query or not query.strip() or not vault.exists():
+        return []
+
+    import time
+
+    deadline = time.monotonic() + timeout
+    search_dirs = [vault / d for d in ("notes", "fleeting", "projects") if (vault / d).exists()]
+    vault_resolved = vault.resolve()
+    md_files: list[Path] = []
+    for directory in search_dirs:
+        for md_file in directory.rglob("*.md"):
+            if md_file.is_symlink():
+                continue
+            resolved = md_file.resolve()
+            if resolved != vault_resolved and vault_resolved not in resolved.parents:
+                continue
+            md_files.append(md_file)
+    md_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    results = []
+    for md_file in md_files:
+        if time.monotonic() >= deadline:
+            break
+        try:
+            content = md_file.read_text(errors="replace")
+        except OSError:
+            continue
+        rel_path = str(md_file.relative_to(vault))
+        title = _frontmatter_title(content, md_file.stem)
+        score = _literal_score(query, rel_path, title, content)
+        if score <= 0 or score < min_score:
+            continue
+        results.append({"path": rel_path, "title": title, "score": round(score, 4), "snippet": _literal_snippet(query, content)})
+
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results[:limit]
+
 
 class SearchBackend(ABC):
     """Abstract search backend for vault note retrieval."""
@@ -30,6 +137,7 @@ class SearchBackend(ABC):
         semantic: bool = False,
         timeout: int = 10,
         min_score: float = 0.0,
+        concrete: bool = False,
     ) -> list[dict]:
         """Search for notes matching a query.
 
@@ -83,9 +191,15 @@ class QMDBackend(SearchBackend):
         semantic: bool = False,
         timeout: int = 10,
         min_score: float = 0.0,
+        concrete: bool = False,
     ) -> list[dict]:
         if not query or not query.strip():
             return []
+
+        if concrete:
+            from memento.config import get_vault
+
+            return _literal_file_search(get_vault(), query, limit, timeout=timeout, min_score=min_score)
 
         if not self.is_available():
             return []
@@ -230,6 +344,7 @@ class GrepBackend(SearchBackend):
         semantic: bool = False,
         timeout: int = 10,
         min_score: float = 0.0,
+        concrete: bool = False,
     ) -> list[dict]:
         if not query or not query.strip():
             return []
@@ -239,6 +354,8 @@ class GrepBackend(SearchBackend):
         from memento.config import get_vault
 
         vault = get_vault()
+        if concrete:
+            return _literal_file_search(vault, query, limit, timeout=timeout, min_score=min_score)
         if not vault.exists():
             return []
 
@@ -377,7 +494,7 @@ def get_backend() -> SearchBackend:
     """
     global _backend
     if _backend is None:
-        from memento.config import get_config, get_vault
+        from memento.config import get_config
 
         config = get_config()
         choice = config.get("search_backend", "auto")

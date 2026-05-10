@@ -110,6 +110,24 @@ def test_pi_bridge_search_reports_remote_error_as_backend_unavailable(capsys):
     assert payload["miss"]["details"] == {"error": "boom"}
 
 
+def test_pi_bridge_search_forwards_concrete_option(capsys):
+    with (
+        patch("memento.pi_bridge.has_qmd", return_value=True),
+        patch(
+            "memento.pi_bridge.qmd_search_with_extras",
+            return_value=[{"path": "notes/env.md", "title": "Env", "score": 1.0, "snippet": "MEMENTO_VAULT_PATH"}],
+        ) as mock_search,
+        patch("memento.pi_bridge.enhance_results") as mock_enhance,
+    ):
+        code = pi_bridge.main(["search", "--query", "MEMENTO_VAULT_PATH", "--concrete", "true"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["results"][0]["path"] == "notes/env.md"
+    assert mock_search.call_args.kwargs["concrete"] is True
+    mock_enhance.assert_not_called()
+
+
 def test_pi_bridge_search_reports_project_filter_removed_all(capsys):
     with (
         patch("memento.pi_bridge.has_qmd", return_value=True),

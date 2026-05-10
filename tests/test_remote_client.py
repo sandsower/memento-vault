@@ -54,6 +54,18 @@ class TestCallTool:
         assert body["method"] == "tools/call"
         assert body["params"]["name"] == "memento_search"
         assert body["params"]["arguments"]["query"] == "test query"
+        assert body["params"]["arguments"]["concrete"] == "auto"
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_search_forwards_concrete_option(self, mock_urlopen, mock_url):
+        mock_urlopen.return_value = self._mock_response([])
+
+        search("MEMENTO_VAULT_PATH", concrete=True)
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        assert body["params"]["arguments"]["concrete"] is True
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")
@@ -85,6 +97,27 @@ class TestCallTool:
 
         assert len(found) == 1
         assert found[0]["title"] == "Foo"
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_search_preserves_single_content_block_result_as_list(self, mock_urlopen, mock_url):
+        mock_urlopen.return_value = self._mock_response(
+            {"path": "notes/foo.md", "title": "Foo", "score": 0.9, "snippet": "test"}
+        )
+
+        found = search("test query")
+
+        assert found == [{"path": "notes/foo.md", "title": "Foo", "score": 0.9, "snippet": "test"}]
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_list_notes_preserves_single_content_block_result_as_list(self, mock_urlopen, mock_url):
+        inventory = {"path": "notes/foo.md", "title": "Foo", "hash": "abc123"}
+        mock_urlopen.return_value = self._mock_response(inventory)
+
+        result = list_notes()
+
+        assert result == [inventory]
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")

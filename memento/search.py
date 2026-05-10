@@ -21,6 +21,7 @@ from memento.graph import (
 
 MISS_RECOVERY_HINTS = {
     "no_exact_match": ["Try a broader or narrower query."],
+    "no_concrete_match": ["Try a broader query or remove exact punctuation.", "Call memento_get if the note path is known."],
     "backend_unavailable": ["Check memento_status for search backend health.", "Run memento_reindex if the index is stale."],
     "threshold_too_high": ["Lower min_score."],
     "project_filter_removed_all": ["Remove or change the cwd project filter."],
@@ -74,17 +75,45 @@ def is_literal_like_query(query: str) -> bool:
         return False
     if (text.startswith("'") and text.endswith("'")) or (text.startswith('"') and text.endswith('"')):
         return True
+    if re.search(r'".+?"', text) or re.search(r"(?<!\w)'.+?'(?!\w)", text):
+        return True
+    if re.search(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", text, re.I):
+        return True
     if re.search(r"[\w.-]+/[\w./-]+", text):
         return True
     if re.search(r"\b[\w.-]+\.(py|ts|tsx|js|jsx|md|json|ya?ml|toml|sh|rb|go|rs)\b", text, re.I):
         return True
-    tokens = text.split()
-    if len(tokens) <= 3 and any(
-        "_" in token or "::" in token or re.search(r"[a-z][A-Z]", token) or re.search(r"\d", token)
-        for token in tokens
-    ):
+    tokens = re.findall(r"[A-Za-z0-9_.:-]+", text)
+    if not tokens or len(tokens) > 3:
+        return False
+    if len(tokens) == 1 and re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", tokens[0]):
         return True
-    return False
+    return any(
+        "_" in token
+        or "::" in token
+        or "." in token
+        or re.search(r"[a-z][A-Z]", token)
+        or re.search(r"\d", token)
+        for token in tokens
+    )
+
+
+def resolve_concrete_mode(concrete: object = "auto", query: str = "") -> tuple[bool, bool]:
+    """Resolve a user concrete option into (enabled, auto_selected)."""
+    if concrete is None or concrete == "auto":
+        enabled = is_literal_like_query(query)
+        return enabled, enabled
+    if isinstance(concrete, str):
+        normalized = concrete.strip().lower()
+        if normalized in ("auto", ""):
+            enabled = is_literal_like_query(query)
+            return enabled, enabled
+        if normalized in ("true", "1", "yes", "on"):
+            return True, False
+        if normalized in ("false", "0", "no", "off"):
+            return False, False
+        return False, False
+    return bool(concrete), False
 
 
 def normalize_miss_reason(reason: Optional[str], query: str = "") -> str:
@@ -103,7 +132,7 @@ def has_qmd():
     return get_backend().is_available()
 
 
-def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_score=0.0):
+def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_score=0.0, concrete=False):
     """Run a search via the configured backend.
 
     Args:
@@ -113,6 +142,7 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_
         semantic: If True, use vector search; otherwise BM25
         timeout: Backend timeout in seconds
         min_score: Minimum relevance score (0.0-1.0)
+        concrete: If True, prefer literal substring/identifier matching.
 
     Returns:
         List of dicts with keys: path, title, score, snippet
@@ -129,19 +159,27 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_
         return []
 
     try:
-        return backend.search(query, collection, limit=limit, semantic=semantic, timeout=timeout, min_score=min_score)
+        return backend.search(
+            query,
+            collection,
+            limit=limit,
+            semantic=semantic,
+            timeout=timeout,
+            min_score=min_score,
+            concrete=concrete,
+        )
     except Exception as exc:
         log_retrieval("search", "qmd_search_unexpected", error=str(exc))
         return []
 
 
-def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=0.0):
+def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=0.0, concrete=False):
     """Search primary collection + any extra collections in parallel.
 
     Returns combined results sorted by score descending.
     """
     config = get_config()
-    extras = config.get("extra_qmd_collections", [])
+    extras = [] if concrete else config.get("extra_qmd_collections", [])
 
     if not extras:
         results = qmd_search(
@@ -151,6 +189,7 @@ def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=
             semantic=semantic,
             timeout=timeout,
             min_score=min_score,
+            concrete=concrete,
         )
         return results[:limit]
 
@@ -167,6 +206,7 @@ def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=
                 semantic,
                 timeout,
                 min_score,
+                concrete,
             )
         ] = "primary"
 
@@ -180,6 +220,7 @@ def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=
                     semantic,
                     timeout,
                     min_score,
+                    concrete,
                 )
             ] = extra
 

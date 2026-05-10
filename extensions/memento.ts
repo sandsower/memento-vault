@@ -363,6 +363,11 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query" }),
 			limit: Type.Optional(Type.Number({ description: "Maximum results, default 5" })),
+			concrete: Type.Optional(Type.Union([
+				Type.Literal("auto"),
+				Type.Literal("true"),
+				Type.Literal("false"),
+			], { description: "Literal search mode: auto, true, or false" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const payload = await runJson(pi, ctx, [
@@ -373,6 +378,8 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				String(params.limit ?? 5),
 				"--cwd",
 				ctx.cwd,
+				"--concrete",
+				params.concrete ?? "auto",
 			]);
 			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
 		},

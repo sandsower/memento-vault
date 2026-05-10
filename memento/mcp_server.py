@@ -15,7 +15,16 @@ from mcp.server.fastmcp import FastMCP
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
 from memento.lifecycle import build_briefing, build_recall, build_tool_context
-from memento.search import enhance_results, has_qmd, miss_envelope, normalize_miss_reason, qmd_search_with_extras, qmd_get
+from memento.search import (
+    enhance_results,
+    filter_by_project,
+    has_qmd,
+    miss_envelope,
+    normalize_miss_reason,
+    qmd_get,
+    qmd_search_with_extras,
+    resolve_concrete_mode,
+)
 from memento.store import (
     acquire_vault_write_lock,
     append_project_session_line,
@@ -155,6 +164,7 @@ def memento_search(
     semantic: bool = False,
     min_score: float = 0.0,
     cwd: str = "",
+    concrete: str | bool = "auto",
 ) -> object:
     """Search the memento vault for relevant notes.
 
@@ -164,6 +174,7 @@ def memento_search(
         semantic: Use vector (semantic) search instead of BM25 keyword search.
         min_score: Minimum relevance score (0.0-1.0).
         cwd: Current working directory -- used to filter results by project scope.
+        concrete: true/false/auto literal search mode. Auto detects identifier-like queries.
 
     Returns:
         List of matching notes on hits. On misses, an envelope with
@@ -191,17 +202,25 @@ def memento_search(
         log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
         return miss
 
+    concrete_enabled, _auto_selected = resolve_concrete_mode(concrete, query)
+    concrete_auto_mode = concrete is None or (isinstance(concrete, str) and concrete.strip().lower() in ("", "auto"))
+    conceptual_miss_reason = normalize_miss_reason("no-results", query) if concrete_auto_mode else "no_exact_match"
     raw_results = qmd_search_with_extras(
         query,
         limit=limit + 3,
-        semantic=semantic,
+        semantic=False if concrete_enabled else semantic,
         timeout=10,
         min_score=min_score,
+        concrete=concrete_enabled,
     )
     results = raw_results
 
     if results:
-        results = enhance_results(results, cwd=cwd or None)
+        if concrete_enabled:
+            if cwd:
+                results = filter_by_project(results, cwd)
+        else:
+            results = enhance_results(results, cwd=cwd or None)
 
     if not results:
         if raw_results:
@@ -211,14 +230,15 @@ def memento_search(
             low_threshold_results = qmd_search_with_extras(
                 query,
                 limit=1,
-                semantic=semantic,
+                semantic=False if concrete_enabled else semantic,
                 timeout=10,
                 min_score=0.0,
+                concrete=concrete_enabled,
             )
-            reason = "threshold_too_high" if low_threshold_results else normalize_miss_reason("no-results", query)
+            reason = "threshold_too_high" if low_threshold_results else ("no_concrete_match" if concrete_enabled else conceptual_miss_reason)
             details = {"min_score": min_score} if reason == "threshold_too_high" else None
         else:
-            reason = normalize_miss_reason("no-results", query)
+            reason = "no_concrete_match" if concrete_enabled else conceptual_miss_reason
             details = None
         miss = miss_envelope(reason, details=details)
         log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])

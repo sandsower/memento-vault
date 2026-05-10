@@ -12,7 +12,7 @@ import struct
 import threading
 from pathlib import Path
 
-from memento.search_backend import SearchBackend
+from memento.search_backend import SearchBackend, _literal_score, _literal_snippet
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +215,7 @@ class EmbeddedSearchBackend(SearchBackend):
         semantic: bool = False,
         timeout: int = 10,
         min_score: float = 0.0,
+        concrete: bool = False,
     ) -> list[dict]:
         if not query or not query.strip():
             return []
@@ -227,6 +228,9 @@ class EmbeddedSearchBackend(SearchBackend):
         with self._lock:
             self._ensure_indexed()
 
+            if concrete:
+                return self._concrete_search(query, limit, min_score)
+
             if semantic and self._vec_available:
                 return self._vec_search(query, limit, min_score)
 
@@ -238,6 +242,24 @@ class EmbeddedSearchBackend(SearchBackend):
             if not results:
                 results = self._simple_search(query, limit, min_score)
             return results
+
+    def _concrete_search(self, query: str, limit: int, min_score: float) -> list[dict]:
+        """Literal substring search over indexed paths, titles, and content."""
+        conn = self._get_conn()
+        rows = conn.execute("SELECT path, title, content FROM notes").fetchall()
+        results = []
+        for path, title, content in rows:
+            score = _literal_score(query, path, title, content)
+            if score <= 0 or score < min_score:
+                continue
+            results.append({
+                "path": path,
+                "title": title,
+                "score": round(score, 4),
+                "snippet": _literal_snippet(query, content),
+            })
+        results.sort(key=lambda r: r["score"], reverse=True)
+        return results[:limit]
 
     def _fts5_search(self, query: str, limit: int, min_score: float) -> list[dict]:
         """BM25 search via FTS5."""

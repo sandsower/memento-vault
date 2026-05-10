@@ -1251,7 +1251,7 @@ def run_remote_recall(prompt, cwd, config):
     max_notes = config.get("recall_max_notes", 3)
     min_score = config.get("recall_min_score", 0.4)
 
-    envelope = remote_search_envelope(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd)
+    envelope = remote_search_envelope(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd, concrete=False)
     raw_results = envelope.get("results", [])
     results, project_decisions = filter_recall_results_by_explicit_project(prompt, raw_results)
     if not results:

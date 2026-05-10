@@ -277,6 +277,8 @@ def test_run_recall_lines_remote_specific_project_prompt_injects_match(
     assert top_path == "notes/fundid.md"
     assert results == [{"path": "notes/fundid.md", "title": "Fundid email", "score": 0.9, "project": "fundid"}]
     assert lines == ["[vault] Related memories:", "  - Fundid email"]
+    mock_remote_search.assert_called_once()
+    assert mock_remote_search.call_args.kwargs["concrete"] is False
     mock_has_qmd.assert_not_called()
 
 
