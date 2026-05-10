@@ -252,12 +252,14 @@ class EmbeddedSearchBackend(SearchBackend):
             score = _literal_score(query, path, title, content)
             if score <= 0 or score < min_score:
                 continue
-            results.append({
-                "path": path,
-                "title": title,
-                "score": round(score, 4),
-                "snippet": _literal_snippet(query, content),
-            })
+            results.append(
+                {
+                    "path": path,
+                    "title": title,
+                    "score": round(score, 4),
+                    "snippet": _literal_snippet(query, content),
+                }
+            )
         results.sort(key=lambda r: r["score"], reverse=True)
         return results[:limit]
 
@@ -299,12 +301,14 @@ class EmbeddedSearchBackend(SearchBackend):
             normalized = score / max_score
             if normalized < min_score:
                 continue
-            results.append({
-                "path": path,
-                "title": title,
-                "score": round(normalized, 4),
-                "snippet": _extract_snippet(content, query),
-            })
+            results.append(
+                {
+                    "path": path,
+                    "title": title,
+                    "score": round(normalized, 4),
+                    "snippet": _extract_snippet(content, query),
+                }
+            )
 
         return results[:limit]
 
@@ -322,12 +326,14 @@ class EmbeddedSearchBackend(SearchBackend):
             score = matched / len(terms)
             if score < min_score:
                 continue
-            results.append({
-                "path": path,
-                "title": title,
-                "score": round(score, 4),
-                "snippet": _extract_snippet(content, query),
-            })
+            results.append(
+                {
+                    "path": path,
+                    "title": title,
+                    "score": round(score, 4),
+                    "snippet": _extract_snippet(content, query),
+                }
+            )
         results.sort(key=lambda r: r["score"], reverse=True)
         return results[:limit]
 
@@ -338,7 +344,7 @@ class EmbeddedSearchBackend(SearchBackend):
         broad matching. FTS5 ranks by BM25 automatically.
         """
         # Strip FTS5 operators and special chars
-        cleaned = re.sub(r'[^\w\s-]', ' ', query)
+        cleaned = re.sub(r"[^\w\s-]", " ", query)
         tokens = [t.strip() for t in cleaned.split() if t.strip() and len(t.strip()) > 1]
         if not tokens:
             return ""
@@ -384,12 +390,14 @@ class EmbeddedSearchBackend(SearchBackend):
             score = max(0.0, 1.0 - distance)
             if score < min_score:
                 continue
-            results.append({
-                "path": path,
-                "title": title,
-                "score": round(score, 4),
-                "snippet": _extract_snippet(content, query),
-            })
+            results.append(
+                {
+                    "path": path,
+                    "title": title,
+                    "score": round(score, 4),
+                    "snippet": _extract_snippet(content, query),
+                }
+            )
 
         return results[:limit]
 
@@ -444,9 +452,7 @@ class EmbeddedSearchBackend(SearchBackend):
         with self._lock:
             self._ensure_indexed()
             conn = self._get_conn()
-            row = conn.execute(
-                "SELECT path, title, content FROM notes WHERE path = ?", (path,)
-            ).fetchone()
+            row = conn.execute("SELECT path, title, content FROM notes WHERE path = ?", (path,)).fetchone()
             if row is None:
                 return None
             return {
@@ -465,9 +471,7 @@ class EmbeddedSearchBackend(SearchBackend):
         try:
             conn = self._get_conn()
             search_dirs = [
-                self._vault_path / d
-                for d in ("notes", "fleeting", "projects")
-                if (self._vault_path / d).exists()
+                self._vault_path / d for d in ("notes", "fleeting", "projects") if (self._vault_path / d).exists()
             ]
 
             indexed_paths = set()
@@ -523,19 +527,18 @@ class EmbeddedSearchBackend(SearchBackend):
     def _batch_embed(self, conn: sqlite3.Connection, notes: list[tuple[str, str]]) -> None:
         """Embed notes in bounded chunks and upsert into notes_vec."""
         # Truncate oversized notes for embedding (full text stays in FTS5)
-        truncated = [
-            (path, content[:_MAX_NOTE_SIZE_FOR_EMBED])
-            for path, content in notes
-        ]
+        truncated = [(path, content[:_MAX_NOTE_SIZE_FOR_EMBED]) for path, content in notes]
 
         for i in range(0, len(truncated), _MAX_EMBED_BATCH):
-            chunk = truncated[i:i + _MAX_EMBED_BATCH]
+            chunk = truncated[i : i + _MAX_EMBED_BATCH]
             try:
                 texts = [content for _, content in chunk]
                 vectors = self._provider.embed(texts)
 
                 if len(vectors) != len(chunk):
-                    logger.warning("Embedding returned %d vectors for %d texts, skipping chunk", len(vectors), len(chunk))
+                    logger.warning(
+                        "Embedding returned %d vectors for %d texts, skipping chunk", len(vectors), len(chunk)
+                    )
                     continue
 
                 conn.execute("SAVEPOINT embed_chunk")

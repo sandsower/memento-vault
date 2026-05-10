@@ -131,7 +131,14 @@ def search_envelope(
     """Search the remote vault, preserving structured miss metadata when present."""
     result = _call_tool(
         "memento_search",
-        {"query": query, "limit": limit, "semantic": semantic, "min_score": min_score, "cwd": cwd, "concrete": concrete},
+        {
+            "query": query,
+            "limit": limit,
+            "semantic": semantic,
+            "min_score": min_score,
+            "cwd": cwd,
+            "concrete": concrete,
+        },
     )
     if isinstance(result, list):
         return {"results": result}
@@ -156,7 +163,9 @@ def search(
     concrete: object = "auto",
 ) -> list[dict]:
     """Search the remote vault, returning only results for legacy callers."""
-    envelope = search_envelope(query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd, concrete=concrete)
+    envelope = search_envelope(
+        query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd, concrete=concrete
+    )
     results = envelope.get("results")
     return results if isinstance(results, list) else []
 

@@ -187,7 +187,9 @@ def test_recall_diagnostics_logs_broad_project_skip_detail(_config, mock_log):
 @patch("memento.lifecycle.has_qmd", return_value=True)
 @patch("memento.lifecycle.get_vault")
 @patch("memento.lifecycle.get_config", return_value={"prompt_recall": True, "recall_diagnostics": True})
-def test_run_recall_lines_broad_project_skip_does_not_search(_config, mock_vault, _has_qmd, mock_search, _is_remote, tmp_path):
+def test_run_recall_lines_broad_project_skip_does_not_search(
+    _config, mock_vault, _has_qmd, mock_search, _is_remote, tmp_path
+):
     (tmp_path / "notes").mkdir()
     mock_vault.return_value = tmp_path
 
@@ -240,7 +242,9 @@ def test_run_recall_lines_specific_project_prompt_searches(
 @patch("memento.remote_client.search")
 @patch("memento.lifecycle.qmd_search_with_extras")
 @patch("memento.lifecycle.get_config", return_value={"prompt_recall": True, "recall_diagnostics": True})
-def test_run_recall_lines_remote_broad_project_skip_does_not_search(_config, mock_local_search, mock_remote_search, _is_remote):
+def test_run_recall_lines_remote_broad_project_skip_does_not_search(
+    _config, mock_local_search, mock_remote_search, _is_remote
+):
     lines, top_path, results, reason = _run_recall_lines("what do we know about Fundid?", "/repo", "s1")
 
     assert (lines, top_path, results, reason) == ([], None, [], "broad-project-query")
@@ -431,7 +435,9 @@ def test_explicit_project_filter_noops_without_explicit_project():
 def test_explicit_project_filter_does_not_treat_acronyms_as_projects():
     results = [{"path": "notes/mcp.md", "title": "MCP lifecycle", "score": 0.8, "project": "memento-vault"}]
 
-    filtered, decisions = filter_recall_results_by_explicit_project("what did we decide about MCP lifecycle tools?", results)
+    filtered, decisions = filter_recall_results_by_explicit_project(
+        "what did we decide about MCP lifecycle tools?", results
+    )
 
     assert filtered == results
     assert decisions == []
@@ -490,14 +496,20 @@ def test_run_recall_lines_project_mismatch_can_filter_everything_without_candida
 ):
     (tmp_path / "notes").mkdir()
     mock_vault.return_value = tmp_path
-    mock_search.return_value = [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}]
+    mock_search.return_value = [
+        {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}
+    ]
 
     lines, top_path, results, reason = _run_recall_lines(
         "what did we decide about fundid server-side email dispatch?", str(tmp_path), "s1"
     )
 
     assert (lines, top_path, results, reason) == ([], None, [], "project-mismatch-filtered-empty")
-    assert not [call for call in mock_log.call_args_list if call.args[1] == "diagnostic-candidates" and call.kwargs.get("stage") == "project-filter"]
+    assert not [
+        call
+        for call in mock_log.call_args_list
+        if call.args[1] == "diagnostic-candidates" and call.kwargs.get("stage") == "project-filter"
+    ]
 
 
 @patch("memento.remote_client.is_remote", return_value=False)
@@ -527,7 +539,9 @@ def test_run_recall_lines_project_filter_logs_candidate_diagnostics_when_enabled
 ):
     (tmp_path / "notes").mkdir()
     mock_vault.return_value = tmp_path
-    mock_search.return_value = [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}]
+    mock_search.return_value = [
+        {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}
+    ]
 
     _run_recall_lines("what did we decide about Fundid server-side email dispatch?", str(tmp_path), "s1")
 
@@ -541,9 +555,7 @@ def test_run_recall_lines_project_filter_logs_candidate_diagnostics_when_enabled
     assert project_filter_events[0]["candidates"] == [
         {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "decision": "project-mismatch"}
     ]
-    assert project_filter_events[0]["query"].startswith(
-        "what did we decide about Fundid server-side email dispatch?"
-    )
+    assert project_filter_events[0]["query"].startswith("what did we decide about Fundid server-side email dispatch?")
 
 
 @patch("memento.remote_client.is_remote", return_value=False)
@@ -625,7 +637,9 @@ def test_build_recall_project_filter_empty_includes_miss_metadata(
 ):
     (tmp_path / "notes").mkdir()
     mock_vault.return_value = tmp_path
-    mock_search.return_value = [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}]
+    mock_search.return_value = [
+        {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}
+    ]
 
     result = build_recall("what did we decide about Fundid server-side email dispatch?", str(tmp_path), "s1")
 
@@ -835,7 +849,9 @@ def test_triage_health_warning_reads_always_on_health_log(tmp_path):
 def test_triage_health_warning_falls_back_to_legacy_retrieval_log(tmp_path):
     health_log = tmp_path / "missing-triage-health.jsonl"
     retrieval_log = tmp_path / "retrieval.jsonl"
-    invalid_mcp_error = "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    invalid_mcp_error = (
+        "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    )
     retrieval_log.write_text(
         "\n".join(
             [
@@ -868,7 +884,9 @@ def test_triage_health_warning_falls_back_to_legacy_retrieval_log(tmp_path):
 
 def test_triage_health_warning_adds_invalid_mcp_hint(tmp_path):
     health_log = tmp_path / "triage-health.jsonl"
-    invalid_mcp_error = "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    invalid_mcp_error = (
+        "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    )
     health_log.write_text(
         "\n".join(
             [

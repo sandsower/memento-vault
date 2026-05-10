@@ -440,9 +440,7 @@ class TestApiBackends:
     @patch("memento.llm.request.urlopen")
     def test_anthropic_api_backend_sends_correct_request(self, mock_urlopen):
         response = MagicMock()
-        response.read.return_value = json.dumps(
-            {"content": [{"type": "text", "text": "anthropic output"}]}
-        ).encode()
+        response.read.return_value = json.dumps({"content": [{"type": "text", "text": "anthropic output"}]}).encode()
         mock_urlopen.return_value.__enter__.return_value = response
 
         result = llm_complete(
@@ -466,9 +464,7 @@ class TestApiBackends:
     @patch("memento.llm.request.urlopen")
     def test_openai_compat_backend_sends_correct_request(self, mock_urlopen):
         response = MagicMock()
-        response.read.return_value = json.dumps(
-            {"choices": [{"message": {"content": "openai output"}}]}
-        ).encode()
+        response.read.return_value = json.dumps({"choices": [{"message": {"content": "openai output"}}]}).encode()
         mock_urlopen.return_value.__enter__.return_value = response
 
         result = llm_complete(

@@ -21,8 +21,14 @@ from memento.graph import (
 
 MISS_RECOVERY_HINTS = {
     "no_exact_match": ["Try a broader or narrower query."],
-    "no_concrete_match": ["Try a broader query or remove exact punctuation.", "Call memento_get if the note path is known."],
-    "backend_unavailable": ["Check memento_status for search backend health.", "Run memento_reindex if the index is stale."],
+    "no_concrete_match": [
+        "Try a broader query or remove exact punctuation.",
+        "Call memento_get if the note path is known.",
+    ],
+    "backend_unavailable": [
+        "Check memento_status for search backend health.",
+        "Run memento_reindex if the index is stale.",
+    ],
     "threshold_too_high": ["Lower min_score."],
     "project_filter_removed_all": ["Remove or change the cwd project filter."],
     "query_too_broad": ["Try a narrower query with concrete terms."],
@@ -89,11 +95,7 @@ def is_literal_like_query(query: str) -> bool:
     if len(tokens) == 1 and re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", tokens[0]):
         return True
     return any(
-        "_" in token
-        or "::" in token
-        or "." in token
-        or re.search(r"[a-z][A-Z]", token)
-        or re.search(r"\d", token)
+        "_" in token or "::" in token or "." in token or re.search(r"[a-z][A-Z]", token) or re.search(r"\d", token)
         for token in tokens
     )
 

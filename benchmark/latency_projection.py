@@ -11,7 +11,6 @@ Usage:
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -28,14 +27,40 @@ def generate_synthetic_notes(vault_path, count, existing_count=0):
     notes_dir.mkdir(parents=True, exist_ok=True)
 
     # Topic pools for realistic content
-    domains = ["redis", "auth", "billing", "caching", "frontend", "api", "database",
-               "testing", "deployment", "monitoring", "search", "graphql", "websockets",
-               "migrations", "permissions", "notifications", "scheduling", "logging"]
+    domains = [
+        "redis",
+        "auth",
+        "billing",
+        "caching",
+        "frontend",
+        "api",
+        "database",
+        "testing",
+        "deployment",
+        "monitoring",
+        "search",
+        "graphql",
+        "websockets",
+        "migrations",
+        "permissions",
+        "notifications",
+        "scheduling",
+        "logging",
+    ]
     types = ["decision", "discovery", "pattern", "bugfix", "tool"]
-    projects = ["api-service", "frontend-app", "billing-service", "auth-gateway",
-                "data-pipeline", "mobile-app", "admin-dashboard", "worker-service"]
+    projects = [
+        "api-service",
+        "frontend-app",
+        "billing-service",
+        "auth-gateway",
+        "data-pipeline",
+        "mobile-app",
+        "admin-dashboard",
+        "worker-service",
+    ]
 
     import random
+
     rng = random.Random(42)
 
     for i in range(existing_count, existing_count + count):
@@ -60,7 +85,7 @@ tags: [{domain}, {domain2}, {project}]
 source: session
 certainty: {certainty}
 project: /home/user/projects/{project}
-date: 2026-03-{rng.randint(1,22):02d}T{rng.randint(8,22):02d}:{rng.randint(0,59):02d}
+date: 2026-03-{rng.randint(1, 22):02d}T{rng.randint(8, 22):02d}:{rng.randint(0, 59):02d}
 ---
 
 {body}
@@ -80,7 +105,8 @@ def setup_qmd_collection(vault_path, collection_name):
     # Index the collection
     subprocess.run(
         ["qmd", "update", "-c", collection_name, "--path", str(vault_path), "--pattern", "**/*.md"],
-        capture_output=True, timeout=60,
+        capture_output=True,
+        timeout=60,
     )
     subprocess.run(["qmd", "embed"], capture_output=True, timeout=120)
 
@@ -121,6 +147,7 @@ def run_projection(max_notes=3000, step=500):
 
     # Check current real vault size for reference
     from memento_utils import get_vault
+
     real_vault = get_vault()
     real_count = len(list((real_vault / "notes").glob("*.md"))) if (real_vault / "notes").exists() else 0
 
@@ -137,13 +164,6 @@ def run_projection(max_notes=3000, step=500):
         vault_path = Path(tmpdir) / "vault"
         vault_path.mkdir()
 
-        # Create QMD config for this temp collection
-        qmd_config = Path.home() / ".config" / "qmd" / "index.yml"
-        if qmd_config.exists():
-            original_config = qmd_config.read_text()
-        else:
-            original_config = None
-
         total_generated = 0
 
         try:
@@ -155,9 +175,9 @@ def run_projection(max_notes=3000, step=500):
 
                 # Re-index
                 subprocess.run(
-                    ["qmd", "update", "-c", collection, "--path", str(vault_path),
-                     "--pattern", "**/*.md"],
-                    capture_output=True, timeout=120,
+                    ["qmd", "update", "-c", collection, "--path", str(vault_path), "--pattern", "**/*.md"],
+                    capture_output=True,
+                    timeout=120,
                 )
 
                 # Measure BM25 latency
@@ -174,11 +194,13 @@ def run_projection(max_notes=3000, step=500):
 
                 print(f"{target_count:>8d}  {avg_lat:>8d}ms  {p95_lat:>8d}ms  {alert:>10s}")
 
-                results.append({
-                    "notes": target_count,
-                    "bm25_avg_ms": avg_lat,
-                    "bm25_p95_ms": p95_lat,
-                })
+                results.append(
+                    {
+                        "notes": target_count,
+                        "bm25_avg_ms": avg_lat,
+                        "bm25_p95_ms": p95_lat,
+                    }
+                )
 
         finally:
             # Clean up the temp collection from QMD

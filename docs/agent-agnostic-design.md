@@ -40,7 +40,4 @@ Implemented:
 ## Notes
 
 - runtime directory selection now verifies writability and falls back safely when `$XDG_RUNTIME_DIR` is present but unusable
-- final quality gates for this branch should use:
-  - `ruff check memento hooks tests`
-  - `ruff format --check .`
-  - `.venv/bin/pytest -q`
+- historical PR1 quality gates used Ruff plus the full pytest suite; current branch shipping gates live in `.beislid/workflow.md`.

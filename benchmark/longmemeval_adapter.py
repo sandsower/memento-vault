@@ -64,17 +64,19 @@ def ingest_haystack(question, granularity="session"):
                 turns_text.append(f"{role}: {content}")
 
             text = "\n".join(turns_text)
-            documents.append({
-                "id": session_id,
-                "text": text,
-                "metadata": {
-                    "date": date,
-                    "session_id": session_id,
-                    "session_idx": idx,
-                    "title": f"Session {session_id}",
-                    "num_turns": len(session),
-                },
-            })
+            documents.append(
+                {
+                    "id": session_id,
+                    "text": text,
+                    "metadata": {
+                        "date": date,
+                        "session_id": session_id,
+                        "session_idx": idx,
+                        "title": f"Session {session_id}",
+                        "num_turns": len(session),
+                    },
+                }
+            )
 
         elif granularity == "turn":
             for turn_idx, turn in enumerate(session):
@@ -82,18 +84,20 @@ def ingest_haystack(question, granularity="session"):
                 content = turn.get("content", "")
                 turn_id = f"{session_id}:turn-{turn_idx}"
 
-                documents.append({
-                    "id": turn_id,
-                    "text": f"{role}: {content}",
-                    "metadata": {
-                        "date": date,
-                        "session_id": session_id,
-                        "session_idx": idx,
-                        "turn_idx": turn_idx,
-                        "role": role,
-                        "title": f"{session_id} turn {turn_idx}",
-                    },
-                })
+                documents.append(
+                    {
+                        "id": turn_id,
+                        "text": f"{role}: {content}",
+                        "metadata": {
+                            "date": date,
+                            "session_id": session_id,
+                            "session_idx": idx,
+                            "turn_idx": turn_idx,
+                            "role": role,
+                            "title": f"{session_id} turn {turn_idx}",
+                        },
+                    }
+                )
 
     return documents
 
@@ -132,10 +136,10 @@ def build_vault_notes(documents, vault_dir=None):
 title: {title}
 type: session
 date: {date}
-session_id: {meta.get('session_id', doc_id)}
+session_id: {meta.get("session_id", doc_id)}
 ---
 
-{doc['text']}
+{doc["text"]}
 """
         note_path.write_text(content)
         note_paths.append(note_path)
@@ -233,9 +237,7 @@ def run_retrieval(question, config=None):
 
             graph = build_wikilink_graph(vault_path)
             if graph and graph.number_of_nodes() > 0:
-                pagerank = compute_pagerank(
-                    graph, alpha=config.get("pagerank_alpha", 0.85)
-                )
+                pagerank = compute_pagerank(graph, alpha=config.get("pagerank_alpha", 0.85))
                 if pagerank and config.get("pagerank_boost_weight", 0) > 0:
                     results = apply_pagerank_boost(results, pagerank, config)
                 if config.get("ppr_enabled", True):
@@ -391,13 +393,17 @@ def call_llm(prompt, timeout=120, backend=None):
         try:
             result = subprocess.run(
                 [
-                    "claude", "--print",
+                    "claude",
+                    "--print",
                     "--dangerously-skip-permissions",
                     "--no-session-persistence",
                     "--bare",
-                    "-p", prompt,
+                    "-p",
+                    prompt,
                 ],
-                capture_output=True, text=True, timeout=timeout,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
             return result.stdout.strip() if result.returncode == 0 else ""
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -405,18 +411,23 @@ def call_llm(prompt, timeout=120, backend=None):
 
     elif backend == "codex":
         import tempfile
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
             out_path = tmp.name
         try:
             subprocess.run(
                 [
-                    "codex", "exec",
+                    "codex",
+                    "exec",
                     "--dangerously-bypass-approvals-and-sandbox",
                     "--ephemeral",
-                    "-o", out_path,
+                    "-o",
+                    out_path,
                     prompt,
                 ],
-                capture_output=True, text=True, timeout=timeout,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
             return Path(out_path).read_text().strip()
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -453,13 +464,14 @@ def multi_hop_retrieve(question, index, initial_results, config):
             snippet = r.get("snippet", "")
             # Extract capitalized phrases (names, places) and numbers
             import re
+
             # Proper nouns and multi-word names
-            for match in re.finditer(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', snippet):
+            for match in re.finditer(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*", snippet):
                 term = match.group()
                 if len(term) > 3 and term.lower() not in tokenize(question["question"]):
                     follow_up_terms.add(term)
             # Numbers with context (e.g., "$350,000", "70 pounds")
-            for match in re.finditer(r'[\$]?\d[\d,]*\.?\d*\s*\w+', snippet):
+            for match in re.finditer(r"[\$]?\d[\d,]*\.?\d*\s*\w+", snippet):
                 follow_up_terms.add(match.group().strip())
 
         if not follow_up_terms:
@@ -506,9 +518,10 @@ def apply_recency_boost(results, documents_by_id):
         try:
             # Parse various date formats
             import re
+
             # "2023/05/20 (Sat) 02:21" -> "2023/05/20"
-            clean = re.sub(r'\s*\([^)]*\)\s*', ' ', date_str).strip()
-            clean = clean.replace('/', '-').split()[0] if clean else ""
+            clean = re.sub(r"\s*\([^)]*\)\s*", " ", date_str).strip()
+            clean = clean.replace("/", "-").split()[0] if clean else ""
             dated_with_parsed.append((r, clean))
         except (ValueError, IndexError):
             dated_with_parsed.append((r, ""))
@@ -558,7 +571,9 @@ def format_context(results, documents_by_id):
         session_id = doc_id.split(":")[0] if ":" in doc_id else doc_id
         if session_id in documents_by_id:
             doc = documents_by_id[session_id]
-            context_parts.append(f"--- Session ({doc.get('metadata', {}).get('date', 'unknown date')}) ---\n{doc['text']}")
+            context_parts.append(
+                f"--- Session ({doc.get('metadata', {}).get('date', 'unknown date')}) ---\n{doc['text']}"
+            )
         elif r.get("snippet"):
             context_parts.append(f"--- {r.get('title', 'Unknown')} ---\n{r['snippet']}")
     return "\n\n".join(context_parts)
@@ -726,9 +741,7 @@ def run_full_eval(dataset_path, config=None, max_questions=None, output_path=Non
         total_done = sum(total_by_type.values())
         acc = total_correct / total_done if total_done > 0 else 0
         print(
-            f"  [{i+1}/{len(dataset)}] {q_type}: "
-            f"{'CORRECT' if is_correct else 'WRONG'} "
-            f"(running: {acc:.1%})",
+            f"  [{i + 1}/{len(dataset)}] {q_type}: {'CORRECT' if is_correct else 'WRONG'} (running: {acc:.1%})",
             file=sys.stderr,
         )
 
@@ -769,12 +782,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="LongMemEval benchmark adapter")
     parser.add_argument("--dataset", required=True, help="Path to LongMemEval JSON")
-    parser.add_argument(
-        "--mode", choices=["retrieval", "full"], default="retrieval"
-    )
-    parser.add_argument(
-        "--config", type=str, default=None, help="JSON config string"
-    )
+    parser.add_argument("--mode", choices=["retrieval", "full"], default="retrieval")
+    parser.add_argument("--config", type=str, default=None, help="JSON config string")
     parser.add_argument("--max-questions", type=int, default=None)
     parser.add_argument("--output", type=str, default=None, help="Output JSONL path")
 
@@ -785,15 +794,15 @@ if __name__ == "__main__":
         config.update(json.loads(args.config))
 
     if args.mode == "retrieval":
-        metrics = run_retrieval_eval(
-            args.dataset, config, max_questions=args.max_questions
-        )
+        metrics = run_retrieval_eval(args.dataset, config, max_questions=args.max_questions)
         print(json.dumps(metrics, indent=2))
     elif args.mode == "full":
         output = args.output or "longmemeval_full_results.jsonl"
         results = run_full_eval(
-            args.dataset, config,
-            max_questions=args.max_questions, output_path=output,
+            args.dataset,
+            config,
+            max_questions=args.max_questions,
+            output_path=output,
         )
         print(json.dumps(results, indent=2))
         print(f"\nDetailed results: {output}", file=sys.stderr)

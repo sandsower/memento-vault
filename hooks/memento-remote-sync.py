@@ -16,7 +16,6 @@ and --batch N to limit how many notes to sync per run (default: all).
 import os
 import re
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -111,9 +110,9 @@ def _dry_run_note(note: dict) -> str:
         return "create"
 
     remote_note = parse_note_text(remote.get("content", ""), Path(remote_path).stem)
-    if remote_note and sync_ledger.content_hash(
-        _sync_payload(remote_note)
-    ) == sync_ledger.content_hash(_sync_payload(note)):
+    if remote_note and sync_ledger.content_hash(_sync_payload(remote_note)) == sync_ledger.content_hash(
+        _sync_payload(note)
+    ):
         return "skip"
     return "conflict"
 
@@ -264,15 +263,23 @@ def catch_up(vault, dry_run=False, batch=0):
         if isinstance(result, dict) and "error" in result:
             print(f"  Error: {note['title']} -> {result['error']}", file=sys.stderr)
             sync_ledger.record(
-                vault, "note", source,
-                status="error", content_hash=chash, error=result["error"],
+                vault,
+                "note",
+                source,
+                status="error",
+                content_hash=chash,
+                error=result["error"],
             )
             errors += 1
         else:
             remote_path = result.get("path", "?")
             sync_ledger.record(
-                vault, "note", source,
-                status="ok", content_hash=chash, remote_path=remote_path,
+                vault,
+                "note",
+                source,
+                status="ok",
+                content_hash=chash,
+                remote_path=remote_path,
             )
             print(f"  Synced: {note['title']} -> {remote_path}")
             pushed += 1
@@ -305,7 +312,7 @@ def main():
         idx = args.index("--batch")
         if idx + 1 < len(args):
             batch = int(args[idx + 1])
-            args = args[:idx] + args[idx + 2:]
+            args = args[:idx] + args[idx + 2 :]
         else:
             args = args[:idx]
 
@@ -368,9 +375,7 @@ def main():
 
         if vault:
             if isinstance(result, dict) and "error" in result:
-                spool_path = sync_ledger.spool_payload(
-                    vault, "note", source, _sync_payload(note)
-                )
+                spool_path = sync_ledger.spool_payload(vault, "note", source, _sync_payload(note))
                 sync_ledger.record(
                     vault,
                     "note",

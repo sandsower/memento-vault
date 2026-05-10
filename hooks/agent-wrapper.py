@@ -6,6 +6,7 @@ Usage: agent-wrapper.py <sentinel_path> <cmd> [args...]
 Creates sentinel_path when the command finishes (regardless of exit code),
 so downstream stages can wait for completion instead of guessing with timers.
 """
+
 import subprocess
 import sys
 from pathlib import Path

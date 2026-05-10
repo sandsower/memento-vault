@@ -40,7 +40,7 @@ def load_logs(since_days=None):
 
 
 def pct(n, total):
-    return f"{n/total*100:.0f}%" if total else "n/a"
+    return f"{n / total * 100:.0f}%" if total else "n/a"
 
 
 def avg(lst):
@@ -104,7 +104,7 @@ def analyze_recall(entries):
     if chars:
         print(f"  Chars injected: avg {avg(chars)}, total {sum(chars)}")
 
-    print(f"  Pipeline distribution:")
+    print("  Pipeline distribution:")
     for pipeline, count in pipelines.most_common():
         print(f"    {pipeline}: {count} ({pct(count, len(inject))})")
 
@@ -116,9 +116,9 @@ def analyze_recall(entries):
         print(f"  Multi-hop gate triggered: {len(hop_gated)}")
         print(f"  Multi-hop fired: {len(hop_fired)}")
         if hop_added:
-            print(f"  New results per hop: avg {sum(hop_added)/len(hop_added):.1f}")
+            print(f"  New results per hop: avg {sum(hop_added) / len(hop_added):.1f}")
         if hop_fired:
-            print(f"  Example hop queries:")
+            print("  Example hop queries:")
             for e in hop_fired[:3]:
                 print(f"    [{e.get('multi_hop_added', 0)} new] {e.get('query', '')[:70]}")
 
@@ -179,7 +179,7 @@ def main():
 
     period_start = entries[0].get("ts", "?")[:10] if entries else "?"
     period_end = entries[-1].get("ts", "?")[:10] if entries else "?"
-    print(f"=== Memento pipeline analysis ===")
+    print("=== Memento pipeline analysis ===")
     print(f"Period: {period_start} to {period_end}")
     print(f"Total log entries: {len(entries)}")
     print()

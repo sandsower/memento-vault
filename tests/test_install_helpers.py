@@ -146,10 +146,10 @@ def test_repair_stale_headless_mcp_config_patches_known_bad_installed_copy(tmp_p
     target.write_text(
         "# local edit preserved\n"
         "cmd = [\n"
-        "        \"claude\",\n"
-        "        \"--strict-mcp-config\",\n"
-        "        \"--mcp-config\",\n"
-        "        \"{}\",\n"
+        '        "claude",\n'
+        '        "--strict-mcp-config",\n'
+        '        "--mcp-config",\n'
+        '        "{}",\n'
         "]\n"
     )
     script = f"""
@@ -178,7 +178,7 @@ repair_stale_headless_mcp_config {target} memento/llm.py
     repaired = target.read_text()
     assert "# local edit preserved" in repaired
     assert '"{}"' not in repaired
-    assert '\'{"mcpServers": {}}\'' in repaired
+    assert "'{\"mcpServers\": {}}'" in repaired
     assert "Repaired stale headless Claude MCP config" in result.stdout
 
 
@@ -347,7 +347,7 @@ def test_shell_warmup_upgrades_inline_python_snippet(tmp_path):
     shell_rc = tmp_path / ".bashrc"
     shell_rc.write_text(
         "# Warm QMD embedding model on shell startup (detached, silent)\n"
-        "command -v python3 >/dev/null 2>&1 && python3 -c 'import shutil, subprocess; q = shutil.which(\"qmd\"); q and subprocess.Popen([q, \"vsearch\", \"warmup\", \"-c\", \"memento\", \"-n\", \"1\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)' >/dev/null 2>&1\n"
+        'command -v python3 >/dev/null 2>&1 && python3 -c \'import shutil, subprocess; q = shutil.which("qmd"); q and subprocess.Popen([q, "vsearch", "warmup", "-c", "memento", "-n", "1"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)\' >/dev/null 2>&1\n'
     )
     script = f"""
 set -euo pipefail
@@ -403,7 +403,7 @@ def test_memento_vault_warmup_starts_qmd_detached(tmp_path):
     )
     log = tmp_path / "qmd.log"
     qmd = tmp_path / "qmd"
-    qmd.write_text(f"#!/usr/bin/env bash\necho \"$@\" >> {log}\n")
+    qmd.write_text(f'#!/usr/bin/env bash\necho "$@" >> {log}\n')
     qmd.chmod(0o755)
     env = os.environ.copy()
     env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
@@ -417,7 +417,7 @@ def test_memento_vault_warmup_starts_qmd_detached(tmp_path):
         if log.exists():
             break
         time.sleep(0.05)
-    assert log.read_text().strip() == 'vsearch warmup -c memento -n 1'
+    assert log.read_text().strip() == "vsearch warmup -c memento -n 1"
 
 
 # ---------------------------------------------------------------------------
@@ -522,9 +522,7 @@ class TestWarmup:
         FakeMCPHandler.auth_required = True
         FakeMCPHandler.expected_token = "my-secret-key"
 
-        rc, stdout, _ = _run_helper(
-            "warmup", fake_mcp_server["url"], "my-secret-key"
-        )
+        rc, stdout, _ = _run_helper("warmup", fake_mcp_server["url"], "my-secret-key")
         assert rc == 0
         assert "OK" in stdout
 
@@ -532,9 +530,7 @@ class TestWarmup:
         FakeMCPHandler.auth_required = True
         FakeMCPHandler.expected_token = "correct-key"
 
-        rc, _, stderr = _run_helper(
-            "warmup", fake_mcp_server["url"], "wrong-key"
-        )
+        rc, _, stderr = _run_helper("warmup", fake_mcp_server["url"], "wrong-key")
         assert rc == 1
         assert "FAIL" in stderr
 
@@ -552,9 +548,7 @@ class TestWarmup:
         """Unreachable server should fail after retries."""
         # Use a port that nothing listens on
         port = _free_port()
-        rc, _, stderr = _run_helper(
-            "warmup", f"http://127.0.0.1:{port}", ""
-        )
+        rc, _, stderr = _run_helper("warmup", f"http://127.0.0.1:{port}", "")
         assert rc == 1
         assert "FAIL" in stderr
 
@@ -574,14 +568,16 @@ class TestWarmup:
 class TestClearAuthCache:
     def test_clears_existing_entry(self, tmp_path):
         cache = tmp_path / "mcp-needs-auth-cache.json"
-        cache.write_text(json.dumps({
-            "memento-vault": {"timestamp": 1234567890},
-            "other-server": {"timestamp": 9999999999},
-        }))
-
-        rc, stdout, _ = _run_helper(
-            "clear-auth-cache", str(tmp_path), "memento-vault"
+        cache.write_text(
+            json.dumps(
+                {
+                    "memento-vault": {"timestamp": 1234567890},
+                    "other-server": {"timestamp": 9999999999},
+                }
+            )
         )
+
+        rc, stdout, _ = _run_helper("clear-auth-cache", str(tmp_path), "memento-vault")
         assert rc == 0
         assert "Cleared" in stdout
 
@@ -593,16 +589,12 @@ class TestClearAuthCache:
         cache = tmp_path / "mcp-needs-auth-cache.json"
         cache.write_text(json.dumps({"other-server": {"timestamp": 123}}))
 
-        rc, stdout, _ = _run_helper(
-            "clear-auth-cache", str(tmp_path), "memento-vault"
-        )
+        rc, stdout, _ = _run_helper("clear-auth-cache", str(tmp_path), "memento-vault")
         assert rc == 0
         assert "No stale cache" in stdout
 
     def test_no_op_when_file_missing(self, tmp_path):
-        rc, stdout, _ = _run_helper(
-            "clear-auth-cache", str(tmp_path), "memento-vault"
-        )
+        rc, stdout, _ = _run_helper("clear-auth-cache", str(tmp_path), "memento-vault")
         assert rc == 0
 
 
@@ -614,8 +606,11 @@ class TestClearAuthCache:
 class TestMcpConfig:
     def test_remote_config_creates_http_entry(self, tmp_path):
         rc, _, _ = _run_helper(
-            "mcp-config", "true", str(tmp_path),
-            "https://vault.example.com:8745", "my-key",
+            "mcp-config",
+            "true",
+            str(tmp_path),
+            "https://vault.example.com:8745",
+            "my-key",
         )
         assert rc == 0
 
@@ -627,8 +622,11 @@ class TestMcpConfig:
 
     def test_remote_config_without_key_has_no_headers(self, tmp_path):
         rc, _, _ = _run_helper(
-            "mcp-config", "true", str(tmp_path),
-            "https://vault.example.com:8745", "",
+            "mcp-config",
+            "true",
+            str(tmp_path),
+            "https://vault.example.com:8745",
+            "",
         )
         assert rc == 0
 
@@ -637,7 +635,11 @@ class TestMcpConfig:
 
     def test_local_config_creates_stdio_entry(self, tmp_path):
         rc, _, _ = _run_helper(
-            "mcp-config", "false", str(tmp_path), "", "",
+            "mcp-config",
+            "false",
+            str(tmp_path),
+            "",
+            "",
         )
         assert rc == 0
 
@@ -652,8 +654,11 @@ class TestMcpConfig:
         (tmp_path / "mcp-servers.json").write_text(json.dumps(existing))
 
         rc, _, _ = _run_helper(
-            "mcp-config", "true", str(tmp_path),
-            "https://vault.example.com", "key",
+            "mcp-config",
+            "true",
+            str(tmp_path),
+            "https://vault.example.com",
+            "key",
         )
         assert rc == 0
 

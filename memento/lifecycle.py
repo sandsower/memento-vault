@@ -180,8 +180,8 @@ def triage_health_warning():
         log_path = TRIAGE_HEALTH_LOG_PATH
         total, failed, invalid_mcp_failed, stale_certainty_failed = _scan_triage_health_log(log_path, cutoff)
         if total < TRIAGE_HEALTH_MIN_EVENTS:
-            legacy_total, legacy_failed, legacy_invalid_mcp_failed, legacy_stale_certainty_failed = _scan_triage_health_log(
-                RETRIEVAL_LOG_PATH, cutoff, mode="legacy"
+            legacy_total, legacy_failed, legacy_invalid_mcp_failed, legacy_stale_certainty_failed = (
+                _scan_triage_health_log(RETRIEVAL_LOG_PATH, cutoff, mode="legacy")
             )
             if legacy_total >= total:
                 total = legacy_total
@@ -194,11 +194,13 @@ def triage_health_warning():
             return None
         if (failed / total) < TRIAGE_HEALTH_FAIL_RATIO:
             return None
-        warning = f"[vault] WARN: triage failing {failed}/{total} in last {TRIAGE_HEALTH_WINDOW_HOURS}h — check {log_path}"
+        warning = (
+            f"[vault] WARN: triage failing {failed}/{total} in last {TRIAGE_HEALTH_WINDOW_HOURS}h — check {log_path}"
+        )
         if invalid_mcp_failed:
             warning += (
                 " — likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
-                "copied hooks should use {\"mcpServers\": {}} for --mcp-config"
+                'copied hooks should use {"mcpServers": {}} for --mcp-config'
             )
         if stale_certainty_failed:
             warning += f" — {_STALE_CERTAINTY_HINT}"
@@ -653,9 +655,7 @@ PROJECT_ENTITY_STOPWORDS = {
     "before",
 }
 
-SPECIFIC_PROJECT_QUERY_PATTERNS = (
-    r"\bwhat did we decide about (?P<subject>[a-z0-9][a-z0-9 _-]*)",
-)
+SPECIFIC_PROJECT_QUERY_PATTERNS = (r"\bwhat did we decide about (?P<subject>[a-z0-9][a-z0-9 _-]*)",)
 
 
 def recall_signal_terms(prompt: str) -> list[str]:
@@ -1385,12 +1385,20 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "empty_vault", prompt)
+        reason = (
+            fallback_remote_reason
+            if isinstance(fallback_remote_reason, StructuredMissReason)
+            else normalize_miss_reason(fallback_remote_reason or "empty_vault", prompt)
+        )
         log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
         return [], None, [], reason
 
     if not has_qmd():
-        reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "backend_unavailable", prompt)
+        reason = (
+            fallback_remote_reason
+            if isinstance(fallback_remote_reason, StructuredMissReason)
+            else normalize_miss_reason(fallback_remote_reason or "backend_unavailable", prompt)
+        )
         log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
         return [], None, [], reason
 
@@ -1559,7 +1567,11 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
                 )
                 return [], None, [], "threshold_too_high"
         bump_prompts_since()
-        miss_reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "no-results", prompt)
+        miss_reason = (
+            fallback_remote_reason
+            if isinstance(fallback_remote_reason, StructuredMissReason)
+            else normalize_miss_reason(fallback_remote_reason or "no-results", prompt)
+        )
         log_retrieval("recall", str(miss_reason), query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
         log_recall_diagnostic(config, "decision", decision="skipped", reason=str(miss_reason), latency_ms=latency_ms)
         return [], None, [], miss_reason
@@ -1660,7 +1672,9 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> Lif
             if normalized == "threshold_too_high" and not isinstance(remote_miss, dict):
                 details = {"min_score": get_config().get("recall_min_score", 0.4)}
             result = empty_result("recall", normalized)
-            result.metadata = {"miss": remote_miss if isinstance(remote_miss, dict) else build_search_miss(normalized, details=details)}
+            result.metadata = {
+                "miss": remote_miss if isinstance(remote_miss, dict) else build_search_miss(normalized, details=details)
+            }
             return result
         return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)

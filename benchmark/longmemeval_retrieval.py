@@ -4,7 +4,7 @@ Uses rank_bm25 for per-question BM25 indexing, producing result dicts
 compatible with memento_utils enhancement functions.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from rank_bm25 import BM25Okapi
 import re
 
@@ -12,6 +12,7 @@ import re
 @dataclass
 class BM25Index:
     """A BM25 index over a set of documents."""
+
     bm25: BM25Okapi
     documents: list  # original document dicts
     corpus_tokens: list  # tokenized corpus
@@ -20,7 +21,7 @@ class BM25Index:
 def tokenize(text):
     """Simple whitespace + punctuation tokenizer for BM25."""
     # Lowercase, split on non-alphanumeric, filter short tokens
-    return [w for w in re.split(r'[^a-z0-9]+', text.lower()) if len(w) > 1]
+    return [w for w in re.split(r"[^a-z0-9]+", text.lower()) if len(w) > 1]
 
 
 def build_bm25_index(documents):
@@ -78,13 +79,15 @@ def bm25_search(index, query, limit=10, min_score=0.0):
         # Build path from document id (mimics vault note path)
         doc_id = doc.get("id", f"doc-{i}")
 
-        results.append({
-            "path": f"notes/{doc_id}.md",
-            "title": doc.get("metadata", {}).get("title", doc_id),
-            "score": norm_score,
-            "snippet": snippet,
-            "_raw_score": score,  # keep raw score for debugging
-            "_doc_id": doc_id,
-        })
+        results.append(
+            {
+                "path": f"notes/{doc_id}.md",
+                "title": doc.get("metadata", {}).get("title", doc_id),
+                "score": norm_score,
+                "snippet": snippet,
+                "_raw_score": score,  # keep raw score for debugging
+                "_doc_id": doc_id,
+            }
+        )
 
     return results
