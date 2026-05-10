@@ -476,6 +476,42 @@ class TestMementoCapture:
         content = project_file.read_text()
         assert "windsurf" in content
 
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_fleeting_only_capture_routes_to_activity_log_when_present(self, tmp_vault):
+        project_dir = tmp_vault / "projects"
+        project_dir.mkdir(exist_ok=True)
+        project_file = project_dir / "my-api.md"
+        project_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "title: my-api",
+                    "---",
+                    "",
+                    "## Sessions",
+                    "",
+                    "- 2026-04-01 — handwritten entry",
+                    "",
+                    "## Activity log",
+                    "",
+                ]
+            )
+        )
+
+        result = memento_capture(
+            session_summary="Lightweight remote hook summary",
+            cwd="/home/vic/Projects/my-api",
+            session_id="sess-remote",
+            agent="cursor",
+            fleeting_only=True,
+        )
+
+        assert "error" not in result
+        content = project_file.read_text()
+        activity_pos = content.index("## Activity log")
+        new_line_pos = content.index("`sess-remote` — Lightweight remote hook summary")
+        assert activity_pos < new_line_pos
+
 
 # --- memento_reindex ---
 

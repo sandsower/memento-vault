@@ -22,6 +22,7 @@ from memento.config import detect_project, get_config, get_vault  # noqa: E402
 from memento.llm import llm_complete  # noqa: E402
 from memento.store import (  # noqa: E402
     acquire_vault_write_lock,
+    append_project_session_line,
     load_inception_state,
     log_retrieval,
     release_vault_write_lock,
@@ -179,10 +180,7 @@ def append_session_to_project(project_file, session_id, summary, ticket=None):
         else:
             content = content.rstrip("\n") + f"\n\n## {ticket}\n\n" + line
     else:
-        if "## Sessions" in content:
-            content = content.rstrip("\n") + "\n" + line
-        else:
-            content += f"\n## Sessions\n{line}"
+        content = append_project_session_line(content, line)
 
     project_file.write_text(content)
 

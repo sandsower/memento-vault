@@ -29,6 +29,7 @@ class TestShimExports:
         for name in [
             "write_note",
             "update_project_index",
+            "append_project_session_line",
             "find_dedup_candidates",
             "acquire_vault_write_lock",
             "release_vault_write_lock",
@@ -297,6 +298,99 @@ class TestUpdateProjectIndex:
         assert new_line_pos > activity_pos
         # And not inside Sessions
         assert sessions_pos < activity_pos < new_line_pos
+
+    def test_update_project_index_appends_to_mid_file_activity_log(self, tmp_vault):
+        """Activity log insertion stays inside the section, before the next heading."""
+        project_file = tmp_vault / "projects" / "api-service.md"
+        project_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "title: api-service",
+                    "---",
+                    "",
+                    "## Notes",
+                    "",
+                    "## Activity log",
+                    "",
+                    "- 2026-04-01 — earlier auto entry",
+                    "",
+                    "## Decisions",
+                    "",
+                    "- Keep this section separate.",
+                ]
+            )
+        )
+
+        with patch("memento.store.datetime") as mock_datetime:
+            mock_now = mock_datetime.now.return_value
+            mock_now.strftime.return_value = "2026-04-15"
+
+            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
+
+        text = project_file.read_text()
+        new_line_pos = text.index("- 2026-04-15 MCP store: New note title")
+        decisions_pos = text.index("## Decisions")
+        assert text.index("## Activity log") < new_line_pos < decisions_pos
+
+    def test_update_project_index_preserves_blank_line_for_empty_activity_log(self, tmp_vault):
+        project_file = tmp_vault / "projects" / "api-service.md"
+        project_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "title: api-service",
+                    "---",
+                    "",
+                    "## Notes",
+                    "",
+                    "## Activity log",
+                    "",
+                ]
+            )
+        )
+
+        with patch("memento.store.datetime") as mock_datetime:
+            mock_now = mock_datetime.now.return_value
+            mock_now.strftime.return_value = "2026-04-15"
+
+            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
+
+        text = project_file.read_text()
+        assert "## Activity log\n\n- 2026-04-15 MCP store: New note title\n" in text
+
+    def test_update_project_index_ignores_heading_text_in_body(self, tmp_vault):
+        """Inline heading literals must not trigger Activity log routing."""
+        project_file = tmp_vault / "projects" / "api-service.md"
+        project_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "title: api-service",
+                    "---",
+                    "",
+                    "## Notes",
+                    "",
+                    "- This note mentions `## Activity log` but does not define it.",
+                    "",
+                    "## Sessions",
+                    "",
+                    "- 2026-04-01 — earlier entry",
+                ]
+            )
+        )
+
+        with patch("memento.store.datetime") as mock_datetime:
+            mock_now = mock_datetime.now.return_value
+            mock_now.strftime.return_value = "2026-04-15"
+
+            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
+
+        text = project_file.read_text()
+        sessions_pos = text.index("## Sessions")
+        new_line_pos = text.index("- 2026-04-15 MCP store: New note title")
+        assert sessions_pos < new_line_pos
+        assert text.count("## Activity log") == 1
 
     def test_update_project_index_falls_back_to_sessions(self, tmp_vault):
         """Hubs without an Activity log section still receive auto-captures in Sessions."""
