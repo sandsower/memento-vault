@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
-.venv/
+.venv
 .claude/
 .pytest_cache/
 docs/research/
@@ -12,3 +12,4 @@ plans/
 sweep*.db
 sweep_results*.json
 .env
+.worktrees/

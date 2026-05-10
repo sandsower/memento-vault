@@ -1,0 +1,9 @@
+# Worktrunk project config for memento-vault.
+# Keep new worktrees immediately usable for local gates without copying secrets.
+
+[pre-start]
+venv = """
+if [ -d {{ primary_worktree_path }}/.venv ] && [ ! -e .venv ]; then
+  ln -s {{ primary_worktree_path }}/.venv .venv
+fi
+"""
