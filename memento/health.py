@@ -7,6 +7,7 @@ import errno
 import json
 import os
 import shutil
+import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -27,6 +28,7 @@ _STALE_MCP_HINT = (
     "likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
     'copied hooks should use {"mcpServers": {}} for --mcp-config'
 )
+_REINSTALL_HINT = "rerun ./install.sh --reinstall"
 _DEFAULT_CONFIG = {
     "vault_path": str(Path.home() / "memento"),
     "auto_commit": True,
@@ -106,7 +108,13 @@ def build_report() -> HealthReport:
     checks.append(_check_vault_dirs(vault))
     checks.append(_check_git(vault, config))
     checks.append(_check_search_backend(vault, config))
+    manifest_check, manifest = _check_install_manifest()
+    checks.append(manifest_check)
+    checks.append(_check_managed_files(manifest))
+    checks.append(_check_claude_hooks(manifest))
     checks.extend(_check_mcp_config())
+    checks.append(_check_mcp_registration())
+    checks.append(_check_pi_bridge_config())
     checks.append(_check_triage_health())
     checks.append(_check_retrieval_health())
     checks.append(_check_locks())
@@ -316,13 +324,387 @@ def _check_search_backend(vault: Path, config: dict[str, Any]) -> CheckResult:
     return CheckResult("search", FAIL, "search_backend auto found no usable local backend")
 
 
+def _config_dir() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "memento-vault"
+
+
+def _home_config_dir() -> Path:
+    return Path.home() / ".config" / "memento-vault"
+
+
+def _config_file_path(filename: str) -> Path:
+    xdg_path = _config_dir() / filename
+    home_path = _home_config_dir() / filename
+    if xdg_path.exists() or xdg_path == home_path:
+        return xdg_path
+    return home_path
+
+
+def _install_manifest_path() -> Path:
+    return _config_file_path("manifest.json")
+
+
+def _check_install_manifest() -> tuple[CheckResult, dict[str, Any] | None]:
+    path = _install_manifest_path()
+    if not path.exists():
+        return CheckResult("install manifest", WARN, f"install manifest not found; {_REINSTALL_HINT}", {"path": str(path)}), None
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return (
+            CheckResult(
+                "install manifest",
+                WARN,
+                f"cannot read install manifest at {path}: {exc}; {_REINSTALL_HINT}",
+                {"path": str(path), "error": str(exc)},
+            ),
+            None,
+        )
+    if not isinstance(manifest, dict):
+        return CheckResult("install manifest", WARN, f"install manifest is not an object; {_REINSTALL_HINT}", {"path": str(path)}), None
+
+    options = manifest.get("options") if isinstance(manifest.get("options"), dict) else {}
+    files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    version = str(manifest.get("version") or "unknown")
+    return (
+        CheckResult(
+            "install manifest",
+            PASS,
+            f"install manifest v{version} found with {len(files)} managed files",
+            {"path": str(path), "version": version, "options": sorted(options), "file_count": len(files)},
+        ),
+        manifest,
+    )
+
+
+_CRITICAL_MANAGED_KEYS = {
+    "memento/__init__.py",
+    "memento/config.py",
+    "memento/utils.py",
+    "memento/store.py",
+    "memento/search.py",
+    "memento/lifecycle.py",
+    "memento/pi_bridge.py",
+    "memento/adapters/__init__.py",
+    "memento/adapters/claude.py",
+}
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        import hashlib
+
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _managed_source_path(key: str) -> Path | None:
+    root = _repo_root()
+    if key.startswith("hooks/") or key.startswith("memento/"):
+        return root / key
+    if key.startswith("skills/"):
+        parts = key.split("/")
+        if len(parts) == 2:
+            return root / "skills" / parts[1] / "SKILL.md"
+        return root / key
+    if key.startswith("agents/"):
+        return root / "agents" / f"{Path(key).name}.md"
+    if key.startswith("codex-skills/"):
+        skill = key.split("/", 1)[1]
+        generic = root / "skills" / "generic" / skill / "SKILL.md"
+        if generic.exists():
+            return generic
+        return root / "skills" / skill / "SKILL.md"
+    return None
+
+
+def _managed_dest_path(key: str) -> Path | None:
+    if key.startswith("hooks/"):
+        return Path.home() / ".claude" / key
+    if key.startswith("memento/"):
+        rel = key.split("/", 1)[1]
+        return Path.home() / ".claude" / "hooks" / "memento" / rel
+    if key.startswith("skills/"):
+        parts = key.split("/")
+        if len(parts) == 2:
+            return Path.home() / ".claude" / "skills" / parts[1] / "SKILL.md"
+        return Path.home() / ".claude" / key
+    if key.startswith("agents/"):
+        return Path.home() / ".claude" / "agents" / f"{Path(key).name}.md"
+    if key.startswith("codex-skills/"):
+        skill = key.split("/", 1)[1]
+        return Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "skills" / skill / "SKILL.md"
+    return None
+
+
+def _check_managed_files(manifest: dict[str, Any] | None) -> CheckResult:
+    if not manifest:
+        return CheckResult("managed files", WARN, f"managed file drift unavailable without install manifest; {_REINSTALL_HINT}")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files:
+        return CheckResult("managed files", WARN, f"install manifest has no managed file hashes; {_REINSTALL_HINT}")
+
+    current: list[str] = []
+    stale_managed: list[str] = []
+    locally_modified: list[str] = []
+    missing: list[str] = []
+    missing_critical: list[str] = []
+    source_missing: list[str] = []
+    not_executable: list[str] = []
+
+    for key, manifest_hash in sorted(files.items()):
+        key = str(key)
+        dest = _managed_dest_path(key)
+        source = _managed_source_path(key)
+        if dest is None:
+            continue
+        if not dest.exists():
+            if key in _CRITICAL_MANAGED_KEYS:
+                missing_critical.append(key)
+            else:
+                missing.append(key)
+            continue
+        if key == "hooks/vault-commit.sh" and not os.access(dest, os.X_OK):
+            not_executable.append(key)
+        installed_hash = _file_sha256(dest)
+        source_hash = _file_sha256(source) if source is not None else None
+        if source_hash is None:
+            source_missing.append(key)
+            continue
+        if installed_hash == source_hash:
+            current.append(key)
+        elif manifest_hash and installed_hash == str(manifest_hash):
+            stale_managed.append(key)
+        else:
+            locally_modified.append(key)
+
+    worst = FAIL if missing_critical else WARN if (stale_managed or locally_modified or missing or source_missing or not_executable) else PASS
+    if worst == PASS:
+        message = f"managed installed files match this checkout ({len(current)} checked)"
+    else:
+        parts = []
+        if missing_critical:
+            parts.append(f"{len(missing_critical)} critical missing")
+        if missing:
+            parts.append(f"{len(missing)} missing")
+        if stale_managed:
+            parts.append(f"{len(stale_managed)} stale managed")
+        if locally_modified:
+            parts.append(f"{len(locally_modified)} locally modified")
+        if not_executable:
+            parts.append(f"{len(not_executable)} not executable")
+        if source_missing:
+            parts.append(f"{len(source_missing)} source missing")
+        message = f"managed file drift detected: {', '.join(parts)}; {_REINSTALL_HINT}"
+
+    return CheckResult(
+        "managed files",
+        worst,
+        message,
+        {
+            "checked": len(files),
+            "current_count": len(current),
+            "missing": missing,
+            "missing_critical": missing_critical,
+            "stale_managed": stale_managed,
+            "locally_modified": locally_modified,
+            "not_executable": not_executable,
+            "source_missing": source_missing,
+        },
+    )
+
+
+def _expected_claude_hooks(manifest: dict[str, Any] | None) -> list[tuple[str, str]]:
+    options = manifest.get("options") if isinstance(manifest, dict) and isinstance(manifest.get("options"), dict) else {}
+    expected = [("SessionEnd", "memento-triage.py")]
+    if options.get("experimental"):
+        expected.extend(
+            [
+                ("SessionStart", "vault-briefing.py"),
+                ("UserPromptSubmit", "vault-recall.py"),
+                ("PreToolUse", "vault-tool-context.py"),
+            ]
+        )
+    return expected
+
+
+def _check_claude_hooks(manifest: dict[str, Any] | None) -> CheckResult:
+    settings_path = Path.home() / ".claude" / "settings.json"
+    expected = _expected_claude_hooks(manifest)
+    if not settings_path.exists():
+        return CheckResult(
+            "claude hooks",
+            WARN,
+            f"Claude settings.json not found; {_REINSTALL_HINT}",
+            {"path": str(settings_path), "expected": [f"{event}/{script}" for event, script in expected]},
+        )
+    try:
+        settings = json.loads(settings_path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return CheckResult(
+            "claude hooks",
+            WARN,
+            f"cannot read Claude settings at {settings_path}: {exc}; {_REINSTALL_HINT}",
+            {"path": str(settings_path), "error": str(exc)},
+        )
+
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    missing = []
+    registered = []
+    for event, script in expected:
+        found = False
+        entries = hooks.get(event, []) if isinstance(hooks, dict) else []
+        if isinstance(entries, list):
+            for entry in entries:
+                hook_list = entry.get("hooks", [entry]) if isinstance(entry, dict) else []
+                for hook in hook_list:
+                    command = hook.get("command", "") if isinstance(hook, dict) else ""
+                    if script in command:
+                        found = True
+        label = f"{event}/{script}"
+        if found:
+            registered.append(label)
+        else:
+            missing.append(label)
+    if missing:
+        return CheckResult(
+            "claude hooks",
+            WARN,
+            f"missing Claude hook registrations: {', '.join(missing)}; {_REINSTALL_HINT}",
+            {"path": str(settings_path), "registered": registered, "missing": missing},
+        )
+    return CheckResult("claude hooks", PASS, "expected Claude hook registrations found", {"path": str(settings_path), "registered": registered})
+
+
+def _mcp_entry_shape(data: Any) -> tuple[str, str | None]:
+    if not isinstance(data, dict):
+        return "invalid", "MCP config root must be an object"
+    entry = data.get("memento-vault")
+    if entry is None:
+        return "missing", None
+    if not isinstance(entry, dict):
+        return "invalid", "memento-vault entry must be an object"
+    url = entry.get("url")
+    if entry.get("type") == "http" or url is not None:
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")) or not url.rstrip("/").endswith("/mcp"):
+            return "invalid", "remote MCP entry must have an http(s) url ending in /mcp"
+        return "remote http", None
+    args = entry.get("args")
+    env = entry.get("env")
+    command = entry.get("command")
+    command_name = Path(str(command)).name if command else ""
+    python_command = command_name.startswith("python")
+    has_module_args = isinstance(args, list) and any(
+        args[index] == "-m" and index + 1 < len(args) and args[index + 1] == "memento"
+        for index in range(len(args))
+    )
+    if python_command and has_module_args and isinstance(env, dict) and env.get("PYTHONPATH"):
+        return "local stdio", None
+    return "invalid", "local MCP entry must run python3 -m memento with PYTHONPATH"
+
+
+def _mcp_registration_shape(output: str) -> str:
+    import re
+
+    text = output.lower()
+    if "memento-vault" not in text:
+        return "invalid"
+    urls = re.findall(r"https?://[^\s]+", text)
+    if urls:
+        return "remote http" if any(url.rstrip('/').endswith("/mcp") for url in urls) else "invalid"
+    if re.search(r"\bpython(?:3(?:\.\d+)?)?\b", text) and re.search(r"(?:^|\s)-m\s+memento(?:\s|$)", text):
+        return "local stdio"
+    return "invalid"
+
+
+def _check_mcp_registration() -> CheckResult:
+    results = []
+    worst = PASS
+    for client in ("claude", "codex"):
+        if shutil.which(client) is None:
+            results.append({"client": client, "status": "skipped", "reason": "cli not found"})
+            continue
+        try:
+            completed = subprocess.run(
+                [client, "mcp", "get", "memento-vault"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=3,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            results.append({"client": client, "status": WARN, "reason": type(exc).__name__})
+            worst = WARN
+            continue
+        if completed.returncode != 0:
+            reason = _safe_text((completed.stderr or completed.stdout).strip()) or "registration lookup failed"
+            results.append({"client": client, "status": WARN, "reason": reason})
+            worst = WARN
+            continue
+        shape = _mcp_registration_shape(completed.stdout)
+        if shape == "invalid":
+            results.append({"client": client, "status": WARN, "reason": "unexpected registration shape"})
+            worst = WARN
+        else:
+            results.append({"client": client, "status": PASS, "shape": shape})
+
+    checked = [result for result in results if result["status"] != "skipped"]
+    if worst == WARN:
+        return CheckResult(
+            "mcp registration",
+            WARN,
+            "MCP CLI registration missing or stale; run ./install.sh --mcp",
+            {"registrations": results},
+        )
+    if checked:
+        return CheckResult("mcp registration", PASS, "MCP CLI registration detected", {"registrations": results})
+    return CheckResult("mcp registration", PASS, "MCP CLI registration not checked (Claude/Codex CLI not found)", {"registrations": results})
+
+
 def _check_mcp_config() -> list[CheckResult]:
     checks = []
     config_path = Path.home() / ".claude" / "mcp-servers.json"
     if config_path.exists():
         try:
-            json.loads(config_path.read_text())
-            checks.append(CheckResult("mcp config", PASS, f"valid JSON at {config_path}", {"path": str(config_path)}))
+            data = json.loads(config_path.read_text())
+            shape, error = _mcp_entry_shape(data)
+            if shape == "invalid":
+                checks.append(
+                    CheckResult(
+                        "mcp config",
+                        FAIL,
+                        f"invalid memento-vault MCP config at {config_path}: {error}; run ./install.sh --mcp",
+                        {"path": str(config_path), "error": error},
+                    )
+                )
+            elif shape == "missing":
+                checks.append(
+                    CheckResult(
+                        "mcp config",
+                        WARN,
+                        f"memento-vault MCP server is not configured in {config_path}; run ./install.sh --mcp",
+                        {"path": str(config_path)},
+                    )
+                )
+            else:
+                checks.append(
+                    CheckResult(
+                        "mcp config",
+                        PASS,
+                        f"valid memento-vault MCP config at {config_path} ({shape})",
+                        {"path": str(config_path), "memento_vault": shape},
+                    )
+                )
         except json.JSONDecodeError as exc:
             checks.append(
                 CheckResult("mcp config", FAIL, f"invalid JSON at {config_path}: {exc}", {"path": str(config_path)})
@@ -337,7 +719,7 @@ def _check_mcp_config() -> list[CheckResult]:
                 )
             )
     else:
-        checks.append(CheckResult("mcp config", WARN, "Claude MCP config not found", {"path": str(config_path)}))
+        checks.append(CheckResult("mcp config", WARN, "Claude MCP config not found; run ./install.sh --mcp", {"path": str(config_path)}))
 
     stale_paths = []
     for path in (Path.home() / ".claude" / "hooks" / "memento" / "llm.py", Path(__file__).with_name("llm.py")):
@@ -348,6 +730,43 @@ def _check_mcp_config() -> list[CheckResult]:
     else:
         checks.append(CheckResult("headless claude mcp", PASS, "headless Claude empty MCP config shape looks current"))
     return checks
+
+
+_PI_BOOL_KEYS = {"enabled", "briefing", "promptRecall", "toolContext", "autoCapture", "captureQueue"}
+_PI_INT_KEYS = {"maxInjectedChars", "maxToolContextPerSession"}
+
+
+def _check_pi_bridge_config() -> CheckResult:
+    path = _config_file_path("pi-bridge.json")
+    if not path.exists():
+        return CheckResult("pi bridge", PASS, "Pi bridge config not found (optional)", {"path": str(path)})
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return CheckResult("pi bridge", WARN, f"cannot read Pi bridge config at {path}: {exc}", {"path": str(path), "error": str(exc)})
+    if not isinstance(raw, dict):
+        return CheckResult("pi bridge", WARN, "Pi bridge config root must be an object", {"path": str(path)})
+    memento = raw.get("memento") if isinstance(raw.get("memento"), dict) else None
+    candidate = (memento or {}).get("piBridge") if memento else raw.get("piBridge", raw)
+    if not isinstance(candidate, dict):
+        return CheckResult("pi bridge", WARN, "Pi bridge config must be an object", {"path": str(path)})
+    invalid = []
+    for key in sorted(_PI_BOOL_KEYS):
+        if key in candidate and not isinstance(candidate[key], bool):
+            invalid.append(key)
+    for key in sorted(_PI_INT_KEYS):
+        value = candidate.get(key)
+        if key in candidate and (type(value) is not int or value < 0):
+            invalid.append(key)
+    if invalid:
+        return CheckResult(
+            "pi bridge",
+            WARN,
+            f"Pi bridge config has invalid key types: {', '.join(invalid)}",
+            {"path": str(path), "invalid_keys": invalid},
+        )
+    configured = sorted(key for key in candidate if key in _PI_BOOL_KEYS or key in _PI_INT_KEYS)
+    return CheckResult("pi bridge", PASS, "Pi bridge config shape looks valid", {"path": str(path), "configured_keys": configured})
 
 
 def _has_stale_empty_mcp_config(path: Path) -> bool:
