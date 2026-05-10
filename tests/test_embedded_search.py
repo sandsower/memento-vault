@@ -195,6 +195,60 @@ class TestEmbeddedSearchFTS5:
         # The note specifically about TTL should rank higher than general caching
         assert results[0]["path"] == "notes/redis-cache-ttl.md"
 
+    def test_concrete_search_ranks_exact_identifier_first(self, backend, embedded_vault):
+        vault, _ = embedded_vault
+        (vault / "notes" / "aa-substring-env-var.md").write_text(
+            "---\ntitle: Configure suffix env var\n---\n\n"
+            "Set MY_MEMENTO_VAULT_PATH_SUFFIX before launching the hook.\n"
+        )
+        (vault / "notes" / "zz-exact-env-var.md").write_text(
+            "---\ntitle: Configure exact env var\n---\n\n"
+            "Set MEMENTO_VAULT_PATH before launching the hook.\n"
+        )
+        backend.reindex("memento")
+
+        results = backend.search("MEMENTO_VAULT_PATH", "memento", concrete=True)
+
+        assert results
+        assert results[0]["path"] == "notes/zz-exact-env-var.md"
+
+    def test_concrete_search_matches_path_substring(self, backend, embedded_vault):
+        vault, _ = embedded_vault
+        (vault / "notes" / "path-note.md").write_text(
+            "---\ntitle: Auth middleware path\n---\n\n"
+            "The file lives at src/server/authMiddleware.ts.\n"
+        )
+        backend.reindex("memento")
+
+        results = backend.search("src/server/authMiddleware.ts", "memento", concrete=True)
+
+        assert any(r["path"] == "notes/path-note.md" for r in results)
+
+    def test_concrete_search_matches_uuid(self, backend, embedded_vault):
+        vault, _ = embedded_vault
+        uuid = "550e8400-e29b-41d4-a716-446655440000"
+        (vault / "notes" / "uuid-note.md").write_text(
+            "---\ntitle: Literal UUID\n---\n\n"
+            f"Trace id {uuid} identifies the failed sync.\n"
+        )
+        backend.reindex("memento")
+
+        results = backend.search(uuid, "memento", concrete=True)
+
+        assert results[0]["path"] == "notes/uuid-note.md"
+
+    def test_concrete_search_matches_quoted_phrase(self, backend, embedded_vault):
+        vault, _ = embedded_vault
+        (vault / "notes" / "phrase-note.md").write_text(
+            "---\ntitle: Literal phrase\n---\n\n"
+            "Remember the exact words blue comet protocol for rollout.\n"
+        )
+        backend.reindex("memento")
+
+        results = backend.search('find "blue comet protocol"', "memento", concrete=True)
+
+        assert results[0]["path"] == "notes/phrase-note.md"
+
 
 class TestEmbeddedSearchGet:
     """Get single note by path."""

@@ -1,11 +1,14 @@
 """Tests for the search backend abstraction layer."""
 
 import pytest
+
+from memento.search import is_literal_like_query, resolve_concrete_mode
 from memento.search_backend import (
     GrepBackend,
     QMDBackend,
     SearchBackend,
     _clean_snippet,
+    _literal_score,
     get_backend,
     reset_backend,
     set_backend,
@@ -25,9 +28,9 @@ class MockBackend(SearchBackend):
     def is_available(self):
         return self._available
 
-    def search(self, query, collection, limit=5, semantic=False, timeout=10, min_score=0.0):
+    def search(self, query, collection, limit=5, semantic=False, timeout=10, min_score=0.0, concrete=False):
         self.search_calls.append(
-            {"query": query, "collection": collection, "limit": limit, "semantic": semantic}
+            {"query": query, "collection": collection, "limit": limit, "semantic": semantic, "concrete": concrete}
         )
         return [r for r in self._results if r.get("score", 1.0) >= min_score][:limit]
 
@@ -87,6 +90,69 @@ class TestBackendSingleton:
         assert isinstance(get_backend(), (QMDBackend, GrepBackend))
 
 
+class TestConcreteDetection:
+    @pytest.mark.parametrize(
+        "query",
+        [
+            '"exact phrase"',
+            'find "exact phrase"',
+            "notes about 'exact phrase'",
+            "MEMENTO_VAULT_PATH",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "src/server/authMiddleware.ts",
+            "some_process.name",
+            "memento_search",
+        ],
+    )
+    def test_literal_like_queries_detected(self, query):
+        assert is_literal_like_query(query) is True
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "what did we decide about cache invalidation",
+            "Redis TTL policy",
+            "AWS deployment notes",
+            "what's the team's Redis TTL policy",
+        ],
+    )
+    def test_conceptual_query_not_literal_like(self, query):
+        assert is_literal_like_query(query) is False
+
+    @pytest.mark.parametrize(
+        ("value", "query", "expected_concrete", "expected_auto"),
+        [
+            (True, "cache", True, False),
+            (False, "MEMENTO_VAULT_PATH", False, False),
+            ("auto", "MEMENTO_VAULT_PATH", True, True),
+            (None, "normal cache policy", False, False),
+            ("flase", "MEMENTO_VAULT_PATH", False, False),
+        ],
+    )
+    def test_resolve_concrete_mode(self, value, query, expected_concrete, expected_auto):
+        concrete, auto_selected = resolve_concrete_mode(value, query)
+        assert concrete is expected_concrete
+        assert auto_selected is expected_auto
+
+    def test_embedded_single_quotes_extract_literal_phrase_not_apostrophes(self):
+        exact = _literal_score("notes about 'blue comet protocol'", "notes/phrase.md", "Phrase", "blue comet protocol")
+        prose = _literal_score("what's the team's Redis TTL policy", "notes/policy.md", "Policy", "Redis TTL policy")
+
+        assert exact > 0
+        assert prose == 0
+
+    def test_literal_score_prefers_exact_content_identifier_over_substring(self):
+        exact = _literal_score("MEMENTO_VAULT_PATH", "notes/exact.md", "Exact", "Set MEMENTO_VAULT_PATH here")
+        substring = _literal_score(
+            "MEMENTO_VAULT_PATH",
+            "notes/substring.md",
+            "Substring",
+            "Set MY_MEMENTO_VAULT_PATH_SUFFIX here",
+        )
+
+        assert exact > substring
+
+
 class TestMockBackend:
     def test_search_delegates_to_backend(self):
         results = [
@@ -99,9 +165,29 @@ class TestMockBackend:
         # Use the search.py wrapper
         from memento.search import qmd_search
 
-        found = qmd_search("test query", collection="memento", limit=5)
+        found = qmd_search("test query", collection="memento", limit=5, concrete=True)
         assert len(found) == 2
         assert mock.search_calls[0]["query"] == "test query"
+        assert mock.search_calls[0]["concrete"] is True
+
+    def test_concrete_search_with_extras_skips_duplicate_fanout(self, monkeypatch):
+        results = [
+            {"path": "notes/foo.md", "title": "Foo", "score": 0.9, "snippet": "MEMENTO_VAULT_PATH"},
+        ]
+        mock = MockBackend(results=results)
+        set_backend(mock)
+        monkeypatch.setattr(
+            "memento.search.get_config",
+            lambda: {"qmd_collection": "memento", "extra_qmd_collections": ["archive"]},
+        )
+
+        from memento.search import qmd_search_with_extras
+
+        found = qmd_search_with_extras("MEMENTO_VAULT_PATH", concrete=True)
+
+        assert found == results
+        assert len(mock.search_calls) == 1
+        assert mock.search_calls[0]["collection"] == "memento"
 
     def test_search_respects_min_score(self):
         results = [

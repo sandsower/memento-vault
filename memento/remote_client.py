@@ -93,7 +93,10 @@ def _call_tool(tool_name: str, arguments: dict, timeout: int = 30) -> dict:
                 except (json.JSONDecodeError, KeyError):
                     parsed.append({"text": item.get("text", "")})
         if len(parsed) == 1:
-            return parsed[0]
+            item = parsed[0]
+            if tool_name == "memento_search" and isinstance(item, dict) and "path" in item:
+                return parsed
+            return item
         if parsed:
             return parsed
     return result
@@ -117,11 +120,18 @@ def list_notes(include_hash: bool = True) -> list[dict] | None:
     return None
 
 
-def search_envelope(query: str, limit: int = 5, semantic: bool = False, min_score: float = 0.0, cwd: str = "") -> dict:
+def search_envelope(
+    query: str,
+    limit: int = 5,
+    semantic: bool = False,
+    min_score: float = 0.0,
+    cwd: str = "",
+    concrete: object = "auto",
+) -> dict:
     """Search the remote vault, preserving structured miss metadata when present."""
     result = _call_tool(
         "memento_search",
-        {"query": query, "limit": limit, "semantic": semantic, "min_score": min_score, "cwd": cwd},
+        {"query": query, "limit": limit, "semantic": semantic, "min_score": min_score, "cwd": cwd, "concrete": concrete},
     )
     if isinstance(result, list):
         return {"results": result}
@@ -137,9 +147,16 @@ def search_envelope(query: str, limit: int = 5, semantic: bool = False, min_scor
     return {"results": []}
 
 
-def search(query: str, limit: int = 5, semantic: bool = False, min_score: float = 0.0, cwd: str = "") -> list[dict]:
+def search(
+    query: str,
+    limit: int = 5,
+    semantic: bool = False,
+    min_score: float = 0.0,
+    cwd: str = "",
+    concrete: object = "auto",
+) -> list[dict]:
     """Search the remote vault, returning only results for legacy callers."""
-    envelope = search_envelope(query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd)
+    envelope = search_envelope(query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd, concrete=concrete)
     results = envelope.get("results")
     return results if isinstance(results, list) else []
 

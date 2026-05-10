@@ -211,9 +211,50 @@ class TestMementoSearch:
             result = memento_search("memento_search")
 
         assert result["results"] == []
-        assert result["miss"]["reason"] == "literal_mode_auto_selected"
-        assert "natural-language" in result["miss"]["recovery_hints"][0]
+        assert result["miss"]["reason"] == "no_concrete_match"
+        assert "broader" in result["miss"]["recovery_hints"][0]
         assert "memento_get" in result["miss"]["recovery_hints"][1]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results")
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[{"path": "notes/env.md", "title": "Env", "score": 1.0, "snippet": "MEMENTO_VAULT_PATH"}],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_concrete_auto_forwards_and_skips_enhancement(self, _qmd, mock_search, mock_enhance, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            results = memento_search("MEMENTO_VAULT_PATH")
+
+        assert results[0]["path"] == "notes/env.md"
+        assert mock_search.call_args.kwargs["concrete"] is True
+        assert mock_search.call_args.kwargs["semantic"] is False
+        mock_enhance.assert_not_called()
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[{"path": "notes/cache.md", "title": "Cache", "score": 0.9, "snippet": "cache"}],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_concrete_false_keeps_conceptual_enhancement(self, _qmd, mock_search, mock_enhance, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            results = memento_search("MEMENTO_VAULT_PATH", concrete=False)
+
+        assert results[0]["path"] == "notes/cache.md"
+        assert mock_search.call_args.kwargs["concrete"] is False
+        mock_enhance.assert_called_once()
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch("memento.mcp_server.qmd_search_with_extras", return_value=[])
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_concrete_false_literal_miss_uses_normal_miss(self, _qmd, _search, _enhance, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("MEMENTO_VAULT_PATH", concrete=False)
+
+        assert result["miss"]["reason"] == "no_exact_match"
 
 
 # --- lifecycle retrieval tools ---

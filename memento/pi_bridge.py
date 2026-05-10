@@ -21,7 +21,16 @@ from typing import Any, Optional
 
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_tool_context, strip_injection
-from memento.search import enhance_results, has_qmd, miss_envelope, normalize_miss_reason, qmd_get, qmd_search_with_extras
+from memento.search import (
+    enhance_results,
+    filter_by_project,
+    has_qmd,
+    miss_envelope,
+    normalize_miss_reason,
+    qmd_get,
+    qmd_search_with_extras,
+    resolve_concrete_mode,
+)
 from memento.remote_client import get as remote_get
 from memento.remote_client import is_remote, search_envelope as remote_search_envelope, status as remote_status
 from memento.store import write_note
@@ -144,12 +153,12 @@ def _search_miss(reason: str, details: Optional[dict[str, Any]] = None) -> dict[
     return payload
 
 
-def _search(query: str, limit: int, cwd: str = "") -> dict[str, Any]:
+def _search(query: str, limit: int, cwd: str = "", concrete: object = "auto") -> dict[str, Any]:
     if not query.strip():
         return _search_miss("query_too_broad", {"query": query})
     if not has_qmd():
         if is_remote():
-            envelope = remote_search_envelope(query=query, limit=limit, cwd=cwd)
+            envelope = remote_search_envelope(query=query, limit=limit, cwd=cwd, concrete=concrete)
             if envelope.get("error"):
                 return _search_miss("backend_unavailable", {"error": envelope["error"]})
             results = envelope.get("results", [])
@@ -161,12 +170,25 @@ def _search(query: str, limit: int, cwd: str = "") -> dict[str, Any]:
             return _search_miss("no_exact_match")
         return _search_miss("backend_unavailable")
     limit = max(1, min(int(limit), 20))
-    raw_results = qmd_search_with_extras(query, limit=limit, semantic=False, timeout=10, min_score=0.0)
-    results = enhance_results(raw_results, cwd=cwd or None) if raw_results else []
+    concrete_enabled, _auto_selected = resolve_concrete_mode(concrete, query)
+    concrete_auto_mode = concrete is None or (isinstance(concrete, str) and concrete.strip().lower() in ("", "auto"))
+    conceptual_miss_reason = normalize_miss_reason("no-results", query) if concrete_auto_mode else "no_exact_match"
+    raw_results = qmd_search_with_extras(
+        query,
+        limit=limit,
+        semantic=False,
+        timeout=10,
+        min_score=0.0,
+        concrete=concrete_enabled,
+    )
+    if raw_results and concrete_enabled:
+        results = filter_by_project(raw_results, cwd) if cwd else raw_results
+    else:
+        results = enhance_results(raw_results, cwd=cwd or None) if raw_results else []
     if not results:
         if raw_results:
             return _search_miss("project_filter_removed_all", {"cwd": cwd} if cwd else None)
-        return _search_miss(normalize_miss_reason("no-results", query))
+        return _search_miss("no_concrete_match" if concrete_enabled else conceptual_miss_reason)
     sanitized = []
     for result in results[:limit]:
         sanitized.append(
@@ -350,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--query", default="")
     search.add_argument("--limit", type=int, default=5)
     search.add_argument("--cwd", default="")
+    search.add_argument("--concrete", default="auto", choices=("auto", "true", "false"))
 
     get = sub.add_parser("get", help="Read a memento note")
     get.add_argument("--path", default="")
@@ -393,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         return _run_json("status", _status, args.cwd)
     if args.command == "search":
-        return _run_json("search", _search, args.query, args.limit, args.cwd)
+        return _run_json("search", _search, args.query, args.limit, args.cwd, args.concrete)
     if args.command == "get":
         return _run_json("get", _get, args.path)
     if args.command == "capture":
