@@ -36,6 +36,24 @@ from memento.utils import read_hook_input
 TRIAGE_HEALTH_WINDOW_HOURS = 24
 TRIAGE_HEALTH_MIN_EVENTS = 3
 TRIAGE_HEALTH_FAIL_RATIO = 0.5
+_STALE_CERTAINTY_HINT = (
+    "likely stale installed memento package; rerun ./install.sh --reinstall; "
+    "current triage accepts certainty labels like confirmed"
+)
+_ACCEPTED_CERTAINTY_LABELS = {
+    "speculation",
+    "speculative",
+    "uncertain",
+    "low",
+    "medium",
+    "moderate",
+    "likely",
+    "confirmed",
+    "certain",
+    "high",
+    "proven",
+    "verified",
+}
 
 
 @dataclass
@@ -95,13 +113,21 @@ TRIAGE_HEALTH_FAILURE_ACTIONS = {
 }
 
 
+def _is_stale_certainty_error(error):
+    text = str(error or "")
+    if "invalid literal for int()" not in text:
+        return False
+    return any(f"'{label}'" in text or f'"{label}"' in text for label in _ACCEPTED_CERTAINTY_LABELS)
+
+
 def _scan_triage_health_log(path, cutoff, mode="health"):
     if not os.path.exists(path):
-        return 0, 0, False
+        return 0, 0, False, False
 
     total = 0
     failed = 0
     invalid_mcp_failed = False
+    stale_certainty_failed = False
     with open(path) as f:
         for line in f:
             try:
@@ -126,7 +152,9 @@ def _scan_triage_health_log(path, cutoff, mode="health"):
                 total += 1
                 if action != "decision":
                     failed += 1
-                    invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(rec.get("error", ""))
+                    error = rec.get("error", "")
+                    invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(error)
+                    stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
                 continue
 
             if action in TRIAGE_HEALTH_SUCCESS_ACTIONS:
@@ -134,8 +162,10 @@ def _scan_triage_health_log(path, cutoff, mode="health"):
             elif action in TRIAGE_HEALTH_FAILURE_ACTIONS:
                 total += 1
                 failed += 1
-                invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(rec.get("error", ""))
-    return total, failed, invalid_mcp_failed
+                error = rec.get("error", "")
+                invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(error)
+                stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
+    return total, failed, invalid_mcp_failed, stale_certainty_failed
 
 
 def triage_health_warning():
@@ -148,13 +178,16 @@ def triage_health_warning():
     try:
         cutoff = datetime.now() - timedelta(hours=TRIAGE_HEALTH_WINDOW_HOURS)
         log_path = TRIAGE_HEALTH_LOG_PATH
-        total, failed, invalid_mcp_failed = _scan_triage_health_log(log_path, cutoff)
+        total, failed, invalid_mcp_failed, stale_certainty_failed = _scan_triage_health_log(log_path, cutoff)
         if total < TRIAGE_HEALTH_MIN_EVENTS:
-            legacy_total, legacy_failed, legacy_invalid_mcp_failed = _scan_triage_health_log(
+            legacy_total, legacy_failed, legacy_invalid_mcp_failed, legacy_stale_certainty_failed = _scan_triage_health_log(
                 RETRIEVAL_LOG_PATH, cutoff, mode="legacy"
             )
             if legacy_total >= total:
-                total, failed, invalid_mcp_failed = legacy_total, legacy_failed, legacy_invalid_mcp_failed
+                total = legacy_total
+                failed = legacy_failed
+                invalid_mcp_failed = legacy_invalid_mcp_failed
+                stale_certainty_failed = legacy_stale_certainty_failed
                 log_path = RETRIEVAL_LOG_PATH
 
         if total < TRIAGE_HEALTH_MIN_EVENTS:
@@ -167,6 +200,8 @@ def triage_health_warning():
                 " — likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
                 "copied hooks should use {\"mcpServers\": {}} for --mcp-config"
             )
+        if stale_certainty_failed:
+            warning += f" — {_STALE_CERTAINTY_HINT}"
         return warning
     except Exception:
         return None

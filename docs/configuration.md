@@ -79,7 +79,7 @@ memento-vault health
 memento-vault doctor   # alias
 ```
 
-Default checks are cheap and local: config parse, vault directory structure, git/auto-commit readiness, selected search backend availability, MCP config JSON validity, stale headless Claude MCP config detection, recent triage health, basic retrieval log health, lock files, and basic Inception state when enabled.
+Default checks are cheap and local: config parse, vault directory structure, git/auto-commit readiness, selected search backend availability, install manifest state, managed hook/package file drift, Claude hook registration, MCP CLI registration, MCP config shape, optional Pi bridge config shape, stale headless Claude MCP config detection, recent triage health, basic retrieval log health, lock files, and basic Inception state when enabled. Drift checks are report-only and suggest installer repair commands such as `./install.sh --reinstall` or `./install.sh --mcp`.
 
 Options:
 
