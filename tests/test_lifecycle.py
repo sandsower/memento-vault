@@ -663,7 +663,6 @@ def test_build_recall_preserves_remote_structured_miss_when_local_unavailable(
     assert result.metadata["miss"] == {
         "reason": "threshold_too_high",
         "recovery_hints": ["Lower min_score."],
-        "details": {"min_score": 0.9},
     }
     decisions = [call.kwargs for call in mock_log.call_args_list if call.args[1] == "diagnostic-decision"]
     assert decisions[-1]["reason"] == "threshold_too_high"

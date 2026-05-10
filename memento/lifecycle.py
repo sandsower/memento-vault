@@ -63,6 +63,15 @@ class LifecycleResult:
         return payload
 
 
+class StructuredMissReason(str):
+    """String reason that carries a structured miss payload through recall internals."""
+
+    def __new__(cls, reason: str, miss: dict):
+        obj = str.__new__(cls, reason)
+        obj.miss = miss
+        return obj
+
+
 def empty_result(source: str, reason: str = "no-results") -> LifecycleResult:
     return LifecycleResult(
         should_inject=False,
@@ -1250,6 +1259,7 @@ def run_remote_recall(prompt, cwd, config):
             reason = "project-mismatch-filtered-empty"
         elif isinstance(envelope.get("miss"), dict):
             reason = envelope["miss"].get("reason") or "no-results"
+            reason = StructuredMissReason(reason, envelope["miss"])
         else:
             reason = "no-results"
         return [], None, [], reason, project_decisions
@@ -1340,13 +1350,13 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        reason = normalize_miss_reason(fallback_remote_reason or "empty_vault", prompt)
-        log_recall_diagnostic(config, "decision", decision="skipped", reason=reason)
+        reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "empty_vault", prompt)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
         return [], None, [], reason
 
     if not has_qmd():
-        reason = normalize_miss_reason(fallback_remote_reason or "backend_unavailable", prompt)
-        log_recall_diagnostic(config, "decision", decision="skipped", reason=reason)
+        reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "backend_unavailable", prompt)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
         return [], None, [], reason
 
     # BM25 search against the prompt, augmented with project context
@@ -1514,9 +1524,9 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
                 )
                 return [], None, [], "threshold_too_high"
         bump_prompts_since()
-        miss_reason = normalize_miss_reason(fallback_remote_reason or "no-results", prompt)
-        log_retrieval("recall", miss_reason, query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
-        log_recall_diagnostic(config, "decision", decision="skipped", reason=miss_reason, latency_ms=latency_ms)
+        miss_reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "no-results", prompt)
+        log_retrieval("recall", str(miss_reason), query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
+        log_recall_diagnostic(config, "decision", decision="skipped", reason=str(miss_reason), latency_ms=latency_ms)
         return [], None, [], miss_reason
 
     results = enhance_results(results, config, cwd=cwd)
@@ -1610,11 +1620,12 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> Lif
             return empty_result("recall", reason)
         normalized = normalize_miss_reason(reason, prompt)
         if normalized in MISS_RECOVERY_HINTS:
+            remote_miss = getattr(reason, "miss", None)
             details = None
-            if normalized == "threshold_too_high":
+            if normalized == "threshold_too_high" and not isinstance(remote_miss, dict):
                 details = {"min_score": get_config().get("recall_min_score", 0.4)}
             result = empty_result("recall", normalized)
-            result.metadata = {"miss": build_search_miss(normalized, details=details)}
+            result.metadata = {"miss": remote_miss if isinstance(remote_miss, dict) else build_search_miss(normalized, details=details)}
             return result
         return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)
