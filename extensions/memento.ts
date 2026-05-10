@@ -347,7 +347,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memento_status",
 		label: "Memento Status",
-		description: "Show memento vault and lifecycle bridge status.",
+		description: "Show memento vault and lifecycle bridge health/config status. Use for operational checks and setup debugging, not for prior decisions, project history, or note content; use memento_search and memento_get for recall.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const payload = await runJson(pi, ctx, ["status", "--cwd", ctx.cwd]);
@@ -359,15 +359,15 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memento_search",
 		label: "Memento Search",
-		description: "Search memento vault notes for prior decisions, discoveries, and session context.",
+		description: "Search memento vault notes before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Use memento_get after search when you need full content for a returned path; do not use search to read a known note path.",
 		parameters: Type.Object({
-			query: Type.String({ description: "Search query" }),
+			query: Type.String({ description: "Natural-language question or exact identifier to search for" }),
 			limit: Type.Optional(Type.Number({ description: "Maximum results, default 5" })),
 			concrete: Type.Optional(Type.Union([
 				Type.Literal("auto"),
 				Type.Literal("true"),
 				Type.Literal("false"),
-			], { description: "Literal search mode: auto, true, or false" })),
+			], { description: "Literal search mode: auto, true, or false. Keep auto for identifier-like queries such as file names, function names, config keys, or error strings." })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const payload = await runJson(pi, ctx, [
@@ -388,9 +388,9 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memento_get",
 		label: "Memento Get",
-		description: "Read a specific memento note by path or note name.",
+		description: "Read the full content of a specific memento note by path or note name. Use after memento_search when a result path needs full content, or directly when the user already supplied an exact note path/name. Do not use for topical discovery; search first.",
 		parameters: Type.Object({
-			path: Type.String({ description: "Note path or note name" }),
+			path: Type.String({ description: "Exact note path or note name, for example notes/my-note.md or my-note" }),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const payload = await runJson(pi, ctx, ["get", "--path", params.path]);
@@ -401,10 +401,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memento_capture",
 		label: "Memento Capture",
-		description: "Manually capture durable knowledge from the current pi session. Use only when the user asks to save memory.",
+		description: "Manually capture durable knowledge from the current pi session. Use only when the user explicitly asks to remember, save, capture, or record memory. This is separate from interactive /memento skill workflows and from automatic lifecycle capture.",
 		parameters: Type.Object({
-			title: Type.String({ description: "Short note title" }),
-			body: Type.String({ description: "Durable knowledge to capture" }),
+			title: Type.String({ description: "Short note title for the durable memory" }),
+			body: Type.String({ description: "Durable decision, discovery, fix, or reusable pattern to capture" }),
 			queue: Type.Optional(Type.Boolean({ description: "Queue for review instead of writing a note immediately" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -429,7 +429,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memento_queue",
 		label: "Memento Capture Queue",
-		description: "List queued pi capture candidates.",
+		description: "List queued pi capture candidates from lifecycle or manual capture review. Use for capture workflow review, not for searching prior decisions or project history.",
 		parameters: Type.Object({
 			limit: Type.Optional(Type.Number({ description: "Maximum queued captures to list, default 20" })),
 			includeBody: Type.Optional(Type.Boolean({ description: "Include queued capture bodies" })),
@@ -445,7 +445,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memento_flush_queue",
 		label: "Memento Flush Queue",
-		description: "Write queued pi capture candidates to durable notes. Use only after user approval.",
+		description: "Write queued pi capture candidates to durable notes. Use only after user approval during capture workflow review; do not use for general memory search or recall.",
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "Capture id to flush" })),
 			all: Type.Optional(Type.Boolean({ description: "Flush all queued captures" })),
