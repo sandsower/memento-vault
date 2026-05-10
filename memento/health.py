@@ -371,14 +371,15 @@ def _check_triage_health() -> CheckResult:
         return CheckResult(
             "triage", WARN, "no recent triage health events found", {"window_hours": _HEALTH_WINDOW_HOURS}
         )
-    if invalid_mcp_failed and failed:
+    failure_threshold_met = total >= 3 and failed / total >= 0.5
+    if failure_threshold_met and invalid_mcp_failed:
         return CheckResult(
             "triage",
             FAIL,
             f"triage failing {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h — {_STALE_MCP_HINT}",
             {"log_path": log_path, "failed": failed, "total": total, "last_error": last_error},
         )
-    if total >= 3 and failed / total >= 0.5:
+    if failure_threshold_met:
         return CheckResult(
             "triage",
             WARN,
@@ -479,17 +480,39 @@ def _check_locks() -> CheckResult:
     lock_results = []
     worst = PASS
     messages = []
-    for name, path in (("vault-write", Path(VAULT_WRITE_LOCK_PATH)), ("inception", Path(INCEPTION_LOCK_PATH))):
-        result = _inspect_lock(name, path)
-        lock_results.append(result)
-        if result["status"] == FAIL:
-            worst = FAIL
-        elif result["status"] == WARN and worst != FAIL:
-            worst = WARN
-        if result["message"]:
-            messages.append(result["message"])
+    for name, paths in (
+        ("vault-write", _lock_path_candidates("vault-write.lock")),
+        ("inception", _lock_path_candidates("inception.lock")),
+    ):
+        for path in paths:
+            result = _inspect_lock(name, path)
+            lock_results.append(result)
+            if result["status"] == FAIL:
+                worst = FAIL
+            elif result["status"] == WARN and worst != FAIL:
+                worst = WARN
+            if result["message"]:
+                messages.append(result["message"])
     message = "; ".join(messages) if messages else "no lock files present"
     return CheckResult("locks", worst, message, {"locks": lock_results})
+
+
+def _lock_path_candidates(filename: str) -> list[Path]:
+    configured = Path(VAULT_WRITE_LOCK_PATH if filename == "vault-write.lock" else INCEPTION_LOCK_PATH)
+    candidates = [
+        configured,
+        Path(os.environ.get("XDG_RUNTIME_DIR", Path.home() / ".cache")) / "memento-vault" / filename,
+        Path.home() / ".cache" / "memento-vault" / filename,
+        Path(os.environ.get("TMPDIR", "/tmp")) / f"memento-vault-{os.getuid()}" / filename,
+    ]
+    unique = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
 
 
 def _inspect_lock(name: str, path: Path) -> dict[str, Any]:

@@ -253,3 +253,68 @@ def test_human_report_does_not_truncate_away_later_checks():
 
     assert "last-check" in rendered
     assert "still visible" in rendered
+
+
+def test_single_invalid_mcp_failure_below_threshold_does_not_fail():
+    invalid_mcp_error = (
+        "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    )
+    Path(health.TRIAGE_HEALTH_LOG_PATH).write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "triage",
+                        "action": "structured_notes_llm_failed",
+                        "error": invalid_mcp_error,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "triage",
+                        "action": "structured_notes_written",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "triage",
+                        "action": "structured_notes_written",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "triage",
+                        "action": "structured_notes_written",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "triage")
+
+    assert check.status == "pass"
+    assert report.status != "fail"
+
+
+def test_lock_check_inspects_temp_fallback_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    lock_dir = tmp_path / f"memento-vault-{os.getuid()}"
+    lock_dir.mkdir()
+    lock = lock_dir / "vault-write.lock"
+    lock.write_text(str(os.getpid()))
+    old = time.time() - 700
+    os.utime(lock, (old, old))
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "locks")
+
+    assert check.status == "fail"
+    assert str(lock) in json.dumps(check.details)
