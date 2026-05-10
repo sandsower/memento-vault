@@ -40,6 +40,20 @@ _STALE_CERTAINTY_HINT = (
     "likely stale installed memento package; rerun ./install.sh --reinstall; "
     "current triage accepts certainty labels like confirmed"
 )
+_ACCEPTED_CERTAINTY_LABELS = {
+    "speculation",
+    "speculative",
+    "uncertain",
+    "low",
+    "medium",
+    "moderate",
+    "likely",
+    "confirmed",
+    "certain",
+    "high",
+    "proven",
+    "verified",
+}
 
 
 @dataclass
@@ -101,7 +115,9 @@ TRIAGE_HEALTH_FAILURE_ACTIONS = {
 
 def _is_stale_certainty_error(error):
     text = str(error or "")
-    return "invalid literal for int()" in text and "confirmed" in text
+    if "invalid literal for int()" not in text:
+        return False
+    return any(f"'{label}'" in text or f'"{label}"' in text for label in _ACCEPTED_CERTAINTY_LABELS)
 
 
 def _scan_triage_health_log(path, cutoff, mode="health"):

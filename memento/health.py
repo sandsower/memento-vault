@@ -33,6 +33,20 @@ _STALE_CERTAINTY_HINT = (
     f"likely stale installed memento package; {_REINSTALL_HINT}; "
     "current triage accepts certainty labels like confirmed"
 )
+_ACCEPTED_CERTAINTY_LABELS = {
+    "speculation",
+    "speculative",
+    "uncertain",
+    "low",
+    "medium",
+    "moderate",
+    "likely",
+    "confirmed",
+    "certain",
+    "high",
+    "proven",
+    "verified",
+}
 _DEFAULT_CONFIG = {
     "vault_path": str(Path.home() / "memento"),
     "auto_commit": True,
@@ -821,7 +835,9 @@ def _scan_triage_logs(cutoff: datetime) -> tuple[str | None, int, int, bool, boo
 
 
 def _is_stale_certainty_error(error: str) -> bool:
-    return "invalid literal for int()" in error and "confirmed" in error
+    if "invalid literal for int()" not in error:
+        return False
+    return any(f"'{label}'" in error or f'"{label}"' in error for label in _ACCEPTED_CERTAINTY_LABELS)
 
 
 def _scan_triage_log(path: Path, cutoff: datetime, legacy: bool) -> tuple[str | None, int, int, bool, bool, str | None]:
