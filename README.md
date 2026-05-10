@@ -191,16 +191,27 @@ cd memento-vault && git pull && ./install.sh --experimental
 
 ## MCP server
 
-The MCP server exposes 5 tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.
+The MCP server exposes read, lifecycle, write, and maintenance tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.
 
-| Tool | What it does |
-|------|-------------|
-| `memento_search` | Search vault notes (BM25, semantic, RRF fusion, temporal decay, PageRank boost; `concrete: auto\|true\|false` for exact identifiers and quoted phrases) |
-| `memento_store` | Write a single knowledge note with frontmatter and project indexing |
-| `memento_capture` | End-of-session triage: parse transcript or accept a summary, write fleeting + atomic note |
-| `memento_get` | Read a specific note by name or path |
-| `memento_status` | Vault status: note count, project count, config summary |
-| `memento_reindex` | Rebuild the search index from all markdown files (after bulk adds, git pull, Obsidian sync) |
+| Tool | What it does | When to use it |
+|------|-------------|----------------|
+| `memento_search` | Search vault notes (BM25, semantic, RRF fusion, temporal decay, PageRank boost; `concrete: auto\|true\|false` for exact identifiers and quoted phrases) | Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path. |
+| `memento_get` | Read full note content by name or path | Use after `memento_search` when a returned path needs full content, or directly when the user already supplied an exact note path/name. |
+| `memento_briefing` / `memento_recall` / `memento_tool_context` | Lifecycle context payloads for session start, prompt recall, and read-tool context | Host-adapter primitives for automatic injection; not general user-answering tools. |
+| `memento_store` | Write a single knowledge note with frontmatter and project indexing | Low-level write primitive for sync/automation or agents without skill support; interactive Claude/Codex sessions should prefer `/memento` or local hooks. |
+| `memento_capture` | End-of-session triage: parse transcript or accept a summary, write fleeting + atomic note | Low-level SessionEnd equivalent for agents without hook support; not a replacement for interactive `/memento` workflows. |
+| `memento_daily_snapshot` | Write a deterministic `notes/daily-<date>-<repo-slug>.md` snapshot | Low-level structured daily-snapshot primitive for path-controlled integrations; do not use for ordinary notes, interactive memory capture, or session triage. |
+| `memento_status` | Vault status: note count, project count, config summary | Use for health/config checks; not for recall, project history, or note content. |
+| `memento_list` | Lightweight note inventory with optional content hashes | Use for sync/inventory clients; not for topical recall or reading notes. |
+| `memento_reindex` | Rebuild the search index from all markdown files (after bulk adds, git pull, Obsidian sync) | Use after out-of-band file changes or stale-index evidence; not as the default response to a broad/empty search miss. |
+
+Common read paths:
+
+- Past decisions: `memento_search({"query": "What did we decide about cache invalidation?"})`.
+- Prior fixes: `memento_search({"query": "Where did we fix stale headless Claude MCP config?"})`.
+- Project history: `memento_search({"query": "memento-vault recent triage failures project history"})`.
+- Exact identifier lookup: `memento_search({"query": "MEMENTO_VAULT_PATH", "concrete": "auto"})`.
+- Reading full content: take a returned `path` such as `notes/cache-policy.md`, then call `memento_get({"path": "notes/cache-policy.md"})`.
 
 Run manually:
 

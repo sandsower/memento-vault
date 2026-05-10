@@ -11,6 +11,7 @@ from memento.search import MISS_RECOVERY_HINTS, build_search_miss
 from memento.mcp_server import (
     _strip_injection,
     memento_capture,
+    memento_daily_snapshot,
     memento_get,
     memento_list,
     memento_reindex,
@@ -255,6 +256,69 @@ class TestMementoSearch:
             result = memento_search("MEMENTO_VAULT_PATH", concrete=False)
 
         assert result["miss"]["reason"] == "no_exact_match"
+
+
+# --- tool selection descriptions ---
+
+
+class TestToolSelectionDescriptions:
+    def test_search_docstring_guides_when_to_search_and_get(self):
+        doc = memento_search.__doc__ or ""
+
+        assert "past decisions" in doc
+        assert "prior bug fixes" in doc
+        assert "exact identifier" in doc
+        assert "Do not use this to read a known note path/name" in doc
+        assert "call memento_get" in doc
+
+    def test_get_docstring_guides_search_then_get(self):
+        doc = memento_get.__doc__ or ""
+
+        assert "full content" in doc
+        assert "Use this after memento_search" in doc
+        assert "search first with memento_search" in doc
+
+    def test_lifecycle_tool_docstrings_mark_host_adapter_primitives(self):
+        for tool in (mcp_server.memento_briefing, mcp_server.memento_recall, mcp_server.memento_tool_context):
+            doc = tool.__doc__ or ""
+            assert "Host-adapter primitive" in doc
+            assert "not a general user-answering search tool" in doc
+            assert "memento_search" in doc
+
+    def test_write_tool_docstrings_separate_low_level_from_interactive_workflows(self):
+        store_doc = memento_store.__doc__ or ""
+        capture_doc = memento_capture.__doc__ or ""
+        daily_snapshot_doc = memento_daily_snapshot.__doc__ or ""
+
+        assert "low-level primitive" in store_doc
+        assert "/memento" in store_doc
+        assert "low-level write primitive" in capture_doc
+        assert "ordinary interactive" in capture_doc
+        assert "/memento" in capture_doc
+        assert "low-level write primitive" in daily_snapshot_doc
+        assert "deterministic path-controlled" in daily_snapshot_doc
+        assert "ordinary notes" in daily_snapshot_doc
+
+    def test_status_and_maintenance_docstrings_are_not_recall_tools(self):
+        status_doc = memento_status.__doc__ or ""
+        list_doc = memento_list.__doc__ or ""
+        reindex_doc = memento_reindex.__doc__ or ""
+
+        assert "operational checks" in status_doc
+        assert "Do not use it to answer questions about" in status_doc
+        assert "sync/inventory primitive" in list_doc
+        assert "Do not use it for" in list_doc
+        assert "stale index" in reindex_doc
+        assert "Do not use it as a normal response" in reindex_doc
+
+    def test_pi_extension_tool_descriptions_include_selection_guidance(self):
+        extension = (Path(__file__).parents[1] / "extensions" / "memento.ts").read_text()
+
+        assert "past decisions, prior fixes, project history" in extension
+        assert "Use memento_get after search" in extension
+        assert "Do not use for topical discovery; search first" in extension
+        assert "separate from interactive /memento skill workflows" in extension
+        assert "not for prior decisions, project history, or note content" in extension
 
 
 # --- lifecycle retrieval tools ---

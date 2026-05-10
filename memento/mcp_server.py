@@ -119,17 +119,24 @@ def _build_server() -> FastMCP:
         "name": "memento-vault",
         "instructions": (
             "Memento Vault is a persistent knowledge store for coding agents.\n\n"
-            "Reads: use memento_search to find past decisions, discoveries, and "
-            "session notes; memento_get to read a specific note; memento_status "
-            "for vault health; memento_list for sync/inventory.\n\n"
+            "General answering path: use memento_search when the user asks about "
+            "past decisions, prior fixes, project history, session context, or exact "
+            "identifiers. Use memento_get after search when you need the full content "
+            "for a returned path, or directly when the user already supplied a note "
+            "path/name. Use memento_status for vault health and memento_list for "
+            "sync/inventory.\n\n"
+            "Lifecycle tools (memento_briefing, memento_recall, "
+            "memento_tool_context) are host-adapter primitives for automatic context "
+            "injection, not general user-answering tools.\n\n"
             "Writes: if your agent has a `memento` skill or `SessionEnd` hook, "
             "use it — the skill is local-first (writes to the git-backed vault, "
             "commits, then syncs here), which avoids duplicate notes and keeps "
-            "the local vault canonical. memento_store and memento_capture are "
-            "low-level primitives intended for automated sync scripts (e.g., "
-            "memento-remote-sync.py) and agents without skill/hook support "
-            "(Windsurf, some Cursor configs). Do not call them from interactive "
-            "Claude Code or Codex sessions — use the /memento skill instead."
+            "the local vault canonical. memento_store, memento_capture, and "
+            "memento_daily_snapshot are low-level primitives intended for automated "
+            "sync/scripts, structured daily-snapshot integrations, and agents "
+            "without skill/hook support (Windsurf, some Cursor configs). Do not "
+            "call them from interactive Claude Code or Codex sessions — use the "
+            "/memento skill instead."
         ),
         "host": host,
         "port": port,
@@ -166,10 +173,20 @@ def memento_search(
     cwd: str = "",
     concrete: str | bool = "auto",
 ) -> object:
-    """Search the memento vault for relevant notes.
+    """Search vault notes for prior context before answering from memory.
+
+    Use this when the user asks about past decisions, prior bug fixes,
+    project/session history, recurring patterns, or where something was
+    implemented. Also use it for exact identifier lookup (file names, function
+    names, config keys, error strings); leave concrete="auto" so identifier-like
+    queries use literal matching.
+
+    Do not use this to read a known note path/name -- call memento_get directly.
+    After search, call memento_get when a result's snippet/content is not enough
+    and you need the full note for a returned path.
 
     Args:
-        query: Search query string.
+        query: Natural-language question or exact identifier to search for.
         limit: Maximum number of results to return.
         semantic: Use vector (semantic) search instead of BM25 keyword search.
         min_score: Minimum relevance score (0.0-1.0).
@@ -272,19 +289,36 @@ def memento_search(
 
 @mcp.tool()
 def memento_briefing(cwd: str = "", session_id: str = "") -> dict:
-    """Return project-aware vault context for first-turn/session briefing."""
+    """Host-adapter primitive for automatic first-turn/session briefing.
+
+    This is not a general user-answering search tool. Hosts call it during
+    session startup to decide whether to inject compact project-aware vault
+    context. For interactive questions about prior work, use memento_search and
+    then memento_get if full note content is needed.
+    """
     return build_briefing(cwd, session_id).to_dict()
 
 
 @mcp.tool()
 def memento_recall(prompt: str, cwd: str = "", session_id: str = "") -> dict:
-    """Return just-in-time vault context for a user prompt."""
+    """Host-adapter primitive for automatic prompt-time context recall.
+
+    This is not a general user-answering search tool. Hosts call it before an
+    agent turn to decide whether to inject related memories. For explicit user
+    questions about past decisions, prior fixes, or project history, call
+    memento_search and then memento_get if full note content is needed.
+    """
     return build_recall(prompt, cwd, session_id).to_dict()
 
 
 @mcp.tool()
 def memento_tool_context(tool_name: str, file_path: str, cwd: str = "", session_id: str = "") -> dict:
-    """Return vault context for a file-read tool result."""
+    """Host-adapter primitive for automatic read-tool context injection.
+
+    This is not a general user-answering search tool. Hosts call it around file
+    reads to attach code-area memories. For explicit recall/search requests,
+    call memento_search and then memento_get if full note content is needed.
+    """
     return build_tool_context(tool_name, file_path, cwd, session_id).to_dict()
 
 
@@ -401,12 +435,17 @@ def memento_daily_snapshot(
     frontmatter_extra: dict | None = None,
     supersede: bool = False,
 ) -> dict:
-    """Write a structured per-repo daily snapshot into the vault.
+    """Write a structured per-repo daily snapshot (low-level write primitive).
+
+    Use this only for integrations that need deterministic path-controlled
+    daily snapshot files, such as orra's vault-bridge. Do not use it for
+    ordinary notes, interactive memory capture, session triage, or topical
+    recall; use the `/memento` skill or memento_capture/memento_store only when
+    their own selection guidance applies.
 
     Writes a deterministic-filename note at notes/daily-<date>-<repo_slug>.md
-    for integrations (like orra's vault-bridge) that need path-controlled
-    writes rather than title-slugged ones. Unlike memento_store, the filename
-    is owned by the caller via date plus repo_slug, so read-back is a plain
+    rather than a title-slugged note. Unlike memento_store, the filename is
+    owned by the caller via date plus repo_slug, so read-back is a plain
     memento_get by path.
 
     Append-only: re-writing the same (date, repo_slug) pair requires
@@ -481,7 +520,12 @@ def memento_daily_snapshot(
 
 @mcp.tool()
 def memento_status() -> dict:
-    """Get vault status: note count, project count, config summary.
+    """Get vault health/status: note counts, project count, config summary.
+
+    Use this for operational checks, setup debugging, and confirming whether the
+    vault/search backend is available. Do not use it to answer questions about
+    prior decisions, project history, or note content; use memento_search and
+    then memento_get for recall/content.
 
     Returns:
         Dict with vault_path, note_count, project_count, fleeting_count, and key config values.
@@ -532,7 +576,12 @@ def memento_status() -> dict:
 
 @mcp.tool()
 def memento_get(path: str) -> dict:
-    """Get a specific note by path or name.
+    """Read the full content of a specific vault note by path or name.
+
+    Use this after memento_search when a search result path needs full content,
+    or directly when the user or another tool already provided an exact note
+    path/name. Do not use it for topical discovery when the note path is
+    unknown; search first with memento_search.
 
     Args:
         path: Note path relative to vault (e.g. "notes/my-note.md") or just the note name
@@ -607,12 +656,14 @@ def memento_capture(
     agent: str = "unknown",
     fleeting_only: bool = False,
 ) -> dict:
-    """Capture a session's knowledge into the vault (low-level primitive).
+    """Capture a session's knowledge into the vault (low-level write primitive).
 
     This is the MCP equivalent of the SessionEnd hook. Use it when your agent
-    doesn't have native hook support (Cursor, Windsurf, etc.). Do not call this
-    from Claude Code or Codex — those have SessionEnd hooks and the `/memento`
-    skill that handle capture via the local-first flow.
+    doesn't have native hook support (Cursor, Windsurf, etc.) or when an
+    automation is explicitly implementing session capture. Do not call this for
+    ordinary interactive "remember this" requests from Claude Code or Codex —
+    those have SessionEnd hooks and the `/memento` skill that handle capture via
+    the local-first flow.
 
     Two modes:
     - Provide session_summary with context fields for direct note creation.
@@ -814,8 +865,10 @@ def memento_capture(
 def memento_list(include_hash: bool = True) -> list[dict]:
     """List all notes in the vault with optional content hashes.
 
-    Returns a lightweight inventory for sync clients to diff local vs remote
-    without fetching full content.
+    Use this as a lightweight sync/inventory primitive for clients diffing local
+    vs remote vault state without fetching full content. Do not use it for
+    topical recall, project history questions, or reading note content; use
+    memento_search and memento_get instead.
 
     Args:
         include_hash: Include sha256 hash of raw file content (default: True).
@@ -856,7 +909,9 @@ def memento_reindex() -> dict:
 
     Triggers a full reindex of FTS5 and vector tables. Use this after
     bulk-adding notes outside the normal write path (e.g., git pull,
-    Obsidian sync, manual file copy).
+    Obsidian sync, manual file copy) or when status/search evidence indicates
+    a stale index. Do not use it as a normal response to broad or empty search
+    misses; refine the query or use memento_get for known paths instead.
 
     Returns:
         Dict with reindex status and note count.
