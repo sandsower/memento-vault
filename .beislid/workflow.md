@@ -18,7 +18,7 @@ link_template: 'https://github.com/sandsower/memento-vault/issues/{id}'
 ```beislid:pr_review_source
 type: cli
 summary_command: 'gh pr view --json url,number,reviewDecision,reviews,comments'
-threads_command: 'gh api repos/{owner}/{repo}/pulls/{number}/comments'
+threads_command: 'gh api repos/{owner}/{repo}/pulls/{number}/comments --paginate'
 ```
 
 ```beislid:pr_review_update
