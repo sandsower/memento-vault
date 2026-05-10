@@ -122,6 +122,48 @@ def test_recent_invalid_mcp_triage_fail_escalates():
     assert report.status == "fail"
 
 
+def test_recent_certainty_string_triage_fail_points_to_reinstall():
+    certainty_error = "invalid literal for int() with base 10: 'confirmed'"
+    Path(health.TRIAGE_HEALTH_LOG_PATH).write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "triage",
+                        "action": "structured_notes_failed",
+                        "error": certainty_error,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "triage",
+                        "action": "structured_notes_parse_empty",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "triage",
+                        "action": "structured_notes_failed",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "triage")
+
+    assert check.status == "warn"
+    assert "stale installed memento package" in check.message
+    assert "./install.sh --reinstall" in check.message
+    assert "certainty labels like confirmed" in check.message
+    assert check.details["last_error"] == certainty_error
+
+
 def test_output_redacts_secrets_in_verbose_and_json(capsys):
     token = "ghp_" + "a" * 36
     Path(health.TRIAGE_HEALTH_LOG_PATH).write_text(

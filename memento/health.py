@@ -27,6 +27,10 @@ _STALE_MCP_HINT = (
     "likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
     'copied hooks should use {"mcpServers": {}} for --mcp-config'
 )
+_STALE_CERTAINTY_HINT = (
+    "likely stale installed memento package; rerun ./install.sh --reinstall; "
+    "current triage accepts certainty labels like confirmed"
+)
 _DEFAULT_CONFIG = {
     "vault_path": str(Path.home() / "memento"),
     "auto_commit": True,
@@ -368,7 +372,7 @@ def _has_stale_empty_mcp_config(path: Path) -> bool:
 
 def _check_triage_health() -> CheckResult:
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
-    log_path, total, failed, invalid_mcp_failed, last_error = _scan_triage_logs(cutoff)
+    log_path, total, failed, invalid_mcp_failed, stale_certainty_failed, last_error = _scan_triage_logs(cutoff)
     if total == 0:
         return CheckResult(
             "triage", WARN, "no recent triage health events found", {"window_hours": _HEALTH_WINDOW_HOURS}
@@ -382,16 +386,19 @@ def _check_triage_health() -> CheckResult:
             {"log_path": log_path, "failed": failed, "total": total, "last_error": last_error},
         )
     if failure_threshold_met:
+        message = f"triage failing {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h"
+        if stale_certainty_failed:
+            message += f" — {_STALE_CERTAINTY_HINT}"
         return CheckResult(
             "triage",
             WARN,
-            f"triage failing {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h",
+            message,
             {"log_path": log_path, "failed": failed, "total": total, "last_error": last_error},
         )
     return CheckResult("triage", PASS, f"recent triage health ok ({failed}/{total} failures)", {"log_path": log_path})
 
 
-def _scan_triage_logs(cutoff: datetime) -> tuple[str | None, int, int, bool, str | None]:
+def _scan_triage_logs(cutoff: datetime) -> tuple[str | None, int, int, bool, bool, str | None]:
     primary = _scan_triage_log(Path(TRIAGE_HEALTH_LOG_PATH), cutoff, legacy=False)
     if primary[1] >= 3:
         return primary
@@ -399,9 +406,13 @@ def _scan_triage_logs(cutoff: datetime) -> tuple[str | None, int, int, bool, str
     return legacy if legacy[1] >= primary[1] else primary
 
 
-def _scan_triage_log(path: Path, cutoff: datetime, legacy: bool) -> tuple[str | None, int, int, bool, str | None]:
+def _is_stale_certainty_error(error: str) -> bool:
+    return "invalid literal for int()" in error and "confirmed" in error
+
+
+def _scan_triage_log(path: Path, cutoff: datetime, legacy: bool) -> tuple[str | None, int, int, bool, bool, str | None]:
     if not path.exists():
-        return (str(path), 0, 0, False, None)
+        return (str(path), 0, 0, False, False, None)
     success_actions = {"structured_notes_written"}
     failure_actions = {
         "hook_input_failed",
@@ -416,6 +427,7 @@ def _scan_triage_log(path: Path, cutoff: datetime, legacy: bool) -> tuple[str | 
     }
     total = failed = 0
     invalid_mcp_failed = False
+    stale_certainty_failed = False
     last_error = None
     for rec in _iter_recent_jsonl(path, cutoff):
         if rec.get("hook") != "triage":
@@ -441,7 +453,8 @@ def _scan_triage_log(path: Path, cutoff: datetime, legacy: bool) -> tuple[str | 
             if error:
                 last_error = error
                 invalid_mcp_failed = invalid_mcp_failed or _is_invalid_mcp_config_error(error)
-    return (str(path), total, failed, invalid_mcp_failed, last_error)
+                stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
+    return (str(path), total, failed, invalid_mcp_failed, stale_certainty_failed, last_error)
 
 
 def _check_retrieval_health() -> CheckResult:
