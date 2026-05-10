@@ -13,6 +13,20 @@ id_pattern: '^#?\d+$'
 link_template: 'https://github.com/sandsower/memento-vault/issues/{id}'
 ```
 
+## PR reviews
+
+```beislid:pr_review_source
+type: cli
+summary_command: 'gh pr view --json url,number,reviewDecision,reviews,comments'
+threads_command: 'gh api repos/{owner}/{repo}/pulls/{number}/comments'
+```
+
+```beislid:pr_review_update
+type: cli
+reply_command: 'gh api repos/{owner}/{repo}/pulls/{number}/comments --method POST --input {json_file}'
+rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewers --method POST --input {json_file}'
+```
+
 ## Quality gates
 
 ```beislid:gates
