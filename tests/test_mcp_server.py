@@ -9,6 +9,7 @@ from memento import mcp_server
 from memento.config import DEFAULT_CONFIG
 from memento.search import MISS_RECOVERY_HINTS, build_search_miss
 from memento.mcp_server import (
+    _bind_host,
     _strip_injection,
     memento_capture,
     memento_daily_snapshot,
@@ -36,6 +37,27 @@ def _use_vault_config(vault_config, monkeypatch):
     monkeypatch.setattr("memento.mcp_server.get_vault", lambda: Path(vault_config["vault_path"]))
     monkeypatch.setattr("memento.store.get_config", lambda: vault_config)
     monkeypatch.setattr("memento.config._CONFIG", vault_config)
+
+
+# --- _bind_host ---
+
+
+class TestBindHost:
+    """Default bind address must be loopback so vaults aren't accidentally
+    network-exposed. Docker users set MEMENTO_HOST=0.0.0.0 explicitly via
+    docker-compose.yml; the default only affects ad-hoc local HTTP runs."""
+
+    def test_default_is_loopback(self, monkeypatch):
+        monkeypatch.delenv("MEMENTO_HOST", raising=False)
+        assert _bind_host() == "127.0.0.1"
+
+    def test_env_override_respected(self, monkeypatch):
+        monkeypatch.setenv("MEMENTO_HOST", "0.0.0.0")
+        assert _bind_host() == "0.0.0.0"
+
+    def test_env_override_arbitrary_address(self, monkeypatch):
+        monkeypatch.setenv("MEMENTO_HOST", "192.168.1.5")
+        assert _bind_host() == "192.168.1.5"
 
 
 # --- _strip_injection ---

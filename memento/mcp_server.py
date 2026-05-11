@@ -37,6 +37,21 @@ from memento.store import (
 from memento.utils import sanitize_secrets
 
 
+# Loopback by default — vaults shouldn't land on a public interface accidentally.
+# Docker users explicitly set MEMENTO_HOST=0.0.0.0 in docker-compose.yml; the
+# default only affects ad-hoc local HTTP runs.
+_DEFAULT_BIND_HOST = "127.0.0.1"
+
+
+def _bind_host() -> str:
+    """HTTP transport bind address. Defaults to loopback.
+
+    Set MEMENTO_HOST=0.0.0.0 to listen on every interface (requires
+    MEMENTO_API_KEY — main() refuses non-local binds without it).
+    """
+    return os.environ.get("MEMENTO_HOST", _DEFAULT_BIND_HOST)
+
+
 def _meaningful_note_body(body: str) -> str:
     body = body.strip()
     while body.endswith("## Related"):
@@ -108,11 +123,11 @@ def _build_server() -> FastMCP:
     """Build the FastMCP server, configured from environment variables.
 
     Environment variables:
-        MEMENTO_HOST: Bind address for HTTP transport (default: 0.0.0.0)
+        MEMENTO_HOST: Bind address for HTTP transport (default: 127.0.0.1)
         MEMENTO_PORT: Port for HTTP transport (default: 8745)
         MEMENTO_API_KEY: Bearer token for HTTP auth (optional)
     """
-    host = os.environ.get("MEMENTO_HOST", "0.0.0.0")
+    host = _bind_host()
     port = int(os.environ.get("MEMENTO_PORT", "8745"))
 
     kwargs = {
@@ -974,7 +989,7 @@ def main():
 
     # Fail closed: refuse to start HTTP transport without auth on non-local interfaces
     if args.transport in ("sse", "streamable-http"):
-        host = os.environ.get("MEMENTO_HOST", "0.0.0.0")
+        host = _bind_host()
         api_key = os.environ.get("MEMENTO_API_KEY") or get_config().get("api_key")
         if not api_key and host not in ("127.0.0.1", "localhost", "::1"):
             print(
@@ -1024,7 +1039,7 @@ def main():
 
             uvicorn.run(
                 auth_app,
-                host=os.environ.get("MEMENTO_HOST", "0.0.0.0"),
+                host=_bind_host(),
                 port=int(os.environ.get("MEMENTO_PORT", "8745")),
                 log_level="warning",
             )
