@@ -2,11 +2,13 @@
 
 import json
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from memento.store import (
     acquire_vault_write_lock,
+    append_fleeting_session,
     find_dedup_candidates,
     log_triage_health,
     release_vault_write_lock,
@@ -503,3 +505,71 @@ class TestTriageHealthLog:
         assert secret not in payload["error"]
         assert "[REDACTED_API_KEY]" in payload["error"]
         assert len(payload["error"]) <= 503
+
+
+class TestAppendFleetingSession:
+    def test_creates_fleeting_file_with_header_and_line(self, tmp_vault):
+        moment = datetime(2026, 5, 12, 14, 37, tzinfo=timezone.utc)
+        result = append_fleeting_session(
+            tmp_vault,
+            "ses_abc123",
+            cwd="/home/dev/proj",
+            branch="main",
+            agent="opencode",
+            files_edited=["a.py", "b.py", "c.py"],
+            now=moment,
+        )
+        path = tmp_vault / "fleeting" / "2026-05-12.md"
+        text = path.read_text()
+        assert text.startswith("# 2026-05-12\n\n")
+        assert "- 14:37 `ses_abc123` /home/dev/proj (main) — opencode, 3 files\n" in text
+        assert result == {"fleeting": "fleeting/2026-05-12.md", "already_logged": False}
+
+    def test_appends_to_existing_file_without_duplicating_header(self, tmp_vault):
+        moment = datetime(2026, 5, 12, 10, 0, tzinfo=timezone.utc)
+        append_fleeting_session(tmp_vault, "ses_one", agent="claude", now=moment)
+        append_fleeting_session(
+            tmp_vault,
+            "ses_two",
+            agent="opencode",
+            now=moment.replace(hour=11, minute=15),
+        )
+        text = (tmp_vault / "fleeting" / "2026-05-12.md").read_text()
+        assert text.count("# 2026-05-12\n") == 1
+        assert "`ses_one`" in text and "`ses_two`" in text
+
+    def test_dedups_same_session_id(self, tmp_vault):
+        moment = datetime(2026, 5, 12, 10, 0, tzinfo=timezone.utc)
+        first = append_fleeting_session(tmp_vault, "ses_dup", agent="opencode", now=moment)
+        second = append_fleeting_session(
+            tmp_vault,
+            "ses_dup",
+            agent="opencode",
+            now=moment.replace(hour=12),
+        )
+        assert first["already_logged"] is False
+        assert second["already_logged"] is True
+        text = (tmp_vault / "fleeting" / "2026-05-12.md").read_text()
+        assert text.count("`ses_dup`") == 1
+
+    def test_handles_missing_optional_metadata(self, tmp_vault):
+        moment = datetime(2026, 5, 12, 9, 5, tzinfo=timezone.utc)
+        append_fleeting_session(tmp_vault, "ses_bare", now=moment)
+        text = (tmp_vault / "fleeting" / "2026-05-12.md").read_text()
+        assert "- 09:05 `ses_bare` ? — \n" in text
+
+    def test_distinct_files_per_utc_day(self, tmp_vault):
+        append_fleeting_session(
+            tmp_vault,
+            "ses_a",
+            agent="claude",
+            now=datetime(2026, 5, 11, 23, 59, tzinfo=timezone.utc),
+        )
+        append_fleeting_session(
+            tmp_vault,
+            "ses_b",
+            agent="claude",
+            now=datetime(2026, 5, 12, 0, 1, tzinfo=timezone.utc),
+        )
+        assert (tmp_vault / "fleeting" / "2026-05-11.md").exists()
+        assert (tmp_vault / "fleeting" / "2026-05-12.md").exists()
