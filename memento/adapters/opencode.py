@@ -30,6 +30,12 @@ def _connect_readonly(db_path):
 
 
 def _resolve_session_id(conn, override=None):
+    """Return the OpenCode session id to parse.
+
+    If ``override`` is given, validate it exists and return it; otherwise return
+    the most recently created session. Raises ``ValueError`` when the override
+    is unknown or the database has no sessions.
+    """
     cur = conn.cursor()
     if override:
         row = cur.execute("SELECT id FROM session WHERE id = ?", (override,)).fetchone()
@@ -43,6 +49,7 @@ def _resolve_session_id(conn, override=None):
 
 
 def _first_text_part(parts):
+    """Return the first non-empty text part body, or ``None`` if none exist."""
     for part in parts:
         if part.get("type") == "text":
             text = part.get("text", "").strip()
