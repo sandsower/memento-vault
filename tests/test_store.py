@@ -508,7 +508,10 @@ class TestTriageHealthLog:
 
 
 class TestAppendFleetingSession:
+    """Vault helper that records a one-line session marker in today's fleeting log."""
+
     def test_creates_fleeting_file_with_header_and_line(self, tmp_vault):
+        """First call for a UTC day creates the file with the date header and entry."""
         moment = datetime(2026, 5, 12, 14, 37, tzinfo=timezone.utc)
         result = append_fleeting_session(
             tmp_vault,
@@ -526,6 +529,7 @@ class TestAppendFleetingSession:
         assert result == {"fleeting": "fleeting/2026-05-12.md", "already_logged": False}
 
     def test_appends_to_existing_file_without_duplicating_header(self, tmp_vault):
+        """Subsequent calls on the same UTC day append, leaving the header intact."""
         moment = datetime(2026, 5, 12, 10, 0, tzinfo=timezone.utc)
         append_fleeting_session(tmp_vault, "ses_one", agent="claude", now=moment)
         append_fleeting_session(
@@ -539,6 +543,7 @@ class TestAppendFleetingSession:
         assert "`ses_one`" in text and "`ses_two`" in text
 
     def test_dedups_same_session_id(self, tmp_vault):
+        """A second call with the same session_id on the same day is a no-op."""
         moment = datetime(2026, 5, 12, 10, 0, tzinfo=timezone.utc)
         first = append_fleeting_session(tmp_vault, "ses_dup", agent="opencode", now=moment)
         second = append_fleeting_session(
@@ -553,12 +558,14 @@ class TestAppendFleetingSession:
         assert text.count("`ses_dup`") == 1
 
     def test_handles_missing_optional_metadata(self, tmp_vault):
+        """Optional fields default sensibly when omitted (cwd → ``?``, others → empty)."""
         moment = datetime(2026, 5, 12, 9, 5, tzinfo=timezone.utc)
         append_fleeting_session(tmp_vault, "ses_bare", now=moment)
         text = (tmp_vault / "fleeting" / "2026-05-12.md").read_text()
         assert "- 09:05 `ses_bare` ? — \n" in text
 
     def test_distinct_files_per_utc_day(self, tmp_vault):
+        """Crossing UTC midnight writes to a new per-day file rather than appending."""
         append_fleeting_session(
             tmp_vault,
             "ses_a",
