@@ -28,6 +28,7 @@ from memento.search import (
 )
 from memento.store import (
     acquire_vault_write_lock,
+    append_fleeting_session,
     append_project_session_line,
     log_retrieval,
     release_vault_write_lock,
@@ -820,29 +821,21 @@ def memento_capture(
     try:
         # Write fleeting note (always — matches local triage behavior)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        now = datetime.now(timezone.utc).strftime("%H:%M")
-        fleeting_dir = vault / "fleeting"
-        fleeting_dir.mkdir(parents=True, exist_ok=True)
-        fleeting_file = fleeting_dir / f"{today}.md"
-
-        if not fleeting_file.exists():
-            fleeting_file.write_text(f"# {today}\n\n")
-
-        # Check fleeting dedup too (for fleeting_only retries)
-        existing_fleeting = fleeting_file.read_text() if fleeting_file.exists() else ""
-        if f"`{session_id}`" in existing_fleeting:
+        fleeting_result = append_fleeting_session(
+            vault,
+            session_id,
+            cwd=cwd,
+            branch=branch,
+            agent=agent,
+            files_edited=files_edited,
+        )
+        if fleeting_result["already_logged"]:
             return {
                 "session_id": session_id,
                 "project": project_slug,
-                "fleeting": str(fleeting_file.relative_to(vault)),
+                "fleeting": fleeting_result["fleeting"],
                 "deduplicated": True,
             }
-
-        branch_str = f" ({branch})" if branch else ""
-        files_count = f", {len(files_edited)} files" if files_edited else ""
-        fleeting_line = f"- {now} `{session_id}` {cwd or '?'}{branch_str} — {agent}{files_count}\n"
-        with open(fleeting_file, "a") as f:
-            f.write(fleeting_line)
 
         if fleeting_only:
             # Ensure project index exists and log session (no [[note]] link)
@@ -864,7 +857,7 @@ def memento_capture(
             return {
                 "session_id": session_id,
                 "project": project_slug,
-                "fleeting": str(fleeting_file.relative_to(vault)),
+                "fleeting": fleeting_result["fleeting"],
             }
 
         # Write atomic note from summary (substantial sessions only)
@@ -897,7 +890,7 @@ def memento_capture(
             "session_id": session_id,
             "note_path": str(note_path.relative_to(vault)),
             "project": project_slug,
-            "fleeting": str(fleeting_file.relative_to(vault)),
+            "fleeting": fleeting_result["fleeting"],
         }
 
     finally:
