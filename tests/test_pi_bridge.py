@@ -330,7 +330,10 @@ def test_pi_bridge_process_start_limit_applies_to_session_groups(capsys, tmp_pat
 
 def test_pi_bridge_process_start_includes_small_cleaned_transcript(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
-    session_file = tmp_path / "session.jsonl"
+    transcript_root = tmp_path / "sessions"
+    monkeypatch.setenv("MEMENTO_PI_TRANSCRIPT_ROOTS", str(transcript_root))
+    session_file = transcript_root / "session.jsonl"
+    transcript_root.mkdir()
     session_file.write_text(
         json.dumps(
             {
@@ -367,6 +370,42 @@ def test_pi_bridge_process_start_includes_small_cleaned_transcript(capsys, tmp_p
     packet = (run_dir / "inputs" / f"{group['group_id']}.md").read_text()
     assert "## Cleaned session transcript" in packet
     assert "Important decision" in packet
+
+
+def test_pi_bridge_process_start_skips_transcript_outside_allowed_roots(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    session_file = tmp_path / "outside.jsonl"
+    session_file.write_text(
+        json.dumps(
+            {"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "Do not include me"}]}}
+        )
+        + "\n"
+    )
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "Body",
+                "metadata": {"project": "repo", "branch": "b", "cwd": "/repo", "session_id": str(session_file)},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    run_dir = tmp_path / "state" / "processing" / started["run_id"]
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    group = manifest["groups"][0]
+    assert group["transcript"]["included"] is False
+    assert group["transcript"]["reason"] == "outside_allowed_roots"
+    packet = (run_dir / "inputs" / f"{group['group_id']}.md").read_text()
+    assert "Do not include me" not in packet
 
 
 def test_pi_bridge_process_finalize_dequeues_no_note_results_with_discard_reason(capsys, tmp_path, monkeypatch):

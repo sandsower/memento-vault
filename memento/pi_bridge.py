@@ -532,6 +532,32 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _allowed_transcript_roots() -> list[Path]:
+    roots = [Path.home() / ".pi" / "agent" / "sessions"]
+    session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+    if session_dir:
+        roots.append(Path(session_dir).expanduser())
+    extra_roots = os.environ.get("MEMENTO_PI_TRANSCRIPT_ROOTS", "")
+    for raw in extra_roots.split(os.pathsep):
+        if raw.strip():
+            roots.append(Path(raw.strip()).expanduser())
+    resolved = []
+    for root in roots:
+        try:
+            resolved.append(root.resolve())
+        except (OSError, ValueError):
+            continue
+    return resolved
+
+
+def _transcript_path_allowed(path: Path) -> bool:
+    try:
+        candidate = path.resolve()
+    except (OSError, ValueError):
+        return False
+    return any(candidate == root or root in candidate.parents for root in _allowed_transcript_roots())
+
+
 def _clean_content_parts(parts: Any, per_tool_cap: int) -> list[str]:
     if isinstance(parts, str):
         return [parts]
@@ -661,12 +687,17 @@ def _queue_process_start(
             transcript_path = Path(str(group["session_id"])).expanduser()
             if transcript_path.exists():
                 size = transcript_path.stat().st_size
+                allowed = _transcript_path_allowed(transcript_path)
                 transcript_info = {
                     "path": str(transcript_path),
                     "size_bytes": size,
-                    "included": size <= transcript_max_bytes,
+                    "included": allowed and size <= transcript_max_bytes,
                 }
-                if size <= transcript_max_bytes:
+                if not allowed:
+                    transcript_info["reason"] = "outside_allowed_roots"
+                elif size > transcript_max_bytes:
+                    transcript_info["reason"] = "over_size_cap"
+                else:
                     transcript_markdown = _clean_transcript(transcript_path)
             else:
                 transcript_info = {"path": str(transcript_path), "included": False, "reason": "missing"}

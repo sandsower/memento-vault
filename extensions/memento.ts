@@ -508,6 +508,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			dryRun: Type.Optional(Type.Boolean({ description: "Preview selected session groups without processing" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!config.processQueue) {
+				const payload = { error: "memento queue processing is disabled", reason: "process_queue_disabled" };
+				return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+			}
 			const hasSelection = Boolean(params.id || params.project || params.branch || params.session || params.limit);
 			if (!hasSelection) {
 				const payload = { error: "memento_process requires explicit selection", guidance: "Pass id, project, branch, session, limit, or dryRun with filters. Use /memento-process interactively." };
