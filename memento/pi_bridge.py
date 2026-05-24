@@ -126,7 +126,12 @@ def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
     reread_ids = {capture.get("id") for capture in _read_queue_file(new_path)}
     old_ids = {capture.get("id") for capture in old if capture.get("id")}
     if not old_ids.issubset(reread_ids):
-        return {"migrated": False, "reason": "verification_failed", "legacy_queue_path": str(legacy), "queue_path": str(new_path)}
+        return {
+            "migrated": False,
+            "reason": "verification_failed",
+            "legacy_queue_path": str(legacy),
+            "queue_path": str(new_path),
+        }
     legacy.unlink()
     try:
         legacy.parent.rmdir()
@@ -413,9 +418,18 @@ def _acquire_processing_lock(run_id: str, owner_pid: int = 0) -> dict[str, Any] 
         created_at = float(existing.get("created_time") or 0)
         stale = (pid and not _is_pid_alive(pid)) or (created_at and time.time() - created_at > 24 * 60 * 60)
         if not stale:
-            return {"error": "another memento processing run is active", "reason": "processing_lock_active", "lock": existing}
+            return {
+                "error": "another memento processing run is active",
+                "reason": "processing_lock_active",
+                "lock": existing,
+            }
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"run_id": run_id, "pid": owner_pid or os.getpid(), "created_time": time.time(), "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+    payload = {
+        "run_id": run_id,
+        "pid": owner_pid or os.getpid(),
+        "created_time": time.time(),
+        "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     return None
 
@@ -499,18 +513,20 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
     ]
     for capture in group.get("captures", []):
         metadata = capture.get("metadata") or {}
-        lines.extend([
-            "",
-            f"### Capture {capture.get('id')}",
-            f"- Title: {capture.get('title') or ''}",
-            f"- Created: {capture.get('created_at') or ''}",
-            f"- Reason: {capture.get('reason') or ''}",
-            f"- Source event: {capture.get('source_event') or ''}",
-            f"- Project: {metadata.get('project') or ''}",
-            f"- Branch: {metadata.get('branch') or ''}",
-            "",
-            str(capture.get("body") or ""),
-        ])
+        lines.extend(
+            [
+                "",
+                f"### Capture {capture.get('id')}",
+                f"- Title: {capture.get('title') or ''}",
+                f"- Created: {capture.get('created_at') or ''}",
+                f"- Reason: {capture.get('reason') or ''}",
+                f"- Source event: {capture.get('source_event') or ''}",
+                f"- Project: {metadata.get('project') or ''}",
+                f"- Branch: {metadata.get('branch') or ''}",
+                "",
+                str(capture.get("body") or ""),
+            ]
+        )
     if transcript_markdown:
         lines.extend(["", "## Cleaned session transcript", "", transcript_markdown])
     return "\n".join(lines).rstrip() + "\n"
@@ -598,7 +614,10 @@ def _queue_process_start(
     captures = _load_queue(vault)
     selected = _selected_captures(captures, capture_id, project, branch, session_id, newest)
     groups = _group_captures(selected)
-    groups.sort(key=lambda group: min((_capture_created_at(capture) for capture in group.get("captures", [])), default=""), reverse=newest)
+    groups.sort(
+        key=lambda group: min((_capture_created_at(capture) for capture in group.get("captures", [])), default=""),
+        reverse=newest,
+    )
     if limit and limit > 0:
         groups = groups[:limit]
         selected_ids = {capture_id for group in groups for capture_id in group.get("capture_ids", [])}
@@ -615,7 +634,13 @@ def _queue_process_start(
         for group in groups
     ]
     if dry_run:
-        return {"dry_run": True, "selected_capture_count": len(selected), "group_count": len(groups), "groups": summary_groups, "queue_path": str(_queue_file(vault))}
+        return {
+            "dry_run": True,
+            "selected_capture_count": len(selected),
+            "group_count": len(groups),
+            "groups": summary_groups,
+            "queue_path": str(_queue_file(vault)),
+        }
     if not groups:
         return {"run_id": None, "run_dir": None, "selected_capture_count": 0, "group_count": 0, "groups": []}
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
@@ -636,7 +661,11 @@ def _queue_process_start(
             transcript_path = Path(str(group["session_id"])).expanduser()
             if transcript_path.exists():
                 size = transcript_path.stat().st_size
-                transcript_info = {"path": str(transcript_path), "size_bytes": size, "included": size <= transcript_max_bytes}
+                transcript_info = {
+                    "path": str(transcript_path),
+                    "size_bytes": size,
+                    "included": size <= transcript_max_bytes,
+                }
                 if size <= transcript_max_bytes:
                     transcript_markdown = _clean_transcript(transcript_path)
             else:
@@ -644,19 +673,21 @@ def _queue_process_start(
         group_id = group["group_id"]
         (inputs_dir / f"{group_id}.json").write_text(json.dumps(group, ensure_ascii=False, indent=2))
         (inputs_dir / f"{group_id}.md").write_text(_render_capture_packet(group, transcript_markdown))
-        manifest_groups.append({
-            "group_id": group_id,
-            "capture_ids": group.get("capture_ids", []),
-            "session_id": group.get("session_id"),
-            "project": group.get("project"),
-            "branch": group.get("branch"),
-            "cwd": group.get("cwd"),
-            "input_json": str(inputs_dir / f"{group_id}.json"),
-            "input_markdown": str(inputs_dir / f"{group_id}.md"),
-            "result_json": str(results_dir / f"{group_id}.json"),
-            "log_markdown": str(logs_dir / f"{group_id}.md"),
-            "transcript": transcript_info,
-        })
+        manifest_groups.append(
+            {
+                "group_id": group_id,
+                "capture_ids": group.get("capture_ids", []),
+                "session_id": group.get("session_id"),
+                "project": group.get("project"),
+                "branch": group.get("branch"),
+                "cwd": group.get("cwd"),
+                "input_json": str(inputs_dir / f"{group_id}.json"),
+                "input_markdown": str(inputs_dir / f"{group_id}.md"),
+                "result_json": str(results_dir / f"{group_id}.json"),
+                "log_markdown": str(logs_dir / f"{group_id}.md"),
+                "transcript": transcript_info,
+            }
+        )
     manifest = {
         "run_id": run_id,
         "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -669,7 +700,13 @@ def _queue_process_start(
         "status": "running",
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
-    return {"run_id": run_id, "run_dir": str(run_dir), "selected_capture_count": len(selected), "group_count": len(groups), "groups": summary_groups}
+    return {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "selected_capture_count": len(selected),
+        "group_count": len(groups),
+        "groups": summary_groups,
+    }
 
 
 def _queue_process_finalize(run_id: str) -> dict[str, Any]:
@@ -691,7 +728,9 @@ def _queue_process_finalize(run_id: str) -> dict[str, Any]:
         try:
             result = json.loads(result_path.read_text(errors="replace"))
         except json.JSONDecodeError:
-            group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"})
+            group_results.append(
+                {"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"}
+            )
             continue
         processed_ids = set(str(x) for x in result.get("processed_capture_ids", []))
         status = result.get("status")
@@ -715,7 +754,14 @@ def _queue_process_finalize(run_id: str) -> dict[str, Any]:
                     break
         if valid:
             dequeue_ids.update(expected_ids)
-            group_results.append({"group_id": group.get("group_id"), "status": status, "reason": reason, "dequeued_capture_ids": sorted(expected_ids)})
+            group_results.append(
+                {
+                    "group_id": group.get("group_id"),
+                    "status": status,
+                    "reason": reason,
+                    "dequeued_capture_ids": sorted(expected_ids),
+                }
+            )
         else:
             group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": reason})
     remaining = [capture for capture in captures if str(capture.get("id")) not in dequeue_ids]
@@ -793,7 +839,9 @@ def build_parser() -> argparse.ArgumentParser:
     process_start.add_argument("--dry-run", action="store_true")
     process_start.add_argument("--transcript-max-bytes", type=int, default=2 * 1024 * 1024)
     process_start.add_argument("--owner-pid", type=int, default=0, help=argparse.SUPPRESS)
-    process_finalize = queue_sub.add_parser("process-finalize", help="Finalize a processing run and dequeue validated captures")
+    process_finalize = queue_sub.add_parser(
+        "process-finalize", help="Finalize a processing run and dequeue validated captures"
+    )
     process_finalize.add_argument("--run-id", required=True)
 
     return parser

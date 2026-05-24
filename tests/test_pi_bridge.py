@@ -253,18 +253,28 @@ def test_pi_bridge_queue_migrates_to_local_state_and_processes(capsys, tmp_path,
     assert payload["groups"][0]["capture_ids"] == ["q1"]
 
 
-
 def test_pi_bridge_process_start_rejects_active_lock(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
     queue_file.parent.mkdir(parents=True)
     queue_file.write_text(
-        json.dumps({"id": "q1", "title": "One", "body": "A", "metadata": {"project": "repo", "branch": "b", "session_id": "s1"}}) + "\n"
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "A",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
+        + "\n"
     )
     lock_file = tmp_path / "state" / "processing.lock"
     lock_file.write_text(json.dumps({"run_id": "active", "pid": 1, "created_time": 9999999999}))
 
-    with patch("memento.pi_bridge.get_vault", return_value=tmp_path), patch("memento.pi_bridge._is_pid_alive", return_value=True):
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge._is_pid_alive", return_value=True),
+    ):
         code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -276,11 +286,35 @@ def test_pi_bridge_process_start_limit_applies_to_session_groups(capsys, tmp_pat
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
     queue_file.parent.mkdir(parents=True)
     queue_file.write_text(
-        json.dumps({"id": "q1", "created_at": "2026-01-01T00:00:00Z", "title": "One", "body": "A", "metadata": {"project": "repo", "branch": "b", "session_id": "s1"}})
+        json.dumps(
+            {
+                "id": "q1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "title": "One",
+                "body": "A",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
         + "\n"
-        + json.dumps({"id": "q2", "created_at": "2026-01-01T00:01:00Z", "title": "Two", "body": "B", "metadata": {"project": "repo", "branch": "b", "session_id": "s1"}})
+        + json.dumps(
+            {
+                "id": "q2",
+                "created_at": "2026-01-01T00:01:00Z",
+                "title": "Two",
+                "body": "B",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
         + "\n"
-        + json.dumps({"id": "q3", "created_at": "2026-01-01T00:02:00Z", "title": "Three", "body": "C", "metadata": {"project": "repo", "branch": "b", "session_id": "s2"}})
+        + json.dumps(
+            {
+                "id": "q3",
+                "created_at": "2026-01-01T00:02:00Z",
+                "title": "Three",
+                "body": "C",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s2"},
+            }
+        )
         + "\n"
     )
 
@@ -298,12 +332,27 @@ def test_pi_bridge_process_start_includes_small_cleaned_transcript(capsys, tmp_p
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     session_file = tmp_path / "session.jsonl"
     session_file.write_text(
-        json.dumps({"type": "message", "timestamp": "t1", "message": {"role": "user", "content": [{"type": "text", "text": "Important decision"}]}}) + "\n"
+        json.dumps(
+            {
+                "type": "message",
+                "timestamp": "t1",
+                "message": {"role": "user", "content": [{"type": "text", "text": "Important decision"}]},
+            }
+        )
+        + "\n"
     )
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
     queue_file.parent.mkdir(parents=True)
     queue_file.write_text(
-        json.dumps({"id": "q1", "title": "One", "body": "Body", "metadata": {"project": "repo", "branch": "b", "cwd": "/repo", "session_id": str(session_file)}}) + "\n"
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "Body",
+                "metadata": {"project": "repo", "branch": "b", "cwd": "/repo", "session_id": str(session_file)},
+            }
+        )
+        + "\n"
     )
 
     with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
@@ -325,7 +374,15 @@ def test_pi_bridge_process_finalize_dequeues_no_note_results_with_discard_reason
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
     queue_file.parent.mkdir(parents=True)
     queue_file.write_text(
-        json.dumps({"id": "q1", "title": "One", "body": "Noise", "metadata": {"project": "repo", "branch": "b", "session_id": "s1"}}) + "\n"
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "Noise",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
+        + "\n"
     )
 
     with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
@@ -337,7 +394,14 @@ def test_pi_bridge_process_finalize_dequeues_no_note_results_with_discard_reason
     manifest = json.loads((run_dir / "manifest.json").read_text())
     group = manifest["groups"][0]
     (run_dir / "results" / f"{group['group_id']}.json").write_text(
-        json.dumps({"processed_capture_ids": ["q1"], "status": "processed_no_notes", "created": [], "discard_reason": "No durable content"})
+        json.dumps(
+            {
+                "processed_capture_ids": ["q1"],
+                "status": "processed_no_notes",
+                "created": [],
+                "discard_reason": "No durable content",
+            }
+        )
     )
 
     with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
@@ -351,11 +415,40 @@ def test_pi_bridge_process_finalize_dequeues_no_note_results_with_discard_reason
 def test_pi_bridge_clean_transcript_drops_thinking_and_caps_tool_results(tmp_path):
     session_file = tmp_path / "session.jsonl"
     session_file.write_text(
-        json.dumps({"type": "message", "timestamp": "t1", "message": {"role": "user", "content": [{"type": "text", "text": "remember the durable decision"}]}})
+        json.dumps(
+            {
+                "type": "message",
+                "timestamp": "t1",
+                "message": {"role": "user", "content": [{"type": "text", "text": "remember the durable decision"}]},
+            }
+        )
         + "\n"
-        + json.dumps({"type": "message", "timestamp": "t2", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "secret reasoning", "thinkingSignature": "sig", "encrypted_content": "blob"}, {"type": "toolCall", "name": "memento_capture", "arguments": {"title": "Decision"}}]}})
+        + json.dumps(
+            {
+                "type": "message",
+                "timestamp": "t2",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "secret reasoning",
+                            "thinkingSignature": "sig",
+                            "encrypted_content": "blob",
+                        },
+                        {"type": "toolCall", "name": "memento_capture", "arguments": {"title": "Decision"}},
+                    ],
+                },
+            }
+        )
         + "\n"
-        + json.dumps({"type": "message", "timestamp": "t3", "message": {"role": "toolResult", "content": [{"type": "toolResult", "text": "x" * 20}]}})
+        + json.dumps(
+            {
+                "type": "message",
+                "timestamp": "t3",
+                "message": {"role": "toolResult", "content": [{"type": "toolResult", "text": "x" * 20}]},
+            }
+        )
         + "\n"
     )
 
@@ -373,9 +466,23 @@ def test_pi_bridge_process_finalize_dequeues_only_valid_results(capsys, tmp_path
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
     queue_file.parent.mkdir(parents=True)
     queue_file.write_text(
-        json.dumps({"id": "q1", "title": "One", "body": "Useful", "metadata": {"project": "repo", "branch": "b", "session_id": "s1"}})
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "Useful",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
         + "\n"
-        + json.dumps({"id": "q2", "title": "Two", "body": "Noisy", "metadata": {"project": "repo", "branch": "b", "session_id": "s2"}})
+        + json.dumps(
+            {
+                "id": "q2",
+                "title": "Two",
+                "body": "Noisy",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s2"},
+            }
+        )
         + "\n"
     )
     notes_dir = tmp_path / "notes"
@@ -391,7 +498,13 @@ def test_pi_bridge_process_finalize_dequeues_only_valid_results(capsys, tmp_path
     manifest = json.loads((run_dir / "manifest.json").read_text())
     by_session = {group["session_id"]: group for group in manifest["groups"]}
     (run_dir / "results" / f"{by_session['s1']['group_id']}.json").write_text(
-        json.dumps({"processed_capture_ids": ["q1"], "status": "processed", "created": [{"title": "Useful", "path": "notes/useful.md"}]})
+        json.dumps(
+            {
+                "processed_capture_ids": ["q1"],
+                "status": "processed",
+                "created": [{"title": "Useful", "path": "notes/useful.md"}],
+            }
+        )
     )
     (run_dir / "results" / f"{by_session['s2']['group_id']}.json").write_text(
         json.dumps({"processed_capture_ids": ["q2"], "status": "processed_no_notes", "created": []})
