@@ -5,6 +5,7 @@
   "private": true,
   "files": [
     "extensions/**/*.ts",
+    "extensions/**/*.mjs",
     "hooks/vault-briefing.py",
     "hooks/vault-recall.py",
     "memento/**/*.py",

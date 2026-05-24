@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import re
 import subprocess
@@ -63,12 +64,25 @@ def _run_lifecycle(source: str, fn, *args: Any) -> int:
         return _emit(_error_payload(source, exc))
 
 
+def _state_root() -> Path:
+    raw = os.environ.get("MEMENTO_PI_STATE_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
+    return base / "memento" / "pi"
+
+
 def _queue_file(vault: Path | None = None) -> Path:
+    _migrate_legacy_queue(vault)
+    return _state_root() / "queue" / "pi-captures.jsonl"
+
+
+def _legacy_queue_file(vault: Path | None = None) -> Path:
     return (vault or get_vault()) / "queue" / "pi-captures.jsonl"
 
 
-def _load_queue(vault: Path | None = None) -> list[dict[str, Any]]:
-    path = _queue_file(vault)
+def _read_queue_file(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     captures = []
@@ -82,10 +96,62 @@ def _load_queue(vault: Path | None = None) -> list[dict[str, Any]]:
     return captures
 
 
-def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> None:
-    path = _queue_file(vault)
+def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
+    legacy = _legacy_queue_file(vault)
+    if not legacy.exists():
+        return {"migrated": False, "reason": "no_legacy_queue"}
+    old = _read_queue_file(legacy)
+    if not old:
+        legacy.unlink()
+        return {"migrated": True, "migrated_count": 0, "deleted_legacy_queue": True}
+    new_path = _state_root() / "queue" / "pi-captures.jsonl"
+    current = _read_queue_file(new_path)
+    seen = {capture.get("id") for capture in current if capture.get("id")}
+    migrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    additions = []
+    for capture in old:
+        capture_id = capture.get("id")
+        if capture_id and capture_id in seen:
+            continue
+        item = dict(capture)
+        metadata = dict(item.get("metadata") or {})
+        metadata.setdefault("migrated_from", str(legacy))
+        metadata.setdefault("migrated_at", migrated_at)
+        item["metadata"] = metadata
+        additions.append(item)
+        if capture_id:
+            seen.add(capture_id)
+    combined = current + additions
+    _write_queue_file(combined, new_path)
+    reread_ids = {capture.get("id") for capture in _read_queue_file(new_path)}
+    old_ids = {capture.get("id") for capture in old if capture.get("id")}
+    if not old_ids.issubset(reread_ids):
+        return {"migrated": False, "reason": "verification_failed", "legacy_queue_path": str(legacy), "queue_path": str(new_path)}
+    legacy.unlink()
+    try:
+        legacy.parent.rmdir()
+    except OSError:
+        pass
+    return {
+        "migrated": True,
+        "migrated_count": len(additions),
+        "deleted_legacy_queue": True,
+        "legacy_queue_path": str(legacy),
+        "queue_path": str(new_path),
+    }
+
+
+def _load_queue(vault: Path | None = None) -> list[dict[str, Any]]:
+    return _read_queue_file(_queue_file(vault))
+
+
+def _write_queue_file(captures: list[dict[str, Any]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(capture, ensure_ascii=False) + "\n" for capture in captures))
+
+
+def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> None:
+    _write_queue_file(captures, _queue_file(vault))
 
 
 def _queue_count(vault: Path | None = None) -> int:
@@ -137,6 +203,8 @@ def _status(cwd: str = "") -> dict[str, Any]:
         "project_count": len(list(projects_dir.glob("*.md"))) if projects_dir.exists() else 0,
         "queued_capture_count": _queue_count(vault),
         "queue_path": str(_queue_file(vault)),
+        "legacy_queue_path": str(_legacy_queue_file(vault)),
+        "legacy_queue_exists": _legacy_queue_file(vault).exists(),
         "lifecycle": {
             "briefing": get_config().get("session_briefing", True),
             "prompt_recall": get_config().get("prompt_recall", True),
@@ -311,35 +379,353 @@ def _queue_list(limit: int = 20, include_body: bool = False) -> dict[str, Any]:
     return {"count": len(captures), "captures": visible, "queue_path": str(_queue_file())}
 
 
-def _queue_flush(capture_id: str = "", all_captures: bool = False) -> dict[str, Any]:
+def _safe_segment(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-._")
+    return cleaned[:120] or uuid.uuid4().hex
+
+
+def _processing_root() -> Path:
+    return _state_root() / "processing"
+
+
+def _lock_file() -> Path:
+    return _state_root() / "processing.lock"
+
+
+def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _acquire_processing_lock(run_id: str, owner_pid: int = 0) -> dict[str, Any] | None:
+    path = _lock_file()
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(errors="replace"))
+        except json.JSONDecodeError:
+            existing = {"pid": 0, "run_id": "unknown"}
+        pid = int(existing.get("pid") or 0)
+        created_at = float(existing.get("created_time") or 0)
+        stale = (pid and not _is_pid_alive(pid)) or (created_at and time.time() - created_at > 24 * 60 * 60)
+        if not stale:
+            return {"error": "another memento processing run is active", "reason": "processing_lock_active", "lock": existing}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"run_id": run_id, "pid": owner_pid or os.getpid(), "created_time": time.time(), "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    return None
+
+
+def _release_processing_lock(run_id: str) -> None:
+    path = _lock_file()
+    if not path.exists():
+        return
+    try:
+        existing = json.loads(path.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        existing = {}
+    if existing.get("run_id") == run_id:
+        path.unlink()
+
+
+def _capture_created_at(capture: dict[str, Any]) -> str:
+    return str(capture.get("created_at") or capture.get("date") or "")
+
+
+def _selected_captures(
+    captures: list[dict[str, Any]],
+    capture_id: str = "",
+    project: str = "",
+    branch: str = "",
+    session_id: str = "",
+    newest: bool = False,
+) -> list[dict[str, Any]]:
+    selected = []
+    for capture in captures:
+        metadata = capture.get("metadata") or {}
+        if capture_id and capture.get("id") != capture_id:
+            continue
+        if project and metadata.get("project") != project:
+            continue
+        if branch and metadata.get("branch") != branch:
+            continue
+        if session_id and metadata.get("session_id") != session_id:
+            continue
+        if metadata.get("memento_processor") is True:
+            continue
+        selected.append(capture)
+    selected.sort(key=_capture_created_at, reverse=newest)
+    return selected
+
+
+def _group_captures(captures: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for capture in captures:
+        metadata = capture.get("metadata") or {}
+        session_id = metadata.get("session_id") if metadata.get("session_id") != "unknown" else None
+        key = f"session:{session_id}" if session_id else f"capture:{capture.get('id')}"
+        if key not in groups:
+            groups[key] = {
+                "group_id": _safe_segment(key),
+                "group_key": key,
+                "session_id": session_id,
+                "project": metadata.get("project"),
+                "branch": metadata.get("branch"),
+                "cwd": metadata.get("cwd"),
+                "capture_ids": [],
+                "captures": [],
+            }
+        groups[key]["capture_ids"].append(capture.get("id"))
+        groups[key]["captures"].append(capture)
+    return list(groups.values())
+
+
+def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "") -> str:
+    lines = [
+        f"# Memento processing input: {group['group_id']}",
+        "",
+        "## Metadata",
+        f"- Session ID: {group.get('session_id') or '(none)'}",
+        f"- Project: {group.get('project') or '(unknown)'}",
+        f"- Branch: {group.get('branch') or '(unknown)'}",
+        f"- CWD: {group.get('cwd') or '(unknown)'}",
+        f"- Capture IDs: {', '.join(str(x) for x in group.get('capture_ids', []))}",
+        "",
+        "## Queued captures",
+    ]
+    for capture in group.get("captures", []):
+        metadata = capture.get("metadata") or {}
+        lines.extend([
+            "",
+            f"### Capture {capture.get('id')}",
+            f"- Title: {capture.get('title') or ''}",
+            f"- Created: {capture.get('created_at') or ''}",
+            f"- Reason: {capture.get('reason') or ''}",
+            f"- Source event: {capture.get('source_event') or ''}",
+            f"- Project: {metadata.get('project') or ''}",
+            f"- Branch: {metadata.get('branch') or ''}",
+            "",
+            str(capture.get("body") or ""),
+        ])
+    if transcript_markdown:
+        lines.extend(["", "## Cleaned session transcript", "", transcript_markdown])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _clean_content_parts(parts: Any, per_tool_cap: int) -> list[str]:
+    if isinstance(parts, str):
+        return [parts]
+    if not isinstance(parts, list):
+        return []
+    output: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+        if part_type == "text" and isinstance(part.get("text"), str):
+            output.append(part["text"])
+        elif part_type == "toolCall":
+            name = part.get("name") or "tool"
+            arguments = part.get("arguments") or {}
+            output.append(f"[tool call] {name} {json.dumps(arguments, ensure_ascii=False)[:1000]}")
+        elif part_type in {"toolResult", "tool_result"}:
+            text = part.get("text") or part.get("content") or ""
+            if not isinstance(text, str):
+                text = json.dumps(text, ensure_ascii=False)
+            suffix = "\n[tool result truncated]" if len(text) > per_tool_cap else ""
+            output.append(f"[tool result]\n{text[:per_tool_cap]}{suffix}")
+        elif part_type in {"image", "input_image"}:
+            output.append("[image omitted]")
+        elif part_type == "thinking":
+            continue
+    return output
+
+
+def _clean_transcript(path: Path, per_tool_cap: int = 3000, total_cap: int = 200000) -> str:
+    lines: list[str] = []
+    total = 0
+    for raw in path.read_text(errors="replace").splitlines():
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        entry_type = entry.get("type")
+        timestamp = entry.get("timestamp") or ""
+        rendered: list[str] = []
+        if entry_type == "message":
+            message = entry.get("message") or {}
+            role = message.get("role") or "message"
+            content = _clean_content_parts(message.get("content"), per_tool_cap)
+            if content:
+                rendered = [f"## {role} {timestamp}".rstrip(), "", "\n\n".join(content)]
+        elif entry_type == "custom_message":
+            content = entry.get("content")
+            if isinstance(content, str) and content.strip():
+                rendered = [f"## custom:{entry.get('customType') or 'message'} {timestamp}".rstrip(), "", content]
+        elif entry_type in {"session", "model_change", "thinking_level_change"}:
+            continue
+        if not rendered:
+            continue
+        block = "\n".join(rendered).strip()
+        if not block:
+            continue
+        lines.append(block)
+        total += len(block)
+        if total > total_cap:
+            lines.append("\n[transcript truncated by memento processor]")
+            break
+    return "\n\n".join(lines)
+
+
+def _queue_process_start(
+    capture_id: str = "",
+    project: str = "",
+    branch: str = "",
+    session_id: str = "",
+    limit: int = 0,
+    newest: bool = False,
+    dry_run: bool = False,
+    transcript_max_bytes: int = 2 * 1024 * 1024,
+    owner_pid: int = 0,
+) -> dict[str, Any]:
     vault = get_vault()
     captures = _load_queue(vault)
-    selected = []
-    remaining = []
-    for capture in captures:
-        if all_captures or capture.get("id") == capture_id:
-            selected.append(capture)
+    selected = _selected_captures(captures, capture_id, project, branch, session_id, newest)
+    groups = _group_captures(selected)
+    groups.sort(key=lambda group: min((_capture_created_at(capture) for capture in group.get("captures", [])), default=""), reverse=newest)
+    if limit and limit > 0:
+        groups = groups[:limit]
+        selected_ids = {capture_id for group in groups for capture_id in group.get("capture_ids", [])}
+        selected = [capture for capture in selected if capture.get("id") in selected_ids]
+    summary_groups = [
+        {
+            "group_id": group["group_id"],
+            "session_id": group.get("session_id"),
+            "project": group.get("project"),
+            "branch": group.get("branch"),
+            "capture_ids": group.get("capture_ids", []),
+            "capture_count": len(group.get("capture_ids", [])),
+        }
+        for group in groups
+    ]
+    if dry_run:
+        return {"dry_run": True, "selected_capture_count": len(selected), "group_count": len(groups), "groups": summary_groups, "queue_path": str(_queue_file(vault))}
+    if not groups:
+        return {"run_id": None, "run_dir": None, "selected_capture_count": 0, "group_count": 0, "groups": []}
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+    lock_error = _acquire_processing_lock(run_id, owner_pid)
+    if lock_error:
+        return lock_error
+    run_dir = _processing_root() / run_id
+    inputs_dir = run_dir / "inputs"
+    results_dir = run_dir / "results"
+    logs_dir = run_dir / "logs"
+    for directory in (inputs_dir, results_dir, logs_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    manifest_groups = []
+    for group in groups:
+        transcript_info = {"included": False}
+        transcript_markdown = ""
+        if group.get("session_id"):
+            transcript_path = Path(str(group["session_id"])).expanduser()
+            if transcript_path.exists():
+                size = transcript_path.stat().st_size
+                transcript_info = {"path": str(transcript_path), "size_bytes": size, "included": size <= transcript_max_bytes}
+                if size <= transcript_max_bytes:
+                    transcript_markdown = _clean_transcript(transcript_path)
+            else:
+                transcript_info = {"path": str(transcript_path), "included": False, "reason": "missing"}
+        group_id = group["group_id"]
+        (inputs_dir / f"{group_id}.json").write_text(json.dumps(group, ensure_ascii=False, indent=2))
+        (inputs_dir / f"{group_id}.md").write_text(_render_capture_packet(group, transcript_markdown))
+        manifest_groups.append({
+            "group_id": group_id,
+            "capture_ids": group.get("capture_ids", []),
+            "session_id": group.get("session_id"),
+            "project": group.get("project"),
+            "branch": group.get("branch"),
+            "cwd": group.get("cwd"),
+            "input_json": str(inputs_dir / f"{group_id}.json"),
+            "input_markdown": str(inputs_dir / f"{group_id}.md"),
+            "result_json": str(results_dir / f"{group_id}.json"),
+            "log_markdown": str(logs_dir / f"{group_id}.md"),
+            "transcript": transcript_info,
+        })
+    manifest = {
+        "run_id": run_id,
+        "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "queue_path": str(_queue_file(vault)),
+        "vault_path": str(vault),
+        "state_root": str(_state_root()),
+        "selected_capture_count": len(selected),
+        "group_count": len(groups),
+        "groups": manifest_groups,
+        "status": "running",
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    return {"run_id": run_id, "run_dir": str(run_dir), "selected_capture_count": len(selected), "group_count": len(groups), "groups": summary_groups}
+
+
+def _queue_process_finalize(run_id: str) -> dict[str, Any]:
+    vault = get_vault()
+    run_dir = _processing_root() / run_id
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.exists():
+        return {"error": f"processing run not found: {run_id}", "reason": "run_not_found"}
+    manifest = json.loads(manifest_path.read_text(errors="replace"))
+    captures = _load_queue(vault)
+    dequeue_ids: set[str] = set()
+    group_results = []
+    for group in manifest.get("groups", []):
+        expected_ids = set(str(x) for x in group.get("capture_ids", []))
+        result_path = Path(group.get("result_json", ""))
+        if not result_path.exists():
+            group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"})
+            continue
+        try:
+            result = json.loads(result_path.read_text(errors="replace"))
+        except json.JSONDecodeError:
+            group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"})
+            continue
+        processed_ids = set(str(x) for x in result.get("processed_capture_ids", []))
+        status = result.get("status")
+        valid = processed_ids == expected_ids and status in {"processed", "processed_no_notes"}
+        reason = "ok"
+        if not valid:
+            reason = "invalid_status_or_capture_ids"
+        elif status == "processed_no_notes" and not str(result.get("discard_reason") or "").strip():
+            valid = False
+            reason = "missing_discard_reason"
+        elif status == "processed":
+            created = result.get("created", [])
+            if not created:
+                valid = False
+                reason = "missing_created_note"
+            for note in created:
+                path = note.get("path") if isinstance(note, dict) else note
+                if not path or not (vault / str(path)).exists():
+                    valid = False
+                    reason = "missing_created_note"
+                    break
+        if valid:
+            dequeue_ids.update(expected_ids)
+            group_results.append({"group_id": group.get("group_id"), "status": status, "reason": reason, "dequeued_capture_ids": sorted(expected_ids)})
         else:
-            remaining.append(capture)
-
-    written = []
-    for capture in selected:
-        metadata = capture.get("metadata") or {}
-        note_path = write_note(
-            vault,
-            capture.get("title") or "Queued pi capture",
-            capture.get("body") or "",
-            "session",
-            ["pi", "queued"],
-            source="pi",
-            project=metadata.get("project") if metadata.get("project") != "unknown" else None,
-            branch=metadata.get("branch"),
-            session_id=metadata.get("session_id") if metadata.get("session_id") != "unknown" else None,
-        )
-        written.append({"id": capture.get("id"), "path": str(note_path.relative_to(vault))})
-
+            group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": reason})
+    remaining = [capture for capture in captures if str(capture.get("id")) not in dequeue_ids]
     _write_queue(remaining, vault)
-    return {"flushed": len(written), "remaining": len(remaining), "written": written}
+    manifest["status"] = "finalized"
+    manifest["finalized_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    manifest["dequeued_capture_ids"] = sorted(dequeue_ids)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    _release_processing_lock(run_id)
+    return {"run_id": run_id, "dequeued": len(dequeue_ids), "remaining": len(remaining), "groups": group_results}
 
 
 def _run_json(source: str, fn, *args: Any) -> int:
@@ -390,14 +776,25 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--reason", default="manual")
     capture.add_argument("--source-event", default="manual")
 
-    queue = sub.add_parser("queue", help="Inspect or flush queued pi captures")
+    queue = sub.add_parser("queue", help="Inspect or process queued pi captures")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
     queue_list = queue_sub.add_parser("list", help="List queued captures")
     queue_list.add_argument("--limit", type=int, default=20)
     queue_list.add_argument("--include-body", action="store_true")
-    queue_flush = queue_sub.add_parser("flush", help="Write queued captures to notes")
-    queue_flush.add_argument("--id", default="")
-    queue_flush.add_argument("--all", action="store_true")
+    process_start = queue_sub.add_parser("process-start", help="Create a processing run for selected captures")
+    process_start.add_argument("--id", default="")
+    process_start.add_argument("--project", default="")
+    process_start.add_argument("--branch", default="")
+    process_start.add_argument("--session", default="")
+    process_start.add_argument("--limit", type=int, default=0)
+    order = process_start.add_mutually_exclusive_group()
+    order.add_argument("--oldest", action="store_true")
+    order.add_argument("--newest", action="store_true")
+    process_start.add_argument("--dry-run", action="store_true")
+    process_start.add_argument("--transcript-max-bytes", type=int, default=2 * 1024 * 1024)
+    process_start.add_argument("--owner-pid", type=int, default=0, help=argparse.SUPPRESS)
+    process_finalize = queue_sub.add_parser("process-finalize", help="Finalize a processing run and dequeue validated captures")
+    process_finalize.add_argument("--run-id", required=True)
 
     return parser
 
@@ -438,8 +835,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "queue":
         if args.queue_command == "list":
             return _run_json("queue", _queue_list, args.limit, args.include_body)
-        if args.queue_command == "flush":
-            return _run_json("queue", _queue_flush, args.id, args.all)
+        if args.queue_command == "process-start":
+            return _run_json(
+                "queue",
+                _queue_process_start,
+                args.id,
+                args.project,
+                args.branch,
+                args.session,
+                args.limit,
+                args.newest,
+                args.dry_run,
+                args.transcript_max_bytes,
+                args.owner_pid,
+            )
+        if args.queue_command == "process-finalize":
+            return _run_json("queue", _queue_process_finalize, args.run_id)
     raise AssertionError(f"unhandled command: {args.command}")
 
 
