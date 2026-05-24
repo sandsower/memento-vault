@@ -281,7 +281,7 @@ def test_pi_bridge_process_start_rejects_active_lock(capsys, tmp_path, monkeypat
     assert payload["reason"] == "processing_lock_active"
 
 
-def test_pi_bridge_process_start_limit_applies_to_session_groups(capsys, tmp_path, monkeypatch):
+def test_pi_bridge_process_start_limit_applies_to_captures(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
     queue_file.parent.mkdir(parents=True)
@@ -323,9 +323,36 @@ def test_pi_bridge_process_start_limit_applies_to_session_groups(capsys, tmp_pat
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["group_count"] == 1
-    assert payload["selected_capture_count"] == 2
+    assert payload["selected_capture_count"] == 1
     assert payload["groups"][0]["session_id"] == "s1"
-    assert payload["groups"][0]["capture_ids"] == ["q1", "q2"]
+    assert payload["groups"][0]["capture_ids"] == ["q1"]
+
+
+def test_pi_bridge_process_start_releases_lock_on_setup_failure(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "A",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
+        + "\n"
+    )
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge._render_capture_packet", side_effect=RuntimeError("setup failed")),
+    ):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "setup failed"
+    assert not (tmp_path / "state" / "processing.lock").exists()
 
 
 def test_pi_bridge_process_start_includes_small_cleaned_transcript(capsys, tmp_path, monkeypatch):

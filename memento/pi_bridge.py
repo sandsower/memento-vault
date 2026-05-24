@@ -407,22 +407,21 @@ def _is_pid_alive(pid: int) -> bool:
     return True
 
 
+def _read_processing_lock(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return {"pid": 0, "run_id": "unknown"}
+
+
+def _processing_lock_stale(existing: dict[str, Any]) -> bool:
+    pid = int(existing.get("pid") or 0)
+    created_at = float(existing.get("created_time") or 0)
+    return bool((pid and not _is_pid_alive(pid)) or (created_at and time.time() - created_at > 24 * 60 * 60))
+
+
 def _acquire_processing_lock(run_id: str, owner_pid: int = 0) -> dict[str, Any] | None:
     path = _lock_file()
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(errors="replace"))
-        except json.JSONDecodeError:
-            existing = {"pid": 0, "run_id": "unknown"}
-        pid = int(existing.get("pid") or 0)
-        created_at = float(existing.get("created_time") or 0)
-        stale = (pid and not _is_pid_alive(pid)) or (created_at and time.time() - created_at > 24 * 60 * 60)
-        if not stale:
-            return {
-                "error": "another memento processing run is active",
-                "reason": "processing_lock_active",
-                "lock": existing,
-            }
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "run_id": run_id,
@@ -430,8 +429,30 @@ def _acquire_processing_lock(run_id: str, owner_pid: int = 0) -> dict[str, Any] 
         "created_time": time.time(),
         "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-    return None
+    for _attempt in range(2):
+        try:
+            with path.open("x", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            return None
+        except FileExistsError:
+            existing = _read_processing_lock(path)
+            if not _processing_lock_stale(existing):
+                return {
+                    "error": "another memento processing run is active",
+                    "reason": "processing_lock_active",
+                    "lock": existing,
+                }
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+    existing = _read_processing_lock(path)
+    return {
+        "error": "another memento processing run is active",
+        "reason": "processing_lock_active",
+        "lock": existing,
+    }
 
 
 def _release_processing_lock(run_id: str) -> None:
@@ -645,9 +666,29 @@ def _queue_process_start(
         reverse=newest,
     )
     if limit and limit > 0:
-        groups = groups[:limit]
-        selected_ids = {capture_id for group in groups for capture_id in group.get("capture_ids", [])}
-        selected = [capture for capture in selected if capture.get("id") in selected_ids]
+        limited_ids: list[str] = []
+        for group in groups:
+            for capture in group.get("captures", []):
+                if len(limited_ids) >= limit:
+                    break
+                limited_ids.append(str(capture.get("id")))
+            if len(limited_ids) >= limit:
+                break
+        selected_ids = set(limited_ids)
+        selected = [capture for capture in selected if str(capture.get("id")) in selected_ids]
+        limited_groups = []
+        for group in groups:
+            captures_in_limit = [
+                capture for capture in group.get("captures", []) if str(capture.get("id")) in selected_ids
+            ]
+            if captures_in_limit:
+                group = {
+                    **group,
+                    "captures": captures_in_limit,
+                    "capture_ids": [capture.get("id") for capture in captures_in_limit],
+                }
+                limited_groups.append(group)
+        groups = limited_groups
     summary_groups = [
         {
             "group_id": group["group_id"],
@@ -673,71 +714,75 @@ def _queue_process_start(
     lock_error = _acquire_processing_lock(run_id, owner_pid)
     if lock_error:
         return lock_error
-    run_dir = _processing_root() / run_id
-    inputs_dir = run_dir / "inputs"
-    results_dir = run_dir / "results"
-    logs_dir = run_dir / "logs"
-    for directory in (inputs_dir, results_dir, logs_dir):
-        directory.mkdir(parents=True, exist_ok=True)
-    manifest_groups = []
-    for group in groups:
-        transcript_info = {"included": False}
-        transcript_markdown = ""
-        if group.get("session_id"):
-            transcript_path = Path(str(group["session_id"])).expanduser()
-            if transcript_path.exists():
-                size = transcript_path.stat().st_size
-                allowed = _transcript_path_allowed(transcript_path)
-                transcript_info = {
-                    "path": str(transcript_path),
-                    "size_bytes": size,
-                    "included": allowed and size <= transcript_max_bytes,
-                }
-                if not allowed:
-                    transcript_info["reason"] = "outside_allowed_roots"
-                elif size > transcript_max_bytes:
-                    transcript_info["reason"] = "over_size_cap"
+    try:
+        run_dir = _processing_root() / run_id
+        inputs_dir = run_dir / "inputs"
+        results_dir = run_dir / "results"
+        logs_dir = run_dir / "logs"
+        for directory in (inputs_dir, results_dir, logs_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+        manifest_groups = []
+        for group in groups:
+            transcript_info = {"included": False}
+            transcript_markdown = ""
+            if group.get("session_id"):
+                transcript_path = Path(str(group["session_id"])).expanduser()
+                if transcript_path.exists():
+                    size = transcript_path.stat().st_size
+                    allowed = _transcript_path_allowed(transcript_path)
+                    transcript_info = {
+                        "path": str(transcript_path),
+                        "size_bytes": size,
+                        "included": allowed and size <= transcript_max_bytes,
+                    }
+                    if not allowed:
+                        transcript_info["reason"] = "outside_allowed_roots"
+                    elif size > transcript_max_bytes:
+                        transcript_info["reason"] = "over_size_cap"
+                    else:
+                        transcript_markdown = _clean_transcript(transcript_path)
                 else:
-                    transcript_markdown = _clean_transcript(transcript_path)
-            else:
-                transcript_info = {"path": str(transcript_path), "included": False, "reason": "missing"}
-        group_id = group["group_id"]
-        (inputs_dir / f"{group_id}.json").write_text(json.dumps(group, ensure_ascii=False, indent=2))
-        (inputs_dir / f"{group_id}.md").write_text(_render_capture_packet(group, transcript_markdown))
-        manifest_groups.append(
-            {
-                "group_id": group_id,
-                "capture_ids": group.get("capture_ids", []),
-                "session_id": group.get("session_id"),
-                "project": group.get("project"),
-                "branch": group.get("branch"),
-                "cwd": group.get("cwd"),
-                "input_json": str(inputs_dir / f"{group_id}.json"),
-                "input_markdown": str(inputs_dir / f"{group_id}.md"),
-                "result_json": str(results_dir / f"{group_id}.json"),
-                "log_markdown": str(logs_dir / f"{group_id}.md"),
-                "transcript": transcript_info,
-            }
-        )
-    manifest = {
-        "run_id": run_id,
-        "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "queue_path": str(_queue_file(vault)),
-        "vault_path": str(vault),
-        "state_root": str(_state_root()),
-        "selected_capture_count": len(selected),
-        "group_count": len(groups),
-        "groups": manifest_groups,
-        "status": "running",
-    }
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
-    return {
-        "run_id": run_id,
-        "run_dir": str(run_dir),
-        "selected_capture_count": len(selected),
-        "group_count": len(groups),
-        "groups": summary_groups,
-    }
+                    transcript_info = {"path": str(transcript_path), "included": False, "reason": "missing"}
+            group_id = group["group_id"]
+            (inputs_dir / f"{group_id}.json").write_text(json.dumps(group, ensure_ascii=False, indent=2))
+            (inputs_dir / f"{group_id}.md").write_text(_render_capture_packet(group, transcript_markdown))
+            manifest_groups.append(
+                {
+                    "group_id": group_id,
+                    "capture_ids": group.get("capture_ids", []),
+                    "session_id": group.get("session_id"),
+                    "project": group.get("project"),
+                    "branch": group.get("branch"),
+                    "cwd": group.get("cwd"),
+                    "input_json": str(inputs_dir / f"{group_id}.json"),
+                    "input_markdown": str(inputs_dir / f"{group_id}.md"),
+                    "result_json": str(results_dir / f"{group_id}.json"),
+                    "log_markdown": str(logs_dir / f"{group_id}.md"),
+                    "transcript": transcript_info,
+                }
+            )
+        manifest = {
+            "run_id": run_id,
+            "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "queue_path": str(_queue_file(vault)),
+            "vault_path": str(vault),
+            "state_root": str(_state_root()),
+            "selected_capture_count": len(selected),
+            "group_count": len(groups),
+            "groups": manifest_groups,
+            "status": "running",
+        }
+        (run_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+        return {
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "selected_capture_count": len(selected),
+            "group_count": len(groups),
+            "groups": summary_groups,
+        }
+    except Exception:
+        _release_processing_lock(run_id)
+        raise
 
 
 def _reported_note_exists_in_vault(vault: Path, path: str) -> bool:

@@ -233,6 +233,19 @@ function processArgsFromParams(params: Record<string, unknown>): string[] {
 	return args;
 }
 
+function withProcessLimit(args: string[], maxCaptures: number): string[] {
+	const capped = Math.max(1, Math.floor(maxCaptures));
+	const next = [...args];
+	const index = next.indexOf("--limit");
+	if (index >= 0) {
+		const requested = Number.parseInt(next[index + 1] ?? "", 10);
+		next[index + 1] = String(Number.isFinite(requested) && requested > 0 ? Math.min(requested, capped) : capped);
+	} else {
+		next.push("--limit", String(capped));
+	}
+	return next;
+}
+
 function parseProcessCommandArgs(raw: string): string[] {
 	const trimmed = raw.trim();
 	if (!trimmed) return [];
@@ -517,7 +530,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				const payload = { error: "memento_process requires explicit selection", guidance: "Pass id, project, branch, session, limit, or dryRun with filters. Use /memento-process interactively." };
 				return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
 			}
-			const cliArgs = processArgsFromParams(params as Record<string, unknown>);
+			const cliArgs = withProcessLimit(processArgsFromParams(params as Record<string, unknown>), config.processQueueMaxCaptures);
 			if (params.dryRun) {
 				const payload = await runJson(pi, ctx, ["queue", "process-start", ...cliArgs, "--dry-run"]);
 				return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
@@ -557,21 +570,23 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("memento queue processing is disabled", "error");
 				return;
 			}
-			let cliArgs = parseProcessCommandArgs(args);
-			if (cliArgs.length === 0) {
-				const preview = await runJson(pi, ctx, ["queue", "process-start", "--project", await currentProjectSlug(pi, ctx), "--limit", "5", "--dry-run"]);
+			let cliArgs = withProcessLimit(parseProcessCommandArgs(args), config.processQueueMaxCaptures);
+			if (args.trim().length === 0) {
+				const batchLimit = String(Math.max(1, Math.floor(config.processQueueMaxCaptures)));
 				const choice = ctx.hasUI ? await ctx.ui.select("Process queued Memento captures", [
-					"Current project, oldest 5",
-					"Current branch, oldest 5",
-					"Oldest 5 overall",
+					`Current project, oldest ${batchLimit}`,
+					`Current branch, oldest ${batchLimit}`,
+					`Oldest ${batchLimit} overall`,
 					"Dry run current project",
 					"Cancel",
 				]) : "Cancel";
 				if (!choice || choice === "Cancel") return;
-				if (choice === "Current project, oldest 5") cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--limit", "5"];
-				else if (choice === "Current branch, oldest 5") cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--branch", await currentBranch(pi, ctx), "--limit", "5"];
-				else if (choice === "Oldest 5 overall") cliArgs = ["--limit", "5"];
-				else if (choice === "Dry run current project") cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--limit", "5", "--dry-run"];
+				if (choice.startsWith("Current project")) cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--limit", batchLimit];
+				else if (choice.startsWith("Current branch")) cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--branch", await currentBranch(pi, ctx), "--limit", batchLimit];
+				else if (choice.startsWith("Oldest")) cliArgs = ["--limit", batchLimit];
+				else if (choice === "Dry run current project") cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--limit", batchLimit, "--dry-run"];
+				const previewArgs = cliArgs.includes("--dry-run") ? cliArgs : [...cliArgs, "--dry-run"];
+				const preview = await runJson(pi, ctx, ["queue", "process-start", ...previewArgs]);
 				ctx.ui.setWidget("memento-process-preview", JSON.stringify(preview, null, 2).split("\n"));
 			}
 			if (cliArgs.includes("--dry-run")) {

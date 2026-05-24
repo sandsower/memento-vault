@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -51,6 +52,8 @@ async function realCurator(group) {
   const input = readFileSync(group.input_markdown, 'utf8');
   const curatorCwd = group.cwd || repoRoot;
   const prompt = `/skill:memento\n\n${mementoSkillFallback()}\n\nYou are processing a queued pi session group for Memento. Create zero or more curated notes using the existing memento_capture tool. Do not write raw transcript notes. Do not edit the queue. Preserve the original project/cwd/branch/session metadata from the input packet in captured note bodies when relevant. Final answer must be ONLY a JSON object with this shape:\n{\n  "group_id": ${JSON.stringify(group.group_id)},\n  "processed_capture_ids": ${JSON.stringify(group.capture_ids ?? [])},\n  "status": "processed" | "processed_no_notes",\n  "created": [{"title":"...","path":"notes/..."}],\n  "skipped_duplicates": [{"title":"...","existing_path":"notes/..."}],\n  "discard_reason": "required when processed_no_notes"\n}\n\nInput packet:\n\n${input}`;
+  const promptPath = resolve(tmpdir(), `memento-process-${process.pid}-${Date.now()}-${group.group_id}.md`);
+  writeFileSync(promptPath, prompt);
   const args = [
     '-p',
     '--no-session',
@@ -62,7 +65,7 @@ async function realCurator(group) {
   ];
   const model = process.env.MEMENTO_PI_PROCESS_QUEUE_MODEL || group.processor_model;
   if (model) args.push('--model', model);
-  args.push(prompt);
+  args.push(`@${promptPath}`);
   const result = spawnSync('pi', args, {
     cwd: curatorCwd,
     encoding: 'utf8',
@@ -74,11 +77,14 @@ async function realCurator(group) {
     },
     maxBuffer: 50 * 1024 * 1024,
   });
+  rmSync(promptPath, { force: true });
   writeFileSync(group.log_markdown, `# Curator output\n\n## stdout\n\n${result.stdout}\n\n## stderr\n\n${result.stderr}\n`);
   if (result.status !== 0) throw new Error(`pi curator failed (${result.status}): ${result.stderr}`);
   const match = result.stdout.match(/\{[\s\S]*"processed_capture_ids"[\s\S]*\}/m);
   if (!match) throw new Error('curator did not return result JSON');
-  writeFileSync(group.result_json, match[0]);
+  const parsed = JSON.parse(match[0]);
+  if (!Array.isArray(parsed.processed_capture_ids)) throw new Error('curator result JSON missing processed_capture_ids array');
+  writeFileSync(group.result_json, JSON.stringify(parsed, null, 2));
 }
 
 async function main() {
