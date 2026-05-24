@@ -461,6 +461,45 @@ def test_pi_bridge_clean_transcript_drops_thinking_and_caps_tool_results(tmp_pat
     assert "encrypted_content" not in cleaned
 
 
+def test_pi_bridge_process_finalize_rejects_created_note_paths_outside_vault(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "Useful",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
+        + "\n"
+    )
+    outside = tmp_path / "outside.md"
+    outside.write_text("not a vault note")
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path / "vault"):
+        (tmp_path / "vault").mkdir()
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    run_id = started["run_id"]
+    run_dir = tmp_path / "state" / "processing" / run_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    group = manifest["groups"][0]
+    (run_dir / "results" / f"{group['group_id']}.json").write_text(
+        json.dumps({"processed_capture_ids": ["q1"], "status": "processed", "created": [{"path": str(outside)}]})
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path / "vault"):
+        code = pi_bridge.main(["queue", "process-finalize", "--run-id", run_id])
+    assert code == 0
+    finalized = json.loads(capsys.readouterr().out)
+    assert finalized["dequeued"] == 0
+    assert json.loads(queue_file.read_text())["id"] == "q1"
+
+
 def test_pi_bridge_process_finalize_dequeues_only_valid_results(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"

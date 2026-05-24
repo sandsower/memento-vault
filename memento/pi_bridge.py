@@ -709,6 +709,16 @@ def _queue_process_start(
     }
 
 
+def _reported_note_exists_in_vault(vault: Path, path: str) -> bool:
+    if not path or Path(path).is_absolute():
+        return False
+    vault_resolved = vault.resolve()
+    candidate = (vault / path).resolve()
+    if not (candidate == vault_resolved or vault_resolved in candidate.parents):
+        return False
+    return candidate.exists()
+
+
 def _queue_process_finalize(run_id: str) -> dict[str, Any]:
     vault = get_vault()
     run_dir = _processing_root() / run_id
@@ -748,7 +758,7 @@ def _queue_process_finalize(run_id: str) -> dict[str, Any]:
                 reason = "missing_created_note"
             for note in created:
                 path = note.get("path") if isinstance(note, dict) else note
-                if not path or not (vault / str(path)).exists():
+                if not path or not _reported_note_exists_in_vault(vault, str(path)):
                     valid = False
                     reason = "missing_created_note"
                     break
