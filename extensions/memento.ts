@@ -21,6 +21,10 @@ interface BridgeConfig {
 	toolContext: boolean;
 	autoCapture: boolean;
 	captureQueue: boolean;
+	processQueue: boolean;
+	processQueueOnSessionClose: boolean;
+	processQueueMaxCaptures: number;
+	processQueueModel?: string | null;
 	maxInjectedChars: number;
 	maxToolContextPerSession: number;
 }
@@ -32,6 +36,10 @@ const defaultConfig: BridgeConfig = {
 	toolContext: false,
 	autoCapture: false,
 	captureQueue: true,
+	processQueue: true,
+	processQueueOnSessionClose: false,
+	processQueueMaxCaptures: 3,
+	processQueueModel: null,
 	maxInjectedChars: 4000,
 	maxToolContextPerSession: 5,
 };
@@ -66,12 +74,13 @@ function bridgeConfigFrom(raw: unknown): Partial<BridgeConfig> {
 	const partial: Partial<BridgeConfig> = {};
 	if (!candidate) return partial;
 
-	for (const key of ["enabled", "briefing", "promptRecall", "toolContext", "autoCapture", "captureQueue"] as const) {
+	for (const key of ["enabled", "briefing", "promptRecall", "toolContext", "autoCapture", "captureQueue", "processQueue", "processQueueOnSessionClose"] as const) {
 		if (typeof candidate[key] === "boolean") partial[key] = candidate[key];
 	}
-	for (const key of ["maxInjectedChars", "maxToolContextPerSession"] as const) {
+	for (const key of ["maxInjectedChars", "maxToolContextPerSession", "processQueueMaxCaptures"] as const) {
 		if (typeof candidate[key] === "number" && Number.isFinite(candidate[key]) && candidate[key] >= 0) partial[key] = candidate[key];
 	}
+	if (typeof candidate.processQueueModel === "string" || candidate.processQueueModel === null) partial.processQueueModel = candidate.processQueueModel;
 	return partial;
 }
 
@@ -84,6 +93,10 @@ function applyEnv(config: BridgeConfig): BridgeConfig {
 		toolContext: envBool("MEMENTO_PI_TOOL_CONTEXT") ?? config.toolContext,
 		autoCapture: envBool("MEMENTO_PI_AUTO_CAPTURE") ?? config.autoCapture,
 		captureQueue: envBool("MEMENTO_PI_CAPTURE_QUEUE") ?? config.captureQueue,
+		processQueue: envBool("MEMENTO_PI_PROCESS_QUEUE") ?? config.processQueue,
+		processQueueOnSessionClose: envBool("MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE") ?? config.processQueueOnSessionClose,
+		processQueueMaxCaptures: envInt("MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES") ?? config.processQueueMaxCaptures,
+		processQueueModel: process.env.MEMENTO_PI_PROCESS_QUEUE_MODEL ?? config.processQueueModel,
 		maxInjectedChars: envInt("MEMENTO_PI_MAX_INJECTED_CHARS") ?? config.maxInjectedChars,
 		maxToolContextPerSession: envInt("MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION") ?? config.maxToolContextPerSession,
 	};
@@ -207,6 +220,58 @@ async function runLifecycle(
 
 function textPart(text: string) {
 	return { type: "text" as const, text };
+}
+
+function processArgsFromParams(params: Record<string, unknown>): string[] {
+	const args: string[] = [];
+	for (const [key, flag] of [["id", "--id"], ["project", "--project"], ["branch", "--branch"], ["session", "--session"]] as const) {
+		const value = params[key];
+		if (typeof value === "string" && value.trim()) args.push(flag, value.trim());
+	}
+	if (typeof params.limit === "number" && Number.isFinite(params.limit) && params.limit > 0) args.push("--limit", String(Math.floor(params.limit)));
+	args.push(params.newest ? "--newest" : "--oldest");
+	return args;
+}
+
+function withProcessLimit(args: string[], maxCaptures: number): string[] {
+	const capped = Math.max(1, Math.floor(maxCaptures));
+	const next = [...args];
+	const index = next.indexOf("--limit");
+	if (index >= 0) {
+		const requested = Number.parseInt(next[index + 1] ?? "", 10);
+		next[index + 1] = String(Number.isFinite(requested) && requested > 0 ? Math.min(requested, capped) : capped);
+	} else {
+		next.push("--limit", String(capped));
+	}
+	return next;
+}
+
+function parseProcessCommandArgs(raw: string): string[] {
+	const trimmed = raw.trim();
+	if (!trimmed) return [];
+	return trimmed.split(/\s+/g);
+}
+
+async function currentProjectSlug(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string> {
+	const payload = await runJson(pi, ctx, ["status", "--cwd", ctx.cwd]);
+	return String(payload.project_slug ?? "unknown");
+}
+
+async function currentBranch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string> {
+	const result = await pi.exec("git", ["branch", "--show-current"], { cwd: ctx.cwd, signal: ctx.signal, timeout: 2_000 });
+	return result.stdout.trim();
+}
+
+async function runProcessWorker(pi: ExtensionAPI, ctx: ExtensionContext, args: string[], config: BridgeConfig): Promise<Record<string, unknown>> {
+	const worker = join(__dirname, "memento-process-worker.mjs");
+	const workerArgs = config.processQueueModel ? ["--processor-model", config.processQueueModel, ...args] : args;
+	const result = await pi.exec("node", [worker, ...workerArgs], { cwd: repoRoot, signal: ctx.signal, timeout: 60 * 60 * 1000 });
+	if (result.code !== 0) return { error: "worker-failed", code: result.code, stderr: result.stderr, stdout: result.stdout };
+	try {
+		return JSON.parse(result.stdout) as Record<string, unknown>;
+	} catch (error) {
+		return { error: "worker-invalid-json", stdout: result.stdout, stderr: result.stderr, message: String(error) };
+	}
 }
 
 export default function mementoExtension(pi: ExtensionAPI) {
@@ -443,18 +508,34 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "memento_flush_queue",
-		label: "Memento Flush Queue",
-		description: "Write queued pi capture candidates to durable notes. Use only after user approval during capture workflow review; do not use for general memory search or recall.",
+		name: "memento_process",
+		label: "Memento Process Queue",
+		description: "Process selected queued pi captures into curated Memento notes. Requires explicit selection; use dryRun to preview.",
 		parameters: Type.Object({
-			id: Type.Optional(Type.String({ description: "Capture id to flush" })),
-			all: Type.Optional(Type.Boolean({ description: "Flush all queued captures" })),
+			id: Type.Optional(Type.String({ description: "Capture id to process" })),
+			project: Type.Optional(Type.String({ description: "Project slug to process" })),
+			branch: Type.Optional(Type.String({ description: "Branch to process" })),
+			session: Type.Optional(Type.String({ description: "Session id/path to process" })),
+			limit: Type.Optional(Type.Number({ description: "Maximum captures to select" })),
+			newest: Type.Optional(Type.Boolean({ description: "Select newest first instead of oldest first" })),
+			dryRun: Type.Optional(Type.Boolean({ description: "Preview selected session groups without processing" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const args = ["queue", "flush"];
-			if (params.all) args.push("--all");
-			else if (params.id) args.push("--id", params.id);
-			const payload = await runJson(pi, ctx, args);
+			if (!config.processQueue) {
+				const payload = { error: "memento queue processing is disabled", reason: "process_queue_disabled" };
+				return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+			}
+			const hasSelection = Boolean(params.id || params.project || params.branch || params.session || params.limit);
+			if (!hasSelection) {
+				const payload = { error: "memento_process requires explicit selection", guidance: "Pass id, project, branch, session, limit, or dryRun with filters. Use /memento-process interactively." };
+				return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+			}
+			const cliArgs = withProcessLimit(processArgsFromParams(params as Record<string, unknown>), config.processQueueMaxCaptures);
+			if (params.dryRun) {
+				const payload = await runJson(pi, ctx, ["queue", "process-start", ...cliArgs, "--dry-run"]);
+				return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+			}
+			const payload = await runProcessWorker(pi, ctx, cliArgs, config);
 			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
 		},
 	});
@@ -482,20 +563,41 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("memento-flush-queue", {
-		description: "Flush queued memento pi captures. Pass an id, or --all.",
+	pi.registerCommand("memento-process", {
+		description: "Process queued memento pi captures into curated notes",
 		handler: async (args, ctx) => {
-			const trimmed = args.trim();
-			const cliArgs = ["queue", "flush"];
-			if (trimmed === "--all") cliArgs.push("--all");
-			else if (trimmed) cliArgs.push("--id", trimmed);
-			else {
-				ctx.ui.notify("Pass a queued capture id or --all", "error");
+			if (!config.processQueue) {
+				ctx.ui.notify("memento queue processing is disabled", "error");
 				return;
 			}
-			const payload = await runJson(pi, ctx, cliArgs);
-			ctx.ui.notify(`memento queue flushed ${String(payload.flushed ?? 0)} capture(s)`, payload.error ? "error" : "success");
-			ctx.ui.setWidget("memento-queue", JSON.stringify(payload, null, 2).split("\n"));
+			let cliArgs = withProcessLimit(parseProcessCommandArgs(args), config.processQueueMaxCaptures);
+			if (args.trim().length === 0) {
+				const batchLimit = String(Math.max(1, Math.floor(config.processQueueMaxCaptures)));
+				const choice = ctx.hasUI ? await ctx.ui.select("Process queued Memento captures", [
+					`Current project, oldest ${batchLimit}`,
+					`Current branch, oldest ${batchLimit}`,
+					`Oldest ${batchLimit} overall`,
+					"Dry run current project",
+					"Cancel",
+				]) : "Cancel";
+				if (!choice || choice === "Cancel") return;
+				if (choice.startsWith("Current project")) cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--limit", batchLimit];
+				else if (choice.startsWith("Current branch")) cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--branch", await currentBranch(pi, ctx), "--limit", batchLimit];
+				else if (choice.startsWith("Oldest")) cliArgs = ["--limit", batchLimit];
+				else if (choice === "Dry run current project") cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--limit", batchLimit, "--dry-run"];
+				const previewArgs = cliArgs.includes("--dry-run") ? cliArgs : [...cliArgs, "--dry-run"];
+				const preview = await runJson(pi, ctx, ["queue", "process-start", ...previewArgs]);
+				ctx.ui.setWidget("memento-process-preview", JSON.stringify(preview, null, 2).split("\n"));
+			}
+			if (cliArgs.includes("--dry-run")) {
+				const payload = await runJson(pi, ctx, ["queue", "process-start", ...cliArgs]);
+				ctx.ui.setWidget("memento-process", JSON.stringify(payload, null, 2).split("\n"));
+				return;
+			}
+			ctx.ui.notify("memento processing started", "info");
+			const payload = await runProcessWorker(pi, ctx, cliArgs, config);
+			ctx.ui.notify(payload.error ? `memento processing failed: ${String(payload.error)}` : "memento processing finished", payload.error ? "error" : "success");
+			ctx.ui.setWidget("memento-process", JSON.stringify(payload, null, 2).split("\n"));
 		},
 	});
 }

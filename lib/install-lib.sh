@@ -240,14 +240,14 @@ repair_stale_headless_mcp_config() {
     [ -f "$target" ] || return 1
 
     local repaired
-    repaired=$(python3 - "$target" <<'PY'
+    repaired=$(python3 - "$target" <<-'PY'
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 text = path.read_text()
 old = '        "--mcp-config",\n        "{}",'
-new = '        "--mcp-config",\n        \'{"mcpServers": {}}\','
+new = "        \"--mcp-config\",\n        '{\"mcpServers\": {}}',"
 if old not in text:
     print("no")
     raise SystemExit(1)
@@ -552,7 +552,7 @@ setup_shell_warmup() {
 
     if [ -n "$shell_rc" ] && [ -f "$shell_rc" ]; then
         if grep -qE "$warmup_marker" "$shell_rc" 2>/dev/null; then
-            python3 - "$shell_rc" "$warmup_block" <<'PY'
+            python3 - "$shell_rc" "$warmup_block" <<-'PY'
 from pathlib import Path
 import re
 import sys

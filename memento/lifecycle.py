@@ -1844,7 +1844,9 @@ def should_skip_tool_context_path(file_path: str) -> bool:
 
     vault = get_vault()
     try:
-        if os.path.realpath(file_path).startswith(str(vault)):
+        resolved_path = Path(os.path.realpath(file_path))
+        resolved_vault = Path(os.path.realpath(vault))
+        if resolved_path == resolved_vault or resolved_vault in resolved_path.parents:
             return True
     except (OSError, ValueError):
         pass

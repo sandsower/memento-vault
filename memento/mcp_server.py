@@ -7,6 +7,7 @@ When running over HTTP, authentication is enforced via bearer tokens.
 import json
 import os
 import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -712,11 +713,11 @@ def memento_capture(
         # Restrict to known agent transcript directories (proper containment check)
         candidate = Path(transcript_path).resolve()
         allowed_roots = [
-            Path.home() / ".claude",
-            Path.home() / ".codex",
-            Path.home() / ".cursor",
-            Path.home() / ".codeium",
-            Path("/tmp"),
+            (Path.home() / ".claude").resolve(),
+            (Path.home() / ".codex").resolve(),
+            (Path.home() / ".cursor").resolve(),
+            (Path.home() / ".codeium").resolve(),
+            Path(tempfile.gettempdir()).resolve(),
         ]
         if not any(candidate == root or root in candidate.parents for root in allowed_roots):
             return {"error": "transcript_path must be inside a known agent directory"}
