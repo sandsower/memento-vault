@@ -3,7 +3,17 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
+import {
+	formatProcessLines,
+	formatQueueLines,
+	formatStatusLines,
+	reduceMementoPanelState,
+	renderMementoPanelLines,
+	renderMementoStatusText,
+	type MementoPanelState,
+} from "./memento-ui.js";
 
 interface LifecycleResult {
 	should_inject: boolean;
@@ -227,6 +237,9 @@ function processArgsFromParams(params: Record<string, unknown>): string[] {
 	for (const [key, flag] of [["id", "--id"], ["project", "--project"], ["branch", "--branch"], ["session", "--session"]] as const) {
 		const value = params[key];
 		if (typeof value === "string" && value.trim()) args.push(flag, value.trim());
+		else if (key === "id" && Array.isArray(value)) {
+			for (const id of value) if (typeof id === "string" && id.trim()) args.push(flag, id.trim());
+		}
 	}
 	if (typeof params.limit === "number" && Number.isFinite(params.limit) && params.limit > 0) args.push("--limit", String(Math.floor(params.limit)));
 	args.push(params.newest ? "--newest" : "--oldest");
@@ -257,9 +270,30 @@ async function currentProjectSlug(pi: ExtensionAPI, ctx: ExtensionContext): Prom
 	return String(payload.project_slug ?? "unknown");
 }
 
-async function currentBranch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string> {
-	const result = await pi.exec("git", ["branch", "--show-current"], { cwd: ctx.cwd, signal: ctx.signal, timeout: 2_000 });
-	return result.stdout.trim();
+function processArgsFromCaptureIds(ids: string[], maxCaptures: number): string[] {
+	return withProcessLimit(ids.flatMap((id) => ["--id", id]), maxCaptures);
+}
+
+function captureIdsFromQueue(queue?: Record<string, unknown>): string[] {
+	const captures = Array.isArray(queue?.captures) ? queue.captures as Record<string, unknown>[] : [];
+	return captures.map((capture) => String(capture.id ?? "")).filter(Boolean);
+}
+
+function defaultSelectedCaptureIds(queue: Record<string, unknown> | undefined, projectSlug: string, maxCaptures: number): string[] {
+	const captures = Array.isArray(queue?.captures) ? queue.captures as Record<string, unknown>[] : [];
+	const selected: string[] = [];
+	for (const capture of captures) {
+		const metadata = capture.metadata && typeof capture.metadata === "object" ? capture.metadata as Record<string, unknown> : {};
+		if (projectSlug !== "unknown" && metadata.project !== projectSlug) continue;
+		const id = String(capture.id ?? "");
+		if (id) selected.push(id);
+		if (selected.length >= Math.max(1, Math.floor(maxCaptures))) break;
+	}
+	return selected;
+}
+
+function countGroups(payload?: Record<string, unknown>): number {
+	return Array.isArray(payload?.groups) ? payload.groups.length : 1;
 }
 
 async function runProcessWorker(pi: ExtensionAPI, ctx: ExtensionContext, args: string[], config: BridgeConfig): Promise<Record<string, unknown>> {
@@ -281,6 +315,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	let toolContextCount = 0;
 	let lastLifecycleReason = "startup";
 	let lifecycleCaptureQueued = false;
+	let footerDetailsPinned = false;
+	let latestStatus: Record<string, unknown> | undefined;
+	let latestQueue: Record<string, unknown> | undefined;
+	let latestProcess: Record<string, unknown> | undefined;
 
 	async function queueLifecycleCapture(ctx: ExtensionContext, title: string, body: string, reason: string, sourceEvent: string) {
 		if (!config.enabled || !config.autoCapture || !config.captureQueue) return undefined;
@@ -303,7 +341,44 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		]);
 		lifecycleCaptureQueued = !payload.error;
 		lastLifecycleReason = payload.error ? `queue-error:${String(payload.error)}` : `${sourceEvent}-capture-queued`;
+		await refreshAmbientWidget(ctx);
 		return payload;
+	}
+
+	function statusDetails(payload: Record<string, unknown>) {
+		return { ...payload, piBridge: { config, configSources: loadedConfig.sources, toolContextCount, lifecycleCaptureQueued, lastLifecycleReason } };
+	}
+
+	async function loadStatus(ctx: ExtensionContext) {
+		const payload = await runJson(pi, ctx, ["status", "--cwd", ctx.cwd]);
+		latestStatus = statusDetails(payload);
+		return latestStatus;
+	}
+
+	async function loadQueue(ctx: ExtensionContext, includeBody = false, limit = 20) {
+		latestQueue = await runJson(pi, ctx, ["queue", "list", "--limit", String(limit), ...(includeBody ? ["--include-body"] : [])]);
+		return latestQueue;
+	}
+
+	async function loadProcessStatus(ctx: ExtensionContext) {
+		latestProcess = await runJson(pi, ctx, ["queue", "process-status"]);
+		return latestProcess;
+	}
+
+	async function refreshAmbientWidget(ctx: ExtensionContext) {
+		if (!ctx.hasUI) return;
+		ctx.ui.setWidget("memento", undefined);
+		ctx.ui.setStatus("memento", renderMementoStatusText(latestStatus, latestQueue, { pinned: footerDetailsPinned, process: latestProcess }));
+	}
+
+	function invokeMementoSkill(ctx: ExtensionContext) {
+		const prompt = [
+			"/skill:memento",
+			"",
+			"Capture durable knowledge from the current pi session. Search first to avoid duplicates. Use memento_capture for durable decisions, discoveries, fixes, or reusable patterns. Do not process queued captures in this flow.",
+		].join("\n");
+		const options = ctx.isIdle() ? undefined : { deliverAs: "followUp" as const };
+		pi.sendUserMessage(prompt, options);
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -313,7 +388,14 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		toolContextCount = 0;
 		lifecycleCaptureQueued = false;
 		lastLifecycleReason = config.enabled ? "ready" : "disabled";
-		ctx.ui.setStatus("memento", config.enabled ? "memento ready" : "memento disabled");
+		ctx.ui.setStatus("memento", config.enabled ? "🧠 …" : "🧠 off");
+		if (ctx.hasUI) ctx.ui.setWidget("memento", undefined);
+		if (config.enabled) {
+			latestStatus = await loadStatus(ctx);
+			latestQueue = await loadQueue(ctx, false, 5);
+			latestProcess = await loadProcessStatus(ctx);
+			await refreshAmbientWidget(ctx);
+		}
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -406,7 +488,8 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			const body = summarizeSessionEntries(ctx.sessionManager.getEntries(), `session is shutting down (${reason})`);
 			await queueLifecycleCapture(ctx, "Pi shutdown candidate capture", body, `session_shutdown:${reason}`, "session_shutdown");
 		}
-		ctx.ui.setStatus("memento", "memento stopped");
+		ctx.ui.setStatus("memento", "🧠 stopped");
+		if (ctx.hasUI) ctx.ui.setWidget("memento", undefined);
 	});
 
 	pi.registerTool({
@@ -415,9 +498,13 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		description: "Show memento vault and lifecycle bridge health/config status. Use for operational checks and setup debugging, not for prior decisions, project history, or note content; use memento_search and memento_get for recall.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			const payload = await runJson(pi, ctx, ["status", "--cwd", ctx.cwd]);
-			const details = { ...payload, piBridge: { config, configSources: loadedConfig.sources, toolContextCount, lifecycleCaptureQueued, lastLifecycleReason } };
-			return { content: [textPart(JSON.stringify(details, null, 2))], details };
+			const details = await loadStatus(ctx);
+			await refreshAmbientWidget(ctx);
+			return { content: [textPart(formatStatusLines(details).join("\n"))], details };
+		},
+		renderResult(result, { expanded }, theme) {
+			const details = result.details as Record<string, unknown> | undefined;
+			return new Text(formatStatusLines(details, { includeDetails: expanded }).join("\n"), 0, 0);
 		},
 	});
 
@@ -500,10 +587,13 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			includeBody: Type.Optional(Type.Boolean({ description: "Include queued capture bodies" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const args = ["queue", "list", "--limit", String(params.limit ?? 20)];
-			if (params.includeBody) args.push("--include-body");
-			const payload = await runJson(pi, ctx, args);
-			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+			const payload = await loadQueue(ctx, Boolean(params.includeBody), params.limit ?? 20);
+			await refreshAmbientWidget(ctx);
+			return { content: [textPart(formatQueueLines(payload).join("\n"))], details: payload };
+		},
+		renderResult(result, { expanded }, theme) {
+			const details = result.details as Record<string, unknown> | undefined;
+			return new Text(formatQueueLines(details, { limit: expanded ? 20 : 8 }).join("\n"), 0, 0);
 		},
 	});
 
@@ -523,34 +613,174 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!config.processQueue) {
 				const payload = { error: "memento queue processing is disabled", reason: "process_queue_disabled" };
-				return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+				return { content: [textPart(formatProcessLines(payload).join("\n"))], details: payload, isError: true };
 			}
 			const hasSelection = Boolean(params.id || params.project || params.branch || params.session || params.limit);
 			if (!hasSelection) {
 				const payload = { error: "memento_process requires explicit selection", guidance: "Pass id, project, branch, session, limit, or dryRun with filters. Use /memento-process interactively." };
-				return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+				return { content: [textPart(formatProcessLines(payload).join("\n"))], details: payload, isError: true };
 			}
 			const cliArgs = withProcessLimit(processArgsFromParams(params as Record<string, unknown>), config.processQueueMaxCaptures);
 			if (params.dryRun) {
 				const payload = await runJson(pi, ctx, ["queue", "process-start", ...cliArgs, "--dry-run"]);
-				return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+				return { content: [textPart(formatProcessLines(payload).join("\n"))], details: payload };
 			}
 			const payload = await runProcessWorker(pi, ctx, cliArgs, config);
-			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+			latestQueue = await loadQueue(ctx, false, 5);
+			latestProcess = await loadProcessStatus(ctx);
+			await refreshAmbientWidget(ctx);
+			return { content: [textPart(formatProcessLines(latestProcess?.status === "idle" ? payload : latestProcess).join("\n"))], details: latestProcess?.status === "idle" ? payload : latestProcess };
+		},
+		renderResult(result, _options, theme) {
+			const details = result.details as Record<string, unknown> | undefined;
+			return new Text(formatProcessLines(details).join("\n"), 0, 0);
+		},
+	});
+
+	pi.registerCommand("memento-capture", {
+		description: "Invoke the Memento skill on the current pi session",
+		handler: async (_args, ctx) => {
+			invokeMementoSkill(ctx);
+			ctx.ui.notify("memento capture queued via /skill:memento", "info");
+		},
+	});
+
+	pi.registerCommand("memento", {
+		description: "Open the Memento Vault dashboard",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI || typeof ctx.ui.custom !== "function") {
+				invokeMementoSkill(ctx);
+				return;
+			}
+			latestStatus = await loadStatus(ctx);
+			latestQueue = await loadQueue(ctx, false, 10);
+			latestProcess = await loadProcessStatus(ctx);
+			let processPreview: Record<string, unknown> | undefined = latestProcess?.status === "idle" ? undefined : latestProcess;
+			let state: MementoPanelState = {
+				view: "actions",
+				selectedIndex: 0,
+				queueItemCount: captureIdsFromQueue(latestQueue).length,
+				processItemCount: countGroups(processPreview),
+				selectedCaptureIds: defaultSelectedCaptureIds(latestQueue, String(latestStatus?.project_slug ?? "unknown"), config.processQueueMaxCaptures),
+			};
+			let requestRender = () => {};
+			let pollTimer: ReturnType<typeof setInterval> | undefined;
+			const syncCounts = () => {
+				state = { ...state, queueItemCount: captureIdsFromQueue(latestQueue).length, processItemCount: countGroups(processPreview) };
+			};
+			const refresh = async () => {
+				latestStatus = await loadStatus(ctx);
+				latestQueue = await loadQueue(ctx, false, 10);
+				latestProcess = await loadProcessStatus(ctx);
+				if (latestProcess?.status !== "idle") processPreview = latestProcess;
+				syncCounts();
+				await refreshAmbientWidget(ctx);
+				requestRender();
+			};
+			const selectedProcessArgs = () => processArgsFromCaptureIds(state.selectedCaptureIds ?? [], config.processQueueMaxCaptures);
+			const startPolling = () => {
+				if (pollTimer) clearInterval(pollTimer);
+				pollTimer = setInterval(() => {
+					void loadProcessStatus(ctx).then(async (payload) => {
+						processPreview = payload;
+						syncCounts();
+						await refreshAmbientWidget(ctx);
+						requestRender();
+						if (payload.status !== "running" && pollTimer) {
+							clearInterval(pollTimer);
+							pollTimer = undefined;
+						}
+					});
+				}, 1500);
+			};
+			await ctx.ui.custom((tui, _theme, _keybindings, done) => {
+				requestRender = () => tui.requestRender();
+				return {
+					render(width: number) {
+						return renderMementoPanelLines(state, { status: latestStatus, queue: latestQueue, process: processPreview, widgetEnabled: footerDetailsPinned }, width);
+					},
+					handleInput(data: string) {
+						const next = reduceMementoPanelState(state, data);
+						state = next.state;
+						if (next.action?.type === "close") {
+							if (pollTimer) clearInterval(pollTimer);
+							done();
+							return;
+						}
+						if (next.action?.type === "capture-current") {
+							invokeMementoSkill(ctx);
+							state = { ...state, message: "Current-session capture sent to /skill:memento." };
+						}
+						if (next.action?.type === "toggle-widget") {
+							footerDetailsPinned = !footerDetailsPinned;
+							void refreshAmbientWidget(ctx);
+							state = { ...state, message: `Footer status ${footerDetailsPinned ? "detailed" : "compact"}.` };
+						}
+						if (next.action?.type === "refresh" || next.action?.type === "show") void refresh();
+						if (next.action?.type === "toggle-capture") {
+							const ids = captureIdsFromQueue(latestQueue);
+							const id = ids[state.selectedIndex];
+							if (id) {
+								const selected = new Set(state.selectedCaptureIds ?? []);
+								if (selected.has(id)) selected.delete(id);
+								else if (selected.size >= Math.max(1, Math.floor(config.processQueueMaxCaptures))) {
+									state = { ...state, message: `Selection capped at ${config.processQueueMaxCaptures} capture(s).` };
+									requestRender();
+									return;
+								} else selected.add(id);
+								state = { ...state, selectedCaptureIds: [...selected], message: `${selected.size} capture(s) selected.` };
+							}
+						}
+						if (next.action?.type === "inspect-group") {
+							state = { ...state, message: "Showing artifact paths for selected group." };
+						}
+						if (next.action?.type === "dry-run") {
+							if ((state.selectedCaptureIds ?? []).length === 0) {
+								state = { ...state, view: "queue", message: "Select at least one queued capture first." };
+							} else {
+								state = { ...state, view: "process", message: "Loading process preview…" };
+								void (async () => {
+									processPreview = await runJson(pi, ctx, ["queue", "process-start", ...selectedProcessArgs(), "--dry-run"]);
+									syncCounts();
+									state = { ...state, view: "process", message: "Process preview loaded." };
+									requestRender();
+								})();
+							}
+						}
+						if (next.action?.type === "process") {
+							if (!config.processQueue) {
+								state = { ...state, view: "process", message: "Queue processing is disabled." };
+							} else if ((state.selectedCaptureIds ?? []).length === 0) {
+								state = { ...state, view: "queue", message: "Select at least one queued capture first." };
+							} else {
+								state = { ...state, view: "process", message: "Processing queued captures…" };
+								startPolling();
+								void (async () => {
+									processPreview = await runProcessWorker(pi, ctx, selectedProcessArgs(), config);
+									latestQueue = await loadQueue(ctx, false, 10);
+									latestProcess = await loadProcessStatus(ctx);
+									processPreview = latestProcess?.status === "idle" ? processPreview : latestProcess;
+									syncCounts();
+									await refreshAmbientWidget(ctx);
+									state = { ...state, selectedCaptureIds: defaultSelectedCaptureIds(latestQueue, String(latestStatus?.project_slug ?? "unknown"), config.processQueueMaxCaptures), message: processPreview.error ? "Processing failed." : "Processing finished." };
+									requestRender();
+								})();
+							}
+						}
+						requestRender();
+					},
+					invalidate() {},
+				};
+			}, { overlay: true });
 		},
 	});
 
 	pi.registerCommand("memento-status", {
 		description: "Show memento pi bridge status",
 		handler: async (_args, ctx) => {
-			const payload = await runJson(pi, ctx, ["status", "--cwd", ctx.cwd]);
-			const details = { ...payload, piBridge: { config, configSources: loadedConfig.sources, toolContextCount, lifecycleCaptureQueued, lastLifecycleReason } };
-			if (payload.error) {
-				ctx.ui.notify(`memento bridge failed: ${String(payload.error)}`, "error");
-			} else {
-				ctx.ui.notify("memento bridge reachable", "success");
-				ctx.ui.setWidget("memento", JSON.stringify(details, null, 2).split("\n"));
-			}
+			const details = await loadStatus(ctx);
+			await refreshAmbientWidget(ctx);
+			ctx.ui.notify(formatStatusLines(details).join("\n"), details.error ? "error" : "success");
 		},
 	});
 
@@ -558,8 +788,9 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		description: "Show queued memento pi capture candidates",
 		handler: async (args, ctx) => {
 			const includeBody = args.includes("--include-body");
-			const payload = await runJson(pi, ctx, ["queue", "list", "--limit", "20", ...(includeBody ? ["--include-body"] : [])]);
-			ctx.ui.setWidget("memento-queue", JSON.stringify(payload, null, 2).split("\n"));
+			const payload = await loadQueue(ctx, includeBody, 20);
+			await refreshAmbientWidget(ctx);
+			ctx.ui.setWidget("memento-queue", formatQueueLines(payload, { limit: 10 }), { placement: "aboveEditor" });
 		},
 	});
 
@@ -572,32 +803,22 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			}
 			let cliArgs = withProcessLimit(parseProcessCommandArgs(args), config.processQueueMaxCaptures);
 			if (args.trim().length === 0) {
-				const batchLimit = String(Math.max(1, Math.floor(config.processQueueMaxCaptures)));
-				const choice = ctx.hasUI ? await ctx.ui.select("Process queued Memento captures", [
-					`Current project, oldest ${batchLimit}`,
-					`Current branch, oldest ${batchLimit}`,
-					`Oldest ${batchLimit} overall`,
-					"Dry run current project",
-					"Cancel",
-				]) : "Cancel";
-				if (!choice || choice === "Cancel") return;
-				if (choice.startsWith("Current project")) cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--limit", batchLimit];
-				else if (choice.startsWith("Current branch")) cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--branch", await currentBranch(pi, ctx), "--limit", batchLimit];
-				else if (choice.startsWith("Oldest")) cliArgs = ["--limit", batchLimit];
-				else if (choice === "Dry run current project") cliArgs = ["--project", await currentProjectSlug(pi, ctx), "--limit", batchLimit, "--dry-run"];
-				const previewArgs = cliArgs.includes("--dry-run") ? cliArgs : [...cliArgs, "--dry-run"];
-				const preview = await runJson(pi, ctx, ["queue", "process-start", ...previewArgs]);
-				ctx.ui.setWidget("memento-process-preview", JSON.stringify(preview, null, 2).split("\n"));
+				cliArgs = withProcessLimit(["--project", await currentProjectSlug(pi, ctx), "--oldest", "--dry-run"], config.processQueueMaxCaptures);
+				ctx.ui.notify("showing memento process preview; use /memento for confirm flow", "info");
 			}
 			if (cliArgs.includes("--dry-run")) {
 				const payload = await runJson(pi, ctx, ["queue", "process-start", ...cliArgs]);
-				ctx.ui.setWidget("memento-process", JSON.stringify(payload, null, 2).split("\n"));
+				ctx.ui.setWidget("memento-process", formatProcessLines(payload), { placement: "aboveEditor" });
 				return;
 			}
 			ctx.ui.notify("memento processing started", "info");
 			const payload = await runProcessWorker(pi, ctx, cliArgs, config);
+			latestQueue = await loadQueue(ctx, false, 5);
+			latestProcess = await loadProcessStatus(ctx);
+			await refreshAmbientWidget(ctx);
+			const displayPayload = latestProcess?.status === "idle" ? payload : latestProcess;
 			ctx.ui.notify(payload.error ? `memento processing failed: ${String(payload.error)}` : "memento processing finished", payload.error ? "error" : "success");
-			ctx.ui.setWidget("memento-process", JSON.stringify(payload, null, 2).split("\n"));
+			ctx.ui.setWidget("memento-process", formatProcessLines(displayPayload), { placement: "aboveEditor" });
 		},
 	});
 }

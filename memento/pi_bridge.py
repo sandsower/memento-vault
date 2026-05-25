@@ -373,11 +373,29 @@ def _capture(
     return {"path": str(note_path.relative_to(vault)), "title": title.strip(), "queued": False}
 
 
+def _body_excerpt(body: str, max_chars: int = 180) -> str:
+    compact = re.sub(r"\s+", " ", body).strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max(1, max_chars - 1)].rstrip() + "…"
+
+
+def _capture_review_metadata(capture: dict[str, Any]) -> dict[str, Any]:
+    body = str(capture.get("body") or "")
+    size_bytes = len(body.encode("utf-8"))
+    return {
+        "body_excerpt": _body_excerpt(body),
+        "body_char_count": len(body),
+        "body_size_bytes": size_bytes,
+        "body_kb": round(size_bytes / 1024, 1),
+    }
+
+
 def _queue_list(limit: int = 20, include_body: bool = False) -> dict[str, Any]:
     captures = _load_queue()
     visible = []
     for capture in captures[-max(1, int(limit)) :]:
-        item = dict(capture)
+        item = {**capture, **_capture_review_metadata(capture)}
         if not include_body:
             item.pop("body", None)
         visible.append(item)
@@ -471,18 +489,25 @@ def _capture_created_at(capture: dict[str, Any]) -> str:
     return str(capture.get("created_at") or capture.get("date") or "")
 
 
+def _normalize_capture_ids(capture_id: str | list[str] | tuple[str, ...] = "") -> set[str]:
+    if isinstance(capture_id, (list, tuple)):
+        return {str(item) for item in capture_id if str(item)}
+    return {str(capture_id)} if capture_id else set()
+
+
 def _selected_captures(
     captures: list[dict[str, Any]],
-    capture_id: str = "",
+    capture_id: str | list[str] | tuple[str, ...] = "",
     project: str = "",
     branch: str = "",
     session_id: str = "",
     newest: bool = False,
 ) -> list[dict[str, Any]]:
     selected = []
+    capture_ids = _normalize_capture_ids(capture_id)
     for capture in captures:
         metadata = capture.get("metadata") or {}
-        if capture_id and capture.get("id") != capture_id:
+        if capture_ids and str(capture.get("id")) not in capture_ids:
             continue
         if project and metadata.get("project") != project:
             continue
@@ -647,7 +672,7 @@ def _clean_transcript(path: Path, per_tool_cap: int = 3000, total_cap: int = 200
 
 
 def _queue_process_start(
-    capture_id: str = "",
+    capture_id: str | list[str] = "",
     project: str = "",
     branch: str = "",
     session_id: str = "",
@@ -785,6 +810,116 @@ def _queue_process_start(
         raise
 
 
+def _latest_processing_run_id() -> str:
+    root = _processing_root()
+    if not root.exists():
+        return ""
+    runs = [path for path in root.iterdir() if path.is_dir()]
+    if not runs:
+        return ""
+    runs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return runs[0].name
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _group_status_from_result(group: dict[str, Any]) -> dict[str, Any]:
+    result_path = Path(str(group.get("result_json") or ""))
+    result = _read_json_file(result_path) if result_path.exists() else {}
+    status = str(result.get("status") or ("pending" if not result_path.exists() else "failed"))
+    item = {
+        "group_id": group.get("group_id"),
+        "status": status,
+        "capture_ids": group.get("capture_ids", []),
+        "capture_count": len(group.get("capture_ids", [])),
+        "session_id": group.get("session_id"),
+        "project": group.get("project"),
+        "branch": group.get("branch"),
+        "input_markdown": group.get("input_markdown"),
+        "result_json": group.get("result_json"),
+        "log_markdown": group.get("log_markdown"),
+    }
+    for key in ("created", "skipped_duplicates", "discard_reason", "error", "reason"):
+        if key in result:
+            item[key] = result[key]
+    return item
+
+
+def _summarize_process_status(payload: dict[str, Any], active: bool) -> dict[str, Any]:
+    groups = payload.get("groups") if isinstance(payload.get("groups"), list) else []
+    completed_statuses = {"processed", "processed_no_notes"}
+    completed = sum(1 for group in groups if group.get("status") in completed_statuses)
+    failed = sum(1 for group in groups if group.get("status") == "failed")
+    pending = max(0, len(groups) - completed - failed)
+    payload["active"] = active
+    payload["completed_group_count"] = completed
+    payload["failed_group_count"] = failed
+    payload["pending_group_count"] = pending
+    payload.setdefault("group_count", len(groups))
+    payload.setdefault("selected_capture_count", sum(len(group.get("capture_ids", [])) for group in groups))
+    return payload
+
+
+def _queue_process_status(run_id: str = "") -> dict[str, Any]:
+    lock = _read_processing_lock(_lock_file()) if _lock_file().exists() else None
+    target_run_id = run_id or (str(lock.get("run_id")) if lock else "") or _latest_processing_run_id()
+    if not target_run_id:
+        return {
+            "status": "idle",
+            "active": False,
+            "groups": [],
+            "completed_group_count": 0,
+            "failed_group_count": 0,
+            "pending_group_count": 0,
+        }
+    run_dir = _processing_root() / target_run_id
+    progress_path = run_dir / "progress.json"
+    progress = _read_json_file(progress_path) if progress_path.exists() else {}
+    lock_active = bool(lock and lock.get("run_id") == target_run_id and not _processing_lock_stale(lock))
+    if progress:
+        payload = dict(progress)
+        payload.setdefault("run_id", target_run_id)
+        payload.setdefault("run_dir", str(run_dir))
+        if lock_active:
+            payload["status"] = "running"
+        elif payload.get("status") == "running":
+            payload["status"] = "interrupted"
+        return _summarize_process_status(payload, lock_active)
+    manifest_path = run_dir / "manifest.json"
+    manifest = _read_json_file(manifest_path)
+    if not manifest:
+        return {
+            "status": "unknown",
+            "active": lock_active,
+            "run_id": target_run_id,
+            "run_dir": str(run_dir),
+            "groups": [],
+        }
+    groups = [_group_status_from_result(group) for group in manifest.get("groups", [])]
+    status = str(manifest.get("status") or "unknown")
+    if lock_active:
+        status = "running"
+    elif status == "running" and any(group.get("status") == "pending" for group in groups):
+        status = "interrupted"
+    payload = {
+        "run_id": target_run_id,
+        "run_dir": str(run_dir),
+        "status": status,
+        "created_at": manifest.get("created_at"),
+        "finalized_at": manifest.get("finalized_at"),
+        "selected_capture_count": manifest.get("selected_capture_count"),
+        "group_count": manifest.get("group_count", len(groups)),
+        "groups": groups,
+        "dequeued_capture_ids": manifest.get("dequeued_capture_ids", []),
+    }
+    return _summarize_process_status(payload, lock_active)
+
+
 def _reported_note_exists_in_vault(vault: Path, path: str) -> bool:
     if not path or Path(path).is_absolute():
         return False
@@ -914,7 +1049,7 @@ def build_parser() -> argparse.ArgumentParser:
     queue_list.add_argument("--limit", type=int, default=20)
     queue_list.add_argument("--include-body", action="store_true")
     process_start = queue_sub.add_parser("process-start", help="Create a processing run for selected captures")
-    process_start.add_argument("--id", default="")
+    process_start.add_argument("--id", action="append", default=[])
     process_start.add_argument("--project", default="")
     process_start.add_argument("--branch", default="")
     process_start.add_argument("--session", default="")
@@ -925,6 +1060,8 @@ def build_parser() -> argparse.ArgumentParser:
     process_start.add_argument("--dry-run", action="store_true")
     process_start.add_argument("--transcript-max-bytes", type=int, default=2 * 1024 * 1024)
     process_start.add_argument("--owner-pid", type=int, default=0, help=argparse.SUPPRESS)
+    process_status = queue_sub.add_parser("process-status", help="Show queued-capture processing progress")
+    process_status.add_argument("--run-id", default="")
     process_finalize = queue_sub.add_parser(
         "process-finalize", help="Finalize a processing run and dequeue validated captures"
     )
@@ -983,6 +1120,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.transcript_max_bytes,
                 args.owner_pid,
             )
+        if args.queue_command == "process-status":
+            return _run_json("queue", _queue_process_status, args.run_id)
         if args.queue_command == "process-finalize":
             return _run_json("queue", _queue_process_finalize, args.run_id)
     raise AssertionError(f"unhandled command: {args.command}")
