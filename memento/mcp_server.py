@@ -7,6 +7,7 @@ When running over HTTP, authentication is enforced via bearer tokens.
 import json
 import os
 import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
-from memento.lifecycle import build_briefing, build_recall, build_tool_context
+from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context
 from memento.search import (
     enhance_results,
     filter_by_project,
@@ -126,7 +127,7 @@ def _build_server() -> FastMCP:
             "path/name. Use memento_status for vault health and memento_list for "
             "sync/inventory.\n\n"
             "Lifecycle tools (memento_briefing, memento_recall, "
-            "memento_tool_context) are host-adapter primitives for automatic context "
+            "memento_session_context, memento_tool_context) are host-adapter primitives for automatic context "
             "injection, not general user-answering tools.\n\n"
             "Writes: if your agent has a `memento` skill or `SessionEnd` hook, "
             "use it — the skill is local-first (writes to the git-backed vault, "
@@ -324,6 +325,37 @@ def memento_tool_context(tool_name: str, file_path: str, cwd: str = "", session_
     call memento_search and then memento_get if full note content is needed.
     """
     return build_tool_context(tool_name, file_path, cwd, session_id).to_dict()
+
+
+@mcp.tool()
+def memento_session_context(
+    cwd: str = "",
+    prompt: str = "",
+    session_id: str = "",
+    token_budget: int = 2000,
+    include_status: bool = True,
+    include_recent: bool = True,
+    include_recall: bool = True,
+    include_tool_context_preview: bool = False,
+) -> dict:
+    """Host-adapter primitive for one-call budgeted session context.
+
+    This is not a general user-answering search tool. Hosts call it during
+    session startup or before an agent turn to fetch a compact context packet
+    that can replace separate memento_briefing, memento_recall, and status
+    calls. For explicit recall/search requests, call memento_search and then
+    memento_get if full note content is needed.
+    """
+    return build_session_context(
+        cwd,
+        prompt,
+        session_id,
+        token_budget,
+        include_status,
+        include_recent,
+        include_recall,
+        include_tool_context_preview,
+    )
 
 
 @mcp.tool()
@@ -712,11 +744,11 @@ def memento_capture(
         # Restrict to known agent transcript directories (proper containment check)
         candidate = Path(transcript_path).resolve()
         allowed_roots = [
-            Path.home() / ".claude",
-            Path.home() / ".codex",
-            Path.home() / ".cursor",
-            Path.home() / ".codeium",
-            Path("/tmp"),
+            (Path.home() / ".claude").resolve(),
+            (Path.home() / ".codex").resolve(),
+            (Path.home() / ".cursor").resolve(),
+            (Path.home() / ".codeium").resolve(),
+            Path(tempfile.gettempdir()).resolve(),
         ]
         if not any(candidate == root or root in candidate.parents for root in allowed_roots):
             return {"error": "transcript_path must be inside a known agent directory"}

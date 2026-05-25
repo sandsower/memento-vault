@@ -279,7 +279,12 @@ class TestToolSelectionDescriptions:
         assert "search first with memento_search" in doc
 
     def test_lifecycle_tool_docstrings_mark_host_adapter_primitives(self):
-        for tool in (mcp_server.memento_briefing, mcp_server.memento_recall, mcp_server.memento_tool_context):
+        for tool in (
+            mcp_server.memento_briefing,
+            mcp_server.memento_recall,
+            mcp_server.memento_tool_context,
+            mcp_server.memento_session_context,
+        ):
             doc = tool.__doc__ or ""
             assert "Host-adapter primitive" in doc
             assert "not a general user-answering search tool" in doc
@@ -378,6 +383,41 @@ class TestLifecycleRetrievalTools:
 
         assert result == expected
         mock_build_tool_context.assert_called_once_with("read", "src/server/authMiddleware.ts", "/repo", "s1")
+
+    @patch("memento.mcp_server.build_session_context")
+    def test_session_context_delegates_to_lifecycle(self, mock_build_session_context):
+        expected = {
+            "should_inject": True,
+            "content": "[vault] Project: repo\n\n[vault] Related memories:",
+            "source": "session-context",
+            "sections": {},
+            "results": [{"path": "notes/cache.md"}],
+            "metadata": {"truncated": False, "expandable_paths": ["notes/cache.md"]},
+        }
+        mock_build_session_context.return_value = expected
+
+        result = mcp_server.memento_session_context(
+            cwd="/repo",
+            prompt="cache",
+            session_id="s1",
+            token_budget=500,
+            include_status=True,
+            include_recent=True,
+            include_recall=True,
+            include_tool_context_preview=True,
+        )
+
+        assert result == expected
+        mock_build_session_context.assert_called_once_with(
+            "/repo",
+            "cache",
+            "s1",
+            500,
+            True,
+            True,
+            True,
+            True,
+        )
 
 
 # --- memento_store ---
