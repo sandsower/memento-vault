@@ -610,13 +610,14 @@ def run_remote_triage(hook_input):
     substantial = is_substantial(meta)
     new_insight = has_new_insight(meta) if substantial else False
     summary = build_session_summary(meta)
+    agent = meta.get("agent", "unknown")
     result = remote_capture(
         session_summary=summary,
         cwd=meta.get("cwd", ""),
         branch=meta.get("git_branch", ""),
         files_edited=meta.get("files_edited", []),
         session_id=session_id,
-        agent="claude",
+        agent=agent,
         fleeting_only=not (substantial and new_insight),
     )
 
@@ -674,7 +675,7 @@ def run_remote_triage(hook_input):
                     "branch": meta.get("git_branch", "") or "",
                     "files_edited": list(meta.get("files_edited") or []),
                     "session_id": session_id,
-                    "agent": "claude",
+                    "agent": agent,
                     "fleeting_only": not (substantial and new_insight),
                 }
                 retry_spool_path = str(sync_ledger.spool_payload(vault, "capture", source, json.dumps(envelope)))

@@ -743,11 +743,13 @@ def memento_capture(
 
         # Restrict to known agent transcript directories (proper containment check)
         candidate = Path(transcript_path).resolve()
+        xdg_data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
         allowed_roots = [
             (Path.home() / ".claude").resolve(),
             (Path.home() / ".codex").resolve(),
             (Path.home() / ".cursor").resolve(),
             (Path.home() / ".codeium").resolve(),
+            (xdg_data_home / "opencode").resolve(),
             Path(tempfile.gettempdir()).resolve(),
         ]
         if not any(candidate == root or root in candidate.parents for root in allowed_roots):

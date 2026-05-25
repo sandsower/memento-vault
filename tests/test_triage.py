@@ -25,6 +25,7 @@ append_session_to_project = _mod.append_session_to_project
 process_structured_notes = _mod.process_structured_notes
 run_structured_notes_worker = _mod._run_structured_notes_worker
 spawn_memento_agent = _mod.spawn_memento_agent
+run_remote_triage = _mod.run_remote_triage
 
 
 def _write_transcript(tmp_path, entries):
@@ -894,3 +895,27 @@ class TestMainHealthLogging:
         assert action_call.args[0] == "structured_notes_payload_unreadable"
         assert action_call.kwargs["session_id"] == "unknown"
         assert action_call.kwargs["error"]
+
+
+class TestRemoteTriage:
+    def test_remote_triage_propagates_detected_agent(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("{}\n")
+        meta = {
+            "agent": "opencode",
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 2,
+            "files_edited": [],
+            "files_read": [],
+            "first_prompt": "Use OpenCode",
+            "last_outcome": "Done.",
+        }
+
+        with (
+            patch("memento_triage.parse_transcript", return_value=meta),
+            patch("memento.remote_client.capture", return_value={"ok": True}) as mock_capture,
+        ):
+            run_remote_triage({"session_id": "ses_open", "transcript_path": str(transcript)})
+
+        assert mock_capture.call_args.kwargs["agent"] == "opencode"
