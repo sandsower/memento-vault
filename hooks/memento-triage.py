@@ -369,7 +369,13 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
     vault = get_vault()
     log_triage_health("structured_notes_attempt", session_id=session_id, project=project_slug)
     try:
-        transcript_text = sanitize_secrets(render_transcript_text(transcript_path, agent=meta.get("agent")))
+        transcript_text = sanitize_secrets(
+            render_transcript_text(
+                transcript_path,
+                agent=meta.get("agent"),
+                session_id=meta.get("opencode_session_id") or meta.get("session_id") or session_id,
+            )
+        )
     except (OSError, UnicodeDecodeError, ValueError):
         log_retrieval(
             "triage",
@@ -591,7 +597,7 @@ def run_remote_triage(hook_input):
         return
 
     try:
-        meta = parse_transcript(transcript_path)
+        meta = parse_transcript(transcript_path, session_id=session_id)
     except Exception:
         return
 
@@ -725,7 +731,7 @@ def main():
         sys.exit(0)
 
     try:
-        meta = parse_transcript(transcript_path)
+        meta = parse_transcript(transcript_path, session_id=session_id)
     except Exception as exc:
         error = str(exc)
         log_retrieval("triage", "parse_transcript_failed", error=error, session_id=session_id)

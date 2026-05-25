@@ -58,8 +58,11 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
 ```beislid:action_policy
 modes:
   supervised-auto:
+    rules:
+      workspace-write: allow
     actions:
       git.commit: allow
+      review.fix: allow
     sandbox:
       on_uncommitted_changes: allow
 ```

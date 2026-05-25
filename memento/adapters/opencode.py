@@ -200,6 +200,7 @@ def parse_transcript(transcript_path, session_id=None):
             "files_read": sorted(files_read),
             "first_prompt": first_user_prompt,
             "last_outcome": last_outcome,
+            "opencode_session_id": session_id,
         }
     finally:
         conn.close()

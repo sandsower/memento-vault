@@ -756,7 +756,7 @@ def memento_capture(
         try:
             from memento.adapters import parse_transcript
 
-            meta = parse_transcript(transcript_path, agent=agent if agent != "unknown" else None)
+            meta = parse_transcript(transcript_path, agent=agent if agent != "unknown" else None, session_id=session_id)
             cwd = cwd or meta.get("cwd", "")
             branch = branch or meta.get("git_branch", "")
             files_edited = files_edited or meta.get("files_edited", [])

@@ -64,7 +64,15 @@ def _read_block(path):
     return {"type": "tool_use", "name": "Read", "input": {"file_path": path}}
 
 
-def _build_opencode_db(path):
+def _build_opencode_db(path, sessions=None):
+    sessions = sessions or [
+        {
+            "id": "ses_open",
+            "time_created": 1,
+            "user_text": "Capture the OpenCode fix",
+            "assistant_text": "Implemented the adapter fix.",
+        }
+    ]
     conn = sqlite3.connect(str(path))
     cur = conn.cursor()
     cur.executescript(
@@ -95,19 +103,45 @@ def _build_opencode_db(path):
         );
         """
     )
-    cur.execute("INSERT INTO session VALUES ('ses_open', 'prj_test', '/repo', 'fixture', '1.0', 1, 1)")
-    cur.execute("INSERT INTO message VALUES ('msg_user', 'ses_open', 2, 2, ?)", (json.dumps({"role": "user"}),))
-    cur.execute(
-        "INSERT INTO part VALUES ('prt_user', 'msg_user', 'ses_open', 2, 2, ?)",
-        (json.dumps({"type": "text", "text": "Capture the OpenCode fix"}),),
-    )
-    cur.execute(
-        "INSERT INTO message VALUES ('msg_assistant', 'ses_open', 3, 3, ?)", (json.dumps({"role": "assistant"}),)
-    )
-    cur.execute(
-        "INSERT INTO part VALUES ('prt_assistant', 'msg_assistant', 'ses_open', 3, 3, ?)",
-        (json.dumps({"type": "text", "text": "Implemented the adapter fix."}),),
-    )
+    for idx, session in enumerate(sessions):
+        session_id = session["id"]
+        created = session["time_created"]
+        cur.execute(
+            "INSERT INTO session VALUES (?, 'prj_test', '/repo', 'fixture', '1.0', ?, ?)",
+            (session_id, created, created),
+        )
+        user_msg = f"msg_user_{idx}"
+        assistant_msg = f"msg_assistant_{idx}"
+        cur.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            (user_msg, session_id, created + 1, created + 1, json.dumps({"role": "user"})),
+        )
+        cur.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                f"prt_user_{idx}",
+                user_msg,
+                session_id,
+                created + 1,
+                created + 1,
+                json.dumps({"type": "text", "text": session["user_text"]}),
+            ),
+        )
+        cur.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            (assistant_msg, session_id, created + 2, created + 2, json.dumps({"role": "assistant"})),
+        )
+        cur.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                f"prt_assistant_{idx}",
+                assistant_msg,
+                session_id,
+                created + 2,
+                created + 2,
+                json.dumps({"type": "text", "text": session["assistant_text"]}),
+            ),
+        )
     conn.commit()
     conn.close()
 
@@ -357,6 +391,50 @@ class TestProcessStructuredNotes:
         assert "User: Capture the OpenCode fix" in captured["prompt"]
         assert "Assistant: Implemented the adapter fix." in captured["prompt"]
         assert (tmp_vault / "notes" / "opencode-adapter-renders-sqlite-transcripts.md").exists()
+
+    def test_triage_structured_extraction_uses_selected_opencode_session(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "opencode.db"
+        _build_opencode_db(
+            transcript,
+            sessions=[
+                {
+                    "id": "ses_target",
+                    "time_created": 1,
+                    "user_text": "Capture the older OpenCode session",
+                    "assistant_text": "Rendered the target session.",
+                },
+                {
+                    "id": "ses_newer",
+                    "time_created": 100,
+                    "user_text": "This newer session must not be used",
+                    "assistant_text": "Wrong session.",
+                },
+            ],
+        )
+        meta = {
+            "agent": "opencode",
+            "opencode_session_id": "ses_target",
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 1,
+            "files_edited": ["adapter.py"],
+            "first_prompt": "Capture the older OpenCode session",
+            "last_outcome": "Rendered the target session.",
+        }
+        captured = {}
+
+        def _llm_complete(prompt):
+            captured["prompt"] = prompt
+            return LLMResult(text="[]", ok=True, error=None)
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", side_effect=_llm_complete),
+        ):
+            process_structured_notes("ses_target", str(transcript), meta, "api-service")
+
+        assert "User: Capture the older OpenCode session" in captured["prompt"]
+        assert "This newer session must not be used" not in captured["prompt"]
 
     def test_triage_structured_extraction(self, tmp_vault, tmp_path):
         transcript = tmp_path / "transcript.jsonl"

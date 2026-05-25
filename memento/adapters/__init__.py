@@ -68,7 +68,7 @@ def detect_agent(transcript_path):
     return "unknown"
 
 
-def render_transcript_text(transcript_path, agent=None):
+def render_transcript_text(transcript_path, agent=None, session_id=None):
     """Render a transcript as readable text for LLM prompts.
 
     Text transcript formats fall back to reading the file. Binary transcript
@@ -78,11 +78,11 @@ def render_transcript_text(transcript_path, agent=None):
         agent = detect_agent(transcript_path)
 
     if agent == "opencode":
-        return _render_opencode(transcript_path)
+        return _render_opencode(transcript_path, session_id=session_id)
     return open(transcript_path).read()
 
 
-def parse_transcript(transcript_path, agent=None):
+def parse_transcript(transcript_path, agent=None, session_id=None):
     """Parse a transcript file using the appropriate agent adapter.
 
     Args:
@@ -110,7 +110,7 @@ def parse_transcript(transcript_path, agent=None):
     if agent == "claude":
         meta = _parse_claude(transcript_path)
     elif agent == "opencode":
-        meta = _parse_opencode(transcript_path)
+        meta = _parse_opencode(transcript_path, session_id=session_id)
     elif agent in ("codex", "cursor", "windsurf"):
         raise ValueError(
             f"Transcript parsing for {agent!r} is not yet implemented. "
