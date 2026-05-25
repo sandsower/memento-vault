@@ -839,7 +839,10 @@ class TestMainHealthLogging:
         }
 
         with (
-            patch("memento_triage.read_hook_input", return_value={"transcript_path": str(transcript)}),
+            patch(
+                "memento_triage.read_hook_input",
+                return_value={"session_id": "unknown", "transcript_path": str(transcript)},
+            ),
             patch("memento_triage.parse_transcript", return_value=meta) as mock_parse,
         ):
             try:
@@ -937,7 +940,7 @@ class TestRemoteTriage:
         }
 
         with patch("memento_triage.parse_transcript", return_value=meta) as mock_parse:
-            run_remote_triage({"transcript_path": str(transcript)})
+            run_remote_triage({"session_id": "unknown", "transcript_path": str(transcript)})
 
         assert mock_parse.call_args.kwargs["session_id"] is None
 

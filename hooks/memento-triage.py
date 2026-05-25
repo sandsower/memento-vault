@@ -578,6 +578,12 @@ def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
 # --- Main ---
 
 
+def _requested_session_id(hook_input):
+    """Return a real hook session id, treating sentinels as absent."""
+    session_id = hook_input.get("session_id")
+    return session_id if session_id and session_id != "unknown" else None
+
+
 def run_remote_triage(hook_input):
     """Run triage via the remote vault client — sends capture request over HTTP.
 
@@ -590,7 +596,7 @@ def run_remote_triage(hook_input):
     """
     from memento.remote_client import capture as remote_capture
 
-    requested_session_id = hook_input.get("session_id")
+    requested_session_id = _requested_session_id(hook_input)
     session_id = requested_session_id or "unknown"
     transcript_path = hook_input.get("transcript_path")
 
@@ -725,7 +731,7 @@ def main():
         log_triage_health("hook_input_failed", session_id="unknown", error=error)
         sys.exit(0)
 
-    requested_session_id = hook_input.get("session_id")
+    requested_session_id = _requested_session_id(hook_input)
     session_id = requested_session_id or "unknown"
     transcript_path = hook_input.get("transcript_path")
 
