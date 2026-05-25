@@ -94,6 +94,24 @@ def _clean_prompt_text(text):
     return cleaned.strip('"').strip("'")
 
 
+def _session_messages(conn, session_id):
+    """Return ordered OpenCode messages with decoded parts for a session."""
+    cur = conn.cursor()
+    messages = []
+    message_rows = cur.execute(
+        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id",
+        (session_id,),
+    ).fetchall()
+    for message in message_rows:
+        data = json.loads(message["data"])
+        part_rows = cur.execute(
+            "SELECT data FROM part WHERE message_id = ? ORDER BY time_created, id",
+            (message["id"],),
+        ).fetchall()
+        messages.append({"role": data.get("role"), "parts": [json.loads(p["data"]) for p in part_rows]})
+    return messages
+
+
 def parse_transcript(transcript_path, session_id=None):
     """Parse an OpenCode session into the standard session metadata dict.
 
@@ -127,20 +145,9 @@ def parse_transcript(transcript_path, session_id=None):
         first_user_prompt = None
         last_assistant_text = None
 
-        message_rows = cur.execute(
-            "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id",
-            (session_id,),
-        ).fetchall()
-
-        for message in message_rows:
-            data = json.loads(message["data"])
-            role = data.get("role")
-
-            part_rows = cur.execute(
-                "SELECT data FROM part WHERE message_id = ? ORDER BY time_created, id",
-                (message["id"],),
-            ).fetchall()
-            parts = [json.loads(p["data"]) for p in part_rows]
+        for message in _session_messages(conn, session_id):
+            role = message["role"]
+            parts = message["parts"]
 
             if role == "user":
                 user_count += 1
@@ -194,6 +201,39 @@ def parse_transcript(transcript_path, session_id=None):
             "first_prompt": first_user_prompt,
             "last_outcome": last_outcome,
         }
+    finally:
+        conn.close()
+
+
+def render_transcript_text(transcript_path, session_id=None):
+    """Render an OpenCode SQLite session as readable text for LLM prompts."""
+    env_session_id = os.environ.get("MEMENTO_OPENCODE_SESSION_ID")
+    if env_session_id:
+        session_id = env_session_id
+
+    conn = _connect_readonly(transcript_path)
+    try:
+        session_id = _resolve_session_id(conn, session_id)
+        lines = []
+        for message in _session_messages(conn, session_id):
+            role = (message["role"] or "unknown").title()
+            for part in message["parts"]:
+                ptype = part.get("type")
+                if ptype == "text":
+                    text = part.get("text", "").strip()
+                    if text:
+                        lines.append(f"{role}: {text}")
+                elif ptype == "tool":
+                    tool = part.get("tool") or "unknown"
+                    inp = (part.get("state") or {}).get("input") or {}
+                    fp = inp.get("file_path") or inp.get("filePath") or inp.get("path")
+                    if tool == "apply_patch":
+                        paths = sorted(_apply_patch_paths(inp.get("patchText") or inp.get("patch_text") or ""))
+                        if paths:
+                            lines.append(f"Assistant tool apply_patch edited: {', '.join(paths)}")
+                    elif fp:
+                        lines.append(f"Assistant tool {tool}: {fp}")
+        return sanitize_secrets("\n".join(lines))
     finally:
         conn.close()
 

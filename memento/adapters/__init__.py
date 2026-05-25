@@ -11,6 +11,7 @@ import os
 from memento.adapters.claude import parse_transcript as _parse_claude
 from memento.adapters.opencode import looks_like_opencode_db
 from memento.adapters.opencode import parse_transcript as _parse_opencode
+from memento.adapters.opencode import render_transcript_text as _render_opencode
 
 _SNIFF_MAX_LINES = 20
 
@@ -65,6 +66,20 @@ def detect_agent(transcript_path):
         raise
 
     return "unknown"
+
+
+def render_transcript_text(transcript_path, agent=None):
+    """Render a transcript as readable text for LLM prompts.
+
+    Text transcript formats fall back to reading the file. Binary transcript
+    stores such as OpenCode SQLite DBs are rendered by their adapter.
+    """
+    if agent is None:
+        agent = detect_agent(transcript_path)
+
+    if agent == "opencode":
+        return _render_opencode(transcript_path)
+    return open(transcript_path).read()
 
 
 def parse_transcript(transcript_path, agent=None):

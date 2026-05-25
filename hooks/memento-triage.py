@@ -30,7 +30,7 @@ from memento.store import (  # noqa: E402
     update_project_index,
     write_note,
 )
-from memento.adapters import parse_transcript  # noqa: E402
+from memento.adapters import parse_transcript, render_transcript_text  # noqa: E402
 from memento.utils import normalize_note_tags, read_hook_input, sanitize_secrets  # noqa: E402
 from memento import sync_ledger  # noqa: E402
 
@@ -369,8 +369,8 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
     vault = get_vault()
     log_triage_health("structured_notes_attempt", session_id=session_id, project=project_slug)
     try:
-        transcript_text = sanitize_secrets(Path(transcript_path).read_text())
-    except OSError:
+        transcript_text = sanitize_secrets(render_transcript_text(transcript_path, agent=meta.get("agent")))
+    except (OSError, UnicodeDecodeError, ValueError):
         log_retrieval(
             "triage",
             "structured_notes_transcript_unreadable",

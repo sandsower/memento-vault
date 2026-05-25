@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -61,6 +62,54 @@ def _edit_block(path):
 
 def _read_block(path):
     return {"type": "tool_use", "name": "Read", "input": {"file_path": path}}
+
+
+def _build_opencode_db(path):
+    conn = sqlite3.connect(str(path))
+    cur = conn.cursor()
+    cur.executescript(
+        """
+        CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            title TEXT NOT NULL,
+            version TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL
+        );
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data TEXT NOT NULL
+        );
+        CREATE TABLE part (
+            id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data TEXT NOT NULL
+        );
+        """
+    )
+    cur.execute("INSERT INTO session VALUES ('ses_open', 'prj_test', '/repo', 'fixture', '1.0', 1, 1)")
+    cur.execute("INSERT INTO message VALUES ('msg_user', 'ses_open', 2, 2, ?)", (json.dumps({"role": "user"}),))
+    cur.execute(
+        "INSERT INTO part VALUES ('prt_user', 'msg_user', 'ses_open', 2, 2, ?)",
+        (json.dumps({"type": "text", "text": "Capture the OpenCode fix"}),),
+    )
+    cur.execute(
+        "INSERT INTO message VALUES ('msg_assistant', 'ses_open', 3, 3, ?)", (json.dumps({"role": "assistant"}),)
+    )
+    cur.execute(
+        "INSERT INTO part VALUES ('prt_assistant', 'msg_assistant', 'ses_open', 3, 3, ?)",
+        (json.dumps({"type": "text", "text": "Implemented the adapter fix."}),),
+    )
+    conn.commit()
+    conn.close()
 
 
 # --- parse_transcript ---
@@ -269,6 +318,46 @@ class TestAppendSessionToProject:
 
 
 class TestProcessStructuredNotes:
+    def test_triage_structured_extraction_from_opencode_db(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "opencode.db"
+        _build_opencode_db(transcript)
+        meta = {
+            "agent": "opencode",
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 1,
+            "files_edited": ["adapter.py"],
+            "first_prompt": "Capture the OpenCode fix",
+            "last_outcome": "Implemented the adapter fix.",
+        }
+        llm_payload = json.dumps(
+            [
+                {
+                    "title": "OpenCode adapter renders SQLite transcripts",
+                    "body": "Structured note extraction renders OpenCode SQLite sessions as text.",
+                    "type": "implementation",
+                    "tags": ["opencode"],
+                    "certainty": 4,
+                }
+            ]
+        )
+        captured = {}
+
+        def _llm_complete(prompt):
+            captured["prompt"] = prompt
+            return LLMResult(text=llm_payload, ok=True, error=None)
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", side_effect=_llm_complete),
+        ):
+            written = process_structured_notes("ses_open", str(transcript), meta, "api-service")
+
+        assert written == 1
+        assert "User: Capture the OpenCode fix" in captured["prompt"]
+        assert "Assistant: Implemented the adapter fix." in captured["prompt"]
+        assert (tmp_vault / "notes" / "opencode-adapter-renders-sqlite-transcripts.md").exists()
+
     def test_triage_structured_extraction(self, tmp_vault, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
         transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
