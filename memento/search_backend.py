@@ -12,6 +12,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+
 def _literal_terms(query: str) -> tuple[str, list[str]]:
     literal = (query or "").strip()
     quoted = re.search(r'"(.+?)"', literal) or re.search(r"(?<!\w)'(.+?)'(?!\w)", literal)
@@ -114,7 +115,9 @@ def _literal_file_search(vault: Path, query: str, limit: int, timeout: int = 10,
         score = _literal_score(query, rel_path, title, content)
         if score <= 0 or score < min_score:
             continue
-        results.append({"path": rel_path, "title": title, "score": round(score, 4), "snippet": _literal_snippet(query, content)})
+        results.append(
+            {"path": rel_path, "title": title, "score": round(score, 4), "snippet": _literal_snippet(query, content)}
+        )
 
     results.sort(key=lambda r: r["score"], reverse=True)
     return results[:limit]
@@ -540,6 +543,7 @@ def _make_embedded(config: dict) -> "SearchBackend | None":
             provider = get_embedding_provider(config)
             if not provider.is_available():
                 import logging
+
                 logging.getLogger(__name__).info("Embedding provider not available, running FTS5-only")
                 provider = None
         except Exception:

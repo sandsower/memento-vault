@@ -64,6 +64,7 @@ def create_objective(dataset_path, max_questions=None, metric="ndcg@10"):
     Returns:
         callable(trial) -> float
     """
+
     def objective(trial):
         config = define_search_space(trial)
 
@@ -78,8 +79,15 @@ def create_objective(dataset_path, max_questions=None, metric="ndcg@10"):
     return objective
 
 
-def run_sweep(dataset_path, n_trials=200, timeout=None, db_path="sweep.db",
-              study_name="tenet-longmemeval", max_questions=None, metric="ndcg@10"):
+def run_sweep(
+    dataset_path,
+    n_trials=200,
+    timeout=None,
+    db_path="sweep.db",
+    study_name="tenet-longmemeval",
+    max_questions=None,
+    metric="ndcg@10",
+):
     """Run the Optuna parameter sweep.
 
     Args:
@@ -140,11 +148,13 @@ def export_results(study, output_path="sweep_results.json", top_n=5):
 
     for trial in trials[:top_n]:
         if trial.value is not None:
-            results["top_configs"].append({
-                "trial_number": trial.number,
-                "value": trial.value,
-                "params": trial.params,
-            })
+            results["top_configs"].append(
+                {
+                    "trial_number": trial.number,
+                    "value": trial.value,
+                    "params": trial.params,
+                }
+            )
 
     Path(output_path).write_text(json.dumps(results, indent=2))
     return results
@@ -152,15 +162,15 @@ def export_results(study, output_path="sweep_results.json", top_n=5):
 
 def print_summary(study):
     """Print a summary of the sweep results."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  SWEEP COMPLETE: {study.study_name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Trials completed: {len(study.trials)}")
     print(f"  Best value:       {study.best_value:.4f}")
-    print(f"  Best params:")
+    print("  Best params:")
     for k, v in study.best_params.items():
         print(f"    {k}: {v}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 def main():
@@ -179,7 +189,7 @@ def main():
 
     print(f"Starting sweep: {args.n_trials} trials, metric={args.metric}")
     if args.timeout:
-        print(f"Timeout: {args.timeout}s ({args.timeout/3600:.1f}h)")
+        print(f"Timeout: {args.timeout}s ({args.timeout / 3600:.1f}h)")
 
     study = run_sweep(
         dataset_path=args.dataset,
@@ -192,7 +202,7 @@ def main():
     )
 
     print_summary(study)
-    results = export_results(study, output_path=args.export, top_n=args.export_top)
+    export_results(study, output_path=args.export, top_n=args.export_top)
     print(f"Results exported to {args.export}")
 
 

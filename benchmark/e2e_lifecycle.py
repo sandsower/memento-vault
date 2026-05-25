@@ -12,23 +12,19 @@ Usage:
 
 import argparse
 import json
-import os
-import shutil
-import subprocess
 import sys
 import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 # Scenarios: (name, agent_delay_s, inception_delay_s)
 SCENARIOS = {
-    "best":    {"agent_delay": 0.01, "inception_delay": 0.01, "label": "Best case (mocked instant)"},
+    "best": {"agent_delay": 0.01, "inception_delay": 0.01, "label": "Best case (mocked instant)"},
     "typical": {"agent_delay": 0.05, "inception_delay": 0.05, "label": "Typical (50ms mock LLM)"},
-    "worst":   {"agent_delay": 0.10, "inception_delay": 0.10, "label": "Worst case (100ms mock LLM)"},
+    "worst": {"agent_delay": 0.10, "inception_delay": 0.10, "label": "Worst case (100ms mock LLM)"},
 }
 
 MOCK_AGENT_NOTES = [
@@ -80,17 +76,17 @@ def create_test_vault(tmpdir):
     # Seed with a few notes so recall has something to find
     for i, note in enumerate(MOCK_AGENT_NOTES):
         content = f"""---
-title: {note['title']}
-type: {note['type']}
-tags: [{', '.join(note['tags'])}]
+title: {note["title"]}
+type: {note["type"]}
+tags: [{", ".join(note["tags"])}]
 source: session
-certainty: {note['certainty']}
+certainty: {note["certainty"]}
 project: /home/user/projects/billing
 branch: main
 date: 2026-03-20T10:{i:02d}
 ---
 
-{note['body']}
+{note["body"]}
 
 ## Related
 
@@ -106,16 +102,24 @@ def create_test_transcript(tmpdir):
     lines = []
     # 20 exchanges to be "substantial"
     for i in range(20):
-        lines.append(json.dumps({
-            "type": "user",
-            "message": {"content": f"Prompt {i}: fix the cache invalidation in billing service"},
-            "cwd": "/home/user/projects/billing",
-            "gitBranch": "fix/cache-bug",
-        }))
-        lines.append(json.dumps({
-            "type": "assistant",
-            "message": {"content": [{"type": "text", "text": f"Response {i}"}]},
-        }))
+        lines.append(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"content": f"Prompt {i}: fix the cache invalidation in billing service"},
+                    "cwd": "/home/user/projects/billing",
+                    "gitBranch": "fix/cache-bug",
+                }
+            )
+        )
+        lines.append(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": f"Response {i}"}]},
+                }
+            )
+        )
     transcript.write_text("\n".join(lines))
     return transcript
 
@@ -123,6 +127,7 @@ def create_test_transcript(tmpdir):
 def create_test_config(vault_path):
     """Create a config dict pointing at the test vault."""
     from memento_utils import DEFAULT_CONFIG
+
     config = dict(DEFAULT_CONFIG)
     config["vault_path"] = str(vault_path)
     config["auto_commit"] = False
@@ -139,13 +144,13 @@ def create_test_config(vault_path):
 
 def simulate_triage(vault, transcript_path, config, scenario):
     """Simulate the triage decision (without spawning a real agent)."""
-    from memento_utils import detect_project, slugify
 
     results = {"steps": {}, "errors": []}
 
     # Step 1: Parse transcript
     with Timer("parse_transcript") as t:
         from memento_triage import parse_transcript
+
         meta = parse_transcript(str(transcript_path))
     results["steps"]["parse_transcript"] = t.elapsed_ms
 
@@ -161,6 +166,7 @@ def simulate_triage(vault, transcript_path, config, scenario):
     # Step 3: Check substantiality
     with Timer("is_substantial") as t:
         from memento_triage import is_substantial
+
         substantial = is_substantial(meta)
     results["steps"]["is_substantial"] = t.elapsed_ms
     results["substantial"] = substantial
@@ -174,17 +180,17 @@ def simulate_triage(vault, transcript_path, config, scenario):
                 note_path = vault / "notes" / f"e2e-fresh-{note['stem']}.md"
                 if not note_path.exists():
                     content = f"""---
-title: Fresh - {note['title']}
-type: {note['type']}
-tags: [{', '.join(note['tags'])}]
+title: Fresh - {note["title"]}
+type: {note["type"]}
+tags: [{", ".join(note["tags"])}]
 source: session
-certainty: {note['certainty']}
+certainty: {note["certainty"]}
 project: /home/user/projects/billing
 branch: fix/cache-bug
-date: {datetime.now().strftime('%Y-%m-%dT%H:%M')}
+date: {datetime.now().strftime("%Y-%m-%dT%H:%M")}
 ---
 
-{note['body']}
+{note["body"]}
 
 ## Related
 
@@ -202,6 +208,7 @@ def simulate_briefing(vault, config):
 
     with Timer("briefing_project_detect") as t:
         from memento_utils import detect_project
+
         slug, ticket = detect_project("/home/user/projects/billing", "fix/cache-bug")
     results["steps"]["project_detect"] = t.elapsed_ms
     results["project"] = slug
@@ -209,7 +216,6 @@ def simulate_briefing(vault, config):
     with Timer("briefing_read_project_index") as t:
         project_file = vault / "projects" / f"{slug}.md"
         if project_file.exists():
-            project_text = project_file.read_text()
             results["project_index_exists"] = True
         else:
             results["project_index_exists"] = False
@@ -230,6 +236,7 @@ def simulate_recall(vault, config, prompt):
 
     with Timer("recall_skip_check") as t:
         from vault_recall import should_skip
+
         skipped = should_skip(prompt, config)
     results["steps"]["skip_check"] = t.elapsed_ms
     results["skipped"] = skipped
@@ -237,6 +244,7 @@ def simulate_recall(vault, config, prompt):
     if not skipped:
         with Timer("recall_multi_hop_gate") as t:
             from memento_utils import extract_wikilinks
+
             hop_needed = len(extract_wikilinks("See [[example-note]] for context.")) > 0
         results["steps"]["multi_hop_gate"] = t.elapsed_ms
         results["multi_hop_gate"] = hop_needed
@@ -311,7 +319,7 @@ def run_scenario(name, scenario):
         all_results = {}
 
         # Phase 1: Triage (session just ended)
-        print(f"\n  Phase 1: Triage")
+        print("\n  Phase 1: Triage")
         triage = simulate_triage(vault, transcript, config, scenario)
         all_results["triage"] = triage
         for step, ms in triage["steps"].items():
@@ -320,7 +328,7 @@ def run_scenario(name, scenario):
         print(f"    notes written: {triage.get('notes_written', 0)}")
 
         # Phase 2: Briefing (new session starts)
-        print(f"\n  Phase 2: Briefing")
+        print("\n  Phase 2: Briefing")
         briefing = simulate_briefing(vault, config)
         all_results["briefing"] = briefing
         for step, ms in briefing["steps"].items():
@@ -344,11 +352,11 @@ def run_scenario(name, scenario):
             matches = recall.get("matches", 0)
             hop = recall.get("multi_hop_gate", False)
             status = "skipped" if skipped else f"{matches} matches{' +hop' if hop else ''}"
-            print(f"    \"{prompt[:40]}...\" -> {status} ({sum(recall['steps'].values())}ms)")
+            print(f'    "{prompt[:40]}..." -> {status} ({sum(recall["steps"].values())}ms)')
         all_results["recall_total_ms"] = recall_total
 
         # Phase 4: Inception (post-session consolidation)
-        print(f"\n  Phase 4: Inception")
+        print("\n  Phase 4: Inception")
         inception = simulate_inception(vault, config, scenario)
         all_results["inception"] = inception
         for step, ms in inception["steps"].items():
@@ -372,7 +380,7 @@ def run_scenario(name, scenario):
         print(f"  Inception:         {inception_ms}ms")
 
         # Validation checks
-        print(f"\n  Validation:")
+        print("\n  Validation:")
         checks = []
 
         # Check fleeting was written
@@ -395,6 +403,7 @@ def run_scenario(name, scenario):
 
         # Check wikilink extraction works (multi-hop gate)
         from memento_utils import extract_wikilinks
+
         ok = len(extract_wikilinks("Related: [[some-note]]")) > 0
         checks.append(("multi-hop wikilink extraction works", ok))
 
@@ -420,6 +429,7 @@ def main():
 
     # Import triage module (has hyphen, need importlib)
     import importlib.util
+
     spec = importlib.util.spec_from_file_location(
         "memento_triage",
         str(Path(__file__).parent.parent / "hooks" / "memento-triage.py"),
@@ -451,9 +461,11 @@ def main():
     # Final summary
     if len(scenarios) > 1:
         print(f"\n{'=' * 60}")
-        print(f"  SUMMARY")
+        print("  SUMMARY")
         print(f"{'=' * 60}")
-        print(f"  {'Scenario':<12s}  {'Total':>8s}  {'Triage':>8s}  {'Brief':>8s}  {'Recall':>8s}  {'Incep':>8s}  {'Pass':>6s}")
+        print(
+            f"  {'Scenario':<12s}  {'Total':>8s}  {'Triage':>8s}  {'Brief':>8s}  {'Recall':>8s}  {'Incep':>8s}  {'Pass':>6s}"
+        )
         for name in scenarios:
             r = all_results[name]
             t = sum(r["triage"]["steps"].values())

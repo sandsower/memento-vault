@@ -180,8 +180,8 @@ def triage_health_warning():
         log_path = TRIAGE_HEALTH_LOG_PATH
         total, failed, invalid_mcp_failed, stale_certainty_failed = _scan_triage_health_log(log_path, cutoff)
         if total < TRIAGE_HEALTH_MIN_EVENTS:
-            legacy_total, legacy_failed, legacy_invalid_mcp_failed, legacy_stale_certainty_failed = _scan_triage_health_log(
-                RETRIEVAL_LOG_PATH, cutoff, mode="legacy"
+            legacy_total, legacy_failed, legacy_invalid_mcp_failed, legacy_stale_certainty_failed = (
+                _scan_triage_health_log(RETRIEVAL_LOG_PATH, cutoff, mode="legacy")
             )
             if legacy_total >= total:
                 total = legacy_total
@@ -194,11 +194,13 @@ def triage_health_warning():
             return None
         if (failed / total) < TRIAGE_HEALTH_FAIL_RATIO:
             return None
-        warning = f"[vault] WARN: triage failing {failed}/{total} in last {TRIAGE_HEALTH_WINDOW_HOURS}h — check {log_path}"
+        warning = (
+            f"[vault] WARN: triage failing {failed}/{total} in last {TRIAGE_HEALTH_WINDOW_HOURS}h — check {log_path}"
+        )
         if invalid_mcp_failed:
             warning += (
                 " — likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
-                "copied hooks should use {\"mcpServers\": {}} for --mcp-config"
+                'copied hooks should use {"mcpServers": {}} for --mcp-config'
             )
         if stale_certainty_failed:
             warning += f" — {_STALE_CERTAINTY_HINT}"
@@ -488,7 +490,7 @@ def run_remote_briefing(cwd, config):
     return summary
 
 
-def build_briefing(cwd: str, session_id: str = "unknown") -> LifecycleResult:
+def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: bool = True) -> LifecycleResult:
     """Build session-start briefing content."""
     config = get_config()
     metadata = {"cwd": cwd, "session_id": session_id}
@@ -503,7 +505,7 @@ def build_briefing(cwd: str, session_id: str = "unknown") -> LifecycleResult:
 
     from memento.remote_client import is_remote
 
-    if is_remote():
+    if is_remote() and allow_deferred:
         try:
             if os.path.exists(DEFERRED_BRIEFING_PATH):
                 os.unlink(DEFERRED_BRIEFING_PATH)
@@ -545,7 +547,7 @@ def build_briefing(cwd: str, session_id: str = "unknown") -> LifecycleResult:
     if warning:
         lines.append(warning)
 
-    if config.get("project_maps_enabled", True) and has_qmd():
+    if allow_deferred and config.get("project_maps_enabled", True) and has_qmd():
         try:
             max_notes = config.get("briefing_max_notes", 5)
             map_notes = lookup_project_notes(project_slug, limit=max_notes)
@@ -576,7 +578,7 @@ def build_briefing(cwd: str, session_id: str = "unknown") -> LifecycleResult:
     except Exception:
         pass
 
-    if has_qmd():
+    if allow_deferred and has_qmd():
         config["_cwd"] = cwd
         spawn_deferred_search(project_slug, git_branch, linked_notes, config)
 
@@ -653,9 +655,7 @@ PROJECT_ENTITY_STOPWORDS = {
     "before",
 }
 
-SPECIFIC_PROJECT_QUERY_PATTERNS = (
-    r"\bwhat did we decide about (?P<subject>[a-z0-9][a-z0-9 _-]*)",
-)
+SPECIFIC_PROJECT_QUERY_PATTERNS = (r"\bwhat did we decide about (?P<subject>[a-z0-9][a-z0-9 _-]*)",)
 
 
 def recall_signal_terms(prompt: str) -> list[str]:
@@ -1385,12 +1385,20 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     vault = get_vault()
     if not vault.exists() or not (vault / "notes").exists():
-        reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "empty_vault", prompt)
+        reason = (
+            fallback_remote_reason
+            if isinstance(fallback_remote_reason, StructuredMissReason)
+            else normalize_miss_reason(fallback_remote_reason or "empty_vault", prompt)
+        )
         log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
         return [], None, [], reason
 
     if not has_qmd():
-        reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "backend_unavailable", prompt)
+        reason = (
+            fallback_remote_reason
+            if isinstance(fallback_remote_reason, StructuredMissReason)
+            else normalize_miss_reason(fallback_remote_reason or "backend_unavailable", prompt)
+        )
         log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
         return [], None, [], reason
 
@@ -1559,7 +1567,11 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
                 )
                 return [], None, [], "threshold_too_high"
         bump_prompts_since()
-        miss_reason = fallback_remote_reason if isinstance(fallback_remote_reason, StructuredMissReason) else normalize_miss_reason(fallback_remote_reason or "no-results", prompt)
+        miss_reason = (
+            fallback_remote_reason
+            if isinstance(fallback_remote_reason, StructuredMissReason)
+            else normalize_miss_reason(fallback_remote_reason or "no-results", prompt)
+        )
         log_retrieval("recall", str(miss_reason), query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
         log_recall_diagnostic(config, "decision", decision="skipped", reason=str(miss_reason), latency_ms=latency_ms)
         return [], None, [], miss_reason
@@ -1647,7 +1659,7 @@ def run_recall():
     return lines, top_path
 
 
-def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> LifecycleResult:
+def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown", *, record: bool = True) -> LifecycleResult:
     """Build prompt recall content."""
     lines, top_path, results, reason = _run_recall_lines(prompt, cwd, session_id)
     if not lines:
@@ -1660,11 +1672,13 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> Lif
             if normalized == "threshold_too_high" and not isinstance(remote_miss, dict):
                 details = {"min_score": get_config().get("recall_min_score", 0.4)}
             result = empty_result("recall", normalized)
-            result.metadata = {"miss": remote_miss if isinstance(remote_miss, dict) else build_search_miss(normalized, details=details)}
+            result.metadata = {
+                "miss": remote_miss if isinstance(remote_miss, dict) else build_search_miss(normalized, details=details)
+            }
             return result
         return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)
-    if top_path:
+    if top_path and record:
         record_recall(top_path)
     return LifecycleResult(
         should_inject=True,
@@ -1782,7 +1796,9 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
     expandable_paths = payload["metadata"].get("expandable_paths", [])
     while expandable_paths and len(json.dumps(payload)) > packet_char_budget:
         expandable_paths.pop()
-        payload["metadata"]["omitted_expandable_paths_count"] = payload["metadata"].get("omitted_expandable_paths_count", 0) + 1
+        payload["metadata"]["omitted_expandable_paths_count"] = (
+            payload["metadata"].get("omitted_expandable_paths_count", 0) + 1
+        )
 
     if len(json.dumps(payload)) > packet_char_budget:
         payload["metadata"].pop("cwd", None)
@@ -1797,7 +1813,9 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
         payload["content"] = ""
 
     if len(json.dumps(payload)) > packet_char_budget:
-        payload["sections"] = {key: value for key, value in payload.get("sections", {}).items() if key in {"status", "queue"}}
+        payload["sections"] = {
+            key: value for key, value in payload.get("sections", {}).items() if key in {"status", "queue"}
+        }
         payload["results"] = []
         payload["metadata"]["expandable_paths"] = []
         payload["metadata"]["omitted_results"] = True
@@ -1824,16 +1842,20 @@ def build_session_context(
     warnings: list[str] = []
 
     if include_recent:
-        briefing = build_briefing(cwd, session_id)
+        briefing = build_briefing(cwd, session_id, allow_deferred=False)
         sections["briefing"] = _compact_lifecycle_section(briefing)
         if briefing.content:
             content_blocks.append(briefing.content)
         raw_results.extend(briefing.results or [])
 
+    recall_top_path = None
+    recall_content_marker = None
     if include_recall and prompt:
-        recall = build_recall(prompt, cwd, session_id)
+        recall = build_recall(prompt, cwd, session_id, record=False)
         sections["recall"] = _compact_lifecycle_section(recall)
+        recall_top_path = recall.metadata.get("top_path") if isinstance(recall.metadata, dict) else None
         if recall.content:
+            recall_content_marker = recall.content.splitlines()[0]
             content_blocks.append(recall.content)
         raw_results.extend(recall.results or [])
 
@@ -1896,7 +1918,10 @@ def build_session_context(
             "budget_notes": budget_notes,
         },
     }
-    return _fit_session_context_payload(payload, packet_char_budget)
+    payload = _fit_session_context_payload(payload, packet_char_budget)
+    if recall_top_path and recall_content_marker and recall_content_marker in payload.get("content", ""):
+        record_recall(recall_top_path)
+    return payload
 
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
@@ -2054,7 +2079,9 @@ def should_skip_tool_context_path(file_path: str) -> bool:
 
     vault = get_vault()
     try:
-        if os.path.realpath(file_path).startswith(str(vault)):
+        resolved_path = Path(os.path.realpath(file_path))
+        resolved_vault = Path(os.path.realpath(vault))
+        if resolved_path == resolved_vault or resolved_vault in resolved_path.parents:
             return True
     except (OSError, ValueError):
         pass

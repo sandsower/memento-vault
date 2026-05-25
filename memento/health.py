@@ -30,8 +30,7 @@ _STALE_MCP_HINT = (
 )
 _REINSTALL_HINT = "rerun ./install.sh --reinstall"
 _STALE_CERTAINTY_HINT = (
-    f"likely stale installed memento package; {_REINSTALL_HINT}; "
-    "current triage accepts certainty labels like confirmed"
+    f"likely stale installed memento package; {_REINSTALL_HINT}; current triage accepts certainty labels like confirmed"
 )
 _ACCEPTED_CERTAINTY_LABELS = {
     "speculation",
@@ -365,7 +364,9 @@ def _install_manifest_path() -> Path:
 def _check_install_manifest() -> tuple[CheckResult, dict[str, Any] | None]:
     path = _install_manifest_path()
     if not path.exists():
-        return CheckResult("install manifest", WARN, f"install manifest not found; {_REINSTALL_HINT}", {"path": str(path)}), None
+        return CheckResult(
+            "install manifest", WARN, f"install manifest not found; {_REINSTALL_HINT}", {"path": str(path)}
+        ), None
     try:
         manifest = json.loads(path.read_text())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -379,7 +380,9 @@ def _check_install_manifest() -> tuple[CheckResult, dict[str, Any] | None]:
             None,
         )
     if not isinstance(manifest, dict):
-        return CheckResult("install manifest", WARN, f"install manifest is not an object; {_REINSTALL_HINT}", {"path": str(path)}), None
+        return CheckResult(
+            "install manifest", WARN, f"install manifest is not an object; {_REINSTALL_HINT}", {"path": str(path)}
+        ), None
 
     options = manifest.get("options") if isinstance(manifest.get("options"), dict) else {}
     files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
@@ -466,7 +469,9 @@ def _managed_dest_path(key: str) -> Path | None:
 
 def _check_managed_files(manifest: dict[str, Any] | None) -> CheckResult:
     if not manifest:
-        return CheckResult("managed files", WARN, f"managed file drift unavailable without install manifest; {_REINSTALL_HINT}")
+        return CheckResult(
+            "managed files", WARN, f"managed file drift unavailable without install manifest; {_REINSTALL_HINT}"
+        )
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         return CheckResult("managed files", WARN, f"install manifest has no managed file hashes; {_REINSTALL_HINT}")
@@ -505,7 +510,13 @@ def _check_managed_files(manifest: dict[str, Any] | None) -> CheckResult:
         else:
             locally_modified.append(key)
 
-    worst = FAIL if missing_critical else WARN if (stale_managed or locally_modified or missing or source_missing or not_executable) else PASS
+    worst = (
+        FAIL
+        if missing_critical
+        else WARN
+        if (stale_managed or locally_modified or missing or source_missing or not_executable)
+        else PASS
+    )
     if worst == PASS:
         message = f"managed installed files match this checkout ({len(current)} checked)"
     else:
@@ -542,7 +553,9 @@ def _check_managed_files(manifest: dict[str, Any] | None) -> CheckResult:
 
 
 def _expected_claude_hooks(manifest: dict[str, Any] | None) -> list[tuple[str, str]]:
-    options = manifest.get("options") if isinstance(manifest, dict) and isinstance(manifest.get("options"), dict) else {}
+    options = (
+        manifest.get("options") if isinstance(manifest, dict) and isinstance(manifest.get("options"), dict) else {}
+    )
     expected = [("SessionEnd", "memento-triage.py")]
     if options.get("experimental"):
         expected.extend(
@@ -600,7 +613,12 @@ def _check_claude_hooks(manifest: dict[str, Any] | None) -> CheckResult:
             f"missing Claude hook registrations: {', '.join(missing)}; {_REINSTALL_HINT}",
             {"path": str(settings_path), "registered": registered, "missing": missing},
         )
-    return CheckResult("claude hooks", PASS, "expected Claude hook registrations found", {"path": str(settings_path), "registered": registered})
+    return CheckResult(
+        "claude hooks",
+        PASS,
+        "expected Claude hook registrations found",
+        {"path": str(settings_path), "registered": registered},
+    )
 
 
 def _mcp_entry_shape(data: Any) -> tuple[str, str | None]:
@@ -613,7 +631,11 @@ def _mcp_entry_shape(data: Any) -> tuple[str, str | None]:
         return "invalid", "memento-vault entry must be an object"
     url = entry.get("url")
     if entry.get("type") == "http" or url is not None:
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")) or not url.rstrip("/").endswith("/mcp"):
+        if (
+            not isinstance(url, str)
+            or not url.startswith(("http://", "https://"))
+            or not url.rstrip("/").endswith("/mcp")
+        ):
             return "invalid", "remote MCP entry must have an http(s) url ending in /mcp"
         return "remote http", None
     args = entry.get("args")
@@ -622,8 +644,7 @@ def _mcp_entry_shape(data: Any) -> tuple[str, str | None]:
     command_name = Path(str(command)).name if command else ""
     python_command = command_name.startswith("python")
     has_module_args = isinstance(args, list) and any(
-        args[index] == "-m" and index + 1 < len(args) and args[index + 1] == "memento"
-        for index in range(len(args))
+        args[index] == "-m" and index + 1 < len(args) and args[index + 1] == "memento" for index in range(len(args))
     )
     if python_command and has_module_args and isinstance(env, dict) and env.get("PYTHONPATH"):
         return "local stdio", None
@@ -638,7 +659,7 @@ def _mcp_registration_shape(output: str) -> str:
         return "invalid"
     urls = re.findall(r"https?://[^\s]+", text)
     if urls:
-        return "remote http" if any(url.rstrip('/').endswith("/mcp") for url in urls) else "invalid"
+        return "remote http" if any(url.rstrip("/").endswith("/mcp") for url in urls) else "invalid"
     if re.search(r"\bpython(?:3(?:\.\d+)?)?\b", text) and re.search(r"(?:^|\s)-m\s+memento(?:\s|$)", text):
         return "local stdio"
     return "invalid"
@@ -686,7 +707,12 @@ def _check_mcp_registration() -> CheckResult:
         )
     if checked:
         return CheckResult("mcp registration", PASS, "MCP CLI registration detected", {"registrations": results})
-    return CheckResult("mcp registration", PASS, "MCP CLI registration not checked (Claude/Codex CLI not found)", {"registrations": results})
+    return CheckResult(
+        "mcp registration",
+        PASS,
+        "MCP CLI registration not checked (Claude/Codex CLI not found)",
+        {"registrations": results},
+    )
 
 
 def _check_mcp_config() -> list[CheckResult]:
@@ -737,7 +763,11 @@ def _check_mcp_config() -> list[CheckResult]:
                 )
             )
     else:
-        checks.append(CheckResult("mcp config", WARN, "Claude MCP config not found; run ./install.sh --mcp", {"path": str(config_path)}))
+        checks.append(
+            CheckResult(
+                "mcp config", WARN, "Claude MCP config not found; run ./install.sh --mcp", {"path": str(config_path)}
+            )
+        )
 
     stale_paths = []
     for path in (Path.home() / ".claude" / "hooks" / "memento" / "llm.py", Path(__file__).with_name("llm.py")):
@@ -761,7 +791,9 @@ def _check_pi_bridge_config() -> CheckResult:
     try:
         raw = json.loads(path.read_text())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return CheckResult("pi bridge", WARN, f"cannot read Pi bridge config at {path}: {exc}", {"path": str(path), "error": str(exc)})
+        return CheckResult(
+            "pi bridge", WARN, f"cannot read Pi bridge config at {path}: {exc}", {"path": str(path), "error": str(exc)}
+        )
     if not isinstance(raw, dict):
         return CheckResult("pi bridge", WARN, "Pi bridge config root must be an object", {"path": str(path)})
     memento = raw.get("memento") if isinstance(raw.get("memento"), dict) else None
@@ -784,7 +816,9 @@ def _check_pi_bridge_config() -> CheckResult:
             {"path": str(path), "invalid_keys": invalid},
         )
     configured = sorted(key for key in candidate if key in _PI_BOOL_KEYS or key in _PI_INT_KEYS)
-    return CheckResult("pi bridge", PASS, "Pi bridge config shape looks valid", {"path": str(path), "configured_keys": configured})
+    return CheckResult(
+        "pi bridge", PASS, "Pi bridge config shape looks valid", {"path": str(path), "configured_keys": configured}
+    )
 
 
 def _has_stale_empty_mcp_config(path: Path) -> bool:

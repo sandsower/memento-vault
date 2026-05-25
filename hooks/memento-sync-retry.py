@@ -51,9 +51,7 @@ def _parse_note(path: str) -> dict | None:
         return m.group(1).strip().strip("\"'") if m else None
 
     tags_m = re.search(r"^tags:\s*\[(.+)\]", fm, re.MULTILINE)
-    tags = (
-        [t.strip().strip("\"'") for t in tags_m.group(1).split(",")] if tags_m else []
-    )
+    tags = [t.strip().strip("\"'") for t in tags_m.group(1).split(",")] if tags_m else []
     certainty_m = re.search(r"^certainty:\s*(\d+)", fm, re.MULTILINE)
     return {
         "title": _pick("title") or Path(path).stem,
@@ -77,22 +75,32 @@ def _retry_note(vault: Path, entry: dict) -> dict:
     if not note_path.exists():
         err = f"note file missing: {note_path}"
         return sync_ledger.record(
-            vault, "note", source,
-            status="error", content_hash=entry.get("content_hash"), error=err,
+            vault,
+            "note",
+            source,
+            status="error",
+            content_hash=entry.get("content_hash"),
+            error=err,
         )
 
     note = _parse_note(str(note_path))
     if not note:
         err = f"note unparseable: {note_path}"
         return sync_ledger.record(
-            vault, "note", source,
-            status="error", content_hash=entry.get("content_hash"), error=err,
+            vault,
+            "note",
+            source,
+            status="error",
+            content_hash=entry.get("content_hash"),
+            error=err,
         )
 
     result = store(**note)
     if isinstance(result, dict) and "error" in result:
         return sync_ledger.record(
-            vault, "note", source,
+            vault,
+            "note",
+            source,
             status="error",
             content_hash=entry.get("content_hash"),
             error=result["error"],
@@ -100,7 +108,9 @@ def _retry_note(vault: Path, entry: dict) -> dict:
         )
 
     return sync_ledger.record(
-        vault, "note", source,
+        vault,
+        "note",
+        source,
         status="ok",
         content_hash=entry.get("content_hash"),
         remote_path=(result or {}).get("path"),
@@ -155,8 +165,12 @@ def _retry_capture(vault: Path, entry: dict) -> dict:
     if envelope is None:
         err = f"no spooled payload for {source}"
         return sync_ledger.record(
-            vault, "capture", source,
-            status="error", content_hash=entry.get("content_hash"), error=err,
+            vault,
+            "capture",
+            source,
+            status="error",
+            content_hash=entry.get("content_hash"),
+            error=err,
         )
 
     # Resolve each capture argument, falling back to what we can reconstruct
@@ -197,7 +211,9 @@ def _retry_capture(vault: Path, entry: dict) -> dict:
 
     if isinstance(result, dict) and "error" in result:
         return sync_ledger.record(
-            vault, "capture", source,
+            vault,
+            "capture",
+            source,
             status="error",
             content_hash=entry.get("content_hash"),
             error=result["error"],
@@ -205,7 +221,9 @@ def _retry_capture(vault: Path, entry: dict) -> dict:
         )
 
     return sync_ledger.record(
-        vault, "capture", source,
+        vault,
+        "capture",
+        source,
         status="ok",
         content_hash=entry.get("content_hash"),
         remote_path=(result or {}).get("path") if isinstance(result, dict) else None,

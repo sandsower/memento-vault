@@ -10,7 +10,6 @@ Covers the two Codex adversarial findings:
 
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -49,9 +48,7 @@ def retry_mod():
 
 
 class TestNoteRetryNoBrokenImport:
-    def test_note_retry_parses_inline_without_importing_sibling(
-        self, tmp_path, retry_mod
-    ):
+    def test_note_retry_parses_inline_without_importing_sibling(self, tmp_path, retry_mod):
         """The retry path must parse notes using its own inline parser.
         Any attempt to import a `memento_remote_sync` module would raise
         ModuleNotFoundError, which would abort the whole run."""
@@ -61,19 +58,17 @@ class TestNoteRetryNoBrokenImport:
         note_dir.mkdir()
         note_file = note_dir / "test-note.md"
         note_file.write_text(
-            "---\n"
-            "title: Test Note\n"
-            "type: discovery\n"
-            "tags: [a, b]\n"
-            "certainty: 3\n"
-            "---\n\n"
-            "Body of the note.\n"
+            "---\ntitle: Test Note\ntype: discovery\ntags: [a, b]\ncertainty: 3\n---\n\nBody of the note.\n"
         )
 
         # Record the prior failure the retry should pick up.
         sync_ledger.record(
-            vault, "note", "notes/test-note.md",
-            status="error", error="connection refused", content_hash="h1",
+            vault,
+            "note",
+            "notes/test-note.md",
+            status="error",
+            error="connection refused",
+            content_hash="h1",
         )
 
         # Patch the remote store so we don't hit the network.
@@ -84,9 +79,7 @@ class TestNoteRetryNoBrokenImport:
             return {"path": "remote/notes/test-note.md"}
 
         with patch.object(retry_mod, "store", fake_store):
-            outcome = retry_mod._retry_note(
-                vault, sync_ledger.pending_retries(vault)[0]
-            )
+            outcome = retry_mod._retry_note(vault, sync_ledger.pending_retries(vault)[0])
 
         assert outcome["status"] == "ok"
         assert captured_args["title"] == "Test Note"
@@ -94,21 +87,21 @@ class TestNoteRetryNoBrokenImport:
         assert captured_args["tags"] == ["a", "b"]
         assert captured_args["certainty"] == 3
 
-    def test_main_does_not_crash_when_note_retry_pending(
-        self, tmp_path, retry_mod, monkeypatch
-    ):
+    def test_main_does_not_crash_when_note_retry_pending(self, tmp_path, retry_mod, monkeypatch):
         """End-to-end: with a pending note entry in the ledger, main()
         must complete without ModuleNotFoundError."""
         vault = tmp_path / "vault"
         vault.mkdir()
         notes = vault / "notes"
         notes.mkdir()
-        (notes / "pending.md").write_text(
-            "---\ntitle: X\ntype: discovery\n---\n\nbody\n"
-        )
+        (notes / "pending.md").write_text("---\ntitle: X\ntype: discovery\n---\n\nbody\n")
         sync_ledger.record(
-            vault, "note", "notes/pending.md",
-            status="error", error="boom", content_hash="h",
+            vault,
+            "note",
+            "notes/pending.md",
+            status="error",
+            error="boom",
+            content_hash="h",
         )
 
         monkeypatch.setattr(retry_mod, "is_remote", lambda: True)
@@ -142,19 +135,19 @@ class TestCaptureRetryPreservesMetadata:
             "agent": "claude",
             "fleeting_only": fleeting_only,
         }
-        spool_path = sync_ledger.spool_payload(
-            vault, "capture", "session:abc-123", json.dumps(envelope)
-        )
+        spool_path = sync_ledger.spool_payload(vault, "capture", "session:abc-123", json.dumps(envelope))
         sync_ledger.record(
-            vault, "capture", "session:abc-123",
-            status="error", error="timeout", content_hash="h",
+            vault,
+            "capture",
+            "session:abc-123",
+            status="error",
+            error="timeout",
+            content_hash="h",
             spool_path=str(spool_path),
         )
         return envelope
 
-    def test_substantive_capture_replayed_with_full_metadata(
-        self, tmp_path, retry_mod
-    ):
+    def test_substantive_capture_replayed_with_full_metadata(self, tmp_path, retry_mod):
         """The core Codex finding: a failed substantive capture must NOT
         be replayed as fleeting, and metadata must be preserved."""
         vault = tmp_path / "vault"
@@ -209,9 +202,7 @@ class TestCaptureRetryPreservesMetadata:
 
         assert captured["fleeting_only"] is True
 
-    def test_envelope_loader_distinguishes_envelope_from_legacy(
-        self, tmp_path, retry_mod
-    ):
+    def test_envelope_loader_distinguishes_envelope_from_legacy(self, tmp_path, retry_mod):
         """The loader must identify the envelope format and NOT misread a
         legacy markdown spool as an envelope."""
         vault = tmp_path / "vault"
@@ -219,7 +210,9 @@ class TestCaptureRetryPreservesMetadata:
 
         # Write an envelope via spool_payload.
         env_path = sync_ledger.spool_payload(
-            vault, "capture", "session:env",
+            vault,
+            "capture",
+            "session:env",
             json.dumps({"session_summary": "x", "cwd": "/a", "fleeting_only": False}),
         )
         # Write a legacy markdown spool by hand.
@@ -237,15 +230,11 @@ class TestCaptureRetryPreservesMetadata:
         assert leg["session_summary"] == "legacy body"
         assert leg.get("_legacy") is True
 
-        missing, kind = retry_mod._load_capture_envelope(
-            str(tmp_path / "nonexistent")
-        )
+        missing, kind = retry_mod._load_capture_envelope(str(tmp_path / "nonexistent"))
         assert kind == "missing"
         assert missing is None
 
-    def test_legacy_spool_warns_and_falls_back_to_fleeting(
-        self, tmp_path, retry_mod, capsys
-    ):
+    def test_legacy_spool_warns_and_falls_back_to_fleeting(self, tmp_path, retry_mod, capsys):
         """Legacy spools pre-date the envelope — replay as fleeting but
         warn the user that classification is degraded. This is better
         than silently misclassifying (the Codex concern), because the
@@ -260,8 +249,11 @@ class TestCaptureRetryPreservesMetadata:
         legacy_file.write_text("---\nsession_id: legacy\n---\n\nsome summary\n")
 
         sync_ledger.record(
-            vault, "capture", "session:legacy",
-            status="error", error="old failure",
+            vault,
+            "capture",
+            "session:legacy",
+            status="error",
+            error="old failure",
             spool_path=str(legacy_file),
         )
 
@@ -288,17 +280,18 @@ class TestCaptureRetryPreservesMetadata:
 
 
 class TestMixedRun:
-    def test_note_failure_does_not_abort_capture_retry(
-        self, tmp_path, retry_mod, monkeypatch
-    ):
+    def test_note_failure_does_not_abort_capture_retry(self, tmp_path, retry_mod, monkeypatch):
         vault = tmp_path / "vault"
         vault.mkdir()
         notes = vault / "notes"
         notes.mkdir()
         (notes / "bad.md").write_text("not a valid note without frontmatter")
         sync_ledger.record(
-            vault, "note", "notes/bad.md",
-            status="error", error="boom",
+            vault,
+            "note",
+            "notes/bad.md",
+            status="error",
+            error="boom",
         )
 
         env = {
@@ -311,12 +304,14 @@ class TestMixedRun:
             "agent": "claude",
             "fleeting_only": True,
         }
-        spool = sync_ledger.spool_payload(
-            vault, "capture", "session:after", json.dumps(env)
-        )
+        spool = sync_ledger.spool_payload(vault, "capture", "session:after", json.dumps(env))
         sync_ledger.record(
-            vault, "capture", "session:after",
-            status="error", error="boom", spool_path=str(spool),
+            vault,
+            "capture",
+            "session:after",
+            status="error",
+            error="boom",
+            spool_path=str(spool),
         )
 
         capture_calls = []

@@ -132,10 +132,7 @@ def write_oversize_sidecar(oversize: list[dict]) -> None:
         "",
     ]
     for o in oversize:
-        lines.append(
-            f"{o['session_id']}  {o['size_kb']}  {o['exchanges']}  "
-            f"{o['files_edited']}  {o['cwd'] or '-'}"
-        )
+        lines.append(f"{o['session_id']}  {o['size_kb']}  {o['exchanges']}  {o['files_edited']}  {o['cwd'] or '-'}")
     OVERSIZE_SIDECAR.write_text("\n".join(lines) + "\n")
 
 
@@ -311,8 +308,7 @@ def main() -> int:
 
     elapsed = time.time() - start
     print(
-        f"\nDone. ok={ok} failed={failed} elapsed={elapsed:.1f}s\n"
-        f"Review vault changes, then commit manually.",
+        f"\nDone. ok={ok} failed={failed} elapsed={elapsed:.1f}s\nReview vault changes, then commit manually.",
         file=sys.stderr,
     )
     print(datetime.now().isoformat(), file=sys.stderr)

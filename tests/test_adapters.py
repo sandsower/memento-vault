@@ -126,9 +126,7 @@ class TestDetectAgent:
 
     def test_metadata_only_returns_unknown(self, tmp_path):
         transcript = tmp_path / "metadata.jsonl"
-        transcript.write_text(
-            "\n".join(json.dumps({"type": "file-history-snapshot", "i": i}) for i in range(5)) + "\n"
-        )
+        transcript.write_text("\n".join(json.dumps({"type": "file-history-snapshot", "i": i}) for i in range(5)) + "\n")
         assert detect_agent(str(transcript)) == "unknown"
 
 

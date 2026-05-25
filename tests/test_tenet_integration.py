@@ -22,7 +22,6 @@ from memento.graph import (
 from memento.search import enhance_results
 
 
-
 @pytest.fixture
 def linked_vault(tmp_path):
     """Vault with a known wikilink structure for integration testing.

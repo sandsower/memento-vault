@@ -1,11 +1,9 @@
 """Tests for memento.sync_ledger — the append-only remote-sync ledger."""
 
 import json
-import os
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -161,9 +159,7 @@ class TestAttemptCount:
 class TestSpool:
     def test_spool_writes_payload_readable_back(self, tmp_path):
         vault = tmp_path / "vault"
-        path = sync_ledger.spool_payload(
-            vault, "capture", "session:abc-123", "hello world"
-        )
+        path = sync_ledger.spool_payload(vault, "capture", "session:abc-123", "hello world")
 
         assert path.exists()
         assert "capture" in str(path.parent)
@@ -171,9 +167,7 @@ class TestSpool:
 
     def test_spool_sanitizes_filename(self, tmp_path):
         vault = tmp_path / "vault"
-        path = sync_ledger.spool_payload(
-            vault, "note", "../evil/path & bad chars", "data"
-        )
+        path = sync_ledger.spool_payload(vault, "note", "../evil/path & bad chars", "data")
         # No slashes from source should appear in the file stem.
         assert "../" not in path.name
         assert path.read_text() == "data"
@@ -211,7 +205,9 @@ class TestEndToEndFlow:
         body = "session summary v1"
         spool = sync_ledger.spool_payload(vault, "capture", "session:x", body)
         sync_ledger.record(
-            vault, "capture", "session:x",
+            vault,
+            "capture",
+            "session:x",
             status="error",
             content_hash=sync_ledger.content_hash(body),
             error="connection refused",
@@ -226,7 +222,9 @@ class TestEndToEndFlow:
 
         # Attempt 2 succeeds.
         sync_ledger.record(
-            vault, "capture", "session:x",
+            vault,
+            "capture",
+            "session:x",
             status="ok",
             content_hash=sync_ledger.content_hash(body),
             remote_path="fleeting/2026-04-13-x.md",

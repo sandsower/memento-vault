@@ -99,13 +99,14 @@ For package installation from a checkout:
 pi install /path/to/memento-vault
 ```
 
-The pi bridge does not start a long-lived MCP child process. Automatic durable writes are not enabled by default. Candidate captures can be queued for review and flushed manually.
+The pi bridge does not start a long-lived MCP child process. Automatic durable writes are not enabled by default. Candidate captures are queued in local state for review and can be processed into curated notes manually.
 
 Useful pi commands/tools:
 
+- `/memento` — open the TUI dashboard for status, readable queued-capture review cards, explicit capture selection, processing previews, and live group-level processing progress.
 - `/memento-status` or `memento_status` — bridge/vault status, lifecycle feature state, queue count.
-- `/memento-queue` or `memento_queue` — list queued pi capture candidates.
-- `/memento-flush-queue <id>` or `memento_flush_queue` — write an approved queued capture to the vault (`--all` flushes all).
+- `/memento-queue` or `memento_queue` — list queued pi capture candidates with deterministic excerpts and size metadata.
+- `/memento-process` or `memento_process` — process selected queued captures into curated durable notes. With no arguments the command shows a dry-run preview; use `/memento` for interactive selection and confirmation.
 - `memento_capture` — manually write a durable note; pass `queue: true` to queue instead.
 
 Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.json`, project-local `.pi/settings.json`, or project `package.json`. The bridge reads `memento.piBridge` first, then `piBridge`, then top-level keys:
@@ -120,6 +121,10 @@ Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.js
       "toolContext": false,
       "autoCapture": false,
       "captureQueue": true,
+      "processQueue": true,
+      "processQueueOnSessionClose": false,
+      "processQueueMaxCaptures": 3,
+      "processQueueModel": null,
       "maxInjectedChars": 4000,
       "maxToolContextPerSession": 5
     }
@@ -139,8 +144,12 @@ Environment variables override file config:
 | `MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION` | `5` | Tool-context injection cap per pi session. |
 | `MEMENTO_PI_AUTO_CAPTURE` | `false` | Queue automatic capture candidates on `agent_end`, compaction, and shutdown lifecycle events. |
 | `MEMENTO_PI_CAPTURE_QUEUE` | `true` | Queue automatic capture candidates instead of writing notes directly. |
+| `MEMENTO_PI_PROCESS_QUEUE` | `true` | Enable manual queued-capture processing. |
+| `MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE` | `false` | Reserved future automation route for processing a small batch on session close. |
+| `MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES` | `3` | Reserved future cap for session-close processing. |
+| `MEMENTO_PI_PROCESS_QUEUE_MODEL` | unset | Optional model override for processor sessions. |
 
-When automatic capture is enabled, pi lifecycle events only create reviewable queue entries. They do not write durable notes until `/memento-flush-queue` or `memento_flush_queue` is used. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
+When automatic capture is enabled, pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
 
 Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
 

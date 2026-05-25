@@ -11,7 +11,6 @@ import importlib
 import json
 import logging
 import os
-import sys
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -56,9 +55,7 @@ class EmbeddingProvider(ABC):
 # ---------------------------------------------------------------------------
 
 
-def _truncate_and_normalize(
-    vectors: np.ndarray, target_dim: int
-) -> np.ndarray:
+def _truncate_and_normalize(vectors: np.ndarray, target_dim: int) -> np.ndarray:
     """Truncate to *target_dim* columns and L2-normalize each row.
 
     Handles the Matryoshka property of nomic-embed-text-v1.5: the model
@@ -109,9 +106,7 @@ class NomicLocalProvider(EmbeddingProvider):
         elif os.environ.get("MEMENTO_MODEL_CACHE_DIR"):
             self._cache_dir = Path(os.environ["MEMENTO_MODEL_CACHE_DIR"])
         else:
-            self._cache_dir = (
-                Path.home() / ".cache" / "memento-vault" / "models"
-            )
+            self._cache_dir = Path.home() / ".cache" / "memento-vault" / "models"
         self._session = None  # lazy onnxruntime.InferenceSession
         self._tokenizer = None  # lazy tokenizers.Tokenizer
 
@@ -173,10 +168,7 @@ class NomicLocalProvider(EmbeddingProvider):
     def _ensure_runtime(self) -> None:
         """Ensure onnxruntime is available; raise RuntimeError if not."""
         if not self._check_onnxruntime_importable():
-            raise RuntimeError(
-                "onnxruntime is required for local embeddings. "
-                "Install it with: pip install onnxruntime"
-            )
+            raise RuntimeError("onnxruntime is required for local embeddings. Install it with: pip install onnxruntime")
         if self._session is None:
             self._load_model()
 
@@ -195,9 +187,7 @@ class NomicLocalProvider(EmbeddingProvider):
 
         # Load ONNX session
         sess_opts = ort.SessionOptions()
-        sess_opts.graph_optimization_level = (
-            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        )
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         # Use only CPU to keep it simple and portable
         self._session = ort.InferenceSession(
             str(onnx_path),
@@ -211,10 +201,7 @@ class NomicLocalProvider(EmbeddingProvider):
 
             self._tokenizer = Tokenizer.from_file(str(tokenizer_path))
         except ImportError:
-            logger.warning(
-                "tokenizers package not installed; "
-                "falling back to basic whitespace tokenization"
-            )
+            logger.warning("tokenizers package not installed; falling back to basic whitespace tokenization")
             self._tokenizer = None
 
     def _download_model(self, model_dir: Path) -> None:
@@ -254,9 +241,7 @@ class NomicLocalProvider(EmbeddingProvider):
                 "Install it with: pip install huggingface_hub"
             )
         except Exception as exc:
-            raise RuntimeError(
-                f"Failed to download embedding model: {exc}"
-            ) from exc
+            raise RuntimeError(f"Failed to download embedding model: {exc}") from exc
 
     # -- inference --
 
@@ -284,40 +269,29 @@ class NomicLocalProvider(EmbeddingProvider):
 
         return pooled.astype(np.float32)
 
-    def _tokenize(
-        self, texts: list[str], max_length: int = 512
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _tokenize(self, texts: list[str], max_length: int = 512) -> tuple[np.ndarray, np.ndarray]:
         """Tokenize texts into padded input_ids and attention_mask arrays."""
         if self._tokenizer is not None:
             return self._tokenize_hf(texts, max_length)
         return self._tokenize_basic(texts, max_length)
 
-    def _tokenize_hf(
-        self, texts: list[str], max_length: int
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _tokenize_hf(self, texts: list[str], max_length: int) -> tuple[np.ndarray, np.ndarray]:
         """Tokenize using the HuggingFace tokenizers library."""
         self._tokenizer.enable_truncation(max_length=max_length)
         self._tokenizer.enable_padding(length=max_length)
         encodings = self._tokenizer.encode_batch(texts)
-        input_ids = np.array(
-            [e.ids for e in encodings], dtype=np.int64
-        )
-        attention_mask = np.array(
-            [e.attention_mask for e in encodings], dtype=np.int64
-        )
+        input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
+        attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
         return input_ids, attention_mask
 
-    def _tokenize_basic(
-        self, texts: list[str], max_length: int
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _tokenize_basic(self, texts: list[str], max_length: int) -> tuple[np.ndarray, np.ndarray]:
         """Fallback whitespace tokenizer — crude but functional.
 
         Assigns sequential integers as token IDs (not aligned with
         model vocabulary, so results will be degraded).
         """
         logger.warning(
-            "Using basic whitespace tokenizer; install 'tokenizers' "
-            "for proper nomic-embed-text tokenization"
+            "Using basic whitespace tokenizer; install 'tokenizers' for proper nomic-embed-text tokenization"
         )
         # Build a simple vocab on the fly
         vocab: dict[str, int] = {}
@@ -374,7 +348,7 @@ class VoyageProvider(EmbeddingProvider):
             return []
         body = {"input": texts, "model": self._model, "output_dimension": self._dims}
         data = self._api_call(body)
-        return [item["embedding"][:self._dims] for item in data["data"]]
+        return [item["embedding"][: self._dims] for item in data["data"]]
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed([text])[0]
@@ -400,13 +374,9 @@ class VoyageProvider(EmbeddingProvider):
                 return json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             error_body = exc.fp.read().decode() if exc.fp else ""
-            raise RuntimeError(
-                f"Voyage API error {exc.code}: {error_body}"
-            ) from exc
+            raise RuntimeError(f"Voyage API error {exc.code}: {error_body}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(
-                f"Voyage API connection error: {exc.reason}"
-            ) from exc
+            raise RuntimeError(f"Voyage API connection error: {exc.reason}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -472,13 +442,9 @@ class OpenAIProvider(EmbeddingProvider):
                 return json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             error_body = exc.fp.read().decode() if exc.fp else ""
-            raise RuntimeError(
-                f"OpenAI API error {exc.code}: {error_body}"
-            ) from exc
+            raise RuntimeError(f"OpenAI API error {exc.code}: {error_body}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(
-                f"OpenAI API connection error: {exc.reason}"
-            ) from exc
+            raise RuntimeError(f"OpenAI API connection error: {exc.reason}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -486,10 +452,7 @@ class OpenAIProvider(EmbeddingProvider):
 # ---------------------------------------------------------------------------
 
 _GOOGLE_DEFAULT_MODEL = "text-embedding-004"
-_GOOGLE_API_URL_TEMPLATE = (
-    "https://generativelanguage.googleapis.com/v1beta"
-    "/models/{model}:embedContent"
-)
+_GOOGLE_API_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent"
 
 
 class GoogleProvider(EmbeddingProvider):
@@ -545,13 +508,9 @@ class GoogleProvider(EmbeddingProvider):
                 return json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             error_body = exc.fp.read().decode() if exc.fp else ""
-            raise RuntimeError(
-                f"Google API error {exc.code}: {error_body}"
-            ) from exc
+            raise RuntimeError(f"Google API error {exc.code}: {error_body}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(
-                f"Google API connection error: {exc.reason}"
-            ) from exc
+            raise RuntimeError(f"Google API connection error: {exc.reason}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +566,4 @@ def get_embedding_provider(config: dict) -> EmbeddingProvider:
             dimensions=dims,
         )
 
-    raise ValueError(
-        f"Unknown embedding provider: '{provider_name}'. "
-        "Supported: local, voyage, openai, google."
-    )
+    raise ValueError(f"Unknown embedding provider: '{provider_name}'. Supported: local, voyage, openai, google.")

@@ -106,8 +106,8 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     assert payload["metadata"]["warnings"] == ["[vault] WARN: triage failing"]
     assert payload["metadata"]["expandable_paths"] == ["notes/cache.md"]
     assert payload["metadata"]["truncated"] is False
-    mock_briefing.assert_called_once_with("/repo", "s1")
-    mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1")
+    mock_briefing.assert_called_once_with("/repo", "s1", allow_deferred=False)
+    mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1", record=False)
 
 
 def test_build_session_context_respects_budget_and_reports_expandable_paths(tmp_path):
@@ -200,6 +200,76 @@ def test_build_session_context_recomputes_should_inject_on_early_fit(tmp_path):
     assert payload["content"] == ""
     assert payload["should_inject"] is False
     assert payload["metadata"]["used_chars"] == 0
+
+
+def test_build_session_context_records_recall_only_after_final_payload_includes_it(tmp_path):
+    (tmp_path / "notes").mkdir()
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch(
+            "memento.lifecycle._run_recall_lines",
+            return_value=(
+                ["[vault] Related memories:", "  - Cache policy: Use TTLs."],
+                "notes/cache.md",
+                [{"path": "notes/cache.md", "title": "Cache policy"}],
+                None,
+            ),
+        ),
+        patch("memento.lifecycle.record_recall") as mock_record,
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "cache", "s1", token_budget=2000)
+
+    assert "Cache policy" in payload["content"]
+    mock_record.assert_called_once_with("notes/cache.md")
+
+
+def test_build_session_context_does_not_record_recall_when_final_payload_drops_content(tmp_path):
+    (tmp_path / "notes").mkdir()
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch(
+            "memento.lifecycle._run_recall_lines",
+            return_value=(
+                ["[vault] Related memories:", "  - Cache policy: Use TTLs."],
+                "notes/cache.md",
+                [{"path": "notes/cache.md", "title": "Cache policy", "snippet": "x" * 2000}],
+                None,
+            ),
+        ),
+        patch("memento.lifecycle.record_recall") as mock_record,
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: " + ("x" * 1000)),
+    ):
+        payload = build_session_context("/repo", "cache", "s1", token_budget=1)
+
+    assert payload["content"] == ""
+    mock_record.assert_not_called()
+
+
+def test_build_session_context_disables_deferred_briefing_work(tmp_path):
+    (tmp_path / "notes").mkdir()
+
+    with (
+        patch("memento.lifecycle.get_config", return_value={"session_briefing": True, "project_maps_enabled": True}),
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.get_git_branch", return_value="feature"),
+        patch("memento.lifecycle.detect_project", return_value=("repo", None)),
+        patch("memento.lifecycle.read_project_index", return_value=([], [])),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.load_or_build_graph"),
+        patch("memento.lifecycle.spawn_deferred_search") as mock_spawn,
+    ):
+        payload = build_session_context("/repo", "", "s1", include_recall=False)
+
+    assert payload["sections"]["briefing"]["should_inject"] is True
+    mock_spawn.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -324,7 +394,9 @@ def test_recall_diagnostics_logs_broad_project_skip_detail(_config, mock_log):
 @patch("memento.lifecycle.has_qmd", return_value=True)
 @patch("memento.lifecycle.get_vault")
 @patch("memento.lifecycle.get_config", return_value={"prompt_recall": True, "recall_diagnostics": True})
-def test_run_recall_lines_broad_project_skip_does_not_search(_config, mock_vault, _has_qmd, mock_search, _is_remote, tmp_path):
+def test_run_recall_lines_broad_project_skip_does_not_search(
+    _config, mock_vault, _has_qmd, mock_search, _is_remote, tmp_path
+):
     (tmp_path / "notes").mkdir()
     mock_vault.return_value = tmp_path
 
@@ -377,7 +449,9 @@ def test_run_recall_lines_specific_project_prompt_searches(
 @patch("memento.remote_client.search")
 @patch("memento.lifecycle.qmd_search_with_extras")
 @patch("memento.lifecycle.get_config", return_value={"prompt_recall": True, "recall_diagnostics": True})
-def test_run_recall_lines_remote_broad_project_skip_does_not_search(_config, mock_local_search, mock_remote_search, _is_remote):
+def test_run_recall_lines_remote_broad_project_skip_does_not_search(
+    _config, mock_local_search, mock_remote_search, _is_remote
+):
     lines, top_path, results, reason = _run_recall_lines("what do we know about Fundid?", "/repo", "s1")
 
     assert (lines, top_path, results, reason) == ([], None, [], "broad-project-query")
@@ -568,7 +642,9 @@ def test_explicit_project_filter_noops_without_explicit_project():
 def test_explicit_project_filter_does_not_treat_acronyms_as_projects():
     results = [{"path": "notes/mcp.md", "title": "MCP lifecycle", "score": 0.8, "project": "memento-vault"}]
 
-    filtered, decisions = filter_recall_results_by_explicit_project("what did we decide about MCP lifecycle tools?", results)
+    filtered, decisions = filter_recall_results_by_explicit_project(
+        "what did we decide about MCP lifecycle tools?", results
+    )
 
     assert filtered == results
     assert decisions == []
@@ -627,14 +703,20 @@ def test_run_recall_lines_project_mismatch_can_filter_everything_without_candida
 ):
     (tmp_path / "notes").mkdir()
     mock_vault.return_value = tmp_path
-    mock_search.return_value = [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}]
+    mock_search.return_value = [
+        {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}
+    ]
 
     lines, top_path, results, reason = _run_recall_lines(
         "what did we decide about fundid server-side email dispatch?", str(tmp_path), "s1"
     )
 
     assert (lines, top_path, results, reason) == ([], None, [], "project-mismatch-filtered-empty")
-    assert not [call for call in mock_log.call_args_list if call.args[1] == "diagnostic-candidates" and call.kwargs.get("stage") == "project-filter"]
+    assert not [
+        call
+        for call in mock_log.call_args_list
+        if call.args[1] == "diagnostic-candidates" and call.kwargs.get("stage") == "project-filter"
+    ]
 
 
 @patch("memento.remote_client.is_remote", return_value=False)
@@ -664,7 +746,9 @@ def test_run_recall_lines_project_filter_logs_candidate_diagnostics_when_enabled
 ):
     (tmp_path / "notes").mkdir()
     mock_vault.return_value = tmp_path
-    mock_search.return_value = [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}]
+    mock_search.return_value = [
+        {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}
+    ]
 
     _run_recall_lines("what did we decide about Fundid server-side email dispatch?", str(tmp_path), "s1")
 
@@ -678,9 +762,7 @@ def test_run_recall_lines_project_filter_logs_candidate_diagnostics_when_enabled
     assert project_filter_events[0]["candidates"] == [
         {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "decision": "project-mismatch"}
     ]
-    assert project_filter_events[0]["query"].startswith(
-        "what did we decide about Fundid server-side email dispatch?"
-    )
+    assert project_filter_events[0]["query"].startswith("what did we decide about Fundid server-side email dispatch?")
 
 
 @patch("memento.remote_client.is_remote", return_value=False)
@@ -762,7 +844,9 @@ def test_build_recall_project_filter_empty_includes_miss_metadata(
 ):
     (tmp_path / "notes").mkdir()
     mock_vault.return_value = tmp_path
-    mock_search.return_value = [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}]
+    mock_search.return_value = [
+        {"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.9, "project": "dala-care"}
+    ]
 
     result = build_recall("what did we decide about Fundid server-side email dispatch?", str(tmp_path), "s1")
 
@@ -972,7 +1056,9 @@ def test_triage_health_warning_reads_always_on_health_log(tmp_path):
 def test_triage_health_warning_falls_back_to_legacy_retrieval_log(tmp_path):
     health_log = tmp_path / "missing-triage-health.jsonl"
     retrieval_log = tmp_path / "retrieval.jsonl"
-    invalid_mcp_error = "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    invalid_mcp_error = (
+        "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    )
     retrieval_log.write_text(
         "\n".join(
             [
@@ -1005,7 +1091,9 @@ def test_triage_health_warning_falls_back_to_legacy_retrieval_log(tmp_path):
 
 def test_triage_health_warning_adds_invalid_mcp_hint(tmp_path):
     health_log = tmp_path / "triage-health.jsonl"
-    invalid_mcp_error = "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    invalid_mcp_error = (
+        "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
+    )
     health_log.write_text(
         "\n".join(
             [

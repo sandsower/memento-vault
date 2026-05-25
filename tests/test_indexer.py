@@ -17,15 +17,9 @@ def vault(tmp_path):
     for d in ("notes", "fleeting", "projects"):
         (v / d).mkdir(parents=True)
 
-    (v / "notes" / "alpha.md").write_text(
-        "---\ntitle: Alpha note\n---\n\nAlpha content about Redis.\n"
-    )
-    (v / "notes" / "beta.md").write_text(
-        "---\ntitle: Beta note\n---\n\nBeta content about PostgreSQL.\n"
-    )
-    (v / "fleeting" / "daily.md").write_text(
-        "---\ntitle: Daily log\n---\n\nWorked on indexer today.\n"
-    )
+    (v / "notes" / "alpha.md").write_text("---\ntitle: Alpha note\n---\n\nAlpha content about Redis.\n")
+    (v / "notes" / "beta.md").write_text("---\ntitle: Beta note\n---\n\nBeta content about PostgreSQL.\n")
+    (v / "fleeting" / "daily.md").write_text("---\ntitle: Daily log\n---\n\nWorked on indexer today.\n")
     return v
 
 
@@ -87,9 +81,7 @@ class TestScanCatchesUpdatedFiles:
 
         # Modify a file — bump mtime to guarantee it's newer
         note = vault / "notes" / "alpha.md"
-        note.write_text(
-            "---\ntitle: Alpha note\n---\n\nUpdated content about Memcached.\n"
-        )
+        note.write_text("---\ntitle: Alpha note\n---\n\nUpdated content about Memcached.\n")
         future = time.time() + 2
         os.utime(note, (future, future))
 
@@ -128,9 +120,7 @@ class TestIndexSingle:
         from memento.indexer import index_single
 
         new_note = vault / "projects" / "gamma.md"
-        new_note.write_text(
-            "---\ntitle: Gamma project\n---\n\nGamma content about Kubernetes.\n"
-        )
+        new_note.write_text("---\ntitle: Gamma project\n---\n\nGamma content about Kubernetes.\n")
 
         result = index_single(vault, backend, "projects/gamma.md")
         assert result is True

@@ -163,20 +163,29 @@ def replay_session(parsed, quiet=False):
         "read_count": len(reads),
         "briefing": {"latency_ms": 0, "chars": 0},
         "recall": {
-            "calls": 0, "injections": 0, "skips": 0,
-            "total_latency_ms": 0, "total_chars": 0,
+            "calls": 0,
+            "injections": 0,
+            "skips": 0,
+            "total_latency_ms": 0,
+            "total_chars": 0,
             "latencies": [],
         },
         "tool_context": {
-            "calls": 0, "injections": 0, "skips": 0,
-            "total_latency_ms": 0, "total_chars": 0,
+            "calls": 0,
+            "injections": 0,
+            "skips": 0,
+            "total_latency_ms": 0,
+            "total_chars": 0,
             "latencies": [],
         },
     }
 
     # Clean caches
-    for f in ["/tmp/memento-deferred-briefing.json", "/tmp/memento-last-recall.json",
-              "/tmp/memento-tool-context-cache.json"]:
+    for f in [
+        "/tmp/memento-deferred-briefing.json",
+        "/tmp/memento-last-recall.json",
+        "/tmp/memento-tool-context-cache.json",
+    ]:
         try:
             os.unlink(f)
         except OSError:
@@ -263,12 +272,16 @@ def percentile(lst, p):
 def print_report(all_stats):
     """Print comprehensive benchmark report."""
     n = len(all_stats)
+    if n == 0:
+        print("\nNo sessions to report.")
+        return
+
     total_prompts = sum(s["prompt_count"] for s in all_stats)
     total_reads = sum(s["read_count"] for s in all_stats)
 
-    print(f"\n{'='*65}")
-    print(f"  MEMENTO VAULT PERFORMANCE REPORT — REAL SESSION REPLAY")
-    print(f"{'='*65}")
+    print(f"\n{'=' * 65}")
+    print("  MEMENTO VAULT PERFORMANCE REPORT — REAL SESSION REPLAY")
+    print(f"{'=' * 65}")
     print(f"  Sessions replayed:  {n}")
     print(f"  Total prompts:      {total_prompts}")
     print(f"  Total file reads:   {total_reads}")
@@ -283,10 +296,10 @@ def print_report(all_stats):
     # --- Briefing ---
     b_lats = [s["briefing"]["latency_ms"] for s in all_stats]
     b_chars = [s["briefing"]["chars"] for s in all_stats]
-    print(f"\n  SESSION BRIEFING (sync output only, QMD deferred)")
-    print(f"  {'Avg latency:':<22} {sum(b_lats)/n:.0f}ms")
+    print("\n  SESSION BRIEFING (sync output only, QMD deferred)")
+    print(f"  {'Avg latency:':<22} {sum(b_lats) / n:.0f}ms")
     print(f"  {'P95 latency:':<22} {percentile(b_lats, 95):.0f}ms")
-    print(f"  {'Avg chars:':<22} {sum(b_chars)/n:.0f}")
+    print(f"  {'Avg chars:':<22} {sum(b_chars) / n:.0f}")
 
     # --- Recall ---
     all_recall_lats = []
@@ -298,16 +311,16 @@ def print_report(all_stats):
     r_chars = sum(s["recall"]["total_chars"] for s in all_stats)
     r_effective = r_inj / max(r_total - r_skip, 1) * 100 if r_total > r_skip else 0
 
-    print(f"\n  PROMPT RECALL (per-prompt BM25)")
+    print("\n  PROMPT RECALL (per-prompt BM25)")
     print(f"  {'Total calls:':<22} {r_total}")
-    print(f"  {'Injections:':<22} {r_inj} ({r_inj/max(r_total,1)*100:.0f}% raw)")
+    print(f"  {'Injections:':<22} {r_inj} ({r_inj / max(r_total, 1) * 100:.0f}% raw)")
     print(f"  {'Intentional skips:':<22} {r_skip}")
     if r_total > r_skip:
         print(f"  {'Effective hit rate:':<22} {r_inj}/{r_total - r_skip} ({r_effective:.0f}%)")
-    print(f"  {'Avg latency/call:':<22} {sum(all_recall_lats)/max(len(all_recall_lats),1):.0f}ms")
+    print(f"  {'Avg latency/call:':<22} {sum(all_recall_lats) / max(len(all_recall_lats), 1):.0f}ms")
     print(f"  {'P95 latency/call:':<22} {percentile(all_recall_lats, 95):.0f}ms")
     print(f"  {'Total chars injected:':<22} {r_chars}")
-    print(f"  {'Avg chars/session:':<22} {r_chars/n:.0f}")
+    print(f"  {'Avg chars/session:':<22} {r_chars / n:.0f}")
 
     # --- Tool context ---
     all_tc_lats = []
@@ -318,41 +331,43 @@ def print_report(all_stats):
     tc_total = tc_inj + tc_skip
     tc_chars = sum(s["tool_context"]["total_chars"] for s in all_stats)
 
-    print(f"\n  TOOL CONTEXT (PreToolUse:Read)")
+    print("\n  TOOL CONTEXT (PreToolUse:Read)")
     print(f"  {'Total calls:':<22} {tc_total}")
-    print(f"  {'Injections:':<22} {tc_inj} ({tc_inj/max(tc_total,1)*100:.0f}% raw)")
+    print(f"  {'Injections:':<22} {tc_inj} ({tc_inj / max(tc_total, 1) * 100:.0f}% raw)")
     print(f"  {'Intentional skips:':<22} {tc_skip}")
     if tc_total > tc_skip:
         searchable = tc_total - tc_skip
-        print(f"  {'Effective hit rate:':<22} {tc_inj}/{searchable} ({tc_inj/searchable*100:.0f}%)")
-    print(f"  {'Avg latency/call:':<22} {sum(all_tc_lats)/max(len(all_tc_lats),1):.0f}ms")
+        print(f"  {'Effective hit rate:':<22} {tc_inj}/{searchable} ({tc_inj / searchable * 100:.0f}%)")
+    print(f"  {'Avg latency/call:':<22} {sum(all_tc_lats) / max(len(all_tc_lats), 1):.0f}ms")
     print(f"  {'P95 latency/call:':<22} {percentile(all_tc_lats, 95):.0f}ms")
     print(f"  {'Total chars injected:':<22} {tc_chars}")
-    print(f"  {'Avg chars/session:':<22} {tc_chars/n:.0f}")
+    print(f"  {'Avg chars/session:':<22} {tc_chars / n:.0f}")
 
     # --- Cost summary ---
     total_chars = sum(b_chars) + r_chars + tc_chars
     avg_per_session = total_chars / n
     est_units = avg_per_session / 4
 
-    print(f"\n  {'='*55}")
-    print(f"  COST SUMMARY")
-    print(f"  {'='*55}")
+    print(f"\n  {'=' * 55}")
+    print("  COST SUMMARY")
+    print(f"  {'=' * 55}")
     print(f"  {'Total chars injected:':<30} {total_chars}")
     print(f"  {'Avg chars/session:':<30} {avg_per_session:.0f}")
     print(f"  {'Est. input units/session:':<30} ~{est_units:.0f}")
     print(f"  {'Breakdown:':<30}")
-    print(f"    {'Briefing:':<28} {sum(b_chars)/n:.0f} chars/session ({sum(b_chars)/max(total_chars,1)*100:.0f}%)")
-    print(f"    {'Recall:':<28} {r_chars/n:.0f} chars/session ({r_chars/max(total_chars,1)*100:.0f}%)")
-    print(f"    {'Tool context:':<28} {tc_chars/n:.0f} chars/session ({tc_chars/max(total_chars,1)*100:.0f}%)")
+    print(
+        f"    {'Briefing:':<28} {sum(b_chars) / n:.0f} chars/session ({sum(b_chars) / max(total_chars, 1) * 100:.0f}%)"
+    )
+    print(f"    {'Recall:':<28} {r_chars / n:.0f} chars/session ({r_chars / max(total_chars, 1) * 100:.0f}%)")
+    print(f"    {'Tool context:':<28} {tc_chars / n:.0f} chars/session ({tc_chars / max(total_chars, 1) * 100:.0f}%)")
 
-    print(f"\n  COMPARISON vs CONCIERGE AGENT")
+    print("\n  COMPARISON vs CONCIERGE AGENT")
     print(f"  {'Concierge (1 call):':<30} ~72,500 input units, 60-90s")
     print(f"  {'Hooks (full session):':<30} ~{est_units:.0f} input units, <500ms/injection")
     if est_units > 0:
         ratio = 72500 / est_units
         print(f"  {'Efficiency:':<30} {ratio:.0f}x fewer input units")
-    print(f"{'='*65}\n")
+    print(f"{'=' * 65}\n")
 
 
 def run_inception_benchmark(quiet=False):
@@ -389,7 +404,6 @@ def run_inception_benchmark(quiet=False):
         return None
 
     stderr = result.stderr or ""
-    stdout = result.stdout or ""
 
     # Parse stderr lines for metrics
     stats = {
@@ -437,9 +451,9 @@ def print_inception_report(stats):
     if stats is None:
         return
 
-    print(f"\n  {'='*55}")
-    print(f"  INCEPTION PIPELINE (dry-run)")
-    print(f"  {'='*55}")
+    print(f"\n  {'=' * 55}")
+    print("  INCEPTION PIPELINE (dry-run)")
+    print(f"  {'=' * 55}")
     print(f"  {'Exit code:':<28} {stats['exit_code']}")
     print(f"  {'Total pipeline time:':<28} {stats['total_ms']}ms")
     print(f"  {'Notes collected:':<28} {stats['notes_collected']}")
@@ -453,7 +467,7 @@ def print_inception_report(stats):
         print(f"  {'Note:':<28} No embeddings found — QMD may not be indexed")
     elif stats["exit_code"] == 1:
         print(f"  {'Note:':<28} Another Inception instance was running (locked)")
-    print(f"  {'='*55}")
+    print(f"  {'=' * 55}")
 
 
 def main():
@@ -477,7 +491,7 @@ def main():
     print(f"Parsed {len(parsed)} non-empty sessions")
 
     # Limit total
-    parsed = parsed[:args.max_sessions]
+    parsed = parsed[: args.max_sessions]
     print(f"Replaying {len(parsed)} sessions...\n")
 
     all_stats = []
@@ -486,7 +500,7 @@ def main():
         prompts = len(p["user_prompts"])
         reads = len(p["read_paths"])
         if not args.quiet:
-            print(f"  [{i+1}/{len(parsed)}] {project} ({prompts} prompts, {reads} reads)...", end=" ", flush=True)
+            print(f"  [{i + 1}/{len(parsed)}] {project} ({prompts} prompts, {reads} reads)...", end=" ", flush=True)
         stats = replay_session(p, quiet=args.quiet)
         total = stats["briefing"]["chars"] + stats["recall"]["total_chars"] + stats["tool_context"]["total_chars"]
         if not args.quiet:
