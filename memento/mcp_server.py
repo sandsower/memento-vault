@@ -820,7 +820,8 @@ def memento_capture(
 
     try:
         # Write fleeting note (always — matches local triage behavior)
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        utc_now = datetime.now(timezone.utc)
+        today = utc_now.strftime("%Y-%m-%d")
         fleeting_result = append_fleeting_session(
             vault,
             session_id,
@@ -828,6 +829,7 @@ def memento_capture(
             branch=branch,
             agent=agent,
             files_edited=files_edited,
+            now=utc_now,
         )
         if fleeting_result["already_logged"]:
             return {

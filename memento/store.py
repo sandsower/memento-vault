@@ -242,9 +242,24 @@ def append_fleeting_session(
         present and no line was appended).
     """
     vault = Path(vault_path)
-    moment = now or datetime.now(timezone.utc)
+    if now is None:
+        moment = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        moment = now.replace(tzinfo=timezone.utc)
+    else:
+        moment = now.astimezone(timezone.utc)
     today = moment.strftime("%Y-%m-%d")
     hhmm = moment.strftime("%H:%M")
+
+    def _clean(value, default=""):
+        text = str(value if value is not None else default)
+        text = " ".join(text.split()).replace("`", "'")
+        return text[:300]
+
+    safe_session_id = _clean(session_id, "?")
+    safe_cwd = _clean(cwd, "?")
+    safe_branch = _clean(branch)
+    safe_agent = _clean(agent)
 
     fleeting_dir = vault / "fleeting"
     fleeting_dir.mkdir(parents=True, exist_ok=True)
@@ -255,12 +270,12 @@ def append_fleeting_session(
 
     existing = fleeting_file.read_text()
     rel = str(fleeting_file.relative_to(vault))
-    if f"`{session_id}`" in existing:
+    if f"`{safe_session_id}`" in existing:
         return {"fleeting": rel, "already_logged": True}
 
-    branch_str = f" ({branch})" if branch else ""
+    branch_str = f" ({safe_branch})" if safe_branch else ""
     files_count = f", {len(files_edited)} files" if files_edited else ""
-    line = f"- {hhmm} `{session_id}` {cwd or '?'}{branch_str} — {agent or ''}{files_count}\n"
+    line = f"- {hhmm} `{safe_session_id}` {safe_cwd}{branch_str} — {safe_agent}{files_count}\n"
     with open(fleeting_file, "a") as f:
         f.write(line)
     return {"fleeting": rel, "already_logged": False}

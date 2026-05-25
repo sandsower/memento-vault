@@ -2,7 +2,7 @@
 
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -580,3 +580,32 @@ class TestAppendFleetingSession:
         )
         assert (tmp_vault / "fleeting" / "2026-05-11.md").exists()
         assert (tmp_vault / "fleeting" / "2026-05-12.md").exists()
+
+    def test_normalizes_naive_and_non_utc_datetimes_to_utc(self, tmp_vault):
+        """The helper consistently derives the target file and time in UTC."""
+        append_fleeting_session(
+            tmp_vault,
+            "ses_naive",
+            now=datetime(2026, 5, 12, 1, 2),
+        )
+        append_fleeting_session(
+            tmp_vault,
+            "ses_offset",
+            now=datetime(2026, 5, 11, 20, 30, tzinfo=timezone(timedelta(hours=-4))),
+        )
+        text = (tmp_vault / "fleeting" / "2026-05-12.md").read_text()
+        assert "- 01:02 `ses_naive`" in text
+        assert "- 00:30 `ses_offset`" in text
+
+    def test_sanitizes_markdown_metadata(self, tmp_vault):
+        """Session metadata stays on one safe markdown line."""
+        append_fleeting_session(
+            tmp_vault,
+            "ses`bad\nnext",
+            cwd="/tmp/project\nextra",
+            branch="main`branch",
+            agent="open\ncode",
+            now=datetime(2026, 5, 12, 9, 0, tzinfo=timezone.utc),
+        )
+        text = (tmp_vault / "fleeting" / "2026-05-12.md").read_text()
+        assert "`ses'bad next` /tmp/project extra (main'branch) — open code" in text
