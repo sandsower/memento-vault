@@ -61,7 +61,9 @@ modes:
     rules:
       workspace-write: allow
     actions:
+      git.branch: allow
       git.commit: allow
+      git.merge: allow
       review.fix: allow
     sandbox:
       on_uncommitted_changes: allow

@@ -1,0 +1,542 @@
+{
+  "schema_version": 1,
+  "description": "Static memento-vault benchmark task set for future Rondo clean evaluators and agent-development experiments.",
+  "tasks": [
+    {
+      "id": "mv-rondo-benchmark-seed",
+      "issue": {
+        "number": 55,
+        "title": "[P0] Create memento-vault benchmark task set for Rondo",
+        "url": "https://github.com/sandsower/memento-vault/issues/55",
+        "labels": [
+          "enhancement",
+          "priority: P0",
+          "status: available",
+          "rondo-enabler"
+        ],
+        "body_snapshot": "## Context\nThe Rondo/Beislið research recommends testing the externalized-knowledge/process theory against a small benchmark set of real memento-vault issues before claiming unattended reliability.\n\nThis benchmark data can be prepared now, even before Rondo runner changes land.\n\n## Proposal\nCreate a memento-vault Rondo benchmark task set.\n\n## Scope\nSelect 8-12 GitHub issues across categories:\n- retrieval behavior\n- MCP/tooling\n- triage/capture\n- docs/process\n- sync/security/release\n\nFor each task, record:\n- issue ID/title/body snapshot\n- expected touched areas\n- acceptance criteria\n- required gates\n- known risky areas\n- relevant memento notes or docs to retrieve\n- success/failure rubric\n\n## Acceptance criteria\n- Benchmark task definitions live in a machine-readable file or documented fixture directory.\n- Tasks can be consumed later by Rondo or a clean evaluator.\n- At least one task exercises memento-vault using its own vault knowledge.\n- The benchmark distinguishes agent failure, harness failure, and ambiguous requirements."
+      },
+      "category": "docs/process",
+      "difficulty": "medium",
+      "requires_vault_knowledge": true,
+      "expected_touched_areas": [
+        "benchmark/rondo/tasks.json",
+        "benchmark/rondo/README.md",
+        "tests/test_rondo_benchmark_tasks.py"
+      ],
+      "acceptance_criteria": [
+        "Defines 8-12 real issue tasks in a machine-readable fixture",
+        "Documents fixture schema and evaluator expectations",
+        "Includes category coverage and at least one task requiring vault recall",
+        "Provides rubrics that separate agent, harness, and requirement failures"
+      ],
+      "required_gates": [
+        ".venv/bin/python -m pytest tests/test_rondo_benchmark_tasks.py",
+        ".venv/bin/python -m ruff check benchmark/rondo tests/test_rondo_benchmark_tasks.py"
+      ],
+      "known_risks": [
+        "Fixture can become stale as GitHub issues evolve",
+        "Overfitting the task set to current repo layout",
+        "Confusing benchmark metadata with executable Rondo runner behavior"
+      ],
+      "retrieval_context": {
+        "docs": [
+          "benchmark/README.md",
+          ".beislid/workflow.md",
+          "AGENTS.md"
+        ],
+        "memento_queries": [
+          "memento-vault Rondo Beislið harness research benchmark task set",
+          "checkpoint memento-vault rondo beisli harness research"
+        ]
+      },
+      "rubric": {
+        "success": "A clean evaluator can parse the fixture, select representative tasks, and understand expected files, gates, risks, and failure classification without reading the live issue tracker.",
+        "agent_failure": "Task metadata is incomplete, categories are missing, or rubrics do not let a reviewer diagnose why an attempted run failed.",
+        "harness_failure": "The fixture is valid but the external Rondo runner cannot consume JSON fixtures yet or expects a different adapter contract that was not available when this task was authored.",
+        "ambiguous_requirements": "The benchmark asks the agent to implement future Rondo capabilities rather than preparing static task definitions."
+      }
+    },
+    {
+      "id": "mv-ci-gates",
+      "issue": {
+        "number": 52,
+        "title": "[P0] Add GitHub Actions CI for memento-vault gates",
+        "url": "https://github.com/sandsower/memento-vault/issues/52",
+        "labels": [
+          "enhancement",
+          "priority: P0",
+          "status: available",
+          "rondo-enabler"
+        ],
+        "body_snapshot": "## Context\nThis checkout currently has no `.github/` workflow. For agentic/Rondo-style automation, local Beislið gates need a CI mirror so PR readiness is verified outside the agent's mutable session.\n\n## Proposal\nAdd GitHub Actions CI for memento-vault.\n\n## Initial jobs\n- Python lint/format:\n  - `ruff check .`\n  - `ruff format --check .`\n  - `python -m compileall -q memento hooks scripts`\n- Test:\n  - full `pytest`\n  - upload failure logs/artifacts if practical\n- MCP/remote focused tests:\n  - `tests/test_mcp_server.py`\n  - `tests/test_remote_client.py`\n  - `tests/test_integration_remote.py`\n- Install/register focused tests:\n  - `tests/test_install_helpers.py`\n  - `tests/test_install_register_mcp.py`\n- Sandbox smoke:\n  - `scripts/claude_sandbox_smoke.py`\n\n## Acceptance criteria\n- CI runs on PRs and pushes to main.\n- CI commands mirror local Beislið gates where possible.\n- Workflow is documented in README or releasing docs.\n- The workflow avoids requiring optional heavy dependencies unless explicitly installed in the job."
+      },
+      "category": "docs/process",
+      "difficulty": "medium",
+      "requires_vault_knowledge": false,
+      "expected_touched_areas": [
+        ".github/workflows/ci.yml",
+        "README.md",
+        ".beislid/workflow.md"
+      ],
+      "acceptance_criteria": [
+        "CI runs on PRs and pushes to main",
+        "CI mirrors local Beislið gates where practical",
+        "Optional heavy dependencies are not required by default",
+        "Workflow behavior is documented"
+      ],
+      "required_gates": [
+        ".venv/bin/python -m ruff check .",
+        ".venv/bin/python -m ruff format --check .",
+        ".venv/bin/python -m compileall -q memento hooks scripts"
+      ],
+      "known_risks": [
+        "Full pytest may need optional dependencies absent from CI",
+        "Duplicating Beislið gates can drift",
+        "CI matrix choices can be too slow for agent loops"
+      ],
+      "retrieval_context": {
+        "docs": [
+          ".beislid/workflow.md",
+          "README.md",
+          "pyproject.toml"
+        ],
+        "memento_queries": []
+      },
+      "rubric": {
+        "success": "A GitHub Actions workflow provides fast safe checks with clear logs and no mandatory optional-heavy setup.",
+        "agent_failure": "The workflow omits key local gates, requires unavailable secrets/dependencies, or does not trigger on PR/main events.",
+        "harness_failure": "GitHub Actions infrastructure fails independently of repository content, or the evaluator cannot inspect workflow execution logs.",
+        "ambiguous_requirements": "The issue does not specify exact Python versions or whether full pytest must pass without optional benchmark dependencies."
+      }
+    },
+    {
+      "id": "mv-release-smoke-gates",
+      "issue": {
+        "number": 54,
+        "title": "[P0] Add release install and package smoke gates",
+        "url": "https://github.com/sandsower/memento-vault/issues/54",
+        "labels": [
+          "enhancement",
+          "priority: P0",
+          "status: available",
+          "rondo-enabler"
+        ],
+        "body_snapshot": "## Context\nmemento-vault has multiple distribution/install surfaces: manual install script, Homebrew formula, Docker/remote deployment, MCP registration, and pi package metadata. Agentic work on this repo needs gates that catch release/install breakage before PR review.\n\n## Proposal\nAdd release/install/package smoke gates.\n\n## Candidate checks\n- `bin/memento-vault --help`\n- `python -m memento --help` or safe MCP startup/status smoke\n- install script dry-run or temp-HOME smoke\n- Homebrew formula syntax/version consistency check\n- Docker build or compose config validation where practical\n- npm/pi package dry-run once package deps are explicit\n- VERSION consistency checks across `VERSION`, formula, package metadata, docs where applicable\n\n## Acceptance criteria\n- A lightweight release smoke script exists.\n- CI or Beislið can run the safe subset without mutating the developer machine.\n- Heavy/optional checks are separated from the fast default path.\n- Failures provide actionable output for agents."
+      },
+      "category": "sync/security/release",
+      "difficulty": "medium",
+      "requires_vault_knowledge": false,
+      "expected_touched_areas": [
+        "scripts or tools release smoke entrypoint",
+        "Formula/memento-vault.rb",
+        "package.json",
+        "docs/releasing.md",
+        "tests/test_install_helpers.py"
+      ],
+      "acceptance_criteria": [
+        "Adds lightweight release/install smoke script",
+        "Separates fast safe checks from heavy optional checks",
+        "Produces actionable failure output",
+        "Can be run by CI or Beislið without mutating the developer machine"
+      ],
+      "required_gates": [
+        "release smoke script help/dry-run",
+        ".venv/bin/python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py"
+      ],
+      "known_risks": [
+        "Install scripts may mutate HOME unless carefully sandboxed",
+        "Homebrew/Docker checks can be expensive or host-dependent",
+        "Version metadata can drift across package surfaces"
+      ],
+      "retrieval_context": {
+        "docs": [
+          "docs/releasing.md",
+          "install.sh",
+          "Formula/memento-vault.rb",
+          "package.json",
+          "VERSION"
+        ],
+        "memento_queries": []
+      },
+      "rubric": {
+        "success": "The repo gains a documented fast smoke path that exercises help/version/install metadata and clearly marks heavy checks optional.",
+        "agent_failure": "The implementation mutates the real user environment, hides failing subchecks, or does not cover package/install surfaces called out in the issue.",
+        "harness_failure": "The host lacks Docker, Homebrew, npm, or other external tools needed only for optional heavy checks.",
+        "ambiguous_requirements": "The issue leaves room to choose which candidate checks are fast defaults versus optional heavy checks."
+      }
+    },
+    {
+      "id": "mv-frontmatter-drift",
+      "issue": {
+        "number": 53,
+        "title": "[P0] Add frontmatter schema and docs drift checker",
+        "url": "https://github.com/sandsower/memento-vault/issues/53",
+        "labels": [
+          "enhancement",
+          "priority: P0",
+          "status: available",
+          "rondo-enabler"
+        ],
+        "body_snapshot": "## Context\nThe harness research identified docs/schema drift as a high-value gate. memento-vault's Markdown frontmatter is a source-of-truth interface for retrieval, Obsidian, sync, and agents. If docs drift from what `write_note`, `write_daily_snapshot`, MCP store/capture, and Inception actually write, agents and users get unreliable guidance.\n\n## Proposal\nAdd a frontmatter/schema drift checker.\n\n## Scope\n- Validate `docs/frontmatter-schema.md` against implemented writers and representative fixtures.\n- Cover note types/sources emitted by:\n  - session triage\n  - MCP store/capture\n  - daily snapshots\n  - Inception pattern notes\n  - preserve tool once implemented\n- Optionally generate a machine-readable schema or golden examples.\n\n## Acceptance criteria\n- A test or script fails when documented frontmatter fields/types/sources drift from implementation.\n- Existing docs are updated to match current implementation.\n- The checker can be run locally and in CI."
+      },
+      "category": "docs/process",
+      "difficulty": "medium",
+      "requires_vault_knowledge": false,
+      "expected_touched_areas": [
+        "docs/frontmatter-schema.md",
+        "memento/store.py",
+        "tests/test_store.py",
+        "tests/test_frontmatter_schema_drift.py or similar"
+      ],
+      "acceptance_criteria": [
+        "Validates documented frontmatter against representative writers/fixtures",
+        "Detects docs drift in CI or local tests",
+        "Keeps schema guidance aligned with retrieval/sync/agent behavior"
+      ],
+      "required_gates": [
+        ".venv/bin/python -m pytest tests/test_store.py targeted schema test",
+        ".venv/bin/python -m ruff check docs tests memento"
+      ],
+      "known_risks": [
+        "Markdown examples may intentionally be illustrative rather than exhaustive",
+        "Multiple writers produce different frontmatter subsets",
+        "Overly strict tests can block valid schema evolution"
+      ],
+      "retrieval_context": {
+        "docs": [
+          "docs/frontmatter-schema.md",
+          "memento/store.py",
+          "tests/test_store.py"
+        ],
+        "memento_queries": []
+      },
+      "rubric": {
+        "success": "A drift check fails when documented frontmatter diverges from implemented writers while allowing legitimate optional fields.",
+        "agent_failure": "The checker only validates static docs text, misses actual writer output, or creates brittle constraints unrelated to stored note behavior.",
+        "harness_failure": "A parser dependency or docs extraction step fails in the harness even though the repository change is correct.",
+        "ambiguous_requirements": "The issue does not enumerate every authoritative writer, so the agent may need to document its chosen representative set."
+      }
+    },
+    {
+      "id": "mv-mcp-tool-drift",
+      "issue": {
+        "number": 41,
+        "title": "[P0] Prevent MCP tool inventory and docs drift",
+        "url": "https://github.com/sandsower/memento-vault/issues/41",
+        "labels": [
+          "documentation",
+          "priority: P0",
+          "status: available",
+          "rondo-enabler"
+        ],
+        "body_snapshot": "## Context\nThe README/MCP docs have already drifted: the text says one tool count while the code exposes a larger tool surface. Tool drift makes installation docs and agent instructions less trustworthy.\n\n## Proposal\nPrevent MCP tool/docs drift by generating tool inventory or testing docs against the registered MCP tools.\n\n## Options\n- Generate the MCP tool table from `memento.mcp_server` metadata.\n- Add a CI test that fails when README/docs tool names differ from the tool registry.\n- Add a small `memento-vault tools --markdown` command used by docs.\n\n## Acceptance criteria\n- Current documented tool count/names match implementation.\n- Future additions/removals fail tests or update generated docs.\n- The fix covers README and any docs/config references that list MCP tools."
+      },
+      "category": "MCP/tooling",
+      "difficulty": "medium",
+      "requires_vault_knowledge": false,
+      "expected_touched_areas": [
+        "memento/mcp_server.py",
+        "README.md",
+        "docs/configuration.md",
+        "tests/test_mcp_server.py"
+      ],
+      "acceptance_criteria": [
+        "Documented MCP tool count and names match implementation",
+        "Future additions/removals fail tests or update generated docs",
+        "README and docs references are covered"
+      ],
+      "required_gates": [
+        ".venv/bin/python -m pytest tests/test_mcp_server.py",
+        ".venv/bin/python -m ruff check memento tests"
+      ],
+      "known_risks": [
+        "MCP server metadata may be hard to inspect without starting external transports",
+        "Generated docs can be noisy in diffs",
+        "Tool aliases or hidden helper tools may not belong in public docs"
+      ],
+      "retrieval_context": {
+        "docs": [
+          "README.md",
+          "docs/configuration.md",
+          "memento/mcp_server.py"
+        ],
+        "memento_queries": []
+      },
+      "rubric": {
+        "success": "A repeatable check or generator keeps public MCP docs synchronized with the registered tool surface.",
+        "agent_failure": "The agent updates counts by hand without a future drift guard or validates the wrong tool registry.",
+        "harness_failure": "The MCP framework changes runtime metadata shape or fails to import in the clean evaluator environment.",
+        "ambiguous_requirements": "The issue allows either generated docs or a docs-vs-registry test; either is acceptable if documented."
+      }
+    },
+    {
+      "id": "mv-search-health-diagnostics",
+      "issue": {
+        "number": 61,
+        "title": "[P0] Expand health diagnostics for recall/search failures",
+        "url": "https://github.com/sandsower/memento-vault/issues/61",
+        "labels": [
+          "enhancement",
+          "priority: P0",
+          "status: available"
+        ],
+        "body_snapshot": "## Context\nFollow-up from #36 (`memento-vault health` / `doctor`). The first health command should ship with cheap, read-only checks. Rich retrieval diagnostics were intentionally deferred to keep the initial PR reviewable.\n\n## Proposal\nExpand health diagnostics for recall/search degradation.\n\n## Candidate checks\n- Recent recall/search failure rate from retrieval logs.\n- Last sanitized/truncated retrieval/search error in `--verbose` / `--json`.\n- Distinguish no-results, backend unavailable, backend exception, and low-signal skips.\n- Surface likely remediation when search backend is configured but repeatedly failing.\n\n## Constraints\n- Default report stays concise.\n- No secrets in output.\n- Read-only and cheap by default.\n- Link behavior back to #36 health report semantics."
+      },
+      "category": "retrieval behavior",
+      "difficulty": "medium",
+      "requires_vault_knowledge": true,
+      "expected_touched_areas": [
+        "memento/health.py",
+        "tests/test_health.py",
+        "docs/configuration.md or README.md"
+      ],
+      "acceptance_criteria": [
+        "Reports recent recall/search failure rate from logs",
+        "Surfaces sanitized last errors in verbose or JSON mode",
+        "Distinguishes no-results, backend unavailable, backend exception, and low-signal skips",
+        "Keeps default health output concise and read-only"
+      ],
+      "required_gates": [
+        ".venv/bin/python -m pytest tests/test_health.py",
+        ".venv/bin/python -m ruff check memento/health.py tests/test_health.py"
+      ],
+      "known_risks": [
+        "Retrieval logs can contain sensitive paths or prompt text",
+        "Health output must remain cheap and read-only",
+        "Different backends may encode failures differently"
+      ],
+      "retrieval_context": {
+        "docs": [
+          "memento/health.py",
+          "tests/test_health.py",
+          "docs/configuration.md"
+        ],
+        "memento_queries": [
+          "recall search failures health diagnostics no-results backend unavailable low-signal",
+          "issue 36 memento-vault health report semantics"
+        ]
+      },
+      "rubric": {
+        "success": "Health diagnostics identify degraded recall/search behavior with sanitized, actionable detail in JSON/verbose output.",
+        "agent_failure": "The implementation leaks secrets, makes expensive retrieval calls, or collapses distinct failure modes into one vague warning.",
+        "harness_failure": "The evaluator has no retrieval log fixture or cannot reproduce local log paths used by the health command.",
+        "ambiguous_requirements": "The exact retrieval log schema is not fully specified, so fixture-backed documented assumptions are acceptable."
+      }
+    },
+    {
+      "id": "mv-search-response-shaping",
+      "issue": {
+        "number": 47,
+        "title": "[P2] Add detail_level include_content and token_budget to memento_search",
+        "url": "https://github.com/sandsower/memento-vault/issues/47",
+        "labels": [
+          "enhancement",
+          "priority: P2",
+          "status: available"
+        ],
+        "body_snapshot": "## Context\nMemento's MCP `memento_search` includes full note content inline when available. This is convenient, especially for remote notes, but can bloat context. The talk's progressive-disclosure theme suggests returning summaries first and loading full content only when needed.\n\n## Proposal\nAdd response-shaping parameters to `memento_search`.\n\n## API sketch\n- `detail_level: \"brief\" | \"summary\" | \"full\"`\n- `include_content: bool`\n- `token_budget: int | None`\n- `expandable_paths: list[str]` when content is withheld or truncated\n\n## Suggested behavior\n- `brief`: path, title, score, maybe note type/certainty.\n- `summary`: current compact snippet behavior; no full body by default.\n- `full`: include full note content where safe/available.\n- If `token_budget` is exceeded, truncate and return expandable paths for `memento_get`.\n\n## Acceptance criteria\n- Default search response stays token-efficient.\n- Agents can explicitly request full content.\n- Results report truncation/expandable paths when budgeted.\n- Tests cover all detail levels and budget truncation."
+      },
+      "category": "retrieval behavior",
+      "difficulty": "medium",
+      "requires_vault_knowledge": false,
+      "expected_touched_areas": [
+        "memento/mcp_server.py",
+        "memento/search.py",
+        "tests/test_mcp_server.py",
+        "tests/test_search_backend.py"
+      ],
+      "acceptance_criteria": [
+        "Adds requested memento_search response controls such as detail_level/include_content/token_budget",
+        "Preserves safe defaults for existing clients",
+        "Tests output shaping and budget behavior"
+      ],
+      "required_gates": [
+        ".venv/bin/python -m pytest tests/test_mcp_server.py tests/test_search_backend.py",
+        ".venv/bin/python -m ruff check memento tests"
+      ],
+      "known_risks": [
+        "Including content can explode token budgets",
+        "MCP schema changes can break existing clients",
+        "Search backends may return heterogeneous result metadata"
+      ],
+      "retrieval_context": {
+        "docs": [
+          "memento/mcp_server.py",
+          "memento/search.py",
+          "README.md"
+        ],
+        "memento_queries": []
+      },
+      "rubric": {
+        "success": "memento_search supports explicit detail/budget controls while existing default behavior remains backward compatible.",
+        "agent_failure": "The agent changes retrieval ranking instead of response shaping, breaks MCP schemas, or ignores budget constraints.",
+        "harness_failure": "The clean evaluator cannot invoke MCP tools and must rely on unit tests only.",
+        "ambiguous_requirements": "The issue leaves exact parameter names negotiable; compatible documented names are acceptable."
+      }
+    },
+    {
+      "id": "mv-pi-sessionend-triage",
+      "issue": {
+        "number": 74,
+        "title": "Implement Pi SessionEnd-style triage instead of automatic capture queue",
+        "url": "https://github.com/sandsower/memento-vault/issues/74",
+        "labels": [
+          "enhancement",
+          "priority: P1",
+          "status: available"
+        ],
+        "body_snapshot": "## Context\n\nThe Pi extension currently handles automatic capture by appending summarized lifecycle events to `queue/pi-captures.jsonl` when `piBridge.autoCapture && piBridge.captureQueue` are enabled. Those queued entries are only drained manually via `/memento-flush-queue` / `memento_flush_queue`, which writes each queued summary as a `source: pi` session note.\n\nThis is not equivalent to the existing Claude Code end-of-session mining path and can grow indefinitely if enabled.\n\n## How Claude Code is set up today\n\nClaude Code uses native hooks installed by `install.sh`:\n\n- `lib/install_helpers.py::merge_settings` registers `SessionEnd` -> `python3 ~/.claude/hooks/memento-triage.py` with `async: true`, `timeout: 30`.\n- `hooks/memento-triage.py` reads Claude hook input from stdin, expects `session_id`, `transcript_path`, and optional `cwd`.\n- It parses the transcript through `memento.adapters.parse_transcript()`; today this dispatches to `memento/adapters/claude.py` for Claude JSONL.\n- Triage behavior:\n  - skip sessions with `<2` exchanges\n  - always write a fleeting daily session line and update the project index\n  - decide `substantial` via exchange count, edited file count, notable paths, debug keywords, and read-heavy investigation signals\n  - run a QMD delta check via `has_new_insight()`\n  - for substantial/new sessions, spawn a detached structured-note worker with `--structured-notes`\n  - worker sanitizes transcript text, calls `memento.llm.llm_complete()`, parses JSON notes, writes atomic notes via `write_note()`, updates project index, logs triage health\n  - auto-commit/reindex after triage; optionally trigger Inception after triage\n- Remote/MCP path also has `memento_capture(transcript_path=...)`, but transcript-path mode is stdio/local only and currently only has the Claude transcript adapter implemented.\n\n## Pi details relevant to implementation\n\nPi extension docs show:\n\n- `agent_end` fires once per user prompt and includes `event.messages` from that prompt.\n- `session_shutdown` fires before replacement/exit.\n- `ctx.sessionManager.getSessionFile()` returns the persisted Pi session JSONL path.\n- `ctx.sessionManager.getEntries()` returns all session entries.\n- Pi sessions are JSONL under `~/.pi/agent/sessions/...`, with message roles/content shapes different from Claude Code (`role: user|assistant|toolResult|bashExecution|custom`, tool calls as `type: \"toolCall\"`, etc.).\n\nThe existing Pi bridge already calls `ctx.sessionManager.getSessionFile()`, but only passes it as metadata/session id for queue entries; `memento.pi_bridge capture` does not support `transcript_path` or full triage.\n\n## Desired behavior\n\nReplace/augment Pi automatic queue capture with a real SessionEnd-style triage path:\n\n1. Add a Pi transcript/session adapter, e.g. `memento/adapters/pi.py`, that parses Pi session JSONL or serialized session entries into the standard `SessionMeta` shape:\n   - `cwd`\n   - `git_branch`\n   - `exchange_count`\n   - `user_messages`\n   - `files_edited`\n   - `files_read`\n   - `first_prompt`\n   - `last_outcome`\n   - `agent: \"pi\"`\n2. Extend `memento.adapters.detect_agent()` / `parse_transcript()` to detect Pi JSONL or accept `agent=\"pi\"`.\n3. Expose a bridge command from `memento.pi_bridge` that runs full triage for Pi, preferably by reusing shared triage logic rather than queue flush semantics. Options:\n   - refactor common triage from `hooks/memento-triage.py` into importable `memento.triage`, then have both Claude hook and Pi bridge call it; or\n   - add a bridge command that invokes the existing triage script with a synthetic hook payload containing `{session_id, transcript_path, cwd}` and `MEMENTO_AGENT=pi`.\n4. Update `extensions/memento.ts` so `agent_end`/`session_shutdown` can trigger the full triage path using `ctx.sessionManager.getSessionFile()` instead of appending summaries to `queue/pi-captures.jsonl`.\n5. Keep manual queue review as an explicit/manual feature if useful, but do not make automatic capture depend on unbounded queue growth.\n\n## Acceptance criteria\n\n- With Pi `autoCapture` enabled, ending a meaningful Pi session produces the same classes of vault output as Claude Code triage: fleeting line, project session update, and atomic notes only when substantial/new.\n- Automatic Pi capture does not append to `queue/pi-captures.jsonl` by default.\n- Pi triage is detached/non-blocking enough not to noticeably delay the UI, matching Claude `SessionEnd async` behavior.\n- Triage health logging covers Pi failures/successes with enough metadata to debug missing transcript, parse failure, LLM failure, structured-note parse empty, and written notes.\n- Add tests for the Pi adapter and bridge path using fixture Pi session JSONL.\n- Existing Claude Code triage tests/behavior continue to pass.\n- Documentation updates explain the difference between manual queue review and automatic Pi triage.\n\n## Notes / gotchas\n\n- Do not send raw transcript contents to a remote HTTP vault. The current MCP server only allows `transcript_path` in local stdio mode; keep that boundary.\n- Reuse existing `sanitize_secrets()` before LLM calls/writes.\n- Preserve idempotency/dedup by session id so repeated `agent_end` or `session_shutdown` events do not duplicate notes.\n- Consider whether Pi should triage on every `agent_end` or only on `session_shutdown`; Claude triage is session-end scoped, while current Pi `agent_end` fires every prompt and caused queue growth."
+      },
+      "category": "triage/capture",
+      "difficulty": "large",
+      "requires_vault_knowledge": true,
+      "expected_touched_areas": [
+        "extensions/memento.ts",
+        "extensions/memento-process-worker.mjs",
+        "memento/pi_bridge.py",
+        "memento/lifecycle.py",
+        "tests/test_pi_bridge.py",
+        "tests/test_triage.py"
+      ],
+      "acceptance_criteria": [
+        "Replaces indefinite automatic capture queue behavior with SessionEnd-style triage semantics",
+        "Keeps queue/manual review behavior understandable",
+        "Adds tests around Pi lifecycle capture and triage parity"
+      ],
+      "required_gates": [
+        ".venv/bin/python -m pytest tests/test_pi_bridge.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py",
+        "node syntax/type smoke where available"
+      ],
+      "known_risks": [
+        "Large cross-language surface",
+        "Risk of losing queued captures",
+        "Differences between Pi and Claude lifecycle events",
+        "Background workers can hide failures"
+      ],
+      "retrieval_context": {
+        "docs": [
+          "extensions/memento.ts",
+          "extensions/memento-process-worker.mjs",
+          "memento/pi_bridge.py",
+          "memento/lifecycle.py"
+        ],
+        "memento_queries": [
+          "Pi auto-capture parity Claude triage SessionEnd queued captures"
+        ]
+      },
+      "rubric": {
+        "success": "Pi capture behavior follows the same triage intent as Claude SessionEnd without unbounded opaque queue growth.",
+        "agent_failure": "The agent only renames commands, drops captured data, or leaves failures invisible to users.",
+        "harness_failure": "The harness cannot simulate Pi lifecycle events or background worker behavior outside the host agent.",
+        "ambiguous_requirements": "The issue is broad; a benchmark evaluator should accept a well-documented first vertical slice if it preserves data and tests parity."
+      }
+    },
+    {
+      "id": "mv-headless-bare-mode",
+      "issue": {
+        "number": 29,
+        "title": "Add optional --bare hardened mode for headless Claude workers",
+        "url": "https://github.com/sandsower/memento-vault/issues/29",
+        "labels": [
+          "priority: P1",
+          "status: available"
+        ],
+        "body_snapshot": "## Context\n\nIssue #28 fixed the concrete destructive-action path by sandboxing headless Claude workers with:\n\n- `--tools \"\"`\n- `--strict-mcp-config --mcp-config \"{}\"`\n- `--permission-mode default`\n- `--disallowedTools ...` as defense in depth\n\nThat blocks built-in tools, inherited MCP servers, and the observed `git push` / `gh pr create` failure mode.\n\n## Follow-up\n\nConsider an optional hardened mode that also adds `--bare` for headless Claude calls.\n\nClaude Code documents `--bare` as skipping hooks, LSP, plugin sync, attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md auto-discovery. That would further reduce lifecycle/config inheritance for detached SessionEnd workers.\n\n## Trade-off\n\n`--bare` changes auth behavior: Anthropic auth is strictly `ANTHROPIC_API_KEY` or `apiKeyHelper` via `--settings`. It may break users relying on normal Claude Code subscription/keychain login.\n\nSuggested shape:\n\n- Keep the current sandbox as the compatible default.\n- Add an opt-in config flag for hardened mode, e.g. `claude_bare_headless: true`.\n- Document that hardened mode requires API-key or apiKeyHelper auth.\n- Add command-construction tests for the opt-in path."
+      },
+      "category": "sync/security/release",
+      "difficulty": "medium",
+      "requires_vault_knowledge": false,
+      "expected_touched_areas": [
+        "hooks/agent-wrapper.py",
+        "hooks/vault-recall.py",
+        "hooks/vault-briefing.py",
+        "docs/configuration.md",
+        "tests/test_sanitization.py or lifecycle tests"
+      ],
+      "acceptance_criteria": [
+        "Adds optional hardened bare/headless mode",
+        "Avoids unsafe interactive assumptions for worker agents",
+        "Documents configuration and tradeoffs",
+        "Keeps existing default behavior unchanged"
+      ],
+      "required_gates": [
+        ".venv/bin/python -m pytest tests/test_lifecycle.py tests/test_sanitization.py",
+        ".venv/bin/python -m ruff check hooks tests"
+      ],
+      "known_risks": [
+        "Security hardening can accidentally remove useful context",
+        "Headless worker environments differ by host",
+        "Environment variables and subprocess output may leak sensitive data"
+      ],
+      "retrieval_context": {
+        "docs": [
+          "hooks/agent-wrapper.py",
+          "hooks/vault-recall.py",
+          "docs/configuration.md"
+        ],
+        "memento_queries": []
+      },
+      "rubric": {
+        "success": "Headless workers can opt into stricter non-interactive behavior without regressing normal interactive sessions.",
+        "agent_failure": "The implementation makes hardened behavior the default, leaks hidden context, or does not test worker-safe paths.",
+        "harness_failure": "The harness cannot model the exact headless Claude worker environment described by the issue.",
+        "ambiguous_requirements": "The issue leaves the flag name and exact disabled features flexible if the chosen semantics are documented."
+      }
+    },
+    {
+      "id": "mv-pi-claude-triage-parity",
+      "issue": {
+        "number": 33,
+        "title": "Pi auto-capture parity with Claude triage",
+        "url": "https://github.com/sandsower/memento-vault/issues/33",
+        "labels": [
+          "priority: P1",
+          "status: available"
+        ],
+        "body_snapshot": "## Problem\n\nPi support currently provides lifecycle retrieval tools and manual/queued capture, but it does not have parity with Claude's SessionEnd triage behavior. Auto-capture is disabled by default in the Pi extension, and when enabled it queues a short candidate summary rather than running the full structured note extraction pipeline.\n\n## Current state\n\n- Claude uses SessionEnd hooks to parse transcripts, score substantiality, write fleeting/project summaries, and run structured note extraction.\n- Pi bridge exposes manual `memento_capture` and queue tools.\n- Pi bridge has `autoCapture: false` by default.\n- Pi lifecycle auto-capture, when enabled, queues summarized candidate captures from lifecycle events instead of triaging the full session transcript.\n\n## Desired state\n\nDefine and ship intentional Pi auto-capture behavior with clear parity boundaries:\n\n- Opt-in or default behavior is explicit and documented.\n- Pi session capture can preserve durable session knowledge without relying on manual `/memento` use.\n- Capture behavior is safe, reviewable, and does not surprise users with unapproved writes.\n- The implementation either reaches Claude triage parity or clearly documents why queued summaries remain the supported Pi model.\n\n## Acceptance criteria\n\n- Decide whether Pi auto-capture should be default-off queued capture, default-on queue, or full structured extraction.\n- Document Pi capture lifecycle events and user-facing configuration.\n- Add tests covering the selected behavior.\n- Add status/diagnostics that make it obvious whether Pi capture is enabled and whether it queued/wrote anything.\n- Avoid coupling Pi to Claude-only transcript formats.\n\n## Out of scope\n\nThis issue does not cover the immediate Claude SessionEnd hotfix for invalid headless MCP config, binary lookup, or triage failure observability."
+      },
+      "category": "triage/capture",
+      "difficulty": "medium",
+      "requires_vault_knowledge": true,
+      "expected_touched_areas": [
+        "memento/lifecycle.py",
+        "memento/pi_bridge.py",
+        "hooks/memento-triage.py",
+        "tests/test_lifecycle.py",
+        "tests/test_triage.py",
+        "tests/test_pi_bridge.py"
+      ],
+      "acceptance_criteria": [
+        "Narrows Pi auto-capture behavior toward Claude triage parity",
+        "Preserves provenance/source metadata",
+        "Tests capture routing and queue/triage outcomes"
+      ],
+      "required_gates": [
+        ".venv/bin/python -m pytest tests/test_lifecycle.py tests/test_triage.py tests/test_pi_bridge.py",
+        ".venv/bin/python -m ruff check memento hooks tests"
+      ],
+      "known_risks": [
+        "Subtle source/provenance mismatches",
+        "Potential duplicate captures",
+        "Queue processing and triage may have different failure semantics"
+      ],
+      "retrieval_context": {
+        "docs": [
+          "memento/lifecycle.py",
+          "hooks/memento-triage.py",
+          "memento/pi_bridge.py"
+        ],
+        "memento_queries": [
+          "Pi auto-capture parity with Claude triage provenance source pi session note"
+        ]
+      },
+      "rubric": {
+        "success": "Pi and Claude capture paths have documented, tested parity for durable knowledge extraction semantics.",
+        "agent_failure": "The agent implements a parallel incompatible path or loses metadata needed to distinguish Pi captures.",
+        "harness_failure": "Host-specific Pi extension hooks are unavailable in the evaluator and require unit-test simulation.",
+        "ambiguous_requirements": "The phrase parity can mean exact implementation reuse or equivalent behavior; either is acceptable when tested and documented."
+      }
+    }
+  ]
+}
