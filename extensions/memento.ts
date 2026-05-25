@@ -296,6 +296,14 @@ function countGroups(payload?: Record<string, unknown>): number {
 	return Array.isArray(payload?.groups) ? payload.groups.length : 1;
 }
 
+function processingMessage(payload?: Record<string, unknown>): string {
+	if (payload?.error) return "Processing failed.";
+	const status = String(payload?.status ?? "");
+	if (status === "failed") return "Processing failed.";
+	if (status === "interrupted") return "Processing interrupted.";
+	return "Processing finished.";
+}
+
 async function runProcessWorker(pi: ExtensionAPI, ctx: ExtensionContext, args: string[], config: BridgeConfig): Promise<Record<string, unknown>> {
 	const worker = join(__dirname, "memento-process-worker.mjs");
 	const workerArgs = config.processQueueModel ? ["--processor-model", config.processQueueModel, ...args] : args;
@@ -602,7 +610,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		label: "Memento Process Queue",
 		description: "Process selected queued pi captures into curated Memento notes. Requires explicit selection; use dryRun to preview.",
 		parameters: Type.Object({
-			id: Type.Optional(Type.String({ description: "Capture id to process" })),
+			id: Type.Optional(Type.Union([
+				Type.String({ minLength: 1, description: "Capture id to process" }),
+				Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description: "Capture ids to process" }),
+			])),
 			project: Type.Optional(Type.String({ description: "Project slug to process" })),
 			branch: Type.Optional(Type.String({ description: "Branch to process" })),
 			session: Type.Optional(Type.String({ description: "Session id/path to process" })),
@@ -762,7 +773,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 									processPreview = latestProcess?.status === "idle" ? processPreview : latestProcess;
 									syncCounts();
 									await refreshAmbientWidget(ctx);
-									state = { ...state, selectedCaptureIds: defaultSelectedCaptureIds(latestQueue, String(latestStatus?.project_slug ?? "unknown"), config.processQueueMaxCaptures), message: processPreview.error ? "Processing failed." : "Processing finished." };
+									state = { ...state, selectedCaptureIds: defaultSelectedCaptureIds(latestQueue, String(latestStatus?.project_slug ?? "unknown"), config.processQueueMaxCaptures), message: processingMessage(processPreview) };
 									requestRender();
 								})();
 							}
@@ -803,7 +814,11 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			}
 			let cliArgs = withProcessLimit(parseProcessCommandArgs(args), config.processQueueMaxCaptures);
 			if (args.trim().length === 0) {
-				cliArgs = withProcessLimit(["--project", await currentProjectSlug(pi, ctx), "--oldest", "--dry-run"], config.processQueueMaxCaptures);
+				const projectSlug = await currentProjectSlug(pi, ctx);
+				cliArgs = withProcessLimit(
+					[...(projectSlug !== "unknown" ? ["--project", projectSlug] : []), "--oldest", "--dry-run"],
+					config.processQueueMaxCaptures,
+				);
 				ctx.ui.notify("showing memento process preview; use /memento for confirm flow", "info");
 			}
 			if (cliArgs.includes("--dry-run")) {
@@ -817,7 +832,8 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			latestProcess = await loadProcessStatus(ctx);
 			await refreshAmbientWidget(ctx);
 			const displayPayload = latestProcess?.status === "idle" ? payload : latestProcess;
-			ctx.ui.notify(payload.error ? `memento processing failed: ${String(payload.error)}` : "memento processing finished", payload.error ? "error" : "success");
+			const message = processingMessage(displayPayload);
+			ctx.ui.notify(payload.error ? `memento processing failed: ${String(payload.error)}` : message.toLowerCase(), message === "Processing finished." ? "success" : "error");
 			ctx.ui.setWidget("memento-process", formatProcessLines(displayPayload), { placement: "aboveEditor" });
 		},
 	});

@@ -94,8 +94,13 @@ function nowIso() {
 function writeProgress(runDir, progress) {
   const path = resolve(runDir, 'progress.json');
   const tempPath = `${path}.tmp`;
-  writeFileSync(tempPath, JSON.stringify({ ...progress, updated_at: nowIso() }, null, 2));
-  renameSync(tempPath, path);
+  try {
+    writeFileSync(tempPath, JSON.stringify({ ...progress, updated_at: nowIso() }, null, 2));
+    renameSync(tempPath, path);
+  } catch (error) {
+    console.error(`Failed to write progress: ${String(error?.message ?? error)}`);
+    try { rmSync(tempPath, { force: true }); } catch {}
+  }
 }
 
 function readResult(path) {

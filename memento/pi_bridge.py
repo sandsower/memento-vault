@@ -817,7 +817,7 @@ def _latest_processing_run_id() -> str:
     runs = [path for path in root.iterdir() if path.is_dir()]
     if not runs:
         return ""
-    runs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    runs.sort(key=lambda path: path.name, reverse=True)
     return runs[0].name
 
 
