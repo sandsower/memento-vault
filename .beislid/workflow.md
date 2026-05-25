@@ -53,6 +53,17 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
   command: '.venv/bin/python scripts/claude_sandbox_smoke.py'
 ```
 
+## Action policy
+
+```beislid:action_policy
+modes:
+  supervised-auto:
+    actions:
+      git.commit: allow
+    sandbox:
+      on_uncommitted_changes: allow
+```
+
 ## Probe cache
 
 ```beislid:probe_cache
