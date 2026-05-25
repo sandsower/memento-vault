@@ -221,6 +221,88 @@ def release_vault_write_lock(lock_file=None, *, lock_path=None):
         pass
 
 
+def append_fleeting_session(
+    vault_path,
+    session_id,
+    *,
+    cwd=None,
+    branch=None,
+    agent=None,
+    files_edited=None,
+    now=None,
+):
+    """Append a one-line marker for a session to today's fleeting log.
+
+    The fleeting log is a per-UTC-day markdown file at
+    ``<vault>/fleeting/<YYYY-MM-DD>.md`` that records *"a session occurred"*
+    even when the agent's transcript wasn't substantive enough to triage into
+    an atomic note. It is the canonical breadcrumb other harnesses (OpenCode,
+    Codex, Cursor) should write to so the vault has consistent activity data
+    regardless of which agent ran.
+
+    The caller is responsible for acquiring :func:`acquire_vault_write_lock`
+    when there may be concurrent writers — this helper deliberately stays
+    composable and does not take the lock itself.
+
+    Args:
+        vault_path: Path-like pointing at the vault root.
+        session_id: Stable identifier for the session. Used for deduplication;
+            the helper will not append a second line for the same id on the
+            same UTC day.
+        cwd: Working directory the session ran in. Optional.
+        branch: Git branch name. Optional.
+        agent: Agent name (e.g. ``"claude"``, ``"opencode"``). Optional;
+            empty string when omitted.
+        files_edited: List of file paths edited in the session. Only the
+            count is recorded.
+        now: Override clock for deterministic tests. Pass a ``datetime``;
+            defaults to ``datetime.now(timezone.utc)``.
+
+    Returns:
+        Dict with ``fleeting`` (str, relative path to the fleeting file) and
+        ``already_logged`` (bool, True when ``session_id`` was already
+        present and no line was appended).
+    """
+    vault = Path(vault_path)
+    if now is None:
+        moment = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        moment = now.replace(tzinfo=timezone.utc)
+    else:
+        moment = now.astimezone(timezone.utc)
+    today = moment.strftime("%Y-%m-%d")
+    hhmm = moment.strftime("%H:%M")
+
+    def _clean(value, default=""):
+        text = str(value if value is not None else default)
+        text = " ".join(text.split()).replace("`", "'")
+        return text[:300]
+
+    safe_session_id = _clean(session_id, "?")
+    safe_cwd = _clean(cwd, "?")
+    safe_branch = _clean(branch)
+    safe_agent = _clean(agent)
+
+    fleeting_dir = vault / "fleeting"
+    fleeting_dir.mkdir(parents=True, exist_ok=True)
+    fleeting_file = fleeting_dir / f"{today}.md"
+
+    if not fleeting_file.exists():
+        fleeting_file.write_text(f"# {today}\n\n")
+
+    existing = fleeting_file.read_text()
+    rel = str(fleeting_file.relative_to(vault))
+    if f"`{safe_session_id}`" in existing:
+        return {"fleeting": rel, "already_logged": True}
+
+    branch_str = f" ({safe_branch})" if safe_branch else ""
+    files_count = f", {len(files_edited)} files" if files_edited else ""
+    line = f"- {hhmm} `{safe_session_id}` {safe_cwd}{branch_str} — {safe_agent}{files_count}\n"
+    with open(fleeting_file, "a") as f:
+        f.write(line)
+    return {"fleeting": rel, "already_logged": False}
+
+
 def _safe_yaml_scalar(value):
     """Sanitize a value for safe YAML frontmatter interpolation.
 
