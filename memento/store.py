@@ -178,10 +178,22 @@ def release_inception_lock(lock_path=None):
         pass
 
 
-def acquire_vault_write_lock(lock_path=None, timeout=5.0, poll_interval=0.05):
-    """Acquire a short-lived vault write lock, polling until timeout."""
+def acquire_vault_write_lock(lock_file=None, timeout=5.0, poll_interval=0.05, *, lock_path=None):
+    """Acquire a short-lived vault write lock, polling until timeout.
+
+    Args:
+        lock_file: Path to the lock file. Defaults to ``VAULT_WRITE_LOCK_PATH``.
+        timeout: Seconds to wait for the lock before giving up.
+        poll_interval: Seconds between acquisition retries.
+        lock_path: Deprecated alias for ``lock_file``. Kept for backward
+            compatibility — prefer ``lock_file`` in new code.
+    """
+    if lock_path is not None:
+        if lock_file is not None:
+            raise TypeError("acquire_vault_write_lock(): specify either lock_file or lock_path, not both")
+        lock_file = lock_path
     deadline = time.monotonic() + timeout
-    path = lock_path or VAULT_WRITE_LOCK_PATH
+    path = lock_file or VAULT_WRITE_LOCK_PATH
     while True:
         if _acquire_pid_lock(path):
             return True
@@ -190,9 +202,19 @@ def acquire_vault_write_lock(lock_path=None, timeout=5.0, poll_interval=0.05):
         time.sleep(poll_interval)
 
 
-def release_vault_write_lock(lock_path=None):
-    """Release the vault write lock file."""
-    path = Path(lock_path or VAULT_WRITE_LOCK_PATH)
+def release_vault_write_lock(lock_file=None, *, lock_path=None):
+    """Release the vault write lock file.
+
+    Args:
+        lock_file: Path to the lock file. Defaults to ``VAULT_WRITE_LOCK_PATH``.
+        lock_path: Deprecated alias for ``lock_file``. Kept for backward
+            compatibility — prefer ``lock_file`` in new code.
+    """
+    if lock_path is not None:
+        if lock_file is not None:
+            raise TypeError("release_vault_write_lock(): specify either lock_file or lock_path, not both")
+        lock_file = lock_path
+    path = Path(lock_file or VAULT_WRITE_LOCK_PATH)
     try:
         path.unlink()
     except FileNotFoundError:

@@ -5,6 +5,8 @@ import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from memento.store import (
     acquire_vault_write_lock,
     find_dedup_candidates,
@@ -454,14 +456,14 @@ class TestUpdateProjectIndex:
 
 class TestVaultWriteLock:
     def test_vault_write_lock_serialization(self, tmp_vault):
-        lock_path = tmp_vault / ".vault-write.lock"
+        lock_file = tmp_vault / ".vault-write.lock"
 
-        assert acquire_vault_write_lock(lock_path=str(lock_path)) is True
+        assert acquire_vault_write_lock(lock_file=str(lock_file)) is True
 
         result = {"acquired": None}
 
         def _contender():
-            result["acquired"] = acquire_vault_write_lock(lock_path=str(lock_path), timeout=0.1, poll_interval=0.01)
+            result["acquired"] = acquire_vault_write_lock(lock_file=str(lock_file), timeout=0.1, poll_interval=0.01)
 
         thread = threading.Thread(target=_contender)
         thread.start()
@@ -469,9 +471,25 @@ class TestVaultWriteLock:
 
         assert result["acquired"] is False
 
-        release_vault_write_lock(lock_path=str(lock_path))
-        assert acquire_vault_write_lock(lock_path=str(lock_path), timeout=0.1, poll_interval=0.01) is True
-        release_vault_write_lock(lock_path=str(lock_path))
+        release_vault_write_lock(lock_file=str(lock_file))
+        assert acquire_vault_write_lock(lock_file=str(lock_file), timeout=0.1, poll_interval=0.01) is True
+        release_vault_write_lock(lock_file=str(lock_file))
+
+    def test_lock_path_alias_still_works(self, tmp_vault):
+        """The old ``lock_path`` keyword stays accepted for back-compat."""
+        lock_file = tmp_vault / ".vault-write.lock"
+        assert acquire_vault_write_lock(lock_path=str(lock_file)) is True
+        release_vault_write_lock(lock_path=str(lock_file))
+        # Acquire-then-release round-trip works through the alias too.
+        assert acquire_vault_write_lock(lock_path=str(lock_file), timeout=0.1) is True
+        release_vault_write_lock(lock_path=str(lock_file))
+
+    def test_lock_path_and_lock_file_both_set_raises(self, tmp_vault):
+        lock_file = tmp_vault / ".vault-write.lock"
+        with pytest.raises(TypeError, match="lock_file or lock_path"):
+            acquire_vault_write_lock(lock_file=str(lock_file), lock_path=str(lock_file))
+        with pytest.raises(TypeError, match="lock_file or lock_path"):
+            release_vault_write_lock(lock_file=str(lock_file), lock_path=str(lock_file))
 
 
 class TestTriageHealthLog:
