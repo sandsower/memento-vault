@@ -368,6 +368,55 @@ class TestOpencodeAdapter:
         assert meta["files_read"] == ["/home/dev/proj/auth.py"]
         assert meta["files_edited"] == ["/home/dev/proj/auth.py"]
 
+    def test_extracts_apply_patch_files(self, tmp_path):
+        db = tmp_path / "opencode.db"
+        _build_opencode_db(
+            db,
+            [
+                {
+                    "id": "ses_patch",
+                    "time_created": 1,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "time_created": 2,
+                            "parts": [{"type": "text", "text": "patch several files"}],
+                        },
+                        {
+                            "role": "assistant",
+                            "time_created": 3,
+                            "parts": [
+                                {
+                                    "type": "tool",
+                                    "tool": "apply_patch",
+                                    "state": {
+                                        "input": {
+                                            "patchText": """*** Begin Patch
+*** Add File: new.py
++print('new')
+*** Update File: existing.py
+@@
+-old
++new
+*** Delete File: old.py
+*** Update File: renamed.py
+*** Move to: moved.py
+@@
+-content
++content
+*** End Patch"""
+                                        }
+                                    },
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        )
+        meta = parse_opencode(str(db))
+        assert meta["files_edited"] == ["existing.py", "moved.py", "new.py", "old.py"]
+
     def test_first_prompt_and_outcome(self, opencode_db):
         meta = parse_opencode(str(opencode_db))
         assert meta["first_prompt"] == "Fix the broken login flow"
@@ -398,6 +447,27 @@ class TestOpencodeAdapter:
         )
         meta = parse_opencode(str(db))
         assert meta["first_prompt"] == "Do the thing"
+
+    def test_preserves_user_markup_in_prompt(self, tmp_path):
+        db = tmp_path / "opencode.db"
+        _build_opencode_db(
+            db,
+            [
+                {
+                    "id": "ses_markup",
+                    "time_created": 1,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "time_created": 2,
+                            "parts": [{"type": "text", "text": "Explain <div>hello</div>"}],
+                        }
+                    ],
+                }
+            ],
+        )
+        meta = parse_opencode(str(db))
+        assert meta["first_prompt"] == "Explain <div>hello</div>"
 
     def test_session_id_override_via_env(self, tmp_path):
         db = tmp_path / "opencode.db"
@@ -430,11 +500,11 @@ class TestOpencodeAdapter:
         )
         # Default: most recent session
         assert parse_opencode(str(db))["first_prompt"] == "new prompt"
-        # Explicit argument wins
+        # Explicit argument wins when env var is unset
         assert parse_opencode(str(db), session_id="ses_old")["first_prompt"] == "old prompt"
-        # Env var override
-        with patch.dict(os.environ, {"MEMENTO_OPENCODE_SESSION_ID": "ses_old"}):
-            assert parse_opencode(str(db))["first_prompt"] == "old prompt"
+        # Env var overrides explicit argument
+        with patch.dict(os.environ, {"MEMENTO_OPENCODE_SESSION_ID": "ses_new"}):
+            assert parse_opencode(str(db), session_id="ses_old")["first_prompt"] == "new prompt"
 
     def test_unknown_session_id_raises(self, opencode_db):
         with pytest.raises(ValueError, match="session not found"):

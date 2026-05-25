@@ -6,24 +6,32 @@ database with three relevant tables: ``session`` (one row per session),
 blocks within a message: text, tool calls, reasoning, lifecycle markers).
 
 Selects which session to parse via the ``MEMENTO_OPENCODE_SESSION_ID``
-environment variable; falls back to the most recently created session.
+environment variable, then an explicit ``session_id`` argument; falls back to
+the most recently created session.
 """
 
 import json
 import os
 import re
 import sqlite3
+from pathlib import Path
 
 from memento.utils import sanitize_secrets
 
 # OpenCode native file tools (lowercase, per upstream tool names).
-_EDIT_TOOLS = {"edit", "write", "patch"}
+_EDIT_TOOLS = {"edit", "write", "patch", "apply_patch"}
 _READ_TOOLS = {"read"}
+_APPLY_PATCH_PATH_RE = re.compile(r"^\*\*\* (Add File|Delete File|Update File|Move to):\s*(.+?)\s*$")
+_PROMPT_WRAPPER_RE = re.compile(
+    r"^\s*<(?P<tag>(?:prompt|system|assistant|user))\b[^>]*>(?P<body>.*)</(?P=tag)>\s*$",
+    re.DOTALL | re.IGNORECASE,
+)
+_SYSTEM_TAG_RE = re.compile(r"<system(?:-[^>]*)?>.*?</system(?:-[^>]*)?>", re.DOTALL | re.IGNORECASE)
 
 
 def _connect_readonly(db_path):
     """Open the OpenCode SQLite DB read-only so a running OpenCode is unaffected."""
-    uri = f"file:{db_path}?mode=ro"
+    uri = f"{Path(db_path).expanduser().resolve().as_uri()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     return conn
@@ -58,22 +66,52 @@ def _first_text_part(parts):
     return None
 
 
+def _apply_patch_paths(patch_text):
+    """Extract edited paths from OpenCode ``apply_patch`` input text."""
+    paths = set()
+    last_update_path = None
+    for line in patch_text.splitlines():
+        match = _APPLY_PATCH_PATH_RE.match(line.strip())
+        if not match:
+            continue
+        marker, path = match.groups()
+        if marker == "Move to":
+            if last_update_path:
+                paths.discard(last_update_path)
+            paths.add(path)
+            last_update_path = None
+        else:
+            paths.add(path)
+            last_update_path = path if marker == "Update File" else None
+    return paths
+
+
+def _clean_prompt_text(text):
+    """Strip OpenCode/system prompt wrappers without dropping user markup."""
+    cleaned = _SYSTEM_TAG_RE.sub("", text).strip()
+    wrapper = _PROMPT_WRAPPER_RE.match(cleaned)
+    if wrapper:
+        cleaned = wrapper.group("body").strip()
+    return cleaned.strip('"').strip("'")
+
+
 def parse_transcript(transcript_path, session_id=None):
     """Parse an OpenCode session into the standard session metadata dict.
 
     Args:
         transcript_path: Path to ``opencode.db`` (typically under
             ``$XDG_DATA_HOME/opencode/``).
-        session_id: Specific OpenCode session id (``ses_...``). Falls back to
-            ``MEMENTO_OPENCODE_SESSION_ID`` env var, then to the most recently
-            created session.
+        session_id: Specific OpenCode session id (``ses_...``). Overridden by
+            ``MEMENTO_OPENCODE_SESSION_ID`` when set; otherwise falls back to
+            the most recently created session.
 
     Returns:
         Dict with session metadata: cwd, git_branch, exchange_count,
         user_messages, files_edited, files_read, first_prompt, last_outcome.
     """
-    if session_id is None:
-        session_id = os.environ.get("MEMENTO_OPENCODE_SESSION_ID") or None
+    env_session_id = os.environ.get("MEMENTO_OPENCODE_SESSION_ID")
+    if env_session_id:
+        session_id = env_session_id
 
     conn = _connect_readonly(transcript_path)
     try:
@@ -110,10 +148,9 @@ def parse_transcript(transcript_path, session_id=None):
                 if first_user_prompt is None:
                     text = _first_text_part(parts)
                     if text:
-                        # OpenCode wraps the prompt in surrounding quotes when the
-                        # user invokes it as ``opencode "..."``; strip system tags too.
-                        cleaned = re.sub(r"<[^>]+>.*?</[^>]+>", "", text, flags=re.DOTALL).strip()
-                        cleaned = cleaned.strip('"').strip("'")
+                        # OpenCode may wrap prompts in surrounding quotes or include
+                        # system wrapper tags; preserve ordinary user markup/code.
+                        cleaned = _clean_prompt_text(text)
                         if cleaned:
                             first_user_prompt = sanitize_secrets(cleaned[:200])
 
@@ -129,11 +166,11 @@ def parse_transcript(transcript_path, session_id=None):
                         tool = (part.get("tool") or "").lower()
                         inp = (part.get("state") or {}).get("input") or {}
                         fp = inp.get("file_path") or inp.get("filePath") or inp.get("path")
-                        if not fp:
-                            continue
-                        if tool in _EDIT_TOOLS:
+                        if tool == "apply_patch":
+                            files_edited.update(_apply_patch_paths(inp.get("patchText") or inp.get("patch_text") or ""))
+                        elif fp and tool in _EDIT_TOOLS:
                             files_edited.add(fp)
-                        elif tool in _READ_TOOLS:
+                        elif fp and tool in _READ_TOOLS:
                             files_read.add(fp)
 
         last_outcome = None
