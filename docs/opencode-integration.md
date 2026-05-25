@@ -70,6 +70,9 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { spawn } from "node:child_process"
 
 const HELPER = `${process.env.HOME}/.local/share/memento-opencode/fleeting.py`
+const PYTHON = process.env.MEMENTO_PYTHON ?? process.env.PYTHON ?? "python3"
+const HOOKS_PATH = `${process.env.HOME}/.claude/hooks`
+const PYTHONPATH = [process.env.PYTHONPATH, HOOKS_PATH].filter(Boolean).join(":")
 
 export const MementoFleetingPlugin: Plugin = async ({ client, directory }) => {
   return {
@@ -91,10 +94,10 @@ export const MementoFleetingPlugin: Plugin = async ({ client, directory }) => {
       // immediately after the assistant responds. Bun tears down stdio
       // handles on parent exit, so we unref the child and let it finish on
       // its own.
-      const child = spawn("python3", [HELPER], {
+      const child = spawn(PYTHON, [HELPER], {
         detached: true,
         stdio: ["pipe", "ignore", "ignore"],
-        env: { ...process.env, PYTHONPATH: `${process.env.HOME}/.claude/hooks` },
+        env: { ...process.env, PYTHONPATH },
       })
       child.stdin?.write(payload)
       child.stdin?.end()
@@ -109,6 +112,8 @@ export const MementoFleetingPlugin: Plugin = async ({ client, directory }) => {
   }
 }
 ```
+
+If memento is installed in a virtualenv, set `MEMENTO_PYTHON=/path/to/venv/bin/python` before launching OpenCode so the detached helper uses the same environment. The plugin preserves any existing `PYTHONPATH` and appends the hooks path for source installs.
 
 And `~/.local/share/memento-opencode/fleeting.py`:
 
