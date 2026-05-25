@@ -490,7 +490,7 @@ def run_remote_briefing(cwd, config):
     return summary
 
 
-def build_briefing(cwd: str, session_id: str = "unknown") -> LifecycleResult:
+def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: bool = True) -> LifecycleResult:
     """Build session-start briefing content."""
     config = get_config()
     metadata = {"cwd": cwd, "session_id": session_id}
@@ -505,7 +505,7 @@ def build_briefing(cwd: str, session_id: str = "unknown") -> LifecycleResult:
 
     from memento.remote_client import is_remote
 
-    if is_remote():
+    if is_remote() and allow_deferred:
         try:
             if os.path.exists(DEFERRED_BRIEFING_PATH):
                 os.unlink(DEFERRED_BRIEFING_PATH)
@@ -547,7 +547,7 @@ def build_briefing(cwd: str, session_id: str = "unknown") -> LifecycleResult:
     if warning:
         lines.append(warning)
 
-    if config.get("project_maps_enabled", True) and has_qmd():
+    if allow_deferred and config.get("project_maps_enabled", True) and has_qmd():
         try:
             max_notes = config.get("briefing_max_notes", 5)
             map_notes = lookup_project_notes(project_slug, limit=max_notes)
@@ -578,7 +578,7 @@ def build_briefing(cwd: str, session_id: str = "unknown") -> LifecycleResult:
     except Exception:
         pass
 
-    if has_qmd():
+    if allow_deferred and has_qmd():
         config["_cwd"] = cwd
         spawn_deferred_search(project_slug, git_branch, linked_notes, config)
 
@@ -1659,7 +1659,7 @@ def run_recall():
     return lines, top_path
 
 
-def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> LifecycleResult:
+def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown", *, record: bool = True) -> LifecycleResult:
     """Build prompt recall content."""
     lines, top_path, results, reason = _run_recall_lines(prompt, cwd, session_id)
     if not lines:
@@ -1678,7 +1678,7 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> Lif
             return result
         return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)
-    if top_path:
+    if top_path and record:
         record_recall(top_path)
     return LifecycleResult(
         should_inject=True,
@@ -1687,6 +1687,241 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown") -> Lif
         results=results,
         metadata={"cwd": cwd, "session_id": session_id, "top_path": top_path},
     )
+
+
+def _session_context_char_budget(token_budget: int | None) -> tuple[int, int]:
+    """Return normalized token and character budgets for session context."""
+    try:
+        normalized_tokens = int(token_budget) if token_budget is not None else 2000
+    except (TypeError, ValueError):
+        normalized_tokens = 2000
+    normalized_tokens = max(1, normalized_tokens)
+    return normalized_tokens, normalized_tokens * 4
+
+
+def _queue_capture_count(vault: Path) -> int:
+    queue_path = vault / "queue" / "pi-captures.jsonl"
+    if not queue_path.exists():
+        return 0
+    try:
+        return sum(1 for line in queue_path.read_text(errors="replace").splitlines() if line.strip())
+    except OSError:
+        return 0
+
+
+def _compact_session_result(result: dict) -> dict:
+    """Return bounded result metadata for session-context structured payloads."""
+    compact = {
+        "path": result.get("path", ""),
+        "title": strip_injection(str(result.get("title", ""))),
+    }
+    if result.get("score") is not None:
+        compact["score"] = result.get("score")
+    snippet = strip_injection(str(result.get("snippet", "")).strip())
+    if snippet:
+        compact["snippet"] = snippet[:160] + ("..." if len(snippet) > 160 else "")
+    return compact
+
+
+def _compact_lifecycle_section(result: LifecycleResult) -> dict:
+    """Return lifecycle result metadata without duplicating unbounded content."""
+    section = {
+        "should_inject": result.should_inject,
+        "source": result.source,
+        "result_count": len(result.results or []),
+    }
+    if result.reason is not None:
+        section["reason"] = result.reason
+    top_path = result.metadata.get("top_path") if isinstance(result.metadata, dict) else None
+    if top_path:
+        section["top_path"] = top_path
+    miss = result.metadata.get("miss") if isinstance(result.metadata, dict) else None
+    if isinstance(miss, dict):
+        section["miss"] = {"reason": miss.get("reason"), "recovery_hints": miss.get("recovery_hints", [])[:2]}
+    return section
+
+
+def _unique_result_paths(results: list[dict]) -> list[str]:
+    paths = []
+    seen = set()
+    for result in results:
+        path = result.get("path") if isinstance(result, dict) else None
+        if path and path not in seen:
+            paths.append(path)
+            seen.add(path)
+    return paths
+
+
+def _truncate_session_context(content: str, char_budget: int) -> tuple[str, bool]:
+    if len(content) <= char_budget:
+        return content, False
+    suffix = "\n[vault] truncated; see expandable_paths for full notes"
+    if char_budget <= len(suffix):
+        return content[:char_budget], True
+    return content[: char_budget - len(suffix)].rstrip() + suffix, True
+
+
+def _finalize_session_context_payload(payload: dict) -> dict:
+    payload["metadata"]["used_chars"] = len(payload.get("content", ""))
+    payload["should_inject"] = bool(payload.get("content"))
+    return payload
+
+
+def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict:
+    """Keep the serialized session-context packet within budget plus metadata overhead."""
+    if len(json.dumps(payload)) <= packet_char_budget:
+        return _finalize_session_context_payload(payload)
+
+    payload["metadata"]["truncated"] = True
+    notes = payload["metadata"].setdefault("budget_notes", [])
+    if "structured payload compacted to fit packet budget" not in notes:
+        notes.append("structured payload compacted to fit packet budget")
+
+    content = payload.get("content", "")
+    if content:
+        overage = len(json.dumps(payload)) - packet_char_budget
+        new_len = max(0, len(content) - overage - 80)
+        payload["content"] = content[:new_len].rstrip()
+
+    if len(json.dumps(payload)) <= packet_char_budget:
+        return _finalize_session_context_payload(payload)
+
+    for result in payload.get("results", []):
+        if "snippet" in result and len(result["snippet"]) > 40:
+            result["snippet"] = result["snippet"][:40] + "..."
+
+    if len(json.dumps(payload)) <= packet_char_budget:
+        return _finalize_session_context_payload(payload)
+
+    expandable_paths = payload["metadata"].get("expandable_paths", [])
+    while expandable_paths and len(json.dumps(payload)) > packet_char_budget:
+        expandable_paths.pop()
+        payload["metadata"]["omitted_expandable_paths_count"] = (
+            payload["metadata"].get("omitted_expandable_paths_count", 0) + 1
+        )
+
+    if len(json.dumps(payload)) > packet_char_budget:
+        payload["metadata"].pop("cwd", None)
+        payload["metadata"].pop("session_id", None)
+        payload["metadata"].pop("warnings", None)
+        payload["metadata"]["omitted_metadata"] = True
+
+    if len(json.dumps(payload)) > packet_char_budget and "queue" in payload.get("sections", {}):
+        payload["sections"]["queue"].pop("queue_path", None)
+
+    if len(json.dumps(payload)) > packet_char_budget:
+        payload["content"] = ""
+
+    if len(json.dumps(payload)) > packet_char_budget:
+        payload["sections"] = {
+            key: value for key, value in payload.get("sections", {}).items() if key in {"status", "queue"}
+        }
+        payload["results"] = []
+        payload["metadata"]["expandable_paths"] = []
+        payload["metadata"]["omitted_results"] = True
+
+    return _finalize_session_context_payload(payload)
+
+
+def build_session_context(
+    cwd: str = "",
+    prompt: str = "",
+    session_id: str = "unknown",
+    token_budget: int | None = None,
+    include_status: bool = True,
+    include_recent: bool = True,
+    include_recall: bool = True,
+    include_tool_context_preview: bool = False,
+) -> dict:
+    """Build a one-call, budgeted session initialization/context packet."""
+    token_budget, char_budget = _session_context_char_budget(token_budget)
+    packet_char_budget = char_budget + 1200
+    sections: dict[str, object] = {}
+    raw_results: list[dict] = []
+    content_blocks: list[str] = []
+    warnings: list[str] = []
+
+    if include_recent:
+        briefing = build_briefing(cwd, session_id, allow_deferred=False)
+        sections["briefing"] = _compact_lifecycle_section(briefing)
+        if briefing.content:
+            content_blocks.append(briefing.content)
+        raw_results.extend(briefing.results or [])
+
+    recall_top_path = None
+    recall_content_marker = None
+    if include_recall and prompt:
+        recall = build_recall(prompt, cwd, session_id, record=False)
+        sections["recall"] = _compact_lifecycle_section(recall)
+        recall_top_path = recall.metadata.get("top_path") if isinstance(recall.metadata, dict) else None
+        if recall.content:
+            recall_content_marker = recall.content.splitlines()[0]
+            content_blocks.append(recall.content)
+        raw_results.extend(recall.results or [])
+
+    if include_status:
+        vault = get_vault()
+        notes_dir = vault / "notes"
+        projects_dir = vault / "projects"
+        warning = triage_health_warning()
+        if warning:
+            warnings.append(warning)
+        status = {
+            "vault_exists": vault.exists(),
+            "qmd_available": has_qmd(),
+            "note_count": len(list(notes_dir.glob("*.md"))) if notes_dir.exists() else 0,
+            "project_count": len(list(projects_dir.glob("*.md"))) if projects_dir.exists() else 0,
+        }
+        sections["status"] = status
+        if warning and all(warning not in block for block in content_blocks):
+            content_blocks.append(warning)
+        content_blocks.append(
+            f"[vault] Status: {status['note_count']} notes, qmd {'available' if status['qmd_available'] else 'unavailable'}"
+        )
+
+        queued_capture_count = _queue_capture_count(vault)
+        queue = {"queued_capture_count": queued_capture_count, "queue_path": str(vault / "queue" / "pi-captures.jsonl")}
+        sections["queue"] = queue
+        if queued_capture_count:
+            content_blocks.append(f"[vault] Capture queue: {queued_capture_count} queued pi capture(s)")
+
+    if include_tool_context_preview:
+        sections["tool_context_preview"] = {
+            "available": False,
+            "reason": "file_path_required",
+            "hint": "Call memento_tool_context with a concrete file path when handling read-tool results.",
+        }
+
+    raw_content = "\n\n".join(block for block in content_blocks if block).strip()
+    content, truncated = _truncate_session_context(raw_content, char_budget)
+    expandable_paths = _unique_result_paths(raw_results)
+    budget_notes = []
+    if truncated:
+        budget_notes.append("content truncated to token_budget; use expandable_paths with memento_get for full notes")
+
+    payload = {
+        "should_inject": bool(content),
+        "content": content,
+        "source": "session-context",
+        "sections": sections,
+        "results": [_compact_session_result(result) for result in raw_results],
+        "metadata": {
+            "cwd": cwd,
+            "session_id": session_id,
+            "token_budget": token_budget,
+            "char_budget": char_budget,
+            "packet_char_budget": packet_char_budget,
+            "used_chars": len(content),
+            "truncated": truncated,
+            "expandable_paths": expandable_paths,
+            "warnings": warnings,
+            "budget_notes": budget_notes,
+        },
+    }
+    payload = _fit_session_context_payload(payload, packet_char_budget)
+    if recall_top_path and recall_content_marker and recall_content_marker in payload.get("content", ""):
+        record_recall(recall_top_path)
+    return payload
 
 
 LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")

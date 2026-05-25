@@ -10,6 +10,7 @@ from memento.lifecycle import (
     LifecycleResult,
     _run_recall_lines,
     build_recall,
+    build_session_context,
     build_tool_context,
     empty_result,
     filter_recall_results_by_explicit_project,
@@ -63,6 +64,212 @@ def test_empty_result_defaults_to_no_results_reason():
         "results": [],
         "reason": "no-results",
     }
+
+
+def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_path):
+    queue_file = tmp_path / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir()
+    queue_file.write_text('{"id":"q1"}\n')
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "a.md").write_text("# A")
+
+    briefing = LifecycleResult(True, "[vault] Project: repo | 1 sessions | 1 notes", "briefing")
+    recall = LifecycleResult(
+        True,
+        "[vault] Related memories:\n  - Cache policy: Use TTLs.",
+        "recall",
+        results=[{"path": "notes/cache.md", "title": "Cache policy", "snippet": "Use TTLs."}],
+        metadata={"top_path": "notes/cache.md"},
+    )
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=briefing) as mock_briefing,
+        patch("memento.lifecycle.build_recall", return_value=recall) as mock_recall,
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: triage failing"),
+    ):
+        payload = build_session_context(
+            cwd="/repo",
+            prompt="how should cache work?",
+            session_id="s1",
+            token_budget=200,
+        )
+
+    assert payload["should_inject"] is True
+    assert payload["source"] == "session-context"
+    assert "[vault] Project: repo" in payload["content"]
+    assert "Cache policy" in payload["content"]
+    assert payload["sections"]["status"]["vault_exists"] is True
+    assert payload["sections"]["status"]["qmd_available"] is True
+    assert payload["sections"]["queue"]["queued_capture_count"] == 1
+    assert payload["metadata"]["warnings"] == ["[vault] WARN: triage failing"]
+    assert payload["metadata"]["expandable_paths"] == ["notes/cache.md"]
+    assert payload["metadata"]["truncated"] is False
+    mock_briefing.assert_called_once_with("/repo", "s1", allow_deferred=False)
+    mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1", record=False)
+
+
+def test_build_session_context_respects_budget_and_reports_expandable_paths(tmp_path):
+    (tmp_path / "notes").mkdir()
+    long_content = "[vault] Related memories:\n  - " + ("long memory " * 100)
+    recall = LifecycleResult(
+        True,
+        long_content,
+        "recall",
+        results=[
+            {"path": "notes/long.md", "title": "Long memory", "snippet": "long memory"},
+            {"path": "notes/second.md", "title": "Second", "snippet": "second"},
+        ],
+    )
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.build_recall", return_value=recall),
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "memory", "s1", token_budget=30)
+
+    assert len(payload["content"]) <= payload["metadata"]["char_budget"]
+    assert payload["metadata"]["truncated"] is True
+    assert payload["metadata"]["expandable_paths"] == ["notes/long.md", "notes/second.md"]
+    assert "truncated" in payload["metadata"]["budget_notes"][0]
+
+
+def test_build_session_context_compacts_structured_payload_under_budget_overhead(tmp_path):
+    (tmp_path / "notes").mkdir()
+    long_text = "x" * 2000
+    recall = LifecycleResult(
+        True,
+        "[vault] Related memories:\n  - " + long_text,
+        "recall",
+        results=[{"path": "notes/long.md", "title": "Long memory", "snippet": long_text, "content": long_text}],
+        metadata={"diagnostic": long_text},
+    )
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.build_recall", return_value=recall),
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "memory", "s1", token_budget=30)
+
+    serialized = json.dumps(payload)
+    assert len(serialized) <= payload["metadata"]["packet_char_budget"]
+    assert "content" not in payload["sections"]["recall"]
+    assert "content" not in payload["results"][0]
+    assert payload["metadata"]["truncated"] is True
+    assert payload["metadata"]["expandable_paths"] == ["notes/long.md"]
+
+
+def test_build_session_context_final_budget_fallback_handles_long_metadata(tmp_path):
+    (tmp_path / "notes").mkdir()
+    long_value = "x" * 5000
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: " + long_value),
+    ):
+        payload = build_session_context(long_value, "", long_value, token_budget=100, include_recall=False)
+
+    assert len(json.dumps(payload)) <= payload["metadata"]["packet_char_budget"]
+    assert payload["should_inject"] == bool(payload["content"])
+    assert payload["metadata"]["truncated"] is True
+    assert payload["metadata"].get("omitted_metadata") is True
+
+
+def test_build_session_context_recomputes_should_inject_on_early_fit(tmp_path):
+    (tmp_path / "notes").mkdir()
+    briefing = LifecycleResult(True, "short context", "briefing")
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=briefing),
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: " + ("x" * 1000)),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=50, include_recall=False)
+
+    assert len(json.dumps(payload)) <= payload["metadata"]["packet_char_budget"]
+    assert payload["content"] == ""
+    assert payload["should_inject"] is False
+    assert payload["metadata"]["used_chars"] == 0
+
+
+def test_build_session_context_records_recall_only_after_final_payload_includes_it(tmp_path):
+    (tmp_path / "notes").mkdir()
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch(
+            "memento.lifecycle._run_recall_lines",
+            return_value=(
+                ["[vault] Related memories:", "  - Cache policy: Use TTLs."],
+                "notes/cache.md",
+                [{"path": "notes/cache.md", "title": "Cache policy"}],
+                None,
+            ),
+        ),
+        patch("memento.lifecycle.record_recall") as mock_record,
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "cache", "s1", token_budget=2000)
+
+    assert "Cache policy" in payload["content"]
+    mock_record.assert_called_once_with("notes/cache.md")
+
+
+def test_build_session_context_does_not_record_recall_when_final_payload_drops_content(tmp_path):
+    (tmp_path / "notes").mkdir()
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch(
+            "memento.lifecycle._run_recall_lines",
+            return_value=(
+                ["[vault] Related memories:", "  - Cache policy: Use TTLs."],
+                "notes/cache.md",
+                [{"path": "notes/cache.md", "title": "Cache policy", "snippet": "x" * 2000}],
+                None,
+            ),
+        ),
+        patch("memento.lifecycle.record_recall") as mock_record,
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: " + ("x" * 1000)),
+    ):
+        payload = build_session_context("/repo", "cache", "s1", token_budget=1)
+
+    assert payload["content"] == ""
+    mock_record.assert_not_called()
+
+
+def test_build_session_context_disables_deferred_briefing_work(tmp_path):
+    (tmp_path / "notes").mkdir()
+
+    with (
+        patch("memento.lifecycle.get_config", return_value={"session_briefing": True, "project_maps_enabled": True}),
+        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.get_git_branch", return_value="feature"),
+        patch("memento.lifecycle.detect_project", return_value=("repo", None)),
+        patch("memento.lifecycle.read_project_index", return_value=([], [])),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.load_or_build_graph"),
+        patch("memento.lifecycle.spawn_deferred_search") as mock_spawn,
+    ):
+        payload = build_session_context("/repo", "", "s1", include_recall=False)
+
+    assert payload["sections"]["briefing"]["should_inject"] is True
+    mock_spawn.assert_not_called()
 
 
 @pytest.mark.parametrize(
