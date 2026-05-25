@@ -590,14 +590,15 @@ def run_remote_triage(hook_input):
     """
     from memento.remote_client import capture as remote_capture
 
-    session_id = hook_input.get("session_id", "unknown")
+    requested_session_id = hook_input.get("session_id")
+    session_id = requested_session_id or "unknown"
     transcript_path = hook_input.get("transcript_path")
 
     if not transcript_path or not os.path.exists(transcript_path):
         return
 
     try:
-        meta = parse_transcript(transcript_path, session_id=session_id)
+        meta = parse_transcript(transcript_path, session_id=requested_session_id)
     except Exception:
         return
 
@@ -724,7 +725,8 @@ def main():
         log_triage_health("hook_input_failed", session_id="unknown", error=error)
         sys.exit(0)
 
-    session_id = hook_input.get("session_id", "unknown")
+    requested_session_id = hook_input.get("session_id")
+    session_id = requested_session_id or "unknown"
     transcript_path = hook_input.get("transcript_path")
 
     if not transcript_path or not os.path.exists(transcript_path):
@@ -732,7 +734,7 @@ def main():
         sys.exit(0)
 
     try:
-        meta = parse_transcript(transcript_path, session_id=session_id)
+        meta = parse_transcript(transcript_path, session_id=requested_session_id)
     except Exception as exc:
         error = str(exc)
         log_retrieval("triage", "parse_transcript_failed", error=error, session_id=session_id)

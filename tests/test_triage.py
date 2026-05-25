@@ -825,6 +825,30 @@ class TestSpawnMementoAgent:
 
 
 class TestMainHealthLogging:
+    def test_main_does_not_pass_unknown_session_sentinel_to_parser(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("{}\n")
+        meta = {
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 1,
+            "files_edited": [],
+            "files_read": [],
+            "first_prompt": "Short session",
+            "last_outcome": None,
+        }
+
+        with (
+            patch("memento_triage.read_hook_input", return_value={"transcript_path": str(transcript)}),
+            patch("memento_triage.parse_transcript", return_value=meta) as mock_parse,
+        ):
+            try:
+                _mod.main()
+            except SystemExit as exc:
+                assert exc.code == 0
+
+        assert mock_parse.call_args.kwargs["session_id"] is None
+
     def test_main_logs_parse_failure_to_triage_health(self, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
         transcript.write_text("not-json\n")
@@ -898,6 +922,25 @@ class TestMainHealthLogging:
 
 
 class TestRemoteTriage:
+    def test_remote_triage_does_not_pass_unknown_session_sentinel_to_parser(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("{}\n")
+        meta = {
+            "agent": "opencode",
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 1,
+            "files_edited": [],
+            "files_read": [],
+            "first_prompt": "Use OpenCode",
+            "last_outcome": "Done.",
+        }
+
+        with patch("memento_triage.parse_transcript", return_value=meta) as mock_parse:
+            run_remote_triage({"transcript_path": str(transcript)})
+
+        assert mock_parse.call_args.kwargs["session_id"] is None
+
     def test_remote_triage_propagates_detected_agent(self, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
         transcript.write_text("{}\n")
