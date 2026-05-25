@@ -793,6 +793,23 @@ class TestMementoCapture:
         assert result["project"] != "unknown"
 
     @pytest.mark.usefixtures("_use_vault_config")
+    def test_captures_opencode_transcript_without_session_id(self, tmp_vault, tmp_path, monkeypatch):
+        opencode_dir = tmp_path / "xdg-data" / "opencode"
+        opencode_dir.mkdir(parents=True)
+        transcript = opencode_dir / "opencode.db"
+        _write_opencode_db(transcript)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+        result = memento_capture(
+            session_summary="",
+            transcript_path=str(transcript),
+            agent="opencode",
+        )
+
+        assert "error" not in result
+        assert result["project"] != "unknown"
+
+    @pytest.mark.usefixtures("_use_vault_config")
     def test_nonexistent_transcript(self, tmp_vault):
         result = memento_capture(
             session_summary="",
