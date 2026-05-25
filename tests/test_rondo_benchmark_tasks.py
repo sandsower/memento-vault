@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 
-TASKS_PATH = Path("benchmark/rondo/tasks.json")
+TASKS_PATH = Path(__file__).resolve().parents[1] / "benchmark/rondo/tasks.json"
 
 REQUIRED_TOP_LEVEL_FIELDS = {
     "schema_version",
