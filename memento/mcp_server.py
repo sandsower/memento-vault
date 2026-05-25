@@ -727,6 +727,7 @@ def memento_capture(
     if not vault.exists():
         return {"error": f"Vault not found at {vault}"}
 
+    requested_session_id = session_id
     session_id = session_id or uuid.uuid4().hex[:12]
 
     # Mode 1: transcript file parsing via adapter (local/stdio transport only)
@@ -743,11 +744,13 @@ def memento_capture(
 
         # Restrict to known agent transcript directories (proper containment check)
         candidate = Path(transcript_path).resolve()
+        xdg_data_home = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
         allowed_roots = [
             (Path.home() / ".claude").resolve(),
             (Path.home() / ".codex").resolve(),
             (Path.home() / ".cursor").resolve(),
             (Path.home() / ".codeium").resolve(),
+            (xdg_data_home / "opencode").resolve(),
             Path(tempfile.gettempdir()).resolve(),
         ]
         if not any(candidate == root or root in candidate.parents for root in allowed_roots):
@@ -756,7 +759,11 @@ def memento_capture(
         try:
             from memento.adapters import parse_transcript
 
-            meta = parse_transcript(transcript_path, agent=agent if agent != "unknown" else None)
+            meta = parse_transcript(
+                transcript_path,
+                agent=agent if agent != "unknown" else None,
+                session_id=requested_session_id,
+            )
             cwd = cwd or meta.get("cwd", "")
             branch = branch or meta.get("git_branch", "")
             files_edited = files_edited or meta.get("files_edited", [])

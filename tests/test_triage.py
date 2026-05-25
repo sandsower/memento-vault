@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -24,6 +25,7 @@ append_session_to_project = _mod.append_session_to_project
 process_structured_notes = _mod.process_structured_notes
 run_structured_notes_worker = _mod._run_structured_notes_worker
 spawn_memento_agent = _mod.spawn_memento_agent
+run_remote_triage = _mod.run_remote_triage
 
 
 def _write_transcript(tmp_path, entries):
@@ -61,6 +63,88 @@ def _edit_block(path):
 
 def _read_block(path):
     return {"type": "tool_use", "name": "Read", "input": {"file_path": path}}
+
+
+def _build_opencode_db(path, sessions=None):
+    sessions = sessions or [
+        {
+            "id": "ses_open",
+            "time_created": 1,
+            "user_text": "Capture the OpenCode fix",
+            "assistant_text": "Implemented the adapter fix.",
+        }
+    ]
+    conn = sqlite3.connect(str(path))
+    cur = conn.cursor()
+    cur.executescript(
+        """
+        CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            title TEXT NOT NULL,
+            version TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL
+        );
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data TEXT NOT NULL
+        );
+        CREATE TABLE part (
+            id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data TEXT NOT NULL
+        );
+        """
+    )
+    for idx, session in enumerate(sessions):
+        session_id = session["id"]
+        created = session["time_created"]
+        cur.execute(
+            "INSERT INTO session VALUES (?, 'prj_test', '/repo', 'fixture', '1.0', ?, ?)",
+            (session_id, created, created),
+        )
+        user_msg = f"msg_user_{idx}"
+        assistant_msg = f"msg_assistant_{idx}"
+        cur.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            (user_msg, session_id, created + 1, created + 1, json.dumps({"role": "user"})),
+        )
+        cur.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                f"prt_user_{idx}",
+                user_msg,
+                session_id,
+                created + 1,
+                created + 1,
+                json.dumps({"type": "text", "text": session["user_text"]}),
+            ),
+        )
+        cur.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            (assistant_msg, session_id, created + 2, created + 2, json.dumps({"role": "assistant"})),
+        )
+        cur.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                f"prt_assistant_{idx}",
+                assistant_msg,
+                session_id,
+                created + 2,
+                created + 2,
+                json.dumps({"type": "text", "text": session["assistant_text"]}),
+            ),
+        )
+    conn.commit()
+    conn.close()
 
 
 # --- parse_transcript ---
@@ -269,6 +353,90 @@ class TestAppendSessionToProject:
 
 
 class TestProcessStructuredNotes:
+    def test_triage_structured_extraction_from_opencode_db(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "opencode.db"
+        _build_opencode_db(transcript)
+        meta = {
+            "agent": "opencode",
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 1,
+            "files_edited": ["adapter.py"],
+            "first_prompt": "Capture the OpenCode fix",
+            "last_outcome": "Implemented the adapter fix.",
+        }
+        llm_payload = json.dumps(
+            [
+                {
+                    "title": "OpenCode adapter renders SQLite transcripts",
+                    "body": "Structured note extraction renders OpenCode SQLite sessions as text.",
+                    "type": "implementation",
+                    "tags": ["opencode"],
+                    "certainty": 4,
+                }
+            ]
+        )
+        captured = {}
+
+        def _llm_complete(prompt):
+            captured["prompt"] = prompt
+            return LLMResult(text=llm_payload, ok=True, error=None)
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", side_effect=_llm_complete),
+        ):
+            written = process_structured_notes("ses_open", str(transcript), meta, "api-service")
+
+        assert written == 1
+        assert "User: Capture the OpenCode fix" in captured["prompt"]
+        assert "Assistant: Implemented the adapter fix." in captured["prompt"]
+        assert (tmp_vault / "notes" / "opencode-adapter-renders-sqlite-transcripts.md").exists()
+
+    def test_triage_structured_extraction_uses_selected_opencode_session(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "opencode.db"
+        _build_opencode_db(
+            transcript,
+            sessions=[
+                {
+                    "id": "ses_target",
+                    "time_created": 1,
+                    "user_text": "Capture the older OpenCode session",
+                    "assistant_text": "Rendered the target session.",
+                },
+                {
+                    "id": "ses_newer",
+                    "time_created": 100,
+                    "user_text": "This newer session must not be used",
+                    "assistant_text": "Wrong session.",
+                },
+            ],
+        )
+        meta = {
+            "agent": "opencode",
+            "opencode_session_id": "ses_target",
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 1,
+            "files_edited": ["adapter.py"],
+            "first_prompt": "Capture the older OpenCode session",
+            "last_outcome": "Rendered the target session.",
+        }
+        captured = {}
+
+        def _llm_complete(prompt):
+            captured["prompt"] = prompt
+            return LLMResult(text="[]", ok=True, error=None)
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", side_effect=_llm_complete),
+        ):
+            process_structured_notes("ses_target", str(transcript), meta, "api-service")
+
+        assert "User: Capture the older OpenCode session" in captured["prompt"]
+        assert "This newer session must not be used" not in captured["prompt"]
+
     def test_triage_structured_extraction(self, tmp_vault, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
         transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
@@ -657,6 +825,33 @@ class TestSpawnMementoAgent:
 
 
 class TestMainHealthLogging:
+    def test_main_does_not_pass_unknown_session_sentinel_to_parser(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("{}\n")
+        meta = {
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 1,
+            "files_edited": [],
+            "files_read": [],
+            "first_prompt": "Short session",
+            "last_outcome": None,
+        }
+
+        with (
+            patch(
+                "memento_triage.read_hook_input",
+                return_value={"session_id": "unknown", "transcript_path": str(transcript)},
+            ),
+            patch("memento_triage.parse_transcript", return_value=meta) as mock_parse,
+        ):
+            try:
+                _mod.main()
+            except SystemExit as exc:
+                assert exc.code == 0
+
+        assert mock_parse.call_args.kwargs["session_id"] is None
+
     def test_main_logs_parse_failure_to_triage_health(self, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
         transcript.write_text("not-json\n")
@@ -727,3 +922,46 @@ class TestMainHealthLogging:
         assert action_call.args[0] == "structured_notes_payload_unreadable"
         assert action_call.kwargs["session_id"] == "unknown"
         assert action_call.kwargs["error"]
+
+
+class TestRemoteTriage:
+    def test_remote_triage_does_not_pass_unknown_session_sentinel_to_parser(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("{}\n")
+        meta = {
+            "agent": "opencode",
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 1,
+            "files_edited": [],
+            "files_read": [],
+            "first_prompt": "Use OpenCode",
+            "last_outcome": "Done.",
+        }
+
+        with patch("memento_triage.parse_transcript", return_value=meta) as mock_parse:
+            run_remote_triage({"session_id": "unknown", "transcript_path": str(transcript)})
+
+        assert mock_parse.call_args.kwargs["session_id"] is None
+
+    def test_remote_triage_propagates_detected_agent(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text("{}\n")
+        meta = {
+            "agent": "opencode",
+            "cwd": "/repo",
+            "git_branch": None,
+            "exchange_count": 2,
+            "files_edited": [],
+            "files_read": [],
+            "first_prompt": "Use OpenCode",
+            "last_outcome": "Done.",
+        }
+
+        with (
+            patch("memento_triage.parse_transcript", return_value=meta),
+            patch("memento.remote_client.capture", return_value={"ok": True}) as mock_capture,
+        ):
+            run_remote_triage({"session_id": "ses_open", "transcript_path": str(transcript)})
+
+        assert mock_capture.call_args.kwargs["agent"] == "opencode"

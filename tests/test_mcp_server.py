@@ -1,5 +1,7 @@
 """Tests for the MCP server tools."""
 
+import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,6 +38,38 @@ def _use_vault_config(vault_config, monkeypatch):
     monkeypatch.setattr("memento.mcp_server.get_vault", lambda: Path(vault_config["vault_path"]))
     monkeypatch.setattr("memento.store.get_config", lambda: vault_config)
     monkeypatch.setattr("memento.config._CONFIG", vault_config)
+
+
+def _write_opencode_db(path):
+    conn = sqlite3.connect(str(path))
+    cur = conn.cursor()
+    cur.executescript(
+        """
+        CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, directory TEXT NOT NULL,
+            title TEXT NOT NULL, version TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+        CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+        """
+    )
+    cur.execute(
+        "INSERT INTO session VALUES ('ses_open', 'prj_test', '/home/vic/Projects/test', 'fixture', '1.0', 1, 1)"
+    )
+    cur.execute("INSERT INTO message VALUES ('msg_user', 'ses_open', 2, 2, ?)", (json.dumps({"role": "user"}),))
+    cur.execute(
+        "INSERT INTO part VALUES ('prt_user', 'msg_user', 'ses_open', 2, 2, ?)",
+        (json.dumps({"type": "text", "text": "Fix via OpenCode"}),),
+    )
+    cur.execute(
+        "INSERT INTO message VALUES ('msg_assistant', 'ses_open', 3, 3, ?)", (json.dumps({"role": "assistant"}),)
+    )
+    cur.execute(
+        "INSERT INTO part VALUES ('prt_assistant', 'msg_assistant', 'ses_open', 3, 3, ?)",
+        (json.dumps({"type": "text", "text": "Fixed via OpenCode."}),),
+    )
+    conn.commit()
+    conn.close()
 
 
 # --- _strip_injection ---
@@ -735,6 +769,41 @@ class TestMementoCapture:
         result = memento_capture(
             session_summary="",
             transcript_path=str(transcript),
+        )
+
+        assert "error" not in result
+        assert result["project"] != "unknown"
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_captures_opencode_transcript_from_xdg_data_home(self, tmp_vault, tmp_path, monkeypatch):
+        opencode_dir = tmp_path / "xdg-data" / "opencode"
+        opencode_dir.mkdir(parents=True)
+        transcript = opencode_dir / "opencode.db"
+        _write_opencode_db(transcript)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+        result = memento_capture(
+            session_summary="",
+            transcript_path=str(transcript),
+            session_id="ses_open",
+            agent="opencode",
+        )
+
+        assert "error" not in result
+        assert result["project"] != "unknown"
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_captures_opencode_transcript_without_session_id(self, tmp_vault, tmp_path, monkeypatch):
+        opencode_dir = tmp_path / "xdg-data" / "opencode"
+        opencode_dir.mkdir(parents=True)
+        transcript = opencode_dir / "opencode.db"
+        _write_opencode_db(transcript)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+        result = memento_capture(
+            session_summary="",
+            transcript_path=str(transcript),
+            agent="opencode",
         )
 
         assert "error" not in result

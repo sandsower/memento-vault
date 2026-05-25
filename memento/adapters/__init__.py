@@ -9,6 +9,9 @@ import json
 import os
 
 from memento.adapters.claude import parse_transcript as _parse_claude
+from memento.adapters.opencode import looks_like_opencode_db
+from memento.adapters.opencode import parse_transcript as _parse_opencode
+from memento.adapters.opencode import render_transcript_text as _render_opencode
 
 _SNIFF_MAX_LINES = 20
 
@@ -18,13 +21,18 @@ def detect_agent(transcript_path):
 
     Detection order:
     1. MEMENTO_AGENT env var (explicit override)
-    2. Sniff the first line of the transcript for format clues
+    2. Sniff the file: SQLite header → OpenCode; JSONL first records → Claude
 
-    Returns one of: "claude", "codex", "cursor", "windsurf", "unknown"
+    Returns one of: "claude", "opencode", "codex", "cursor", "windsurf", "unknown"
     """
     env_agent = os.environ.get("MEMENTO_AGENT", "").lower().strip()
-    if env_agent in ("claude", "codex", "cursor", "windsurf"):
+    if env_agent in ("claude", "opencode", "codex", "cursor", "windsurf"):
         return env_agent
+
+    # OpenCode stores sessions in SQLite, so check the binary header first;
+    # otherwise opening it as text would just raise UnicodeDecodeError below.
+    if looks_like_opencode_db(transcript_path):
+        return "opencode"
 
     # Sniff transcript format by scanning early records. Claude Code writes
     # metadata records (file-history-snapshot, attachment, system) ahead of
@@ -60,7 +68,21 @@ def detect_agent(transcript_path):
     return "unknown"
 
 
-def parse_transcript(transcript_path, agent=None):
+def render_transcript_text(transcript_path, agent=None, session_id=None):
+    """Render a transcript as readable text for LLM prompts.
+
+    Text transcript formats fall back to reading the file. Binary transcript
+    stores such as OpenCode SQLite DBs are rendered by their adapter.
+    """
+    if agent is None:
+        agent = detect_agent(transcript_path)
+
+    if agent == "opencode":
+        return _render_opencode(transcript_path, session_id=session_id)
+    return open(transcript_path).read()
+
+
+def parse_transcript(transcript_path, agent=None, session_id=None):
     """Parse a transcript file using the appropriate agent adapter.
 
     Args:
@@ -87,6 +109,8 @@ def parse_transcript(transcript_path, agent=None):
 
     if agent == "claude":
         meta = _parse_claude(transcript_path)
+    elif agent == "opencode":
+        meta = _parse_opencode(transcript_path, session_id=session_id)
     elif agent in ("codex", "cursor", "windsurf"):
         raise ValueError(
             f"Transcript parsing for {agent!r} is not yet implemented. "

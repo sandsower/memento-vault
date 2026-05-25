@@ -30,7 +30,7 @@ from memento.store import (  # noqa: E402
     update_project_index,
     write_note,
 )
-from memento.adapters import parse_transcript  # noqa: E402
+from memento.adapters import parse_transcript, render_transcript_text  # noqa: E402
 from memento.utils import normalize_note_tags, read_hook_input, sanitize_secrets  # noqa: E402
 from memento import sync_ledger  # noqa: E402
 
@@ -369,8 +369,14 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
     vault = get_vault()
     log_triage_health("structured_notes_attempt", session_id=session_id, project=project_slug)
     try:
-        transcript_text = sanitize_secrets(Path(transcript_path).read_text())
-    except OSError:
+        transcript_text = sanitize_secrets(
+            render_transcript_text(
+                transcript_path,
+                agent=meta.get("agent"),
+                session_id=meta.get("opencode_session_id") or meta.get("session_id") or session_id,
+            )
+        )
+    except (OSError, UnicodeDecodeError, ValueError):
         log_retrieval(
             "triage",
             "structured_notes_transcript_unreadable",
@@ -572,6 +578,12 @@ def spawn_memento_agent(session_id, transcript_path, meta, project_slug):
 # --- Main ---
 
 
+def _requested_session_id(hook_input):
+    """Return a real hook session id, treating sentinels as absent."""
+    session_id = hook_input.get("session_id")
+    return session_id if session_id and session_id != "unknown" else None
+
+
 def run_remote_triage(hook_input):
     """Run triage via the remote vault client — sends capture request over HTTP.
 
@@ -584,14 +596,15 @@ def run_remote_triage(hook_input):
     """
     from memento.remote_client import capture as remote_capture
 
-    session_id = hook_input.get("session_id", "unknown")
+    requested_session_id = _requested_session_id(hook_input)
+    session_id = requested_session_id or "unknown"
     transcript_path = hook_input.get("transcript_path")
 
     if not transcript_path or not os.path.exists(transcript_path):
         return
 
     try:
-        meta = parse_transcript(transcript_path)
+        meta = parse_transcript(transcript_path, session_id=requested_session_id)
     except Exception:
         return
 
@@ -604,13 +617,14 @@ def run_remote_triage(hook_input):
     substantial = is_substantial(meta)
     new_insight = has_new_insight(meta) if substantial else False
     summary = build_session_summary(meta)
+    agent = meta.get("agent", "unknown")
     result = remote_capture(
         session_summary=summary,
         cwd=meta.get("cwd", ""),
         branch=meta.get("git_branch", ""),
         files_edited=meta.get("files_edited", []),
         session_id=session_id,
-        agent="claude",
+        agent=agent,
         fleeting_only=not (substantial and new_insight),
     )
 
@@ -668,7 +682,7 @@ def run_remote_triage(hook_input):
                     "branch": meta.get("git_branch", "") or "",
                     "files_edited": list(meta.get("files_edited") or []),
                     "session_id": session_id,
-                    "agent": "claude",
+                    "agent": agent,
                     "fleeting_only": not (substantial and new_insight),
                 }
                 retry_spool_path = str(sync_ledger.spool_payload(vault, "capture", source, json.dumps(envelope)))
@@ -717,7 +731,8 @@ def main():
         log_triage_health("hook_input_failed", session_id="unknown", error=error)
         sys.exit(0)
 
-    session_id = hook_input.get("session_id", "unknown")
+    requested_session_id = _requested_session_id(hook_input)
+    session_id = requested_session_id or "unknown"
     transcript_path = hook_input.get("transcript_path")
 
     if not transcript_path or not os.path.exists(transcript_path):
@@ -725,7 +740,7 @@ def main():
         sys.exit(0)
 
     try:
-        meta = parse_transcript(transcript_path)
+        meta = parse_transcript(transcript_path, session_id=requested_session_id)
     except Exception as exc:
         error = str(exc)
         log_retrieval("triage", "parse_transcript_failed", error=error, session_id=session_id)
