@@ -422,7 +422,7 @@ class TestOpencodeAdapter:
         assert meta["first_prompt"] == "Fix the broken login flow"
         assert meta["last_outcome"] == "Done."
 
-    def test_strips_system_tags_from_prompt(self, tmp_path):
+    def test_unwraps_whole_prompt_wrapper(self, tmp_path):
         db = tmp_path / "opencode.db"
         _build_opencode_db(
             db,
@@ -434,7 +434,7 @@ class TestOpencodeAdapter:
                         {
                             "role": "user",
                             "time_created": 2,
-                            "parts": [{"type": "text", "text": "<system-reminder>x</system-reminder>Do the thing"}],
+                            "parts": [{"type": "text", "text": "<system-reminder>Do the thing</system-reminder>"}],
                         },
                         {
                             "role": "assistant",
@@ -460,14 +460,19 @@ class TestOpencodeAdapter:
                         {
                             "role": "user",
                             "time_created": 2,
-                            "parts": [{"type": "text", "text": "Explain <div>hello</div>"}],
+                            "parts": [
+                                {
+                                    "type": "text",
+                                    "text": "Explain <div>hello</div> and <system>role tags</system>",
+                                }
+                            ],
                         }
                     ],
                 }
             ],
         )
         meta = parse_opencode(str(db))
-        assert meta["first_prompt"] == "Explain <div>hello</div>"
+        assert meta["first_prompt"] == "Explain <div>hello</div> and <system>role tags</system>"
 
     def test_session_id_override_via_env(self, tmp_path):
         db = tmp_path / "opencode.db"

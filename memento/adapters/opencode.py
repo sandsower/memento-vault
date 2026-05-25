@@ -23,10 +23,9 @@ _EDIT_TOOLS = {"edit", "write", "patch", "apply_patch"}
 _READ_TOOLS = {"read"}
 _APPLY_PATCH_PATH_RE = re.compile(r"^\*\*\* (Add File|Delete File|Update File|Move to):\s*(.+?)\s*$")
 _PROMPT_WRAPPER_RE = re.compile(
-    r"^\s*<(?P<tag>(?:prompt|system|assistant|user))\b[^>]*>(?P<body>.*)</(?P=tag)>\s*$",
+    r"^\s*<(?P<tag>(?:prompt|assistant|user|system(?:-[\w-]+)?))\b[^>]*>(?P<body>.*)</(?P=tag)>\s*$",
     re.DOTALL | re.IGNORECASE,
 )
-_SYSTEM_TAG_RE = re.compile(r"<system(?:-[^>]*)?>.*?</system(?:-[^>]*)?>", re.DOTALL | re.IGNORECASE)
 
 
 def _connect_readonly(db_path):
@@ -87,8 +86,8 @@ def _apply_patch_paths(patch_text):
 
 
 def _clean_prompt_text(text):
-    """Strip OpenCode/system prompt wrappers without dropping user markup."""
-    cleaned = _SYSTEM_TAG_RE.sub("", text).strip()
+    """Strip whole-prompt wrappers without dropping embedded user markup."""
+    cleaned = text.strip()
     wrapper = _PROMPT_WRAPPER_RE.match(cleaned)
     if wrapper:
         cleaned = wrapper.group("body").strip()
