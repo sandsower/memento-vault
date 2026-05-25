@@ -281,6 +281,81 @@ def test_pi_bridge_process_start_rejects_active_lock(capsys, tmp_path, monkeypat
     assert payload["reason"] == "processing_lock_active"
 
 
+def test_pi_bridge_queue_list_includes_review_metadata_without_body(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    body = "First important sentence.\nSecond line with more context.\n" + "x" * 200
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "title": "Queued note",
+                "body": body,
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "list"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    capture = payload["captures"][0]
+    assert "body" not in capture
+    assert capture["body_char_count"] == len(body)
+    assert capture["body_size_bytes"] == len(body.encode("utf-8"))
+    assert capture["body_kb"] > 0
+    assert capture["body_excerpt"].startswith("First important sentence. Second line")
+
+
+def test_pi_bridge_process_start_repeated_ids_selects_exact_captures(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "title": "One",
+                "body": "A",
+                "metadata": {"project": "repo", "session_id": "s1"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "q2",
+                "created_at": "2026-01-01T00:01:00Z",
+                "title": "Two",
+                "body": "B",
+                "metadata": {"project": "repo", "session_id": "s2"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "q3",
+                "created_at": "2026-01-01T00:02:00Z",
+                "title": "Three",
+                "body": "C",
+                "metadata": {"project": "other", "session_id": "s3"},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--id", "q3", "--id", "q1", "--dry-run"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected_capture_count"] == 2
+    assert [group["capture_ids"] for group in payload["groups"]] == [["q1"], ["q3"]]
+
+
 def test_pi_bridge_process_start_limit_applies_to_captures(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
@@ -433,6 +508,133 @@ def test_pi_bridge_process_start_skips_transcript_outside_allowed_roots(capsys, 
     assert group["transcript"]["reason"] == "outside_allowed_roots"
     packet = (run_dir / "inputs" / f"{group['group_id']}.md").read_text()
     assert "Do not include me" not in packet
+
+
+def test_pi_bridge_process_status_idle_without_runs(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-status"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "idle"
+    assert payload["active"] is False
+    assert payload["groups"] == []
+
+
+def test_pi_bridge_process_status_reads_progress_file(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    run_dir = tmp_path / "state" / "processing" / "run1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "progress.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run1",
+                "status": "running",
+                "created_at": "2026-01-01T00:00:00Z",
+                "selected_capture_count": 2,
+                "group_count": 2,
+                "current_group_id": "g2",
+                "groups": [
+                    {
+                        "group_id": "g1",
+                        "status": "processed",
+                        "capture_ids": ["q1"],
+                        "created": [{"path": "notes/a.md"}],
+                    },
+                    {"group_id": "g2", "status": "running", "capture_ids": ["q2"]},
+                ],
+            }
+        )
+    )
+    (tmp_path / "state" / "processing.lock").write_text(
+        json.dumps({"run_id": "run1", "pid": 123, "created_time": 9999999999})
+    )
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge._is_pid_alive", return_value=True),
+    ):
+        code = pi_bridge.main(["queue", "process-status"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "running"
+    assert payload["active"] is True
+    assert payload["completed_group_count"] == 1
+    assert payload["pending_group_count"] == 1
+    assert payload["current_group_id"] == "g2"
+
+
+def test_pi_bridge_process_status_marks_stale_progress_interrupted(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    run_dir = tmp_path / "state" / "processing" / "run1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "progress.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run1",
+                "status": "running",
+                "selected_capture_count": 1,
+                "group_count": 1,
+                "groups": [{"group_id": "g1", "status": "running", "capture_ids": ["q1"]}],
+            }
+        )
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-status", "--run-id", "run1"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["active"] is False
+    assert payload["status"] == "interrupted"
+
+
+def test_pi_bridge_process_status_falls_back_to_manifest_results(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    run_dir = tmp_path / "state" / "processing" / "run1"
+    results_dir = run_dir / "results"
+    logs_dir = run_dir / "logs"
+    inputs_dir = run_dir / "inputs"
+    results_dir.mkdir(parents=True)
+    logs_dir.mkdir()
+    inputs_dir.mkdir()
+    result_path = results_dir / "g1.json"
+    log_path = logs_dir / "g1.md"
+    input_path = inputs_dir / "g1.md"
+    result_path.write_text(json.dumps({"status": "processed_no_notes", "discard_reason": "noise"}))
+    log_path.write_text("log")
+    input_path.write_text("input")
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run1",
+                "status": "running",
+                "created_at": "2026-01-01T00:00:00Z",
+                "selected_capture_count": 2,
+                "group_count": 2,
+                "groups": [
+                    {
+                        "group_id": "g1",
+                        "capture_ids": ["q1"],
+                        "input_markdown": str(input_path),
+                        "result_json": str(result_path),
+                        "log_markdown": str(log_path),
+                    },
+                    {"group_id": "g2", "capture_ids": ["q2"], "result_json": str(results_dir / "g2.json")},
+                ],
+            }
+        )
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-status", "--run-id", "run1"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "interrupted"
+    assert payload["completed_group_count"] == 1
+    assert payload["groups"][0]["status"] == "processed_no_notes"
+    assert payload["groups"][0]["discard_reason"] == "noise"
+    assert payload["groups"][1]["status"] == "pending"
 
 
 def test_pi_bridge_process_finalize_dequeues_no_note_results_with_discard_reason(capsys, tmp_path, monkeypatch):

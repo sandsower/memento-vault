@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -87,6 +87,45 @@ async function realCurator(group) {
   writeFileSync(group.result_json, JSON.stringify(parsed, null, 2));
 }
 
+function nowIso() {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function writeProgress(runDir, progress) {
+  const path = resolve(runDir, 'progress.json');
+  const tempPath = `${path}.tmp`;
+  try {
+    writeFileSync(tempPath, JSON.stringify({ ...progress, updated_at: nowIso() }, null, 2));
+    renameSync(tempPath, path);
+  } catch (error) {
+    console.error(`Failed to write progress: ${String(error?.message ?? error)}`);
+    try { rmSync(tempPath, { force: true }); } catch {}
+  }
+}
+
+function readResult(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch (_error) {
+    return {};
+  }
+}
+
+function groupProgressFromManifest(group) {
+  return {
+    group_id: group.group_id,
+    status: 'pending',
+    capture_ids: group.capture_ids ?? [],
+    capture_count: (group.capture_ids ?? []).length,
+    session_id: group.session_id,
+    project: group.project,
+    branch: group.branch,
+    input_markdown: group.input_markdown,
+    result_json: group.result_json,
+    log_markdown: group.log_markdown,
+  };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const fakeMode = argValue(args, '--fake-curator');
@@ -98,12 +137,34 @@ async function main() {
     return;
   }
   const manifest = JSON.parse(readFileSync(resolve(start.run_dir, 'manifest.json'), 'utf8'));
+  const progress = {
+    run_id: start.run_id,
+    run_dir: start.run_dir,
+    status: 'running',
+    created_at: manifest.created_at ?? nowIso(),
+    selected_capture_count: manifest.selected_capture_count ?? start.selected_capture_count ?? 0,
+    group_count: manifest.group_count ?? (manifest.groups ?? []).length,
+    current_group_id: null,
+    groups: (manifest.groups ?? []).map(groupProgressFromManifest),
+  };
+  writeProgress(start.run_dir, progress);
   const processed = [];
   for (const group of manifest.groups ?? []) {
+    const progressGroup = progress.groups.find((item) => item.group_id === group.group_id);
     try {
+      if (progressGroup) progressGroup.status = 'running';
+      progress.current_group_id = group.group_id;
+      writeProgress(start.run_dir, progress);
       if (processorModel) group.processor_model = processorModel;
       if (fakeMode) await fakeCurator(group, fakeMode);
       else await realCurator(group);
+      const result = readResult(group.result_json);
+      if (progressGroup) {
+        progressGroup.status = result.status || 'processed';
+        progressGroup.created = result.created ?? [];
+        progressGroup.skipped_duplicates = result.skipped_duplicates ?? [];
+        if (result.discard_reason) progressGroup.discard_reason = result.discard_reason;
+      }
       processed.push(group.group_id);
     } catch (error) {
       const message = String(error?.message ?? error);
@@ -116,9 +177,31 @@ async function main() {
         error: message,
       }, null, 2));
       writeFileSync(group.log_markdown, `# Curator failure\n\n${message}\n\n${error?.stack ?? ''}\n`);
+      if (progressGroup) {
+        progressGroup.status = 'failed';
+        progressGroup.error = message;
+      }
+    } finally {
+      writeProgress(start.run_dir, progress);
     }
   }
+  progress.current_group_id = null;
+  writeProgress(start.run_dir, progress);
   const finalized = runBridge(['queue', 'process-finalize', '--run-id', start.run_id]);
+  const finalizeGroups = new Map((finalized.groups ?? []).map((group) => [group.group_id, group]));
+  for (const group of progress.groups) {
+    const finalizedGroup = finalizeGroups.get(group.group_id);
+    if (!finalizedGroup) continue;
+    group.status = finalizedGroup.status || group.status;
+    if (finalizedGroup.reason) group.reason = finalizedGroup.reason;
+    if (finalizedGroup.dequeued_capture_ids) group.dequeued_capture_ids = finalizedGroup.dequeued_capture_ids;
+  }
+  progress.status = finalized.error ? 'failed' : 'finalized';
+  progress.finalized_at = nowIso();
+  progress.dequeued = finalized.dequeued ?? 0;
+  progress.remaining = finalized.remaining;
+  progress.finalize = finalized;
+  writeProgress(start.run_dir, progress);
   console.log(JSON.stringify({ ...finalized, run_id: start.run_id, run_dir: start.run_dir, processed_groups: processed }, null, 2));
 }
 
