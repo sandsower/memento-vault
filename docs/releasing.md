@@ -1,10 +1,29 @@
 # Releasing Memento Vault
 
+## Release smoke gate
+
+Before cutting or reviewing release-related changes, run the fast safe smoke gate:
+
+```bash
+python3 scripts/release_smoke.py
+```
+
+The default gate checks CLI help/version paths, MCP module help startup, Homebrew formula metadata, pi package metadata, and version consistency across `VERSION`, `package.json`, `memento/__init__.py`, and `Formula/memento-vault.rb`. It only runs non-mutating checks and prints actionable failure messages.
+
+Optional tool-backed checks are separated behind `--heavy`:
+
+```bash
+python3 scripts/release_smoke.py --heavy
+```
+
+Heavy checks currently validate Docker Compose config and run an npm package dry-run when those tools are installed; missing optional tools are reported as skips.
+
 ## Version tag
 
-1. Make sure `VERSION`, `package.json`, `memento/__init__.py`, and `Formula/memento-vault.rb` agree on the release version.
-2. Merge the release PR to `main`.
-3. Tag the release from `main`:
+1. Run `python3 scripts/release_smoke.py` and fix any failures.
+2. Make sure `VERSION`, `package.json`, `memento/__init__.py`, and `Formula/memento-vault.rb` agree on the release version.
+3. Merge the release PR to `main`.
+4. Tag the release from `main`:
 
 ```bash
 git checkout main
