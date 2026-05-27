@@ -489,7 +489,9 @@ def _capture(
         session_id=session_id if session_id != "unknown" else None,
     )
     if reason == "manual" or source_event in {"manual", "tool"}:
-        _mark_manual_capture_state(session_id, cwd, project_slug, branch, clean_title, clean_body, datetime.now(timezone.utc))
+        _mark_manual_capture_state(
+            session_id, cwd, project_slug, branch, clean_title, clean_body, datetime.now(timezone.utc)
+        )
     return {"path": str(note_path.relative_to(vault)), "title": clean_title, "queued": False}
 
 

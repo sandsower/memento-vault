@@ -250,7 +250,22 @@ def test_pi_bridge_lifecycle_after_manual_capture_skips_low_signal_body(capsys, 
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):
-        assert pi_bridge.main(["capture", "--title", "Manual", "--body", "Captured the important point.", "--cwd", "/repo", "--session-id", "s1"]) == 0
+        assert (
+            pi_bridge.main(
+                [
+                    "capture",
+                    "--title",
+                    "Manual",
+                    "--body",
+                    "Captured the important point.",
+                    "--cwd",
+                    "/repo",
+                    "--session-id",
+                    "s1",
+                ]
+            )
+            == 0
+        )
         capsys.readouterr()
         code = pi_bridge.main(
             [
@@ -291,7 +306,22 @@ def test_pi_bridge_lifecycle_after_manual_capture_queues_meaningful_keyword(caps
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):
-        assert pi_bridge.main(["capture", "--title", "Manual", "--body", "Captured earlier point.", "--cwd", "/repo", "--session-id", "s1"]) == 0
+        assert (
+            pi_bridge.main(
+                [
+                    "capture",
+                    "--title",
+                    "Manual",
+                    "--body",
+                    "Captured earlier point.",
+                    "--cwd",
+                    "/repo",
+                    "--session-id",
+                    "s1",
+                ]
+            )
+            == 0
+        )
         capsys.readouterr()
         code = pi_bridge.main(
             [
@@ -327,7 +357,22 @@ def test_pi_bridge_lifecycle_after_manual_capture_queues_exchange_threshold(caps
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):
-        assert pi_bridge.main(["capture", "--title", "Manual", "--body", "Captured earlier point.", "--cwd", "/repo", "--session-id", "s1"]) == 0
+        assert (
+            pi_bridge.main(
+                [
+                    "capture",
+                    "--title",
+                    "Manual",
+                    "--body",
+                    "Captured earlier point.",
+                    "--cwd",
+                    "/repo",
+                    "--session-id",
+                    "s1",
+                ]
+            )
+            == 0
+        )
         capsys.readouterr()
         code = pi_bridge.main(
             [
@@ -361,7 +406,22 @@ def test_pi_bridge_manual_queued_capture_bypasses_lifecycle_gate(capsys, tmp_pat
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):
-        assert pi_bridge.main(["capture", "--title", "Manual", "--body", "Captured earlier point.", "--cwd", "/repo", "--session-id", "s1"]) == 0
+        assert (
+            pi_bridge.main(
+                [
+                    "capture",
+                    "--title",
+                    "Manual",
+                    "--body",
+                    "Captured earlier point.",
+                    "--cwd",
+                    "/repo",
+                    "--session-id",
+                    "s1",
+                ]
+            )
+            == 0
+        )
         capsys.readouterr()
         code = pi_bridge.main(
             [
