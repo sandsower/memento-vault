@@ -197,8 +197,12 @@ def _load_capture_session_state(session_id: str, cwd: str) -> dict[str, Any]:
 
 def _write_capture_session_state(session_id: str, cwd: str, state: dict[str, Any]) -> None:
     path = _capture_session_state_file(session_id, cwd)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        # Session state is an optimization for lifecycle queue suppression; capture commands must still succeed.
+        print(f"[memento] warning: could not write pi capture session state: {exc}", file=sys.stderr)
 
 
 def _body_hash(title: str, body: str) -> str:

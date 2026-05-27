@@ -242,6 +242,14 @@ def test_pi_bridge_capture_records_manual_session_state(capsys, tmp_path, monkey
     assert state["branch"] == "feature/pi"
 
 
+def test_pi_bridge_session_state_write_failure_is_nonfatal(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    with patch("pathlib.Path.write_text", side_effect=OSError("disk full")):
+        pi_bridge._write_capture_session_state("s1", "/repo", {"session_id": "s1"})
+
+    assert "could not write pi capture session state" in capsys.readouterr().err
+
+
 def test_pi_bridge_lifecycle_after_manual_capture_skips_low_signal_body(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     (tmp_path / "notes").mkdir()

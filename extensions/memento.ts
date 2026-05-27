@@ -347,7 +347,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			"--source-event",
 			sourceEvent,
 		]);
-		lifecycleCaptureQueued = Boolean(payload.queued);
+		lifecycleCaptureQueued = lifecycleCaptureQueued || Boolean(payload.queued);
 		lastLifecycleReason = payload.error
 			? `queue-error:${String(payload.error)}`
 			: payload.skipped
