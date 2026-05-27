@@ -207,6 +207,217 @@ def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     assert (tmp_path / payload["path"]).exists()
 
 
+def test_pi_bridge_capture_records_manual_session_state(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    (tmp_path / "notes").mkdir()
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+    ):
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Manual capture",
+                "--body",
+                "Durable decision captured by the user.",
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "s1",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queued"] is False
+    state_files = list((tmp_path / "state" / "capture-sessions").glob("*.json"))
+    assert len(state_files) == 1
+    state = json.loads(state_files[0].read_text())
+    assert state["manual_capture_at"]
+    assert state["session_id"] == "s1"
+    assert state["cwd"] == "/repo"
+    assert state["project"] == "repo"
+    assert state["branch"] == "feature/pi"
+
+
+def test_pi_bridge_lifecycle_after_manual_capture_skips_low_signal_body(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    (tmp_path / "notes").mkdir()
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+    ):
+        assert pi_bridge.main(["capture", "--title", "Manual", "--body", "Captured the important point.", "--cwd", "/repo", "--session-id", "s1"]) == 0
+        capsys.readouterr()
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Pi session candidate capture",
+                "--body",
+                "- user: thanks\n- assistant: done",
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "s1",
+                "--queue",
+                "--reason",
+                "agent_end",
+                "--source-event",
+                "agent_end",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "queued": False,
+        "skipped": True,
+        "reason": "manual_capture_suppressed_lifecycle",
+        "source_event": "agent_end",
+        "session_id": "s1",
+    }
+    assert not (tmp_path / "state" / "queue" / "pi-captures.jsonl").exists()
+
+
+def test_pi_bridge_lifecycle_after_manual_capture_queues_meaningful_keyword(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    (tmp_path / "notes").mkdir()
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+    ):
+        assert pi_bridge.main(["capture", "--title", "Manual", "--body", "Captured earlier point.", "--cwd", "/repo", "--session-id", "s1"]) == 0
+        capsys.readouterr()
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Pi session candidate capture",
+                "--body",
+                "- user: The root cause is the lifecycle queue gate.",
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "s1",
+                "--queue",
+                "--reason",
+                "agent_end",
+                "--source-event",
+                "agent_end",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queued"] is True
+    assert (tmp_path / "state" / "queue" / "pi-captures.jsonl").exists()
+
+
+def test_pi_bridge_lifecycle_after_manual_capture_queues_exchange_threshold(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    (tmp_path / "notes").mkdir()
+    body = "\n".join(["- user: one", "- assistant: two", "- user: three", "- assistant: four", "- user: five"])
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+    ):
+        assert pi_bridge.main(["capture", "--title", "Manual", "--body", "Captured earlier point.", "--cwd", "/repo", "--session-id", "s1"]) == 0
+        capsys.readouterr()
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Pi session candidate capture",
+                "--body",
+                body,
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "s1",
+                "--queue",
+                "--reason",
+                "agent_end",
+                "--source-event",
+                "agent_end",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queued"] is True
+
+
+def test_pi_bridge_manual_queued_capture_bypasses_lifecycle_gate(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    (tmp_path / "notes").mkdir()
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+    ):
+        assert pi_bridge.main(["capture", "--title", "Manual", "--body", "Captured earlier point.", "--cwd", "/repo", "--session-id", "s1"]) == 0
+        capsys.readouterr()
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Manual queued capture",
+                "--body",
+                "Queue this explicitly.",
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "s1",
+                "--queue",
+                "--reason",
+                "manual",
+                "--source-event",
+                "tool",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queued"] is True
+
+
+def test_pi_bridge_lifecycle_without_manual_baseline_still_queues(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+    ):
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Pi session candidate capture",
+                "--body",
+                "- user: hello\n- assistant: helped",
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "s1",
+                "--queue",
+                "--reason",
+                "agent_end",
+                "--source-event",
+                "agent_end",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queued"] is True
+
+
 def test_pi_bridge_capture_can_queue_instead_of_write(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     with (
