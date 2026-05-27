@@ -8,6 +8,7 @@ memento.lifecycle; this module only translates CLI JSON to LifecycleResult JSON.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -161,6 +162,115 @@ def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> N
 
 def _queue_count(vault: Path | None = None) -> int:
     return len(_load_queue(vault))
+
+
+_LIFECYCLE_SOURCE_EVENTS = {"agent_end", "session_shutdown", "session_before_compact", "session_compact"}
+_MEANINGFUL_KEYWORDS = re.compile(
+    r"\b(bug|debug|fix|fixed|error|issue|root cause|decision|decided|design|approach|tradeoff|defer|in scope|out of scope|should live|ship it)\b",
+    re.IGNORECASE,
+)
+_FILE_EDIT_SIGNAL = re.compile(r"\b(files? edited|edit(?:ed)?|write|patch|modified|changed)\b", re.IGNORECASE)
+_EXCHANGE_LINE = re.compile(r"^\s*-\s*(user|assistant):", re.IGNORECASE | re.MULTILINE)
+_MANUAL_SUPPRESSION_EXCHANGE_THRESHOLD = 5
+_SUBSTANTIAL_TAIL_CHARS = 1200
+
+
+def _session_state_key(session_id: str, cwd: str) -> str:
+    raw = f"{session_id or 'unknown'}\0{str(Path(cwd).expanduser()) if cwd else 'unknown'}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _capture_session_state_file(session_id: str, cwd: str) -> Path:
+    return _state_root() / "capture-sessions" / f"{_session_state_key(session_id, cwd)}.json"
+
+
+def _load_capture_session_state(session_id: str, cwd: str) -> dict[str, Any]:
+    path = _capture_session_state_file(session_id, cwd)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_capture_session_state(session_id: str, cwd: str, state: dict[str, Any]) -> None:
+    path = _capture_session_state_file(session_id, cwd)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        # Session state is an optimization for lifecycle queue suppression; capture commands must still succeed.
+        print(f"[memento] warning: could not write pi capture session state: {exc}", file=sys.stderr)
+
+
+def _body_hash(title: str, body: str) -> str:
+    return hashlib.sha256(f"{title.strip()}\n{body.strip()}".encode("utf-8")).hexdigest()[:16]
+
+
+def _is_lifecycle_source(source_event: str) -> bool:
+    return source_event in _LIFECYCLE_SOURCE_EVENTS
+
+
+def _meaningful_lifecycle_signal(body: str, source_event: str) -> tuple[bool, str]:
+    if not body.strip():
+        return False, "empty_body"
+    if _FILE_EDIT_SIGNAL.search(body):
+        return True, "file_edit_signal"
+    if _MEANINGFUL_KEYWORDS.search(body):
+        return True, "keyword_signal"
+    exchange_count = len(_EXCHANGE_LINE.findall(body))
+    if exchange_count >= _MANUAL_SUPPRESSION_EXCHANGE_THRESHOLD:
+        return True, "exchange_threshold"
+    if source_event in {"session_shutdown", "session_before_compact"} and len(body.strip()) >= _SUBSTANTIAL_TAIL_CHARS:
+        return True, "substantial_tail"
+    return False, "manual_capture_suppressed_lifecycle"
+
+
+def _mark_manual_capture_state(
+    session_id: str, cwd: str, project_slug: str, branch: str | None, title: str, body: str, now: datetime
+) -> None:
+    state = _load_capture_session_state(session_id, cwd)
+    state.update(
+        {
+            "session_id": session_id,
+            "cwd": cwd,
+            "project": project_slug,
+            "branch": branch,
+            "manual_capture_at": now.isoformat(timespec="seconds"),
+            "manual_capture_body_hash": _body_hash(title, body),
+            "last_lifecycle_decision": "manual_capture_recorded",
+        }
+    )
+    _write_capture_session_state(session_id, cwd, state)
+
+
+def _lifecycle_queue_decision(session_id: str, cwd: str, body: str, source_event: str) -> dict[str, Any]:
+    state = _load_capture_session_state(session_id, cwd)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if not body.strip():
+        decision = {"queue": False, "reason": "empty_body"}
+    elif not state.get("manual_capture_at"):
+        decision = {"queue": True, "reason": "no_manual_capture_baseline"}
+    else:
+        meaningful, reason = _meaningful_lifecycle_signal(body, source_event)
+        decision = {"queue": meaningful, "reason": reason}
+
+    state.update(
+        {
+            "session_id": session_id,
+            "cwd": cwd,
+            "last_lifecycle_decision_at": now,
+            "last_lifecycle_source_event": source_event,
+            "last_lifecycle_decision": "queued" if decision["queue"] else "skipped",
+            "last_lifecycle_reason": decision["reason"],
+        }
+    )
+    if decision["queue"]:
+        state["lifecycle_queue_count"] = int(state.get("lifecycle_queue_count") or 0) + 1
+    _write_capture_session_state(session_id, cwd, state)
+    return decision
 
 
 def _git_branch(cwd: str) -> str | None:
@@ -339,6 +449,16 @@ def _capture(
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
     branch = _git_branch(cwd)
     if queue:
+        if _is_lifecycle_source(source_event):
+            decision = _lifecycle_queue_decision(session_id, cwd, body, source_event)
+            if not decision["queue"]:
+                return {
+                    "queued": False,
+                    "skipped": True,
+                    "reason": decision["reason"],
+                    "source_event": source_event,
+                    "session_id": session_id,
+                }
         capture_id = f"pi-{int(time.time())}-{uuid.uuid4().hex[:8]}"
         capture = {
             "id": capture_id,
@@ -359,10 +479,12 @@ def _capture(
         _write_queue(captures, vault)
         return {"id": capture_id, "title": title.strip(), "queued": True, "queue_path": str(_queue_file(vault))}
 
+    clean_title = title.strip()
+    clean_body = body.strip()
     note_path = write_note(
         vault,
-        title.strip(),
-        body.strip(),
+        clean_title,
+        clean_body,
         "session",
         ["pi", project_slug] if project_slug != "unknown" else ["pi"],
         source="pi",
@@ -370,7 +492,11 @@ def _capture(
         branch=branch,
         session_id=session_id if session_id != "unknown" else None,
     )
-    return {"path": str(note_path.relative_to(vault)), "title": title.strip(), "queued": False}
+    if reason == "manual" or source_event in {"manual", "tool"}:
+        _mark_manual_capture_state(
+            session_id, cwd, project_slug, branch, clean_title, clean_body, datetime.now(timezone.utc)
+        )
+    return {"path": str(note_path.relative_to(vault)), "title": clean_title, "queued": False}
 
 
 def _body_excerpt(body: str, max_chars: int = 180) -> str:

@@ -347,8 +347,12 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			"--source-event",
 			sourceEvent,
 		]);
-		lifecycleCaptureQueued = !payload.error;
-		lastLifecycleReason = payload.error ? `queue-error:${String(payload.error)}` : `${sourceEvent}-capture-queued`;
+		lifecycleCaptureQueued = lifecycleCaptureQueued || Boolean(payload.queued);
+		lastLifecycleReason = payload.error
+			? `queue-error:${String(payload.error)}`
+			: payload.skipped
+				? `${sourceEvent}-capture-skipped:${String(payload.reason ?? "unspecified")}`
+				: `${sourceEvent}-capture-queued`;
 		await refreshAmbientWidget(ctx);
 		return payload;
 	}
