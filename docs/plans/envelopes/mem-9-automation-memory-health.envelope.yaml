@@ -1,5 +1,11 @@
 kind: execution-envelope-v0
-status: approved
+status: proposed
+approval:
+  approver: null
+  date: null
+  decision: null
+# Lifecycle: the repo owner flips status to approved with filled approval metadata at merge time.
+# Downstream runners must treat anything other than status: approved as non-executable (fail-closed).
 source:
   type: linear_issue
   id: MEM-38

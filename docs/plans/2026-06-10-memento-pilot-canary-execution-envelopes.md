@@ -80,7 +80,13 @@ new doc, gate results, decisions made AFK, and open risks.
 
 ```yaml
 kind: execution-envelope-v0
-status: approved
+status: proposed
+approval:
+  approver: null
+  date: null
+  decision: null
+# Lifecycle: the repo owner flips status to approved with filled approval metadata at merge time.
+# Downstream runners must treat anything other than status: approved as non-executable (fail-closed).
 source:
   type: linear_issue
   id: MEM-38
@@ -220,7 +226,13 @@ AFK, and open risks.
 
 ```yaml
 kind: execution-envelope-v0
-status: approved
+status: proposed
+approval:
+  approver: null
+  date: null
+  decision: null
+# Lifecycle: the repo owner flips status to approved with filled approval metadata at merge time.
+# Downstream runners must treat anything other than status: approved as non-executable (fail-closed).
 source:
   type: linear_issue
   id: MEM-38
@@ -342,8 +354,10 @@ ownership:
 - **Combined the implementation plan and the envelope deliverable into this
   single doc.** MEM-38 is a docs/contract ticket; a separate plan file would
   duplicate this content. The pre-approved path for the deliverable is used.
-- **Envelope status set to `approved`.** The MEM-38 pre-approved decisions call
-  for "one approved envelope each"; MEM-38 itself is the approval act.
+- **Envelope status set to `proposed` (not self-approved).** Envelopes must not
+  self-approve; the repo owner flips status to `approved` with filled approval
+  metadata at merge time. Downstream runners treat anything other than
+  `status: approved` as non-executable (fail-closed).
 - **MEM-9's dependency on MEM-17 marked soft.** GH #97 only needs the signal
   list, which is enumerated in the MEM-9 envelope itself, so the tickets can
   run in parallel — matching the source plan's Phase 7 parallelism intent.
