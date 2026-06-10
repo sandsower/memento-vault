@@ -1,6 +1,8 @@
 # Memento Pilot/Canary Execution Envelopes (MEM-38)
 
-Source plan: `rondo/elixir/docs/plans/2026-06-09-execution-envelope-structure.md` (Phase 7).
+Source plan: rondo repo, `elixir/docs/plans/2026-06-09-execution-envelope-structure.md`
+(Phase 7) — a sibling Olin repository; this document stands alone if rondo is
+not checked out.
 Contract reference: `execution-envelope-v0` in `beislid/docs/configuration.md`.
 
 This document defines the pilot/canary boundary for Memento automation hardening
@@ -360,3 +362,9 @@ ownership:
 - `proof-requirement-v1` field shapes follow the BEI-56/BEI-57 examples; if the
   Beislið contract evolves, these YAML files should be regenerated rather than
   hand-patched.
+- The repo-wide `plans/` rule in `.gitignore` covers `docs/plans/`; these
+  deliverables were force-added (`git add -f`). Any future file added under
+  `docs/plans/` (e.g. a third envelope, or artifacts the MEM-17/MEM-9
+  implementers produce here) will be silently ignored unless the author uses
+  `git add -f` or a `!docs/plans/**` negation rule is added to `.gitignore`
+  (deliberately left untouched in this slice).
