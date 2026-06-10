@@ -1,0 +1,119 @@
+kind: execution-envelope-v0
+status: approved
+approval:
+  approver: Vic Valenzuela
+  date: 2026-06-10
+  decision: approved (merge of PR #99)
+# Lifecycle: the repo owner flips status to approved with filled approval metadata at merge time.
+# Downstream runners must treat anything other than status: approved as non-executable (fail-closed).
+source:
+  type: linear_issue
+  id: MEM-38
+  title: "[Envelope] Define pilot/canary execution envelopes for Memento automation"
+  related:
+    - type: linear_issue
+      id: MEM-17
+      title: "[GH #94] [P0] Document automation MemoryProvider contract"
+    - type: github_issue
+      repository: sandsower/memento-vault
+      id: 94
+      title: "[P0] Document automation MemoryProvider contract"
+objective: >-
+  Document the Memento automation MemoryProvider contract: allowed
+  inputs/outputs, provider operations, failure behavior, privacy expectations,
+  and explicit non-goals, so Rondo/Beislið can consume Memento as automation
+  memory safely.
+slice:
+  id: mem-17-memoryprovider-contract-docs
+  include:
+    - New contract doc under docs/ (e.g. docs/automation-memory-provider.md)
+    - >-
+      Provider operations: pre-run context packet, explicit search/get, note
+      refs used by a run, post-run lesson capture, batch synthesis from
+      sanitized summaries
+    - Fail-open behavior when memory is optional, and when fail-closed is
+      required instead
+    - Privacy/redaction expectations for everything entering the vault
+    - >-
+      Explicit prohibitions: raw proof storage, active coordination state,
+      locks, patches, full transcripts by default, Rondo-specific queues
+    - Before/after examples of Rondo/Beislið usage around a run
+    - Description of health/status signals for automation-memory availability
+      (signals only; implementation is MEM-9)
+    - README/docs index cross-links as needed
+  exclude:
+    - Any runtime/MCP/CLI code changes
+    - Implementing health checks (MEM-9 owns that)
+    - A run ledger, proof store, lock, or coordination state in the vault
+    - Rondo adapter internals or Beislið proof semantics
+autonomy:
+  allow:
+    - Write and edit the contract documentation within the slice.
+    - Add cross-links from existing docs/README to the new contract doc.
+    - Run configured Beislið gates and inspect diffs.
+  ask:
+    - Add or change runtime code, MCP tool behavior, or CLI surface.
+    - Rename or restructure existing public documentation.
+    - Post to external trackers beyond the configured ticket-status updates.
+  deny:
+    - Store run evidence, proofs, locks, queues, or coordination state in the
+      vault or describe them as supported.
+    - Implement MEM-9 health checks inside this slice.
+    - Weaken the prohibition list to make automation integration easier.
+proof_requirements:
+  - kind: proof-requirement-v1
+    id: configured-pre-pr-gates
+    type: command_gate
+    stage: pre-pr
+    status: required
+    success_criteria:
+      - "Configured Beislið gates in .beislid/workflow.md pass (docs-only
+        changes still run ruff/format/compileall/test gates)."
+    failure_policy:
+      on_missing: block
+      on_failure: block
+      retryable: true
+    expected_artifact:
+      kind: gate_envelope
+      reference: "gate transcript in the delivery output"
+  - kind: proof-requirement-v1
+    id: acceptance-checklist
+    type: review_check
+    stage: pre-pr
+    status: required
+    success_criteria:
+      - "Docs describe Memento's role in automation."
+      - "Contract includes allowed inputs/outputs and failure behavior."
+      - "Health/status signals for automation-memory availability are described."
+      - "Non-goals are explicit and hard to misinterpret."
+    failure_policy:
+      on_missing: block
+      on_failure: block
+      retryable: true
+    expected_artifact:
+      kind: checklist
+      reference: "acceptance checklist in the delivery summary"
+pause_conditions:
+  - A required gate fails after 3 bounded attempts.
+  - The contract cannot be documented without changing runtime behavior.
+  - The ownership boundary (memory-only Memento) would have to bend.
+  - A dependency artifact (execution-envelope-v0 contract, this envelope) is
+    missing or contradicts the work.
+dependencies:
+  - GH sandsower/memento-vault#94 acceptance criteria (canonical scope).
+  - execution-envelope-v0 contract in beislid/docs/configuration.md.
+  - This approved envelope (MEM-38 deliverable).
+  - .beislid/workflow.md gates available locally.
+expected_delivery:
+  summary: "What the contract defines, where it lives, and why."
+  artifacts:
+    - changed_files
+    - gate_results
+    - decisions_made_afk
+    - open_risks
+  next_step: "ready-for-review; human approves the contract doc before MEM-17 closes"
+ownership:
+  beislid: "Defines work-contract, autonomy, and proof semantics."
+  rondo: "Owns execution and run evidence produced while carrying out this envelope."
+  memento: "Owns curated memory and learning only; never a run ledger, proof store, or coordination database."
+  teotl: "Deferred; no runtime/service responsibility."

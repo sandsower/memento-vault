@@ -1,0 +1,122 @@
+kind: execution-envelope-v0
+status: approved
+approval:
+  approver: Vic Valenzuela
+  date: 2026-06-10
+  decision: approved (merge of PR #99)
+# Lifecycle: the repo owner flips status to approved with filled approval metadata at merge time.
+# Downstream runners must treat anything other than status: approved as non-executable (fail-closed).
+source:
+  type: linear_issue
+  id: MEM-38
+  title: "[Envelope] Define pilot/canary execution envelopes for Memento automation"
+  related:
+    - type: linear_issue
+      id: MEM-9
+      title: "[GH #97] [P1] Add automation memory health checks"
+    - type: github_issue
+      repository: sandsower/memento-vault
+      id: 97
+      title: "[P1] Add automation memory health checks"
+    - type: linear_issue
+      id: MEM-17
+      title: "[GH #94] [P0] Document automation MemoryProvider contract"
+      note: "MEM-17's contract describes the signals this slice implements."
+objective: >-
+  Expose cheap, read-only, secret-free JSON health signals for automation
+  memory so Rondo can see degraded or missing recall without runs failing by
+  default.
+slice:
+  id: mem-9-automation-memory-health-checks
+  include:
+    - Health JSON exposing automation-memory readiness (search backend
+      availability, recent recall failure rate, stale index warnings,
+      local/remote divergence when configured, last successful automation
+      memory packet, common failure reasons)
+    - Read-only, cheap-by-default probe path suitable for Rondo provider probes
+    - Extension of the existing status surface (memento_status / status CLI)
+      rather than a new service
+    - Tests for the new health fields, including the secret-free guarantee
+    - Doc updates describing the health surface
+  exclude:
+    - Network-dependent or slow checks on the default path
+    - Persisting health history, run state, or probe results in the vault
+    - Failing runs by default when memory is degraded
+    - New daemons, services, or background processes
+autonomy:
+  allow:
+    - Implement read-only health reporting within the existing status surface.
+    - Write tests first (TDD) for new health fields and secret exclusion.
+    - Run configured Beislið gates and inspect diffs.
+    - Update docs describing the health JSON.
+  ask:
+    - Add network-dependent or non-cheap checks to the default health path.
+    - Add new external dependencies or change the MCP tool list.
+    - Change behavior of existing status consumers in a breaking way.
+  deny:
+    - Include secrets, tokens, full note contents, or raw transcripts in any
+      health output.
+    - Block or fail execution by default on degraded/missing memory.
+    - Store health/run/probe state in the vault as notes or coordination data.
+proof_requirements:
+  - kind: proof-requirement-v1
+    id: configured-pre-pr-gates
+    type: command_gate
+    stage: pre-pr
+    status: required
+    success_criteria:
+      - "Configured Beislið gates in .beislid/workflow.md pass, including the
+        test gates covering the changed modules."
+    failure_policy:
+      on_missing: block
+      on_failure: block
+      retryable: true
+    expected_artifact:
+      kind: gate_envelope
+      reference: "gate transcript in the delivery output"
+  - kind: proof-requirement-v1
+    id: acceptance-checklist
+    type: review_check
+    stage: pre-pr
+    status: required
+    success_criteria:
+      - "Health JSON exposes automation-memory readiness."
+      - "Rondo can consume readiness/probe metadata (sample JSON delivered)."
+      - "Output remains cheap/read-only by default."
+      - "Secrets are never included (covered by a test)."
+    failure_policy:
+      on_missing: block
+      on_failure: block
+      retryable: true
+    expected_artifact:
+      kind: checklist
+      reference: "acceptance checklist plus sample health JSON in the delivery summary"
+pause_conditions:
+  - A required gate fails after 3 bounded attempts.
+  - Cheap read-only reporting cannot be achieved without persistent state or a
+    background process.
+  - Secret exclusion cannot be reliably guaranteed in the output.
+  - The work requires MEM-17 contract semantics that are missing or
+    contradictory.
+dependencies:
+  - GH sandsower/memento-vault#97 acceptance criteria (canonical scope).
+  - MEM-17 contract doc for the named health signals (soft dependency; signals
+    are also enumerated in this envelope so MEM-9 can proceed in parallel).
+  - execution-envelope-v0 contract in beislid/docs/configuration.md.
+  - This approved envelope (MEM-38 deliverable).
+  - .beislid/workflow.md gates available locally.
+expected_delivery:
+  summary: "Health surface added, fields exposed, default-path cost, and fail-open behavior."
+  artifacts:
+    - changed_files
+    - test_results
+    - gate_results
+    - sample_health_json
+    - decisions_made_afk
+    - open_risks
+  next_step: "ready-for-review; human reviews fail-open semantics before MEM-9 closes"
+ownership:
+  beislid: "Defines work-contract, autonomy, and proof semantics."
+  rondo: "Owns execution, run evidence, and consumes the readiness probe."
+  memento: "Owns curated memory and the health surface over it; never a run ledger, proof store, or coordination database."
+  teotl: "Deferred; no runtime/service responsibility."
