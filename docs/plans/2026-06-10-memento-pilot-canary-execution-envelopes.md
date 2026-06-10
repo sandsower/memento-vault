@@ -80,11 +80,11 @@ new doc, gate results, decisions made AFK, and open risks.
 
 ```yaml
 kind: execution-envelope-v0
-status: proposed
+status: approved
 approval:
-  approver: null
-  date: null
-  decision: null
+  approver: Vic Valenzuela
+  date: 2026-06-10
+  decision: approved (merge of PR #99)
 # Lifecycle: the repo owner flips status to approved with filled approval metadata at merge time.
 # Downstream runners must treat anything other than status: approved as non-executable (fail-closed).
 source:
@@ -226,11 +226,11 @@ AFK, and open risks.
 
 ```yaml
 kind: execution-envelope-v0
-status: proposed
+status: approved
 approval:
-  approver: null
-  date: null
-  decision: null
+  approver: Vic Valenzuela
+  date: 2026-06-10
+  decision: approved (merge of PR #99)
 # Lifecycle: the repo owner flips status to approved with filled approval metadata at merge time.
 # Downstream runners must treat anything other than status: approved as non-executable (fail-closed).
 source:
