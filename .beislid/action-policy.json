@@ -1,0 +1,34 @@
+{
+  "modes": {
+    "supervised-auto": {
+      "rules": { "dependency-install": "allow", "git-remote": "allow", "workspace-write": "allow" },
+      "actions": {
+        "dependency.install": "allow",
+        "ticket.fetch": "allow",
+        "ticket.comment": "allow",
+        "pr.review.reply": "allow",
+        "git.branch": "allow",
+        "git.commit": "allow",
+        "git.merge": "allow",
+        "git.push": "allow",
+        "gh.pr.create": "allow",
+        "gh.pr.merge": "allow",
+        "review.fix": "allow"
+      },
+      "sandbox": { "on_uncommitted_changes": "allow" }
+    },
+    "unattended-auto": {
+      "rules": { "dependency-install": "allow", "git-remote": "allow", "workspace-write": "allow" },
+      "actions": {
+        "dependency.install": "allow",
+        "ticket.fetch": "allow",
+        "ticket.comment": "allow",
+        "pr.review.reply": "allow",
+        "git.branch": "allow",
+        "git.commit": "allow",
+        "git.push": "allow",
+        "gh.pr.create": "allow"
+      }
+    }
+  }
+}
