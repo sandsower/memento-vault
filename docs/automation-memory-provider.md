@@ -40,7 +40,7 @@ memento_session_context({
 })
 ```
 
-The packet combines a project briefing, prompt-relevant recall, and vault status in a single call, trimmed to `token_budget`. The `include_status`, `include_recent`, and `include_recall` flags switch sections off when a runner wants less.
+The packet combines a project briefing, prompt-relevant recall, and vault status in a single call, trimmed to `token_budget`. The `include_status`, `include_recent`, and `include_recall` flags switch sections off when a runner wants less (`include_recent` gates the briefing section).
 
 `memento_briefing`, `memento_recall`, and `memento_tool_context` are the underlying host-adapter primitives (session start, prompt time, and around file reads respectively). They return a `LifecycleResult` payload: `should_inject`, `content`, `source`, `results`, and optionally `reason` and `metadata`. Runners MAY call them individually; `memento_session_context` is preferred because it is budgeted and one round-trip. None of these are general user-answering search tools.
 
@@ -67,11 +67,12 @@ A miss is data, not an error. On a miss, `memento_search` returns a structured e
   "results": [],
   "miss": {
     "reason": "backend_unavailable",
-    "recovery_hints": ["..."],
-    "details": {}
+    "recovery_hints": ["..."]
   }
 }
 ```
+
+A `details` key is present only when there is something to report (for example `{"min_score": 0.7}` on `threshold_too_high`); adapters MUST NOT assume it exists.
 
 Miss reasons include `no_exact_match`, `no_concrete_match`, `query_too_broad`, `empty_vault`, `backend_unavailable`, `project_filter_removed_all`, and `threshold_too_high`. Automation MUST treat a miss envelope as "no memory available", not as a run failure, and MUST NOT retry-loop on `empty_vault` or `backend_unavailable`.
 
@@ -100,7 +101,7 @@ memento_capture({
 
 For a single, well-formed lesson, `memento_store` writes one atomic note with typed frontmatter (`note_type`: discovery, decision, pattern, debugging, or architecture; `certainty` 1–5; optional `validity_context` and `supersedes`). It is also idempotent: storing an identical payload returns the existing path with `"idempotent": true`.
 
-Inputs to both MUST already be sanitized by the caller (see Privacy below). Both acquire a short-lived internal write lock; a `lock_timeout`-style error is retryable.
+Inputs to both MUST already be sanitized by the caller (see Privacy below). Both acquire a short-lived internal write lock; lock contention surfaces as an error dict whose message mentions the write lock, and such errors are retryable. (A structured `"reason": "lock_timeout"` field exists only on `memento_daily_snapshot`.)
 
 ### Batch synthesis from sanitized summaries
 
@@ -118,7 +119,7 @@ A dedicated "submit N run summaries, synthesize now" endpoint does not exist and
 
 ## Privacy and redaction
 
-Everything entering the vault passes `sanitize_secrets()`, which redacts API keys (`sk-…`, `sk-proj-…`), GitHub tokens (`ghp_…`, `gho_…`, `github_pat_…`), Slack tokens, AWS keys, JWTs, connection strings (`postgres://…` etc.), bearer tokens, and high-entropy `*_KEY/_SECRET/_TOKEN/_PASSWORD` assignments. Tool output is additionally filtered for prompt-injection patterns, and health/status output never contains secrets.
+Note bodies and summaries entering the vault pass `sanitize_secrets()`, which redacts API keys (`sk-…`, `sk-proj-…`), GitHub tokens (`ghp_…`, `gho_…`, `github_pat_…`), Slack tokens, AWS keys, JWTs, connection strings (`postgres://…` etc.), bearer tokens, and high-entropy `*_KEY/_SECRET/_TOKEN/_PASSWORD` assignments. Tool output is additionally filtered for prompt-injection patterns, and health/status output never contains secrets.
 
 That server-side pass is **defense-in-depth, not permission**:
 
