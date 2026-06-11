@@ -308,3 +308,7 @@ Notes accumulate. `/memento-defrag` handles decay:
 - Certainty 4-5 -> never archive
 
 Archived notes move to `archive/`, are removed from the QMD index, but remain in git history and are searchable via grep.
+
+## Automation consumption
+
+Automated runners (Rondo, Beislið, or any orchestrator) can use the vault as automation memory: a context packet before a run, explicit search/get during it, and sanitized lesson capture after it. The boundary is strict — the vault is curated memory, never a run ledger, proof store, or coordination database. The [automation MemoryProvider contract](automation-memory-provider.md) defines the operations, failure behavior, privacy expectations, and prohibitions.

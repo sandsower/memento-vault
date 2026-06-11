@@ -257,6 +257,8 @@ For other MCP-compatible agents (Cursor, Windsurf, etc.), add to your agent's MC
 
 `memento_capture` is the MCP equivalent of the SessionEnd hook. Agents without hook support can call it at the end of a session with either a transcript path or a structured summary.
 
+Consuming Memento from automated runners (Rondo, Beislið, or any orchestrator)? The [automation MemoryProvider contract](docs/automation-memory-provider.md) defines the allowed operations, fail-open behavior, privacy expectations, and explicit prohibitions — in short: the vault is curated memory, never a run ledger.
+
 ### Connecting to a remote vault via MCP
 
 If you have a remote vault running (Docker, Fly.io, etc.), any MCP-compatible agent can connect over HTTP. You need two things from whoever deployed the vault:

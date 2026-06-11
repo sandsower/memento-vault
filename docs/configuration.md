@@ -91,6 +91,8 @@ memento-vault health --strict   # exit nonzero on warnings
 
 Exit codes: failures always exit 1; warnings exit 0 unless `--strict` is set. The command never repairs state or prints secrets.
 
+Automated runners consuming the vault as memory should read the health/status signals section of the [automation MemoryProvider contract](automation-memory-provider.md) for what these surfaces guarantee (read-only, secret-free, fail-open by default).
+
 ## Project rules
 
 Map working directories to project slugs and ticket patterns. Without rules, the slug is the directory name and tickets are extracted by a generic `[a-z]+-\d+` regex.
