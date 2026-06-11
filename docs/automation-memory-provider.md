@@ -119,7 +119,7 @@ A dedicated "submit N run summaries, synthesize now" endpoint does not exist and
 
 ## Privacy and redaction
 
-Note bodies and summaries entering the vault pass `sanitize_secrets()`, which redacts API keys (`sk-…`, `sk-proj-…`), GitHub tokens (`ghp_…`, `gho_…`, `github_pat_…`), Slack tokens, AWS keys, JWTs, connection strings (`postgres://…` etc.), bearer tokens, and high-entropy `*_KEY/_SECRET/_TOKEN/_PASSWORD` assignments. Tool output is additionally filtered for prompt-injection patterns, and health/status output never contains secrets.
+Note bodies and summaries entering the vault pass `sanitize_secrets()`, which redacts API keys (`sk-…`, `sk-proj-…`), GitHub tokens (`ghp_…`, `gho_…`, `github_pat_…`), Slack tokens, AWS keys, JWTs, connection strings (`postgres://…` etc.), bearer tokens, and high-entropy `*_KEY/_SECRET/_TOKEN/_PASSWORD/_PASS` assignments. Tool output is additionally filtered for prompt-injection patterns, and health/status output never contains secrets.
 
 That server-side pass is **defense-in-depth, not permission**:
 

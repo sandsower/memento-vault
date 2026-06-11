@@ -255,7 +255,7 @@ For other MCP-compatible agents (Cursor, Windsurf, etc.), add to your agent's MC
 }
 ```
 
-`memento_capture` is the MCP equivalent of the SessionEnd hook. Agents without hook support can call it at the end of a session with either a transcript path or a structured summary.
+`memento_capture` is the MCP equivalent of the SessionEnd hook. Agents without hook support can call it at the end of a session with either a transcript path (local/stdio only) or a structured summary.
 
 Consuming Memento from automated runners (Rondo, Beislið, or any orchestrator)? The [automation MemoryProvider contract](docs/automation-memory-provider.md) defines the allowed operations, fail-open behavior, privacy expectations, and explicit prohibitions — in short: the vault is curated memory, never a run ledger.
 
