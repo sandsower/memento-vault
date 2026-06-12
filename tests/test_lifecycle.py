@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -970,6 +971,92 @@ def test_tool_context_skips_insufficient_keywords(_has_qmd):
             result = build_tool_context("Read", "/workspace/src/a.py", "/repo", "s1")
 
     assert result.reason == "insufficient-keywords"
+
+
+@patch("memento.lifecycle.has_qmd", return_value=False)
+def test_tool_context_resolves_relative_path_against_session_cwd(_has_qmd, tmp_path, monkeypatch):
+    # The Pi bridge runs with cwd=<memento-vault checkout> while the session
+    # works in another project and passes the Read tool's raw relative path.
+    # The path must resolve under the session cwd, not the process cwd.
+    foreign_checkout = tmp_path / "memento-vault-checkout"
+    foreign_checkout.mkdir()
+    session_project = tmp_path / "user-project"
+    (session_project / "src").mkdir(parents=True)
+    monkeypatch.chdir(foreign_checkout)
+
+    result = build_tool_context("Read", "src/authMiddleware.ts", str(session_project), "s1")
+
+    expected = os.path.realpath(str(session_project / "src" / "authMiddleware.ts"))
+    assert result.metadata["file_path"] == expected
+    assert result.reason == "qmd-unavailable"
+
+
+@patch("memento.lifecycle.has_qmd", return_value=False)
+def test_tool_context_absolute_path_ignores_session_cwd(_has_qmd, tmp_path):
+    session_project = tmp_path / "user-project"
+    (session_project / "src").mkdir(parents=True)
+    absolute = str(session_project / "src" / "authMiddleware.ts")
+
+    result = build_tool_context("Read", absolute, "/somewhere/else", "s1")
+
+    assert result.metadata["file_path"] == os.path.realpath(absolute)
+
+
+@patch("memento.lifecycle.has_qmd", return_value=False)
+def test_tool_context_relative_path_without_cwd_uses_process_cwd(_has_qmd, tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    monkeypatch.chdir(project)
+
+    result = build_tool_context("Read", "src/authMiddleware.ts", "", "s1")
+
+    assert result.metadata["file_path"] == os.path.realpath(str(project / "src" / "authMiddleware.ts"))
+
+
+def test_load_cache_drops_pre_schema_dir_entries(tmp_path, monkeypatch):
+    import memento.lifecycle as lifecycle_module
+
+    cache_file = tmp_path / "tool-context-cache.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "dirs": {"/foreign/docs": {"results": [{"path": "notes/pi-session-candidate-capture-3.md"}]}},
+                "last_qmd_call": 123.0,
+                "injections": {"s1": {"count": 2, "paths": ["notes/a.md"]}},
+            }
+        )
+    )
+    monkeypatch.setattr(lifecycle_module, "CACHE_PATH", str(cache_file))
+
+    cache = lifecycle_module.load_cache()
+
+    # Pre-schema dir entries may be poisoned by the relative-path cwd bug;
+    # they are dropped while session injection state survives the migration.
+    assert cache["schema"] == lifecycle_module.TOOL_CONTEXT_CACHE_SCHEMA
+    assert cache["dirs"] == {}
+    assert cache["last_qmd_call"] == 123.0
+    assert cache["injections"] == {"s1": {"count": 2, "paths": ["notes/a.md"]}}
+
+
+def test_load_cache_keeps_current_schema_entries(tmp_path, monkeypatch):
+    import memento.lifecycle as lifecycle_module
+
+    cache_file = tmp_path / "tool-context-cache.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "schema": lifecycle_module.TOOL_CONTEXT_CACHE_SCHEMA,
+                "dirs": {"/project/docs": {"results": [{"path": "notes/good.md"}]}},
+                "last_qmd_call": 5.0,
+                "injections": {},
+            }
+        )
+    )
+    monkeypatch.setattr(lifecycle_module, "CACHE_PATH", str(cache_file))
+
+    cache = lifecycle_module.load_cache()
+
+    assert cache["dirs"] == {"/project/docs": {"results": [{"path": "notes/good.md"}]}}
 
 
 @patch("memento.lifecycle.log_retrieval")
