@@ -138,17 +138,19 @@ if [ "$REMOTE_MODE" = true ]; then
     fi
 
     if [ -z "$REMOTE_URL" ]; then
-        echo ""
-        read -rp "Remote vault URL (e.g., https://vault.example.com:8745): " REMOTE_URL
+        if [ -t 0 ]; then
+            echo ""
+            read -rp "Remote vault URL (e.g., https://vault.example.com:8745): " REMOTE_URL || REMOTE_URL=""
+        fi
         if [ -z "$REMOTE_URL" ]; then
-            error "Remote URL is required for --remote mode."
+            error "Remote URL is required for --remote mode. Pass it as --remote URL or set MEMENTO_VAULT_URL."
             exit 1
         fi
     fi
 
     REMOTE_API_KEY="${MEMENTO_API_KEY:-}"
-    if [ -z "$REMOTE_API_KEY" ]; then
-        read -rp "API key for remote vault (leave empty if none): " REMOTE_API_KEY
+    if [ -z "$REMOTE_API_KEY" ] && [ -t 0 ]; then
+        read -rp "API key for remote vault (leave empty if none): " REMOTE_API_KEY || REMOTE_API_KEY=""
     fi
 
     info "Remote mode: hooks will connect to $REMOTE_URL"
@@ -180,7 +182,12 @@ if [ -n "$INSTALLED_VERSION" ]; then
     if [ "$INSTALLED_VERSION" = "$NEW_VERSION" ] && [ "$FORCE" != true ]; then
         info "Memento Vault v${NEW_VERSION} is already installed."
         if [ "$REINSTALL" != true ]; then
-            read -rp "Reinstall safely using local-edit protection? [y/N] " reinstall
+            reinstall=""
+            if [ -t 0 ]; then
+                read -rp "Reinstall safely using local-edit protection? [y/N] " reinstall || reinstall=""
+            else
+                info "Non-interactive install: already at v${NEW_VERSION}; rerun with --reinstall to refresh."
+            fi
             if [[ ! "$reinstall" =~ ^[Yy] ]]; then
                 exit 0
             fi
@@ -211,10 +218,14 @@ info "python3: $(python3 --version)"
 if ! command -v claude &>/dev/null; then
     warn "Claude Code CLI not found. Hooks and skills require Claude Code to function."
     warn "Install it from: https://docs.anthropic.com/en/docs/claude-code"
-    echo ""
-    read -rp "Continue anyway? [y/N] " cont
-    if [[ ! "$cont" =~ ^[Yy] ]]; then
-        exit 0
+    if [ -t 0 ]; then
+        echo ""
+        read -rp "Continue anyway? [y/N] " cont || cont=""
+        if [[ ! "$cont" =~ ^[Yy] ]]; then
+            exit 0
+        fi
+    else
+        warn "Non-interactive install: continuing without Claude Code CLI."
     fi
 else
     info "claude: $(claude --version 2>/dev/null || echo 'installed')"
