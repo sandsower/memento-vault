@@ -30,6 +30,15 @@ python3 scripts/release_smoke.py --install-exec
 It exercises the `curl | bash` shape (stdin is not a tty), asserts the
 installed hook layout, and mutates nothing outside the temp HOME.
 
+## CI
+
+`.github/workflows/ci.yml` mirrors the local Beislið gates on every PR and
+push to main: lint/format/compileall, the four gate test suites, release
+smoke (including the bash-3.2 shell-syntax check on a macOS runner), and the
+non-interactive install execution smoke. `claude-sandbox-smoke` stays
+local-only (it needs an authenticated `claude` CLI), and the full pytest job
+is advisory until the embedded vector-search environment issues are fixed.
+
 ## Version tag
 
 1. Run `python3 scripts/release_smoke.py` and fix any failures.
