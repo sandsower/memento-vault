@@ -40,6 +40,12 @@ def isolate_triage_health_log(monkeypatch, tmp_path):
     monkeypatch.setattr("memento.lifecycle.TRIAGE_HEALTH_LOG_PATH", str(health_log), raising=False)
 
 
+@pytest.fixture(autouse=True)
+def isolate_recall_dedup_state(monkeypatch, tmp_path):
+    """Keep recall dedup state out of the user's real runtime dir."""
+    monkeypatch.setattr("memento.lifecycle.RECALL_DEDUP_PATH", str(tmp_path / "recall-dedup.json"), raising=False)
+
+
 @pytest.fixture
 def tmp_vault(tmp_path):
     """Create a temporary vault with standard directory structure."""

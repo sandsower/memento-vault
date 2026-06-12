@@ -225,7 +225,7 @@ def test_build_session_context_records_recall_only_after_final_payload_includes_
         payload = build_session_context("/repo", "cache", "s1", token_budget=2000)
 
     assert "Cache policy" in payload["content"]
-    mock_record.assert_called_once_with("notes/cache.md")
+    mock_record.assert_called_once_with(["notes/cache.md"], "s1")
 
 
 def test_build_session_context_does_not_record_recall_when_final_payload_drops_content(tmp_path):
@@ -408,7 +408,7 @@ def test_run_recall_lines_broad_project_skip_does_not_search(
 
 
 @patch("memento.remote_client.is_remote", return_value=False)
-@patch("memento.lifecycle.is_duplicate", return_value=False)
+@patch("memento.lifecycle.recently_injected_paths", return_value=set())
 @patch("memento.lifecycle.enhance_results", side_effect=lambda results, *args, **kwargs: results)
 @patch("memento.lifecycle.qmd_search_with_extras")
 @patch("memento.lifecycle.has_qmd", return_value=True)
@@ -461,7 +461,7 @@ def test_run_recall_lines_remote_broad_project_skip_does_not_search(
 
 
 @patch("memento.remote_client.is_remote", return_value=True)
-@patch("memento.lifecycle.is_duplicate", return_value=False)
+@patch("memento.lifecycle.recently_injected_paths", return_value=set())
 @patch("memento.remote_client.search_envelope")
 @patch("memento.lifecycle.has_qmd")
 @patch(
@@ -893,7 +893,7 @@ def test_build_recall_preserves_remote_structured_miss_when_local_unavailable(
 
 
 @patch("memento.remote_client.is_remote", return_value=True)
-@patch("memento.lifecycle.is_duplicate", return_value=False)
+@patch("memento.lifecycle.recently_injected_paths", return_value=set())
 @patch("memento.lifecycle.enhance_results", side_effect=lambda results, *args, **kwargs: results)
 @patch("memento.lifecycle.qmd_search_with_extras")
 @patch("memento.lifecycle.has_qmd", return_value=True)
@@ -1515,3 +1515,129 @@ def test_triage_warning_error_text_is_injection_stripped(tmp_path):
     assert "Ignore all previous instructions" not in warning
     assert "you are now" not in warning.lower()
     assert "[filtered]" in warning
+
+
+class TestRecallDedupPerSessionMultiPath:
+    def _engine(self):
+        import memento.lifecycle as lifecycle_module
+
+        return lifecycle_module
+
+    def test_remembers_all_injected_paths_not_only_top(self):
+        m = self._engine()
+        m.record_recall(["notes/a.md", "notes/b.md", "notes/c.md"], "s1")
+
+        assert m.recently_injected_paths("s1") == {"notes/a.md", "notes/b.md", "notes/c.md"}
+
+    def test_paths_expire_after_n_prompts(self):
+        m = self._engine()
+        with patch("memento.lifecycle.get_config", return_value={"recall_dedup_prompts": 2}):
+            m.record_recall(["notes/a.md"], "s1")
+
+        m.bump_prompts_since("s1")
+        assert m.recently_injected_paths("s1") == {"notes/a.md"}
+        m.bump_prompts_since("s1")
+        assert m.recently_injected_paths("s1") == set()
+
+    def test_sessions_are_isolated(self):
+        m = self._engine()
+        m.record_recall(["notes/a.md"], "claude-session")
+
+        # A concurrent Pi session must not be suppressed by Claude's state.
+        assert m.recently_injected_paths("pi-session") == set()
+        assert m.recently_injected_paths("claude-session") == {"notes/a.md"}
+
+    def test_bumping_one_session_does_not_age_another(self):
+        m = self._engine()
+        m.record_recall(["notes/a.md"], "s1")
+        m.record_recall(["notes/b.md"], "s2")
+
+        for _ in range(10):
+            m.bump_prompts_since("s1")
+
+        assert m.recently_injected_paths("s1") == set()
+        assert m.recently_injected_paths("s2") == {"notes/b.md"}
+
+    def test_state_is_bounded_by_session_count(self):
+        m = self._engine()
+        for i in range(m.RECALL_DEDUP_MAX_SESSIONS + 10):
+            m.record_recall([f"notes/{i}.md"], f"session-{i}")
+
+        with open(m.RECALL_DEDUP_PATH) as f:
+            state = json.load(f)
+        assert len(state["sessions"]) <= m.RECALL_DEDUP_MAX_SESSIONS
+
+    def test_corrupt_state_file_resets_cleanly(self):
+        m = self._engine()
+        Path(m.RECALL_DEDUP_PATH).write_text("{not json")
+
+        assert m.recently_injected_paths("s1") == set()
+        m.record_recall(["notes/a.md"], "s1")
+        assert m.recently_injected_paths("s1") == {"notes/a.md"}
+
+    def test_recall_filters_previously_injected_paths(self, tmp_path):
+        (tmp_path / "notes").mkdir()
+        config = {
+            "prompt_recall": True,
+            "recall_min_score": 0.4,
+            "recall_max_notes": 3,
+            "recall_high_confidence": 0.55,
+            "recall_dedup_prompts": 3,
+            "concept_index_enabled": False,
+            "rrf_enabled": False,
+            "multi_hop_enabled": False,
+            "reranker_enabled": False,
+            "recall_skip_patterns": [],
+        }
+        results = [
+            {"path": "notes/seen.md", "title": "Seen note", "score": 0.9},
+            {"path": "notes/fresh.md", "title": "Fresh note", "score": 0.8},
+        ]
+
+        with (
+            patch("memento.remote_client.is_remote", return_value=False),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.get_vault", return_value=tmp_path),
+            patch("memento.lifecycle.has_qmd", return_value=True),
+            patch("memento.lifecycle.qmd_search_with_extras", return_value=results),
+            patch("memento.lifecycle.enhance_results", side_effect=lambda r, *a, **k: r),
+            patch("memento.lifecycle.recently_injected_paths", return_value={"notes/seen.md"}),
+        ):
+            _lines, top_path, injected, reason = _run_recall_lines(
+                "why does the fresh cache note matter here?", str(tmp_path), "s1"
+            )
+
+        assert reason is None
+        assert top_path == "notes/fresh.md"
+        assert all(r["path"] != "notes/seen.md" for r in injected)
+
+    def test_recall_skips_when_all_results_recently_injected(self, tmp_path):
+        (tmp_path / "notes").mkdir()
+        config = {
+            "prompt_recall": True,
+            "recall_min_score": 0.4,
+            "recall_max_notes": 3,
+            "recall_high_confidence": 0.55,
+            "concept_index_enabled": False,
+            "rrf_enabled": False,
+            "multi_hop_enabled": False,
+            "reranker_enabled": False,
+            "recall_skip_patterns": [],
+        }
+        results = [{"path": "notes/seen.md", "title": "Seen note", "score": 0.9}]
+
+        with (
+            patch("memento.remote_client.is_remote", return_value=False),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.get_vault", return_value=tmp_path),
+            patch("memento.lifecycle.has_qmd", return_value=True),
+            patch("memento.lifecycle.qmd_search_with_extras", return_value=results),
+            patch("memento.lifecycle.enhance_results", side_effect=lambda r, *a, **k: r),
+            patch("memento.lifecycle.recently_injected_paths", return_value={"notes/seen.md"}),
+        ):
+            lines, _top_path, _injected, reason = _run_recall_lines(
+                "why does the seen cache note matter here?", str(tmp_path), "s1"
+            )
+
+        assert reason == "duplicate"
+        assert lines == []

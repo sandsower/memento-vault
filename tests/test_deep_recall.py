@@ -320,7 +320,7 @@ class TestDeepRecallGate:
             patch("memento.lifecycle.enhance_results", return_value=results),
             patch("memento.lifecycle.prf_expand_query", return_value="Fix the broken test"),
             patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
-            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.recently_injected_paths", return_value=set()),
             patch("memento.lifecycle.log_retrieval"),
             patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
@@ -350,7 +350,7 @@ class TestDeepRecallGate:
             patch("memento.lifecycle.enhance_results", return_value=results),
             patch("memento.lifecycle.prf_expand_query", return_value="What did we decide last time about the cache?"),
             patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
-            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.recently_injected_paths", return_value=set()),
             patch("memento.lifecycle.log_retrieval"),
             patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
@@ -380,7 +380,7 @@ class TestDeepRecallGate:
             patch("memento.lifecycle.qmd_search_with_extras", return_value=results),
             patch("memento.lifecycle.enhance_results", return_value=results),
             patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
-            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.recently_injected_paths", return_value=set()),
             patch("memento.lifecycle.log_retrieval"),
             patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
@@ -410,7 +410,7 @@ class TestDeepRecallGate:
             patch("memento.lifecycle.enhance_results", return_value=results),
             patch("memento.lifecycle.prf_expand_query", return_value="What did we decide last time about the cache?"),
             patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
-            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.recently_injected_paths", return_value=set()),
             patch("memento.lifecycle.log_retrieval"),
             patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
@@ -444,7 +444,7 @@ class TestDeepRecallGate:
             patch("memento.lifecycle.enhance_results", return_value=results),
             patch("memento.lifecycle.prf_expand_query", return_value="What did we decide last time about the cache?"),
             patch("memento.lifecycle.detect_project", return_value=("unknown", None)),
-            patch("memento.lifecycle.is_duplicate", return_value=False),
+            patch("memento.lifecycle.recently_injected_paths", return_value=set()),
             patch("memento.lifecycle.log_retrieval"),
             patch("memento.lifecycle.spawn_deep_recall") as mock_spawn,
         ):
