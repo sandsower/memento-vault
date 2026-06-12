@@ -45,7 +45,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install package and test deps
-        run: python -m pip install -e ".[mcp]" pytest pyyaml numpy networkx
+        run: python -m pip install -e ".[mcp]" pytest pyyaml numpy networkx scipy
       - name: targeted-tests
         run: python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py
       - name: retrieval-tests
@@ -65,7 +65,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install package and test deps
-        run: python -m pip install -e ".[mcp,embedded]" pytest pyyaml networkx rank_bm25 optuna
+        run: python -m pip install -e ".[mcp,embedded]" pytest pyyaml networkx scipy hdbscan rank_bm25 optuna
       - name: pytest
         run: python -m pytest -q
 
