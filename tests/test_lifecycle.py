@@ -1603,7 +1603,7 @@ class TestRecallDedupPerSessionMultiPath:
             patch("memento.lifecycle.enhance_results", side_effect=lambda r, *a, **k: r),
             patch("memento.lifecycle.recently_injected_paths", return_value={"notes/seen.md"}),
         ):
-            lines, top_path, injected, reason = _run_recall_lines(
+            _lines, top_path, injected, reason = _run_recall_lines(
                 "why does the fresh cache note matter here?", str(tmp_path), "s1"
             )
 
@@ -1635,7 +1635,7 @@ class TestRecallDedupPerSessionMultiPath:
             patch("memento.lifecycle.enhance_results", side_effect=lambda r, *a, **k: r),
             patch("memento.lifecycle.recently_injected_paths", return_value={"notes/seen.md"}),
         ):
-            lines, top_path, injected, reason = _run_recall_lines(
+            lines, _top_path, _injected, reason = _run_recall_lines(
                 "why does the seen cache note matter here?", str(tmp_path), "s1"
             )
 
