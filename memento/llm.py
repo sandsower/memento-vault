@@ -298,10 +298,11 @@ def llm_complete(prompt, config=None, timeout=None):
     resolved = _resolved_config(config)
     backend = resolved.get("llm_backend", "claude")
     model = resolved.get("llm_model")
+    prompt_bytes = len(prompt.encode("utf-8"))
     # Scale timeout with prompt size for every backend. Baseline 60s covers
     # short completions; add 1s per 5KB of prompt so a 500KB transcript gets
     # ~160s, capped at 300s.
-    effective_timeout = timeout if timeout is not None else max(60, min(300, 60 + len(prompt) // 5_000))
+    effective_timeout = timeout if timeout is not None else max(60, min(300, 60 + prompt_bytes // 5_000))
 
     started = time.time()
     if backend == "claude":
@@ -323,7 +324,7 @@ def llm_complete(prompt, config=None, timeout=None):
         result,
         backend=backend,
         model=model,
-        prompt_bytes=len(prompt.encode("utf-8")),
+        prompt_bytes=prompt_bytes,
         duration_ms=int((time.time() - started) * 1000),
     )
 
