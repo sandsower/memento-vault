@@ -2124,15 +2124,28 @@ def extract_tool_context_keywords(file_path: str) -> str:
     return " ".join(unique)
 
 
+# v2: caches written before the relative-path cwd fix hold dir entries
+# poisoned by paths resolved against the wrong project; drop them once.
+TOOL_CONTEXT_CACHE_SCHEMA = 2
+
+
 def load_cache() -> dict:
     """Load the tool-context cache from disk."""
     try:
         if os.path.exists(CACHE_PATH):
             with open(CACHE_PATH) as f:
-                return json.load(f)
+                cache = json.load(f)
+            if cache.get("schema") != TOOL_CONTEXT_CACHE_SCHEMA:
+                return {
+                    "schema": TOOL_CONTEXT_CACHE_SCHEMA,
+                    "dirs": {},
+                    "last_qmd_call": cache.get("last_qmd_call", 0),
+                    "injections": cache.get("injections", {}),
+                }
+            return cache
     except (json.JSONDecodeError, OSError):
         pass
-    return {"dirs": {}, "last_qmd_call": 0, "injections": {}}
+    return {"schema": TOOL_CONTEXT_CACHE_SCHEMA, "dirs": {}, "last_qmd_call": 0, "injections": {}}
 
 
 def save_cache(cache: dict) -> None:
@@ -2226,7 +2239,14 @@ def build_tool_context(
         return no_context("missing-file-path")
 
     try:
-        normalized_path = os.path.realpath(os.path.expanduser(file_path))
+        expanded = os.path.expanduser(file_path)
+        # Hosts like the Pi bridge pass tool paths relative to the user's
+        # project while this process runs with an unrelated cwd; resolving
+        # against the process cwd produced wrong-project queries. Anchor
+        # relative paths to the session cwd instead.
+        if cwd and not os.path.isabs(expanded):
+            expanded = os.path.join(os.path.expanduser(cwd), expanded)
+        normalized_path = os.path.realpath(expanded)
     except (OSError, ValueError):
         return no_context("invalid-file-path")
     metadata["file_path"] = normalized_path
