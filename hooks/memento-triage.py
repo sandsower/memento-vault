@@ -430,6 +430,12 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
     )
 
     result = llm_complete(prompt)
+    llm_telemetry = {
+        "backend": result.backend,
+        "model": result.model,
+        "prompt_bytes": result.prompt_bytes,
+        "duration_ms": result.duration_ms,
+    }
     if not result.ok:
         error = result.error or "unknown llm error"
         log_retrieval(
@@ -446,6 +452,7 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             error=error,
             transcript_chars=rendered_chars,
             transcript_truncated=transcript_truncated,
+            **llm_telemetry,
         )
         return 0
 
@@ -462,6 +469,7 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             "structured_notes_parse_empty",
             session_id=session_id,
             project=project_slug,
+            **llm_telemetry,
         )
         return 0
 
@@ -502,6 +510,7 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             session_id=session_id,
             project=project_slug,
             notes_written=written,
+            **llm_telemetry,
         )
         return written
     finally:

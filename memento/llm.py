@@ -1,6 +1,6 @@
 """Shared LLM backend abstraction for hooks."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import shutil
@@ -17,6 +17,13 @@ class LLMResult:
     text: str
     ok: bool
     error: str | None = None
+    # Telemetry, populated by llm_complete: lets callers record which
+    # backend/model handled the prompt and at what cost without re-deriving
+    # config (failures in detached hooks are otherwise unattributable).
+    backend: str | None = None
+    model: str | None = None
+    prompt_bytes: int | None = None
+    duration_ms: int | None = None
 
     def __post_init__(self):
         if self.ok and not self.text:
@@ -198,17 +205,20 @@ def _claude_complete(prompt, model=None, timeout=30):
     return _run_cli(cmd, stdin_input=prompt, timeout=timeout)
 
 
-def _codex_complete(prompt, model=None):
+def _codex_complete(prompt, model=None, timeout=30):
     errors = []
     for attempt in range(5):
         with tempfile.NamedTemporaryFile(prefix="memento-llm-", suffix=".txt", delete=False) as handle:
             output_path = Path(handle.name)
 
+        # Pass the prompt over stdin ("-" sentinel), not argv: rendered
+        # transcripts can exceed ARG_MAX (exactly 1MB on macOS), which makes
+        # exec fail before codex even starts.
         cmd = ["codex", "exec", "--ephemeral"]
         if model:
             cmd.extend(["--model", model])
-        cmd.extend(["-o", str(output_path), prompt])
-        result = _run_cli(cmd, output_path=output_path)
+        cmd.extend(["-o", str(output_path), "-"])
+        result = _run_cli(cmd, output_path=output_path, timeout=timeout, stdin_input=prompt)
         if result.ok:
             return result
         errors.append(result.error or "unknown")
@@ -221,12 +231,12 @@ def _codex_complete(prompt, model=None):
     return _error(f"codex failed after 5 attempts. Last: {errors[-1]}")
 
 
-def _gemini_complete(prompt, model=None):
+def _gemini_complete(prompt, model=None, timeout=30):
+    # Same ARG_MAX hazard as codex: keep the prompt off argv.
     cmd = ["gemini"]
     if model:
         cmd.extend(["--model", model])
-    cmd.extend(["-p", prompt])
-    return _run_cli(cmd)
+    return _run_cli(cmd, timeout=timeout, stdin_input=prompt)
 
 
 def _api_complete(url, headers, payload, extract_text, timeout=30):
@@ -249,7 +259,7 @@ def _api_complete(url, headers, payload, extract_text, timeout=30):
         return _error(f"Unexpected LLM response structure: {exc}")
 
 
-def _anthropic_api_complete(prompt, model, api_key):
+def _anthropic_api_complete(prompt, model, api_key, timeout=30):
     return _api_complete(
         "https://api.anthropic.com/v1/messages",
         {
@@ -263,10 +273,11 @@ def _anthropic_api_complete(prompt, model, api_key):
             "messages": [{"role": "user", "content": prompt}],
         },
         lambda body: "".join(part.get("text", "") for part in body.get("content", []) if part.get("type") == "text"),
+        timeout=timeout,
     )
 
 
-def _openai_compat_complete(prompt, model, api_key, base_url):
+def _openai_compat_complete(prompt, model, api_key, base_url, timeout=30):
     base = (base_url or "https://api.openai.com/v1").rstrip("/")
     return _api_complete(
         f"{base}/chat/completions",
@@ -279,6 +290,7 @@ def _openai_compat_complete(prompt, model, api_key, base_url):
             "messages": [{"role": "user", "content": prompt}],
         },
         lambda body: ((body.get("choices") or [{}])[0].get("message") or {}).get("content", ""),
+        timeout=timeout,
     )
 
 
@@ -286,22 +298,35 @@ def llm_complete(prompt, config=None, timeout=None):
     resolved = _resolved_config(config)
     backend = resolved.get("llm_backend", "claude")
     model = resolved.get("llm_model")
-    # Scale timeout with prompt size. Baseline 60s covers short completions;
-    # add 1s per 5KB of prompt so a 500KB transcript gets ~160s, capped at 300s.
-    effective_timeout = timeout if timeout is not None else max(60, min(300, 60 + len(prompt) // 5_000))
+    prompt_bytes = len(prompt.encode("utf-8"))
+    # Scale timeout with prompt size for every backend. Baseline 60s covers
+    # short completions; add 1s per 5KB of prompt so a 500KB transcript gets
+    # ~160s, capped at 300s.
+    effective_timeout = timeout if timeout is not None else max(60, min(300, 60 + prompt_bytes // 5_000))
 
+    started = time.time()
     if backend == "claude":
-        return _claude_complete(prompt, model, timeout=effective_timeout)
-    if backend == "codex":
-        return _codex_complete(prompt, model)
-    if backend == "gemini":
-        return _gemini_complete(prompt, model)
-    if backend == "anthropic-api":
-        return _anthropic_api_complete(prompt, model, resolved.get("llm_api_key"))
-    if backend == "openai-compat":
-        return _openai_compat_complete(prompt, model, resolved.get("llm_api_key"), resolved.get("llm_api_base"))
+        result = _claude_complete(prompt, model, timeout=effective_timeout)
+    elif backend == "codex":
+        result = _codex_complete(prompt, model, timeout=effective_timeout)
+    elif backend == "gemini":
+        result = _gemini_complete(prompt, model, timeout=effective_timeout)
+    elif backend == "anthropic-api":
+        result = _anthropic_api_complete(prompt, model, resolved.get("llm_api_key"), timeout=effective_timeout)
+    elif backend == "openai-compat":
+        result = _openai_compat_complete(
+            prompt, model, resolved.get("llm_api_key"), resolved.get("llm_api_base"), timeout=effective_timeout
+        )
+    else:
+        result = _error(f"Unknown LLM backend: {backend}")
 
-    return _error(f"Unknown LLM backend: {backend}")
+    return replace(
+        result,
+        backend=backend,
+        model=model,
+        prompt_bytes=prompt_bytes,
+        duration_ms=int((time.time() - started) * 1000),
+    )
 
 
 def preflight_check(config=None):

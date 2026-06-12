@@ -1075,3 +1075,125 @@ class TestRemoteTriage:
             run_remote_triage({"session_id": "ses_open", "transcript_path": str(transcript)})
 
         assert mock_capture.call_args.kwargs["agent"] == "opencode"
+
+
+class TestTriageLlmTelemetry:
+    def test_llm_failure_health_entry_includes_backend_telemetry(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Failing session")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "main",
+            "exchange_count": 2,
+            "files_edited": [],
+            "first_prompt": "Failing session",
+            "last_outcome": None,
+        }
+        health_events = []
+        failed = LLMResult(
+            text="",
+            ok=False,
+            error="codex timed out",
+            backend="codex",
+            model="gpt-5",
+            prompt_bytes=2048,
+            duration_ms=1500,
+        )
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=failed),
+            patch(
+                "memento_triage.log_triage_health",
+                side_effect=lambda action, **kw: health_events.append((action, kw)),
+            ),
+        ):
+            process_structured_notes("sess-tel", str(transcript), meta, "api-service")
+
+        failures = [kw for action, kw in health_events if action == "structured_notes_llm_failed"]
+        assert len(failures) == 1
+        assert failures[0]["backend"] == "codex"
+        assert failures[0]["model"] == "gpt-5"
+        assert failures[0]["prompt_bytes"] == 2048
+        assert failures[0]["duration_ms"] == 1500
+
+    def test_written_health_entry_includes_backend_telemetry(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Good session")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "main",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Good session",
+            "last_outcome": "Fixed.",
+        }
+        payload = json.dumps(
+            [{"title": "Telemetry note", "body": "Body.", "type": "discovery", "tags": [], "certainty": 3}]
+        )
+        ok = LLMResult(
+            text=payload,
+            ok=True,
+            error=None,
+            backend="codex",
+            model=None,
+            prompt_bytes=4096,
+            duration_ms=900,
+        )
+        health_events = []
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=ok),
+            patch(
+                "memento_triage.log_triage_health",
+                side_effect=lambda action, **kw: health_events.append((action, kw)),
+            ),
+        ):
+            written = process_structured_notes("sess-tel2", str(transcript), meta, "api-service")
+
+        assert written == 1
+        success = [kw for action, kw in health_events if action == "structured_notes_written"]
+        assert len(success) == 1
+        assert success[0]["backend"] == "codex"
+        assert success[0]["prompt_bytes"] == 4096
+
+    def test_parse_empty_health_entry_includes_backend_telemetry(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Empty parse session")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "main",
+            "exchange_count": 4,
+            "files_edited": [],
+            "first_prompt": "Empty parse session",
+            "last_outcome": "Done.",
+        }
+        ok_but_unparseable = LLMResult(
+            text="not json at all",
+            ok=True,
+            error=None,
+            backend="codex",
+            model="gpt-5",
+            prompt_bytes=1024,
+            duration_ms=700,
+        )
+        health_events = []
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=ok_but_unparseable),
+            patch(
+                "memento_triage.log_triage_health",
+                side_effect=lambda action, **kw: health_events.append((action, kw)),
+            ),
+        ):
+            written = process_structured_notes("sess-tel3", str(transcript), meta, "api-service")
+
+        assert written == 0
+        empty = [kw for action, kw in health_events if action == "structured_notes_parse_empty"]
+        assert len(empty) == 1
+        assert empty[0]["backend"] == "codex"
+        assert empty[0]["model"] == "gpt-5"
+        assert empty[0]["prompt_bytes"] == 1024
+        assert empty[0]["duration_ms"] == 700
