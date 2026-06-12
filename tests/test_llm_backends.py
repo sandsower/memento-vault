@@ -103,12 +103,15 @@ class TestCliBackends:
         assert "-o" in cmd
         assert "--model" in cmd
         assert "gpt-5" in cmd
-        assert cmd[-1] == "test prompt"
+        # Prompt travels over stdin ("-" sentinel), never argv: rendered
+        # transcripts can exceed ARG_MAX (1MB on macOS).
+        assert cmd[-1] == "-"
+        assert "test prompt" not in cmd
+        assert mock_run.call_args.kwargs["input"] == "test prompt"
         assert result.ok is True
         assert result.text == "codex output"
         mock_unlink.assert_called_once()
         mock_read.assert_called_once()
-        assert mock_run.call_args.kwargs["stdin"] == subprocess.DEVNULL
 
     @patch("memento.llm.Path.read_text", return_value='{"notes":[]}\n')
     @patch("memento.llm.Path.unlink")
@@ -249,9 +252,52 @@ class TestCliBackends:
         )
 
         cmd = mock_run.call_args[0][0]
-        assert cmd == ["gemini", "--model", "gemini-2.5-pro", "-p", "test prompt"]
+        assert cmd == ["gemini", "--model", "gemini-2.5-pro"]
+        assert mock_run.call_args.kwargs["input"] == "test prompt"
         assert result.ok is True
         assert result.text == "gemini output"
+
+    @patch("memento.llm.Path.read_text", return_value="ok\n")
+    @patch("memento.llm.Path.unlink")
+    @patch("memento.llm.subprocess.run")
+    def test_codex_backend_receives_scaled_timeout(self, mock_run, mock_unlink, mock_read):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        prompt = "x" * 500_000  # ~160s scaled timeout, not _run_cli's 30s default
+
+        llm_complete(prompt, {"llm_backend": "codex"})
+
+        assert mock_run.call_args.kwargs["timeout"] == 160
+
+    @patch("memento.llm.subprocess.run")
+    def test_gemini_backend_receives_scaled_timeout(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n", stderr="")
+        prompt = "x" * 500_000
+
+        llm_complete(prompt, {"llm_backend": "gemini"})
+
+        assert mock_run.call_args.kwargs["timeout"] == 160
+
+    @patch("memento.llm.subprocess.run")
+    def test_llm_complete_attaches_telemetry_on_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="claude output\n", stderr="")
+
+        result = llm_complete("test prompt", {"llm_backend": "claude", "llm_model": "sonnet"})
+
+        assert result.backend == "claude"
+        assert result.model == "sonnet"
+        assert result.prompt_bytes == len("test prompt".encode("utf-8"))
+        assert result.duration_ms is not None and result.duration_ms >= 0
+
+    @patch("memento.llm.subprocess.run")
+    def test_llm_complete_attaches_telemetry_on_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="Prompt is too long\n", stderr="")
+
+        result = llm_complete("test prompt", {"llm_backend": "claude"})
+
+        assert result.ok is False
+        assert result.backend == "claude"
+        assert result.prompt_bytes == len("test prompt".encode("utf-8"))
+        assert result.duration_ms is not None
 
     @patch("memento.llm.subprocess.run")
     def test_backend_returns_error_on_timeout(self, mock_run):
