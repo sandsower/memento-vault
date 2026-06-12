@@ -2258,7 +2258,9 @@ def extract_tool_context_keywords(file_path: str) -> str:
 
 # v2: caches written before the relative-path cwd fix hold dir entries
 # poisoned by paths resolved against the wrong project; drop them once.
-TOOL_CONTEXT_CACHE_SCHEMA = 2
+# v3: dir entries become project-scoped ("<cwd>::<dir>") and carry a ts for
+# TTL expiry; pre-v3 keys are shape-incompatible, so drop them once.
+TOOL_CONTEXT_CACHE_SCHEMA = 3
 
 
 def load_cache() -> dict:
@@ -2287,6 +2289,29 @@ def save_cache(cache: dict) -> None:
             json.dump(cache, f)
     except OSError:
         pass
+
+
+def _tool_context_dir_key(cwd: str, normalized_path: str) -> str:
+    """Scope cache entries by project (cwd) as well as directory.
+
+    A directory shared between checkouts (or a mis-resolved path) must not
+    replay one project's cached results into another project's sessions.
+    """
+    try:
+        scope = os.path.realpath(os.path.expanduser(cwd)).rstrip("/") if cwd else "-"
+    except (OSError, ValueError):
+        scope = "-"
+    return f"{scope}::{Path(normalized_path).parent}"
+
+
+def _tool_context_entry_fresh(entry: dict, config: dict) -> bool:
+    try:
+        ttl_hours = float(config.get("tool_context_cache_ttl_hours", 24))
+    except (TypeError, ValueError):
+        ttl_hours = 24.0
+    if ttl_hours <= 0:
+        return True  # TTL disabled
+    return (time.time() - float(entry.get("ts", 0))) < ttl_hours * 3600
 
 
 def get_recall_paths(session_id: str = "unknown") -> set[str]:
@@ -2347,9 +2372,16 @@ def build_tool_context(
     file_path: str,
     cwd: str = "",
     session_id: str = "unknown",
+    lineage_id: str | None = None,
 ) -> LifecycleResult:
-    """Build context for a file-read tool result."""
+    """Build context for a file-read tool result.
+
+    lineage_id, when provided, keys the per-session injection caps instead of
+    session_id: resumed sessions get fresh session ids but share a transcript,
+    and caps keyed on the transient id reset on every resume.
+    """
     config = get_config()
+    lineage = lineage_id or session_id
     metadata = {"cwd": cwd, "session_id": session_id, "tool_name": tool_name, "file_path": file_path}
 
     def no_context(reason: str) -> LifecycleResult:
@@ -2383,15 +2415,19 @@ def build_tool_context(
 
     cache = load_cache()
     max_injections = config.get("tool_context_max_injections", 5)
-    if session_injection_count(cache, session_id) >= max_injections:
+    if session_injection_count(cache, lineage) >= max_injections:
         return no_context("cap-reached")
 
-    dir_key = str(Path(normalized_path).parent)
+    dir_key = _tool_context_dir_key(cwd, normalized_path)
     search_query = None
     latency_ms = 0
-    if dir_key in cache.get("dirs", {}):
-        cached = cache["dirs"][dir_key]
-        results = cached.get("results", [])
+    cached_entry = cache.get("dirs", {}).get(dir_key)
+    if cached_entry is not None and not _tool_context_entry_fresh(cached_entry, config):
+        del cache["dirs"][dir_key]
+        cached_entry = None
+        log_retrieval("tool-context", "cache-expired", dir_key=dir_key)
+    if cached_entry is not None:
+        results = cached_entry.get("results", [])
         if not results:
             return no_context("no-results")
         log_retrieval("tool-context", "cache-hit", file_path=normalized_path, dir_key=dir_key)
@@ -2404,7 +2440,7 @@ def build_tool_context(
         search_query = extract_tool_context_keywords(normalized_path)
         metadata["query"] = search_query
         if not search_query or len(search_query.split()) < 2:
-            cache.setdefault("dirs", {})[dir_key] = {"results": []}
+            cache.setdefault("dirs", {})[dir_key] = {"results": [], "ts": time.time()}
             save_cache(cache)
             return no_context("insufficient-keywords")
 
@@ -2424,7 +2460,7 @@ def build_tool_context(
         results = enhance_results(results, config, cwd=cwd, require_project_match=True)
 
         cache["last_qmd_call"] = time.time()
-        cache.setdefault("dirs", {})[dir_key] = {"results": results}
+        cache.setdefault("dirs", {})[dir_key] = {"results": results, "ts": time.time()}
         save_cache(cache)
 
         if not results:
@@ -2464,7 +2500,7 @@ def build_tool_context(
         latency_ms=latency_ms,
     )
 
-    record_injection(cache, session_id, injected_paths)
+    record_injection(cache, lineage, injected_paths)
     save_cache(cache)
     return LifecycleResult(
         should_inject=True,

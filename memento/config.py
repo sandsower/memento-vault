@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
     "tool_context_max_notes": 2,
     "tool_context_max_injections": 5,
     "tool_context_cooldown": 1,
+    "tool_context_cache_ttl_hours": 24,  # 0 disables expiry
     # Inception (background consolidation)
     "inception_enabled": False,
     "inception_backend": "codex",

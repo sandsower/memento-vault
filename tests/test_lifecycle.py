@@ -1111,7 +1111,7 @@ def test_tool_context_hook_adapter_outputs_claude_json(capsys):
         with patch.object(module, "build_tool_context", return_value=result) as mock_build:
             module.main()
 
-    mock_build.assert_called_once_with("Read", "src/server/authMiddleware.ts", "/repo", "s1")
+    mock_build.assert_called_once_with("Read", "src/server/authMiddleware.ts", "/repo", "s1", lineage_id=None)
     output = json.loads(capsys.readouterr().out)
     assert output == {
         "hookSpecificOutput": {
@@ -1120,6 +1120,34 @@ def test_tool_context_hook_adapter_outputs_claude_json(capsys):
             "additionalContext": "[connected-to-vault]\n  - Auth boundary",
         }
     }
+
+
+def test_tool_context_hook_adapter_derives_lineage_from_transcript(capsys):
+    hook_path = Path(__file__).parent.parent / "hooks" / "vault-tool-context.py"
+    spec = importlib.util.spec_from_file_location("vault_tool_context_hook_lineage", hook_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    hook_input = {
+        "tool_name": "Read",
+        "tool_input": {"file_path": "src/server/authMiddleware.ts"},
+        "cwd": "/repo",
+        "session_id": "resumed-session-2",
+        "transcript_path": "/home/vic/.claude/projects/x/original-session.jsonl",
+    }
+    result = LifecycleResult(False, "", "tool-context", reason="no-results")
+    with patch.object(module, "read_hook_input", return_value=hook_input):
+        with patch.object(module, "build_tool_context", return_value=result) as mock_build:
+            module.main()
+
+    mock_build.assert_called_once_with(
+        "Read",
+        "src/server/authMiddleware.ts",
+        "/repo",
+        "resumed-session-2",
+        lineage_id="original-session",
+    )
 
 
 def test_triage_health_warning_reads_always_on_health_log(tmp_path):
@@ -1644,3 +1672,144 @@ class TestRecallDedupPerSessionMultiPath:
 
         assert reason == "duplicate"
         assert lines == []
+
+
+class TestToolContextCacheTTLAndScoping:
+    def _call(self, cache, qmd_results=None, cwd="/repo", session_id="s1", lineage_id=None, config_extra=None):
+        import time as _time
+
+        from memento.lifecycle import build_tool_context
+
+        config = dict(DEFAULT_CONFIG)
+        config["tool_context_min_score"] = 0.75
+        if config_extra:
+            config.update(config_extra)
+        saved = {}
+
+        with (
+            patch("memento.lifecycle.has_qmd", return_value=True),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.load_cache", return_value=cache),
+            patch("memento.lifecycle.save_cache", side_effect=lambda c: saved.update(c)),
+            patch(
+                "memento.lifecycle.qmd_search_with_extras",
+                return_value=qmd_results if qmd_results is not None else [],
+            ) as mock_search,
+            patch("memento.lifecycle.enhance_results", side_effect=lambda results, *a, **k: results),
+            patch("memento.lifecycle.log_retrieval"),
+        ):
+            result = build_tool_context(
+                "Read", "/workspace/src/server/authMiddleware.ts", cwd, session_id, lineage_id=lineage_id
+            )
+        return result, mock_search, saved, _time
+
+    def test_fresh_cache_entry_serves_hit_without_search(self):
+        import time as _time
+
+        from memento.lifecycle import _tool_context_dir_key
+
+        key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
+        cache = {
+            "schema": 3,
+            "dirs": {
+                key: {
+                    "results": [{"path": "notes/auth.md", "title": "Auth note", "score": 0.8, "snippet": ""}],
+                    "ts": _time.time(),
+                }
+            },
+            "last_qmd_call": 0,
+            "injections": {},
+        }
+
+        result, mock_search, _, _ = self._call(cache)
+
+        assert result.should_inject is True
+        mock_search.assert_not_called()
+
+    def test_expired_cache_entry_triggers_fresh_search(self):
+        import time as _time
+
+        from memento.lifecycle import _tool_context_dir_key
+
+        key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
+        cache = {
+            "schema": 3,
+            "dirs": {
+                key: {
+                    "results": [{"path": "notes/stale.md", "title": "Stale", "score": 0.8, "snippet": ""}],
+                    "ts": _time.time() - 48 * 3600,
+                }
+            },
+            "last_qmd_call": 0,
+            "injections": {},
+        }
+        fresh = [{"path": "notes/fresh.md", "title": "Fresh note", "score": 0.9, "snippet": ""}]
+
+        result, mock_search, saved, _ = self._call(cache, qmd_results=fresh)
+
+        mock_search.assert_called_once()
+        assert result.should_inject is True
+        assert "Fresh note" in result.content
+        assert saved["dirs"][key]["results"][0]["path"] == "notes/fresh.md"
+        assert saved["dirs"][key]["ts"] > _time.time() - 60
+
+    def test_ttl_zero_disables_expiry(self):
+        from memento.lifecycle import _tool_context_dir_key
+
+        key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
+        cache = {
+            "schema": 3,
+            "dirs": {
+                key: {
+                    "results": [{"path": "notes/old.md", "title": "Old note", "score": 0.8, "snippet": ""}],
+                    "ts": 1,
+                }
+            },
+            "last_qmd_call": 0,
+            "injections": {},
+        }
+
+        result, mock_search, _, _ = self._call(cache, config_extra={"tool_context_cache_ttl_hours": 0})
+
+        assert result.should_inject is True
+        mock_search.assert_not_called()
+
+    def test_cache_entries_scoped_per_project(self):
+        fresh = [{"path": "notes/x.md", "title": "X note", "score": 0.9, "snippet": ""}]
+        cache = {"schema": 3, "dirs": {}, "last_qmd_call": 0, "injections": {}}
+
+        _, search_a, saved_a, _ = self._call(dict(cache, dirs={}), qmd_results=fresh, cwd="/project-a")
+        _, search_b, saved_b, _ = self._call(dict(cache, dirs={}), qmd_results=fresh, cwd="/project-b")
+
+        search_a.assert_called_once()
+        search_b.assert_called_once()
+        (key_a,) = saved_a["dirs"].keys()
+        (key_b,) = saved_b["dirs"].keys()
+        assert key_a != key_b
+        assert key_a.endswith("::/workspace/src/server")
+        assert key_b.endswith("::/workspace/src/server")
+
+    def test_injection_cap_keyed_by_lineage_survives_resume(self):
+        cache = {
+            "schema": 3,
+            "dirs": {},
+            "last_qmd_call": 0,
+            "injections": {"original-session": {"count": 5, "paths": []}},
+        }
+
+        result, mock_search, _, _ = self._call(cache, session_id="resumed-session-2", lineage_id="original-session")
+
+        assert result.reason == "cap-reached"
+        mock_search.assert_not_called()
+
+    def test_injection_cap_falls_back_to_session_id(self):
+        cache = {
+            "schema": 3,
+            "dirs": {},
+            "last_qmd_call": 0,
+            "injections": {"s1": {"count": 5, "paths": []}},
+        }
+
+        result, _, _, _ = self._call(cache, session_id="s1")
+
+        assert result.reason == "cap-reached"
