@@ -82,6 +82,42 @@ def render_transcript_text(transcript_path, agent=None, session_id=None):
     return open(transcript_path).read()
 
 
+_TRUNCATION_MARKER_RESERVE = 120
+
+
+def truncate_transcript(text, max_chars):
+    """Head+tail truncate transcript text to a character budget.
+
+    Keeps the opening (goal, context) and the tail (outcomes, decisions),
+    dropping the middle with an explicit elision marker. Session endings
+    carry most of the durable signal, so the tail gets the larger share.
+    Returns text unchanged when it fits or when max_chars <= 0 (disabled).
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    budget = max_chars - _TRUNCATION_MARKER_RESERVE
+    if budget < 200:
+        return text[-max_chars:]
+
+    head_budget = budget // 4
+    tail_budget = budget - head_budget
+    head = text[:head_budget]
+    tail = text[-tail_budget:]
+
+    # Cut on line boundaries so the LLM never sees a spliced half-record.
+    cut = head.rfind("\n")
+    if cut > 0:
+        head = head[: cut + 1]
+    cut = tail.find("\n")
+    if cut >= 0:
+        tail = tail[cut + 1 :]
+
+    elided = len(text) - len(head) - len(tail)
+    marker = f"\n[... transcript truncated: {elided:,} characters elided from the middle ...]\n"
+    return head + marker + tail
+
+
 def parse_transcript(transcript_path, agent=None, session_id=None):
     """Parse a transcript file using the appropriate agent adapter.
 

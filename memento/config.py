@@ -21,6 +21,10 @@ DEFAULT_CONFIG = {
     "auto_commit": True,
     "agent_model": "sonnet",
     "agent_delay_seconds": 90,
+    # Character budget for transcripts embedded in the structured-notes
+    # triage prompt. ~400K chars ≈ 100K tokens: fits sonnet's context with
+    # headroom and stays under codex's 1MB ARG_MAX. 0 disables truncation.
+    "triage_transcript_max_chars": 400_000,
     # Retrieval hooks
     "session_briefing": True,
     "briefing_max_notes": 5,

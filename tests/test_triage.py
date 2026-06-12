@@ -476,6 +476,115 @@ class TestProcessStructuredNotes:
         assert project_file.exists()
         assert "[[redis-cache-keys-need-explicit-ttl]]" in project_file.read_text()
 
+    def test_oversize_transcript_truncated_before_prompt(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        filler = json.dumps(_assistant_msg([_text_block("middle filler " + "x" * 500)]))
+        lines = [json.dumps(_user_msg("Investigate the triage transcript cap"))]
+        lines += [filler] * 2000
+        lines += [json.dumps(_assistant_msg([_text_block("Final outcome: cap verified.")]))]
+        transcript.write_text("\n".join(lines))
+        assert transcript.stat().st_size > 1_000_000
+
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "main",
+            "exchange_count": 20,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Investigate the triage transcript cap",
+            "last_outcome": "Cap verified.",
+        }
+        captured = {}
+        health_events = []
+
+        def _llm_complete(prompt):
+            captured["prompt"] = prompt
+            return LLMResult(text="[]", ok=True, error=None)
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", side_effect=_llm_complete),
+            patch(
+                "memento_triage.get_config",
+                return_value={"triage_transcript_max_chars": 50_000},
+            ),
+            patch(
+                "memento_triage.log_triage_health",
+                side_effect=lambda action, **kw: health_events.append((action, kw)),
+            ),
+        ):
+            process_structured_notes("sess-big", str(transcript), meta, "api-service")
+
+        # Budget plus prompt scaffolding (instructions, meta, existing titles).
+        assert len(captured["prompt"]) < 55_000
+        assert "transcript truncated" in captured["prompt"]
+        # Head and tail survive; the middle is dropped.
+        assert "Investigate the triage transcript cap" in captured["prompt"]
+        assert "Final outcome: cap verified." in captured["prompt"]
+
+        truncation_events = [kw for action, kw in health_events if action == "structured_notes_transcript_truncated"]
+        assert len(truncation_events) == 1
+        assert truncation_events[0]["transcript_chars"] > 1_000_000
+        assert truncation_events[0]["prompt_chars"] <= 50_000
+
+    def test_small_transcript_not_truncated(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Small session")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "main",
+            "exchange_count": 2,
+            "files_edited": [],
+            "first_prompt": "Small session",
+            "last_outcome": "Done.",
+        }
+        captured = {}
+
+        def _llm_complete(prompt):
+            captured["prompt"] = prompt
+            return LLMResult(text="[]", ok=True, error=None)
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", side_effect=_llm_complete),
+        ):
+            process_structured_notes("sess-small", str(transcript), meta, "api-service")
+
+        assert "transcript truncated" not in captured["prompt"]
+        assert "Small session" in captured["prompt"]
+
+    def test_llm_failure_health_entry_includes_transcript_stats(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Failing session")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "main",
+            "exchange_count": 2,
+            "files_edited": [],
+            "first_prompt": "Failing session",
+            "last_outcome": None,
+        }
+        health_events = []
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch(
+                "memento_triage.llm_complete",
+                return_value=LLMResult(text="", ok=False, error="Prompt is too long"),
+            ),
+            patch(
+                "memento_triage.log_triage_health",
+                side_effect=lambda action, **kw: health_events.append((action, kw)),
+            ),
+        ):
+            written = process_structured_notes("sess-fail", str(transcript), meta, "api-service")
+
+        assert written == 0
+        failures = [kw for action, kw in health_events if action == "structured_notes_llm_failed"]
+        assert len(failures) == 1
+        assert failures[0]["error"] == "Prompt is too long"
+        assert failures[0]["transcript_chars"] > 0
+        assert failures[0]["transcript_truncated"] is False
+
     def test_triage_coerces_word_certainty(self, tmp_vault, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
         transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
@@ -688,12 +797,13 @@ class TestSpawnMementoAgent:
             project="api-service",
             error="codex timed out",
         )
-        mock_health.assert_any_call(
-            "structured_notes_llm_failed",
-            session_id="sess-123",
-            project="api-service",
-            error="codex timed out",
-        )
+        health_calls = [call for call in mock_health.call_args_list if call.args[0] == "structured_notes_llm_failed"]
+        assert len(health_calls) == 1
+        kwargs = health_calls[0].kwargs
+        assert kwargs["session_id"] == "sess-123"
+        assert kwargs["project"] == "api-service"
+        assert kwargs["error"] == "codex timed out"
+        assert kwargs["transcript_truncated"] is False
 
     def test_triage_logs_lock_timeout_details(self, tmp_vault, tmp_path):
         transcript = tmp_path / "transcript.jsonl"

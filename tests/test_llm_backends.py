@@ -42,7 +42,7 @@ class TestCliBackends:
             "--permission-mode",
             "default",
             "--disallowedTools",
-            "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch",
+            "Bash,Edit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch",
         ]
         assert cmd[-2:] == ["--model", "sonnet"]
         assert mock_run.call_args.kwargs["input"] == "test prompt"
@@ -64,8 +64,12 @@ class TestCliBackends:
         assert "--permission-mode" in cmd
         assert cmd[cmd.index("--permission-mode") + 1] == "default"
         denylist = cmd[cmd.index("--disallowedTools") + 1].split(",")
-        for tool in ["Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "Task", "Agent", "WebFetch", "WebSearch"]:
+        for tool in ["Bash", "Edit", "Write", "NotebookEdit", "Task", "Agent", "WebFetch", "WebSearch"]:
             assert tool in denylist
+        # MultiEdit no longer exists in Claude Code; keeping it in the denylist
+        # makes the CLI print a warning on every headless run, which pollutes
+        # stderr and gets misrecorded as the failure reason in health logs.
+        assert "MultiEdit" not in denylist
 
     @patch("memento.llm.subprocess.run")
     def test_claude_backend_adds_actionable_invalid_mcp_hint(self, mock_run):
@@ -336,6 +340,40 @@ class TestCliBackends:
         assert "boom" in result.error
 
     @patch("memento.llm.subprocess.run")
+    def test_error_surfaces_stdout_when_stderr_empty(self, mock_run):
+        # The claude CLI prints "Prompt is too long" to stdout and exits 1
+        # with an empty stderr; the real reason must reach the caller.
+        mock_run.return_value = MagicMock(returncode=1, stdout="Prompt is too long\n", stderr="")
+
+        result = llm_complete("prompt", {"llm_backend": "claude"})
+
+        assert result.ok is False
+        assert "Prompt is too long" in result.error
+
+    @patch("memento.llm.subprocess.run")
+    def test_error_surfaces_stdout_when_stderr_is_warning_only(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="Prompt is too long\n",
+            stderr="Warning: unknown tool in disallowedTools\n",
+        )
+
+        result = llm_complete("prompt", {"llm_backend": "claude"})
+
+        assert result.ok is False
+        assert "Prompt is too long" in result.error
+        assert "unknown tool in disallowedTools" in result.error
+
+    @patch("memento.llm.subprocess.run")
+    def test_error_prefers_real_stderr_over_stdout(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="partial output\n", stderr="fatal: real error\n")
+
+        result = llm_complete("prompt", {"llm_backend": "claude"})
+
+        assert result.ok is False
+        assert result.error == "fatal: real error"
+
+    @patch("memento.llm.subprocess.run")
     def test_get_backend_from_config(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="ok\n", stderr="")
 
@@ -354,7 +392,7 @@ class TestCliBackends:
             "--permission-mode",
             "default",
             "--disallowedTools",
-            "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch",
+            "Bash,Edit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch",
         ]
         assert cmd[-2:] == ["--model", "haiku"]
         assert mock_run.call_args.kwargs["input"] == "prompt"

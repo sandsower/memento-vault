@@ -70,6 +70,30 @@ def _success(text):
     return LLMResult(text=stripped, ok=True, error=None)
 
 
+def _stderr_is_warning_only(stderr_text):
+    """True when every non-empty stderr line is a warning, not an error."""
+    lines = [line.strip() for line in stderr_text.splitlines() if line.strip()]
+    return bool(lines) and all(line.lower().startswith(("warn", "[warn")) for line in lines)
+
+
+def _failure_message(result):
+    """Build an error message from a failed CLI run, preferring real signal.
+
+    The claude CLI prints some hard failures (e.g. "Prompt is too long") to
+    stdout while stderr carries only harmless warnings — dropping stdout here
+    hides the real failure reason from triage health logs.
+    """
+    stderr_text = result.stderr.strip()
+    stdout_text = result.stdout.strip()
+    if stderr_text and not _stderr_is_warning_only(stderr_text):
+        return stderr_text
+    if stdout_text and stderr_text:
+        return f"{stdout_text}\n[stderr] {stderr_text}"
+    if stdout_text:
+        return stdout_text
+    return stderr_text or f"LLM command failed with exit code {result.returncode}"
+
+
 def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
     try:
         if stdin_input is None:
@@ -104,8 +128,7 @@ def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
                 return _success(text)
             if result.stdout.strip():
                 return _success(result.stdout)
-        message = result.stderr.strip() or f"LLM command failed with exit code {result.returncode}"
-        return _error(_with_invalid_mcp_config_hint(message))
+        return _error(_with_invalid_mcp_config_hint(_failure_message(result)))
 
     if output_path is not None:
         try:
@@ -122,7 +145,7 @@ def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
     return _success(result.stdout)
 
 
-CLAUDE_HEADLESS_DISALLOWED_TOOLS = "Bash,Edit,MultiEdit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch"
+CLAUDE_HEADLESS_DISALLOWED_TOOLS = "Bash,Edit,Write,NotebookEdit,Task,Agent,WebFetch,WebSearch"
 CLAUDE_EMPTY_MCP_CONFIG = '{"mcpServers": {}}'
 
 
