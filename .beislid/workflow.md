@@ -56,6 +56,8 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
   command: '.venv/bin/python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py'
 - name: release-smoke
   command: '.venv/bin/python scripts/release_smoke.py'
+- name: install-exec-smoke
+  command: '.venv/bin/python scripts/release_smoke.py --install-exec'
 - name: claude-sandbox-smoke
   command: '.venv/bin/python scripts/claude_sandbox_smoke.py'
 ```

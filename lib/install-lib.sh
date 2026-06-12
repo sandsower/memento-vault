@@ -306,8 +306,11 @@ setup_vault() {
 
     # Obsidian setup (optional, first install only)
     if [ -z "$INSTALLED_VERSION" ]; then
-        echo ""
-        read -rp "Set up Obsidian views? (Base views for browsing notes) [Y/n] " obsidian
+        obsidian=""
+        if [ -t 0 ]; then
+            echo ""
+            read -rp "Set up Obsidian views? (Base views for browsing notes) [Y/n] " obsidian || obsidian=""
+        fi
         if [[ ! "$obsidian" =~ ^[Nn] ]]; then
             if [ ! -d "$VAULT_PATH/.obsidian" ]; then
                 cp -r "$SCRIPT_DIR/templates/obsidian/.obsidian" "$VAULT_PATH/.obsidian"
@@ -524,8 +527,14 @@ setup_qmd() {
 
     # Initial index (first install only)
     if [ -z "$INSTALLED_VERSION" ]; then
-        echo ""
-        read -rp "Run initial QMD indexing now? [Y/n] " index_now
+        index_now=""
+        if [ -t 0 ]; then
+            echo ""
+            read -rp "Run initial QMD indexing now? [Y/n] " index_now || index_now=""
+        else
+            info "Non-interactive install: skipping initial QMD indexing (run 'qmd update -c memento && qmd embed' later)."
+            index_now="n"
+        fi
         if [[ ! "$index_now" =~ ^[Nn] ]]; then
             qmd update -c memento && qmd embed
             info "QMD index built"
@@ -571,8 +580,11 @@ path.write_text(text)
 PY
             info "Updated QMD model warmup in $shell_rc"
         elif [ "$QMD_AVAILABLE" = true ] && [ "$EXPERIMENTAL" = true ] && [ "$REMOTE_MODE" != true ]; then
-            echo ""
-            read -rp "Add QMD model warmup to $shell_rc? (faster session briefings) [Y/n] " warmup
+            warmup="n"
+            if [ -t 0 ]; then
+                echo ""
+                read -rp "Add QMD model warmup to $shell_rc? (faster session briefings) [Y/n] " warmup || warmup="n"
+            fi
             if [[ ! "$warmup" =~ ^[Nn] ]]; then
                 cat >> "$shell_rc" << WARMUP_EOF
 

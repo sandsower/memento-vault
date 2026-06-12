@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -162,6 +163,95 @@ def check_pi_package_metadata(root: Path) -> CheckResult:
     return pass_("pi package metadata", "package.json exposes pi extension and skills metadata.")
 
 
+def check_shell_syntax(root: Path) -> CheckResult:
+    """Parse every tracked shell script with bash -n.
+
+    On macOS /bin/bash is 3.2, the oldest bash users install with (Homebrew
+    formulae run install scripts through it) — this is the gate that would
+    have caught GH #90, where 4.x-only syntax shipped in a release.
+    """
+    try:
+        listing = subprocess.run(["git", "ls-files", "*.sh"], cwd=root, text=True, capture_output=True, timeout=20)
+        scripts = [line for line in listing.stdout.splitlines() if line.strip()]
+    except FileNotFoundError:
+        return skip("shell syntax", "git not found; cannot list shell scripts.")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return fail("shell syntax", f"Could not list shell scripts: {exc}")
+    if not scripts:
+        return skip("shell syntax", "No tracked .sh files found.")
+
+    bash = "/bin/bash" if Path("/bin/bash").exists() else shutil.which("bash")
+    if not bash:
+        return skip("shell syntax", "bash not found; cannot parse shell scripts.")
+
+    version = subprocess.run([bash, "-c", "echo $BASH_VERSION"], text=True, capture_output=True).stdout.strip()
+    failures = []
+    for script in scripts:
+        result = subprocess.run([bash, "-n", script], cwd=root, text=True, capture_output=True, timeout=20)
+        if result.returncode != 0:
+            failures.append(f"{script}: {(result.stderr or result.stdout).strip()[:200]}")
+    if failures:
+        return fail("shell syntax", f"bash {version} rejected: " + " | ".join(failures))
+    return pass_("shell syntax", f"{len(scripts)} scripts parse under bash {version}.")
+
+
+def check_install_execution(root: Path) -> CheckResult:
+    """Run install.sh non-interactively against a throwaway HOME.
+
+    Exercises the curl|bash shape (stdin not a tty): the install must finish
+    without prompting and produce the hook layout. Only the temp HOME is
+    mutated.
+    """
+    installer = root / "install.sh"
+    if not installer.exists():
+        return fail("install execution", "Missing install.sh.")
+
+    home = Path(tempfile.mkdtemp(prefix="memento-install-smoke-"))
+    try:
+        (home / ".gitconfig").write_text("[user]\n\temail = smoke@invalid\n\tname = Install Smoke\n")
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        # Keep XDG state inside the sandbox even if the caller overrides it.
+        for key in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "MEMENTO_VAULT_PATH"):
+            env.pop(key, None)
+        result = subprocess.run(
+            ["bash", str(installer)],
+            cwd=root,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
+        output = (result.stdout + result.stderr).strip()
+        if result.returncode != 0:
+            return fail("install execution", f"install.sh exited {result.returncode}. Output tail: {output[-600:]}")
+        problems = []
+        if not (home / ".claude" / "hooks" / "memento-triage.py").exists():
+            problems.append("missing ~/.claude/hooks/memento-triage.py")
+        if not (home / ".claude" / "hooks" / "memento" / "lifecycle.py").exists():
+            problems.append("missing ~/.claude/hooks/memento/lifecycle.py")
+        settings = home / ".claude" / "settings.json"
+        if not settings.exists():
+            problems.append("missing ~/.claude/settings.json")
+        else:
+            try:
+                hooks = json.loads(settings.read_text()).get("hooks", {})
+            except json.JSONDecodeError:
+                hooks = {}
+            if "SessionEnd" not in hooks:
+                problems.append("SessionEnd hook not registered in settings.json")
+        if not (home / "memento" / "notes").is_dir():
+            problems.append("vault notes/ not created")
+        if problems:
+            return fail("install execution", "; ".join(problems))
+        return pass_("install execution", "Non-interactive fresh-HOME install completed with expected layout.")
+    except subprocess.TimeoutExpired:
+        return fail("install execution", "install.sh timed out after 300s (likely an unguarded prompt).")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def run_command(name: str, command: list[str], *, root: Path, expect_stdout: str | None = None) -> CheckResult:
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{root}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else str(root)
@@ -242,6 +332,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Also run optional tool-backed checks such as Docker Compose and npm pack dry-runs.",
     )
+    parser.add_argument(
+        "--install-exec",
+        action="store_true",
+        help="Run install.sh non-interactively against a throwaway HOME (slower; mutates only the temp HOME).",
+    )
     return parser.parse_args(argv)
 
 
@@ -253,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         check_version_consistency(root),
         check_homebrew_formula(root),
         check_pi_package_metadata(root),
+        check_shell_syntax(root),
     ]
     if args.skip_command_checks:
         checks.extend(
@@ -268,6 +364,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.heavy:
         checks.extend(heavy_checks(root))
+
+    if args.install_exec:
+        checks.append(check_install_execution(root))
 
     for result in checks:
         print(f"{result.status} {result.name}: {result.detail}")

@@ -18,6 +18,18 @@ python3 scripts/release_smoke.py --heavy
 
 Heavy checks currently validate Docker Compose config and run an npm package dry-run when those tools are installed; missing optional tools are reported as skips.
 
+The default gate also parses every tracked shell script with `bash -n` (on
+macOS that is bash 3.2, the same interpreter Homebrew users get — the class of
+breakage behind GH #90). A full non-interactive install execution against a
+throwaway HOME is available behind its own flag:
+
+```bash
+python3 scripts/release_smoke.py --install-exec
+```
+
+It exercises the `curl | bash` shape (stdin is not a tty), asserts the
+installed hook layout, and mutates nothing outside the temp HOME.
+
 ## Version tag
 
 1. Run `python3 scripts/release_smoke.py` and fix any failures.
