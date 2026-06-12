@@ -2328,7 +2328,9 @@ def build_tool_context(
             min_score=min_score,
         )
         latency_ms = int((time.time() - t0) * 1000)
-        results = enhance_results(results, config, cwd=cwd)
+        # Tool-context is unsolicited injection: require a positive project
+        # match instead of letting untagged notes through as general knowledge.
+        results = enhance_results(results, config, cwd=cwd, require_project_match=True)
 
         cache["last_qmd_call"] = time.time()
         cache.setdefault("dirs", {})[dir_key] = {"results": results}
