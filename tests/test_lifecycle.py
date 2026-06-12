@@ -988,7 +988,10 @@ def test_tool_context_resolves_relative_path_against_session_cwd(_has_qmd, tmp_p
 
     expected = os.path.realpath(str(session_project / "src" / "authMiddleware.ts"))
     assert result.metadata["file_path"] == expected
-    assert result.reason == "qmd-unavailable"
+    # The terminal reason is environment-dependent (pytest tmp dirs live
+    # under /tmp/ on Linux, which SKIP_PREFIXES covers); the resolution
+    # assertion above is the point of this test.
+    assert result.reason in ("qmd-unavailable", "skipped-path")
 
 
 @patch("memento.lifecycle.has_qmd", return_value=False)

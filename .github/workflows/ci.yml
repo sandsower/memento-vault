@@ -1,0 +1,101 @@
+# CI mirror of the local Beislið gates (.beislid/workflow.md), so PR
+# readiness is verified outside the agent's mutable session (GH #52).
+#
+# Deliberately not in CI:
+# - claude-sandbox-smoke: runs a real completion through an authenticated
+#   `claude` CLI; remains a local-only gate.
+# - full pytest is advisory (continue-on-error) until the embedded vector
+#   search environment issues are fixed; the blocking jobs run the same
+#   suites the Beislið gates run.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: python -m pip install ruff
+      - name: ruff check
+        run: python -m ruff check .
+      - name: ruff format check
+        run: python -m ruff format --check .
+      - name: compileall
+        run: python -m compileall -q memento hooks scripts
+
+  gate-tests:
+    name: Gate test suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and test deps
+        run: python -m pip install -e ".[mcp]" pytest pyyaml numpy networkx scipy
+      - name: targeted-tests
+        run: python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py
+      - name: retrieval-tests
+        run: python -m pytest tests/test_tenet_*.py tests/test_multi_hop.py tests/test_deep_recall.py
+      - name: mcp-server-tests
+        run: python -m pytest tests/test_mcp_server.py tests/test_remote_client.py tests/test_integration_remote.py
+      - name: install-tests
+        run: python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py
+
+  full-pytest:
+    name: Full pytest (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and test deps
+        run: python -m pip install -e ".[mcp,embedded]" pytest pyyaml networkx scipy hdbscan rank_bm25 optuna
+      - name: pytest
+        run: python -m pytest -q
+
+  smoke:
+    name: Release and install smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package (MCP module help needs it)
+        run: python -m pip install -e ".[mcp]"
+      - name: release-smoke
+        run: python scripts/release_smoke.py
+      - name: install-exec-smoke
+        run: python scripts/release_smoke.py --install-exec
+
+  shell-syntax-bash32:
+    # macOS runners ship /bin/bash 3.2 — the interpreter Homebrew users get.
+    # This is the job that would have caught GH #90 before release.
+    name: Shell syntax (macOS bash 3.2)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n under 3.2
+        run: |
+          /bin/bash --version | head -1
+          rc=0
+          for f in $(git ls-files '*.sh'); do
+            /bin/bash -n "$f" || rc=1
+          done
+          exit $rc
