@@ -173,6 +173,8 @@ def check_shell_syntax(root: Path) -> CheckResult:
     try:
         listing = subprocess.run(["git", "ls-files", "*.sh"], cwd=root, text=True, capture_output=True, timeout=20)
         scripts = [line for line in listing.stdout.splitlines() if line.strip()]
+    except FileNotFoundError:
+        return skip("shell syntax", "git not found; cannot list shell scripts.")
     except (OSError, subprocess.TimeoutExpired) as exc:
         return fail("shell syntax", f"Could not list shell scripts: {exc}")
     if not scripts:
