@@ -161,7 +161,7 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_
         return []
 
     try:
-        return backend.search(
+        results = backend.search(
             query,
             collection,
             limit=limit,
@@ -173,6 +173,10 @@ def qmd_search(query, collection=None, limit=5, semantic=False, timeout=10, min_
     except Exception as exc:
         log_retrieval("search", "qmd_search_unexpected", error=str(exc))
         return []
+    # Archived notes are retired from active retrieval: the vault indexes
+    # **/*.md, so without this filter archive/ content keeps surfacing in
+    # recall and tool-context forever. Explicit get-by-path still works.
+    return [r for r in results if not str(r.get("path", "")).startswith("archive/")]
 
 
 def qmd_search_with_extras(query, limit=5, semantic=False, timeout=5, min_score=0.0, concrete=False):

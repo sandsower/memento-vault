@@ -353,3 +353,49 @@ class TestGrepBackendPathTraversal:
             result = backend.get("notes/test.md")
         assert result is not None
         assert result["title"] == "Test"
+
+
+class TestArchiveExclusion:
+    """Archived notes are retired from active retrieval."""
+
+    def test_qmd_search_filters_archive_paths(self):
+        from memento.search import qmd_search
+
+        backend = MockBackend(
+            results=[
+                {"path": "notes/good-note.md", "title": "Good", "score": 0.9, "snippet": ""},
+                {
+                    "path": "archive/pi-candidate-captures-2026-05-24/pi-session-candidate-capture-3.md",
+                    "title": "Dump",
+                    "score": 0.95,
+                    "snippet": "",
+                },
+                {
+                    "path": "archive/beislid-main-plans-2026-05-03/old-plan.md",
+                    "title": "Old plan",
+                    "score": 0.8,
+                    "snippet": "",
+                },
+            ]
+        )
+        set_backend(backend)
+        try:
+            results = qmd_search("candidate capture")
+        finally:
+            reset_backend()
+
+        assert [r["path"] for r in results] == ["notes/good-note.md"]
+
+    def test_qmd_search_keeps_notes_with_archive_in_name(self):
+        from memento.search import qmd_search
+
+        backend = MockBackend(
+            results=[{"path": "notes/archive-export-design.md", "title": "Archive export", "score": 0.9, "snippet": ""}]
+        )
+        set_backend(backend)
+        try:
+            results = qmd_search("archive export")
+        finally:
+            reset_backend()
+
+        assert [r["path"] for r in results] == ["notes/archive-export-design.md"]
