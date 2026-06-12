@@ -757,8 +757,10 @@ def apply_quality_signals(results, config=None):
                 r["_meta"] = meta
 
         if meta:
-            note_type = (meta.get("type") or "").strip()
-            tags = set(meta.get("tags") or [])
+            # Frontmatter values may be quoted or cased freely; normalize so
+            # `type: "Session"` or `tags: [PI, QUEUED]` can't bypass the rules.
+            note_type = str(meta.get("type") or "").strip().strip('"').strip("'").lower()
+            tags = {str(tag).strip().strip('"').strip("'").lower() for tag in (meta.get("tags") or [])}
             if note_type == "session" and tags & {"pi", "queued"}:
                 log_retrieval("search", "quality_excluded", path=path, reason="queued-session-capture")
                 continue

@@ -204,3 +204,27 @@ class TestToolContextRequiresProjectMatch:
             build_tool_context("Read", "/workspace/src/server/authMiddleware.ts", "/repo", "s1")
 
         assert captured["require_project_match"] is True
+
+
+class TestQualitySignalNormalization:
+    def test_quoted_and_cased_frontmatter_still_dropped(self, vault):
+        path = _write_note(
+            vault,
+            "cased-capture",
+            ["title: Cased capture", 'type: "Session"', "tags: [PI, QUEUED]"],
+        )
+        results = [_result(path)]
+
+        with patch("memento.graph.get_vault", return_value=vault):
+            kept = apply_quality_signals(results, config={"quality_signals_enabled": True})
+
+        assert kept == []
+
+    def test_cased_session_type_still_penalized(self, vault):
+        path = _write_note(vault, "cased-session", ["title: S", "type: Session"])
+        results = [_result(path, 1.0)]
+
+        with patch("memento.graph.get_vault", return_value=vault):
+            kept = apply_quality_signals(results, config={"quality_signals_enabled": True})
+
+        assert kept[0]["score"] == pytest.approx(0.85)
