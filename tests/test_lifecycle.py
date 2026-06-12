@@ -1267,3 +1267,125 @@ def test_triage_health_warning_detects_other_accepted_certainty_labels(tmp_path)
     assert warning is not None
     assert "stale installed memento package" in warning
     assert "./install.sh --reinstall" in warning
+
+
+class TestDeferredWorkerResolution:
+    def _make_layout(self, root, installed):
+        """Create a fake lifecycle.py location plus a worker script.
+
+        installed=False: <root>/memento/lifecycle.py + <root>/hooks/<worker>
+        installed=True:  <root>/memento/lifecycle.py + <root>/<worker>  (the
+        ~/.claude/hooks layout install.sh produces)
+        """
+        (root / "memento").mkdir(parents=True)
+        fake_lifecycle = root / "memento" / "lifecycle.py"
+        fake_lifecycle.write_text("# fake\n")
+        if installed:
+            worker = root / "vault-briefing.py"
+        else:
+            (root / "hooks").mkdir()
+            worker = root / "hooks" / "vault-briefing.py"
+        worker.write_text("# worker\n")
+        return fake_lifecycle, worker
+
+    def test_find_hook_script_repo_layout(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        fake_lifecycle, worker = self._make_layout(tmp_path / "repo", installed=False)
+        monkeypatch.setattr(lifecycle_module, "__file__", str(fake_lifecycle))
+
+        assert lifecycle_module._find_hook_script("vault-briefing.py") == worker
+
+    def test_find_hook_script_installed_layout(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        fake_lifecycle, worker = self._make_layout(tmp_path / "claude-hooks", installed=True)
+        monkeypatch.setattr(lifecycle_module, "__file__", str(fake_lifecycle))
+
+        assert lifecycle_module._find_hook_script("vault-briefing.py") == worker
+
+    def test_find_hook_script_missing_returns_none(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        (tmp_path / "empty" / "memento").mkdir(parents=True)
+        fake_lifecycle = tmp_path / "empty" / "memento" / "lifecycle.py"
+        fake_lifecycle.write_text("# fake\n")
+        monkeypatch.setattr(lifecycle_module, "__file__", str(fake_lifecycle))
+
+        assert lifecycle_module._find_hook_script("vault-briefing.py") is None
+
+    def test_spawn_deferred_search_uses_installed_layout_worker(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        fake_lifecycle, worker = self._make_layout(tmp_path / "claude-hooks", installed=True)
+        monkeypatch.setattr(lifecycle_module, "__file__", str(fake_lifecycle))
+        monkeypatch.setattr(lifecycle_module, "DEFERRED_BRIEFING_PATH", str(tmp_path / "deferred.json"))
+
+        with patch("memento.lifecycle._subprocess.Popen") as mock_popen:
+            lifecycle_module.spawn_deferred_search("api-service", "main", [], {})
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[1] == str(worker)
+        assert Path(cmd[1]).exists()
+        assert (tmp_path / "deferred.json").exists()
+
+    def test_spawn_deferred_search_missing_worker_logs_and_skips(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        (tmp_path / "empty" / "memento").mkdir(parents=True)
+        fake_lifecycle = tmp_path / "empty" / "memento" / "lifecycle.py"
+        fake_lifecycle.write_text("# fake\n")
+        monkeypatch.setattr(lifecycle_module, "__file__", str(fake_lifecycle))
+        monkeypatch.setattr(lifecycle_module, "DEFERRED_BRIEFING_PATH", str(tmp_path / "deferred.json"))
+
+        with (
+            patch("memento.lifecycle._subprocess.Popen") as mock_popen,
+            patch("memento.lifecycle.log_retrieval") as mock_log,
+        ):
+            lifecycle_module.spawn_deferred_search("api-service", "main", [], {})
+
+        mock_popen.assert_not_called()
+        # No stale pending file is left behind for recall to wait on.
+        assert not (tmp_path / "deferred.json").exists()
+        mock_log.assert_called_once()
+        assert mock_log.call_args[0] == ("briefing", "deferred-worker-missing")
+
+    def test_spawn_deep_recall_uses_installed_layout_worker(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        root = tmp_path / "claude-hooks"
+        (root / "memento").mkdir(parents=True)
+        fake_lifecycle = root / "memento" / "lifecycle.py"
+        fake_lifecycle.write_text("# fake\n")
+        worker = root / "vault-recall.py"
+        worker.write_text("# worker\n")
+        monkeypatch.setattr(lifecycle_module, "__file__", str(fake_lifecycle))
+        monkeypatch.setattr(lifecycle_module, "RUNTIME_DIR", str(tmp_path))
+        monkeypatch.setattr(lifecycle_module, "DEEP_RECALL_PENDING_PATH", str(tmp_path / "pending.json"))
+
+        with patch("memento.lifecycle._subprocess.Popen") as mock_popen:
+            lifecycle_module.spawn_deep_recall("why does the cache fail?", [], {})
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[1] == str(worker)
+        assert Path(cmd[1]).exists()
+
+    def test_spawn_deep_recall_missing_worker_logs_and_skips(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        (tmp_path / "empty" / "memento").mkdir(parents=True)
+        fake_lifecycle = tmp_path / "empty" / "memento" / "lifecycle.py"
+        fake_lifecycle.write_text("# fake\n")
+        monkeypatch.setattr(lifecycle_module, "__file__", str(fake_lifecycle))
+        monkeypatch.setattr(lifecycle_module, "DEEP_RECALL_PENDING_PATH", str(tmp_path / "pending.json"))
+
+        with (
+            patch("memento.lifecycle._subprocess.Popen") as mock_popen,
+            patch("memento.lifecycle.log_retrieval") as mock_log,
+        ):
+            lifecycle_module.spawn_deep_recall("why does the cache fail?", [], {})
+
+        mock_popen.assert_not_called()
+        assert not (tmp_path / "pending.json").exists()
+        mock_log.assert_called_once()
+        assert mock_log.call_args[0] == ("recall", "deep-recall-worker-missing")
