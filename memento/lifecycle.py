@@ -238,7 +238,10 @@ def triage_health_warning(rate_limited=False):
             f"[vault] WARN: triage failing {failed}/{total} in last {TRIAGE_HEALTH_WINDOW_HOURS}h — check {log_path}"
         )
         if last_error:
-            snippet = " ".join(str(last_error).split())[:140]
+            # The warning is injected into prompt-visible briefing content;
+            # error text can quote arbitrary LLM/CLI output, so strip
+            # instruction-like patterns before embedding it.
+            snippet = _strip_injection(" ".join(str(last_error).split()))[:140]
             warning += f' — last error: "{snippet}"'
         if invalid_mcp_failed:
             warning += (
