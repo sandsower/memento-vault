@@ -337,6 +337,19 @@ def format_qmd_result(result):
     return parts[0]
 
 
+def _find_hook_script(name):
+    """Locate a worker hook script in both repo and installed layouts.
+
+    Repo layout:      <repo>/memento/lifecycle.py with <repo>/hooks/<name>
+    Installed layout: ~/.claude/hooks/memento/lifecycle.py with ~/.claude/hooks/<name>
+    """
+    base = Path(__file__).resolve().parent.parent
+    for candidate in (base / "hooks" / name, base / name):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
     """Spawn a background subprocess to run QMD search and write results."""
     max_notes = config.get("briefing_max_notes", 5)
@@ -358,13 +371,23 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
         "timestamp": time.time(),
     }
 
+    worker = _find_hook_script("vault-briefing.py")
+    if worker is None:
+        log_retrieval(
+            "briefing",
+            "deferred-worker-missing",
+            script="vault-briefing.py",
+            search_base=str(Path(__file__).resolve().parent.parent),
+        )
+        return
+
     try:
         with open(DEFERRED_BRIEFING_PATH, "w") as f:
             json.dump({"status": "pending", "params": params}, f)
 
         # Spawn background worker — the same script with --deferred flag
         _subprocess.Popen(
-            [sys.executable, str(Path(__file__).parent.parent / "hooks" / "vault-briefing.py"), "--deferred"],
+            [sys.executable, str(worker), "--deferred"],
             stdin=_subprocess.DEVNULL,
             stdout=_subprocess.DEVNULL,
             stderr=_subprocess.DEVNULL,
@@ -1049,6 +1072,16 @@ def spawn_deep_recall(prompt, initial_results, config):
     """
     backend = config.get("deep_recall_backend", "codex")
 
+    worker = _find_hook_script("vault-recall.py")
+    if worker is None:
+        log_retrieval(
+            "recall",
+            "deep-recall-worker-missing",
+            script="vault-recall.py",
+            search_base=str(Path(__file__).resolve().parent.parent),
+        )
+        return
+
     # Build context from initial results
     context_lines = []
     for r in initial_results[:5]:
@@ -1083,7 +1116,7 @@ def spawn_deep_recall(prompt, initial_results, config):
         _subprocess.Popen(
             [
                 sys.executable,
-                str(Path(__file__).parent.parent / "hooks" / "vault-recall.py"),
+                str(worker),
                 "--deep-recall",
                 input_file.name,
                 backend,
