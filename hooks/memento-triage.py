@@ -30,7 +30,7 @@ from memento.store import (  # noqa: E402
     update_project_index,
     write_note,
 )
-from memento.adapters import parse_transcript, render_transcript_text  # noqa: E402
+from memento.adapters import parse_transcript, render_transcript_text, truncate_transcript  # noqa: E402
 from memento.utils import normalize_note_tags, read_hook_input, sanitize_secrets  # noqa: E402
 from memento import sync_ledger  # noqa: E402
 
@@ -390,6 +390,22 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
         )
         return 0
 
+    try:
+        max_chars = int(get_config().get("triage_transcript_max_chars", 400_000))
+    except (TypeError, ValueError):
+        max_chars = 400_000
+    rendered_chars = len(transcript_text)
+    transcript_text = truncate_transcript(transcript_text, max_chars)
+    transcript_truncated = len(transcript_text) < rendered_chars
+    if transcript_truncated:
+        log_triage_health(
+            "structured_notes_transcript_truncated",
+            session_id=session_id,
+            project=project_slug,
+            transcript_chars=rendered_chars,
+            prompt_chars=len(transcript_text),
+        )
+
     existing_titles = []
     notes_dir = vault / "notes"
     if notes_dir.exists():
@@ -428,6 +444,8 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             session_id=session_id,
             project=project_slug,
             error=error,
+            transcript_chars=rendered_chars,
+            transcript_truncated=transcript_truncated,
         )
         return 0
 

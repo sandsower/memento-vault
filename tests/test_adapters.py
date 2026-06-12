@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from memento.adapters import detect_agent, parse_transcript
+from memento.adapters import detect_agent, parse_transcript, truncate_transcript
 from memento.adapters.claude import parse_transcript as parse_claude
 from memento.adapters.opencode import parse_transcript as parse_opencode
 
@@ -534,3 +534,50 @@ class TestOpencodeAdapter:
             assert meta["user_messages"] == 2
         finally:
             os.chmod(opencode_db, 0o644)
+
+
+class TestTruncateTranscript:
+    def test_under_budget_unchanged(self):
+        text = "line one\nline two\nline three\n"
+        assert truncate_transcript(text, 1000) is text
+
+    def test_zero_budget_disables_truncation(self):
+        text = "x" * 10_000
+        assert truncate_transcript(text, 0) is text
+
+    def test_over_budget_truncates_to_max(self):
+        lines = [f"line {i} " + "x" * 90 for i in range(2000)]
+        text = "\n".join(lines)
+        result = truncate_transcript(text, 50_000)
+
+        assert len(result) <= 50_000
+        assert "transcript truncated" in result
+        assert "characters elided from the middle" in result
+
+    def test_keeps_head_and_tail(self):
+        lines = [f"line {i} " + "x" * 90 for i in range(2000)]
+        text = "\n".join(lines)
+        result = truncate_transcript(text, 50_000)
+
+        assert result.startswith("line 0 ")
+        assert result.rstrip().endswith(lines[-1])
+        # The tail carries outcomes and decisions, so it gets the larger share.
+        marker_pos = result.index("transcript truncated")
+        assert marker_pos < len(result) - marker_pos
+
+    def test_cuts_on_line_boundaries(self):
+        lines = [f"record-{i:06d}" for i in range(10_000)]
+        text = "\n".join(lines)
+        result = truncate_transcript(text, 20_000)
+
+        head, _, rest = result.partition("\n[... transcript truncated")
+        _, _, tail = rest.partition("...]\n")
+        for chunk in head.strip().splitlines() + tail.strip().splitlines():
+            assert chunk in lines
+
+    def test_tiny_budget_falls_back_to_tail(self):
+        text = "x" * 10_000
+        result = truncate_transcript(text, 100)
+
+        assert len(result) == 100
+        assert result == text[-100:]
