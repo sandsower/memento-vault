@@ -963,64 +963,107 @@ def should_skip_recall(prompt, config):
     return False
 
 
-def is_duplicate(top_result_path):
-    """Check if the top result is the same as the last injection.
-    Returns True if we should skip to avoid repetition.
+RECALL_DEDUP_MAX_SESSIONS = 50
+RECALL_DEDUP_SESSION_TTL_HOURS = 48
+
+
+def _recall_dedup_prompts():
+    try:
+        return int(get_config().get("recall_dedup_prompts", 3))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _prune_recall_dedup(state):
+    """Bound dedup state: drop idle sessions, cap total session count."""
+    sessions = state.get("sessions", {})
+    cutoff = time.time() - RECALL_DEDUP_SESSION_TTL_HOURS * 3600
+    sessions = {sid: s for sid, s in sessions.items() if isinstance(s, dict) and s.get("updated", 0) >= cutoff}
+    if len(sessions) > RECALL_DEDUP_MAX_SESSIONS:
+        newest = sorted(sessions.items(), key=lambda kv: kv[1].get("updated", 0), reverse=True)
+        sessions = dict(newest[:RECALL_DEDUP_MAX_SESSIONS])
+    state["sessions"] = sessions
+    return state
+
+
+def _mutate_recall_dedup(mutator):
+    """Read-modify-write the dedup state under an exclusive file lock.
+
+    The state file is shared by Claude hooks, the Pi bridge, and MCP; without
+    the lock one host's write could clobber another's. Fail-open: dedup is an
+    optimization, never worth breaking recall over.
     """
     try:
-        if not os.path.exists(LAST_RECALL_PATH):
-            return False
+        os.makedirs(os.path.dirname(RECALL_DEDUP_PATH), exist_ok=True)
+        with open(RECALL_DEDUP_PATH, "a+") as f:
+            try:
+                import fcntl
 
-        with open(LAST_RECALL_PATH) as f:
-            last = json.load(f)
-
-        # Skip if same top result within the last 3 prompts
-        if last.get("top_path") == top_result_path:
-            prompts_since = last.get("prompts_since", 0)
-            if prompts_since < 3:
-                # Update counter
-                last["prompts_since"] = prompts_since + 1
-                with open(LAST_RECALL_PATH, "w") as f:
-                    json.dump(last, f)
-                return True
-
-        return False
-
+                fcntl.flock(f, fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                pass
+            f.seek(0)
+            raw = f.read()
+            try:
+                state = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError:
+                state = {}
+            if not isinstance(state, dict):
+                state = {}
+            state = _prune_recall_dedup(state)
+            result = mutator(state)
+            state = _prune_recall_dedup(state)
+            f.seek(0)
+            f.truncate()
+            json.dump(state, f)
+            return result
     except Exception:
-        return False
+        return None
 
 
-def record_recall(top_result_path):
-    """Record this recall for dedup tracking."""
-    try:
-        with open(LAST_RECALL_PATH, "w") as f:
-            json.dump(
-                {
-                    "top_path": top_result_path,
-                    "prompts_since": 0,
-                    "timestamp": time.time(),
-                },
-                f,
-            )
-    except Exception:
-        pass
+def recently_injected_paths(session_id):
+    """Paths recall injected into this session within the dedup window."""
+
+    def read(state):
+        entry = state.get("sessions", {}).get(session_id or "unknown", {})
+        return set((entry.get("injected") or {}).keys())
+
+    return _mutate_recall_dedup(read) or set()
 
 
-def bump_prompts_since():
-    """Increment the prompts_since counter when we skip injection."""
-    try:
-        if not os.path.exists(LAST_RECALL_PATH):
+def record_recall(paths, session_id="unknown"):
+    """Remember every injected path for this session for N prompts."""
+    prompts = _recall_dedup_prompts()
+
+    def write(state):
+        entry = state.setdefault("sessions", {}).setdefault(session_id or "unknown", {})
+        injected = entry.setdefault("injected", {})
+        for path in paths if isinstance(paths, (list, tuple, set)) else [paths]:
+            if path:
+                injected[str(path)] = prompts
+        entry["updated"] = time.time()
+
+    _mutate_recall_dedup(write)
+
+
+def bump_prompts_since(session_id="unknown"):
+    """Age this session's dedup entries by one prompt; drop expired paths."""
+
+    def write(state):
+        entry = state.get("sessions", {}).get(session_id or "unknown")
+        if not entry:
             return
+        injected = entry.get("injected") or {}
+        for path in list(injected):
+            try:
+                injected[path] = int(injected[path]) - 1
+            except (TypeError, ValueError):
+                injected[path] = 0
+            if injected[path] <= 0:
+                del injected[path]
+        entry["updated"] = time.time()
 
-        with open(LAST_RECALL_PATH) as f:
-            last = json.load(f)
-
-        last["prompts_since"] = last.get("prompts_since", 0) + 1
-        with open(LAST_RECALL_PATH, "w") as f:
-            json.dump(last, f)
-
-    except Exception:
-        pass
+    _mutate_recall_dedup(write)
 
 
 def _strip_injection(text):
@@ -1348,7 +1391,7 @@ def consume_deep_recall():
         return []
 
 
-def run_remote_recall(prompt, cwd, config):
+def run_remote_recall(prompt, cwd, config, session_id="unknown"):
     """Run recall via the remote vault client.
 
     Returns (lines, top_path, results, reason, project_decisions). A non-terminal
@@ -1378,9 +1421,13 @@ def run_remote_recall(prompt, cwd, config):
             reason = "no-results"
         return [], None, [], reason, project_decisions
 
+    recent = recently_injected_paths(session_id)
+    if recent:
+        fresh = [r for r in results if r.get("path", "") not in recent]
+        if not fresh:
+            return [], None, [], "duplicate", project_decisions
+        results = fresh
     top_path = results[0].get("path", "")
-    if is_duplicate(top_path):
-        return [], None, [], "duplicate", project_decisions
 
     lines = ["[vault] Related memories:"]
     injected_results = results[:max_notes]
@@ -1417,8 +1464,10 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     if not prompt:
         log_recall_diagnostic(config, "decision", decision="skipped", reason="empty-prompt")
         return [], None, [], "empty-prompt"
+    # Each recall invocation is one user prompt: age this session's dedup
+    # entries exactly once, regardless of which branch we take below.
+    bump_prompts_since(session_id)
     if should_skip_recall(prompt, config):
-        bump_prompts_since()
         if config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
             reason = "low-signal-prompt"
         elif config.get("recall_skip_broad_project_queries", True) and is_broad_project_history_query(prompt):
@@ -1442,7 +1491,9 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     fallback_remote_reason = None
     if is_remote() and prompt:
         try:
-            lines, top_path, remote_results, remote_reason, project_decisions = run_remote_recall(prompt, cwd, config)
+            lines, top_path, remote_results, remote_reason, project_decisions = run_remote_recall(
+                prompt, cwd, config, session_id=session_id
+            )
             if project_decisions and config.get("recall_diagnostics_include_candidates", False):
                 log_recall_diagnostic(
                     config,
@@ -1627,7 +1678,6 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
                 min_score=0.0,
             )
             if threshold_probe:
-                bump_prompts_since()
                 log_retrieval(
                     "recall",
                     "threshold_too_high",
@@ -1645,7 +1695,6 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
                     latency_ms=latency_ms,
                 )
                 return [], None, [], "threshold_too_high"
-        bump_prompts_since()
         miss_reason = (
             fallback_remote_reason
             if isinstance(fallback_remote_reason, StructuredMissReason)
@@ -1675,17 +1724,22 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             pass
 
     if not results:
-        bump_prompts_since()
         reason = "project-mismatch-filtered-empty" if project_filter_applied else "filtered-empty"
         log_retrieval("recall", reason, query=query, results_before=results_before, latency_ms=latency_ms)
         log_recall_diagnostic(config, "decision", decision="skipped", reason=reason, latency_ms=latency_ms)
         return [], None, [], reason
 
+    recent = recently_injected_paths(session_id)
+    if recent:
+        fresh = [r for r in results if r.get("path", "") not in recent]
+        if not fresh:
+            log_retrieval("recall", "dedup-skip", query=query)
+            log_recall_diagnostic(
+                config, "decision", decision="skipped", reason="duplicate", top_path=results[0].get("path", "")
+            )
+            return [], None, [], "duplicate"
+        results = fresh
     top_path = results[0].get("path", "")
-    if is_duplicate(top_path):
-        log_retrieval("recall", "dedup-skip", query=query)
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="duplicate", top_path=top_path)
-        return [], None, [], "duplicate"
 
     lines = ["[vault] Related memories:"]
     injected = []
@@ -1758,7 +1812,7 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown", *, rec
         return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)
     if top_path and record:
-        record_recall(top_path)
+        record_recall([r.get("path", "") for r in results], session_id)
     return LifecycleResult(
         should_inject=True,
         content=content,
@@ -1999,16 +2053,15 @@ def build_session_context(
     }
     payload = _fit_session_context_payload(payload, packet_char_budget)
     if recall_top_path and recall_content_marker and recall_content_marker in payload.get("content", ""):
-        record_recall(recall_top_path)
+        record_recall([recall_top_path], session_id)
     return payload
 
 
-LAST_RECALL_PATH = os.path.join(RUNTIME_DIR, "last-recall.json")
+RECALL_DEDUP_PATH = os.path.join(RUNTIME_DIR, "recall-dedup.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
 DEEP_RECALL_PENDING_PATH = os.path.join(RUNTIME_DIR, "deep-recall-pending.json")
 
 CACHE_PATH = os.path.join(RUNTIME_DIR, "tool-context-cache.json")
-RECALL_STATE_PATH = LAST_RECALL_PATH
 
 SKIP_PREFIXES = (
     "/usr/",
@@ -2236,17 +2289,9 @@ def save_cache(cache: dict) -> None:
         pass
 
 
-def get_recall_paths() -> set[str]:
-    """Read paths recently injected by prompt recall for dedup."""
-    try:
-        if os.path.exists(RECALL_STATE_PATH):
-            with open(RECALL_STATE_PATH) as f:
-                data = json.load(f)
-            top = data.get("top_path", "")
-            return {top} if top else set()
-    except (json.JSONDecodeError, OSError):
-        pass
-    return set()
+def get_recall_paths(session_id: str = "unknown") -> set[str]:
+    """Paths recently injected by prompt recall in this session (for dedup)."""
+    return recently_injected_paths(session_id)
 
 
 def session_injection_count(cache: dict, session_id: str) -> int:
@@ -2392,7 +2437,7 @@ def build_tool_context(
             )
             return no_context("no-results")
 
-    recall_paths = get_recall_paths()
+    recall_paths = get_recall_paths(session_id)
     already_injected = session_injected_paths(cache, session_id)
     exclude = recall_paths | already_injected
     filtered = [r for r in results if r.get("path", "") not in exclude]
