@@ -122,12 +122,13 @@ def _is_stale_certainty_error(error):
 
 def _scan_triage_health_log(path, cutoff, mode="health"):
     if not os.path.exists(path):
-        return 0, 0, False, False
+        return 0, 0, False, False, ""
 
     total = 0
     failed = 0
     invalid_mcp_failed = False
     stale_certainty_failed = False
+    last_error = ""
     with open(path) as f:
         for line in f:
             try:
@@ -153,6 +154,8 @@ def _scan_triage_health_log(path, cutoff, mode="health"):
                 if action != "decision":
                     failed += 1
                     error = rec.get("error", "")
+                    if error:
+                        last_error = error
                     invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(error)
                     stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
                 continue
@@ -163,40 +166,80 @@ def _scan_triage_health_log(path, cutoff, mode="health"):
                 total += 1
                 failed += 1
                 error = rec.get("error", "")
+                if error:
+                    last_error = error
                 invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(error)
                 stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
-    return total, failed, invalid_mcp_failed, stale_certainty_failed
+    return total, failed, invalid_mcp_failed, stale_certainty_failed, last_error
 
 
-def triage_health_warning():
+TRIAGE_WARN_STATE_PATH = os.path.join(RUNTIME_DIR, "triage-warn-state.json")
+
+
+def _triage_warn_shown_today():
+    try:
+        with open(TRIAGE_WARN_STATE_PATH) as f:
+            return json.load(f).get("date") == datetime.now().strftime("%Y-%m-%d")
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
+def _mark_triage_warn_shown():
+    try:
+        with open(TRIAGE_WARN_STATE_PATH, "w") as f:
+            json.dump({"date": datetime.now().strftime("%Y-%m-%d")}, f)
+    except OSError:
+        pass
+
+
+def triage_health_warning(rate_limited=False):
     """Return a one-line warning if SessionEnd triage is silently failing.
 
     Scans the always-on triage health log first, falling back to legacy
     retrieval.jsonl diagnostics for older installs. Returns None when healthy
     or when there isn't enough data to judge.
+
+    With rate_limited=True (the injection surfaces: briefing, session
+    context), the warning fires at most once per day — it was previously
+    re-injected into 100% of session briefings for days at a time. Diagnostic
+    surfaces (memento health) pass False and always see it.
     """
     try:
         cutoff = datetime.now() - timedelta(hours=TRIAGE_HEALTH_WINDOW_HOURS)
         log_path = TRIAGE_HEALTH_LOG_PATH
-        total, failed, invalid_mcp_failed, stale_certainty_failed = _scan_triage_health_log(log_path, cutoff)
+        total, failed, invalid_mcp_failed, stale_certainty_failed, last_error = _scan_triage_health_log(
+            log_path, cutoff
+        )
         if total < TRIAGE_HEALTH_MIN_EVENTS:
-            legacy_total, legacy_failed, legacy_invalid_mcp_failed, legacy_stale_certainty_failed = (
-                _scan_triage_health_log(RETRIEVAL_LOG_PATH, cutoff, mode="legacy")
-            )
+            (
+                legacy_total,
+                legacy_failed,
+                legacy_invalid_mcp_failed,
+                legacy_stale_certainty_failed,
+                legacy_last_error,
+            ) = _scan_triage_health_log(RETRIEVAL_LOG_PATH, cutoff, mode="legacy")
             if legacy_total >= total:
                 total = legacy_total
                 failed = legacy_failed
                 invalid_mcp_failed = legacy_invalid_mcp_failed
                 stale_certainty_failed = legacy_stale_certainty_failed
+                last_error = legacy_last_error
                 log_path = RETRIEVAL_LOG_PATH
 
         if total < TRIAGE_HEALTH_MIN_EVENTS:
             return None
         if (failed / total) < TRIAGE_HEALTH_FAIL_RATIO:
             return None
+        if rate_limited:
+            if _triage_warn_shown_today():
+                return None
+            _mark_triage_warn_shown()
         warning = (
             f"[vault] WARN: triage failing {failed}/{total} in last {TRIAGE_HEALTH_WINDOW_HOURS}h — check {log_path}"
         )
+        if last_error:
+            snippet = " ".join(str(last_error).split())[:140]
+            warning += f' — last error: "{snippet}"'
         if invalid_mcp_failed:
             warning += (
                 " — likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
@@ -566,7 +609,7 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
         f"[vault] Project: {project_slug}{branch_str} | {len(recent_sessions)} sessions{last_date} | {note_count} notes"
     ]
 
-    warning = triage_health_warning()
+    warning = triage_health_warning(rate_limited=True)
     if warning:
         lines.append(warning)
 
@@ -1896,7 +1939,7 @@ def build_session_context(
         vault = get_vault()
         notes_dir = vault / "notes"
         projects_dir = vault / "projects"
-        warning = triage_health_warning()
+        warning = triage_health_warning(rate_limited=True)
         if warning:
             warnings.append(warning)
         status = {
