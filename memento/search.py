@@ -655,11 +655,14 @@ def expand_wikilinks(results, config=None):
     return all_results
 
 
-def filter_by_project(results, cwd):
+def filter_by_project(results, cwd, require_match=False):
     """Filter results to notes matching the current project.
 
     Notes with a `project` field that doesn't match cwd are excluded.
-    Notes without a `project` field (general knowledge) pass through.
+    By default, notes without a `project` field (general knowledge) pass
+    through. With require_match=True only positively matched notes survive —
+    the bar for unsolicited injection surfaces like tool-context, where
+    untagged junk previously slipped through as "general knowledge".
     """
     if not cwd:
         return results
@@ -680,12 +683,18 @@ def filter_by_project(results, cwd):
                 r["_meta"] = meta
 
         if meta is None:
-            filtered.append(r)  # Can't read metadata — keep it
+            if require_match:
+                log_retrieval("search", "project_match_required", path=r.get("path", ""), reason="no-metadata")
+            else:
+                filtered.append(r)  # Can't read metadata — keep it
             continue
 
         note_project = meta.get("project")
         if not note_project:
-            filtered.append(r)  # No project field — general knowledge
+            if require_match:
+                log_retrieval("search", "project_match_required", path=r.get("path", ""), reason="no-project-field")
+            else:
+                filtered.append(r)  # No project field — general knowledge
             continue
 
         # Match if cwd starts with (or equals) the note's project path
@@ -700,23 +709,98 @@ def filter_by_project(results, cwd):
     return filtered
 
 
-def enhance_results(results, config=None, cwd=None):
+# Paths whose content is operational logging, not curated knowledge: daily
+# fleeting logs and project index files. They rank in BM25 because they quote
+# session summaries verbatim, but injecting them is noise.
+QUALITY_LOG_SHAPED_PREFIXES = ("fleeting/", "projects/")
+
+
+def _quality_factor(config, key, default):
+    try:
+        return float(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def apply_quality_signals(results, config=None):
+    """Drop or down-rank low-quality note classes in retrieval candidates.
+
+    Applied in the shared enhancement pipeline (recall, tool-context,
+    deferred briefing, MCP search). Classes, per audit 2026-06-10 Part 2:
+    - queued Pi raw captures (type: session + pi/queued tags): dropped
+    - log-shaped paths (fleeting daily logs, project index files): dropped
+    - remaining `type: session` notes: penalized until the capture schema
+      is unified (MEM-50)
+    - low certainty (<= 2): mild penalty; untyped notes: mild penalty
+    """
+    if config is None:
+        config = get_config()
+    if not config.get("quality_signals_enabled", True):
+        return results
+
+    session_factor = _quality_factor(config, "quality_session_note_factor", 0.85)
+    untyped_factor = _quality_factor(config, "quality_untyped_factor", 0.95)
+    low_certainty_factor = _quality_factor(config, "quality_low_certainty_factor", 0.9)
+
+    kept = []
+    for r in results:
+        path = str(r.get("path", ""))
+        if path.startswith(QUALITY_LOG_SHAPED_PREFIXES):
+            log_retrieval("search", "quality_excluded", path=path, reason="log-shaped")
+            continue
+
+        meta = r.get("_meta")
+        if meta is None:
+            note_name = Path(path).stem
+            if note_name:
+                meta = read_note_metadata(note_name)
+                r["_meta"] = meta
+
+        if meta:
+            # Frontmatter values may be quoted or cased freely; normalize so
+            # `type: "Session"` or `tags: [PI, QUEUED]` can't bypass the rules.
+            note_type = str(meta.get("type") or "").strip().strip('"').strip("'").lower()
+            tags = {str(tag).strip().strip('"').strip("'").lower() for tag in (meta.get("tags") or [])}
+            if note_type == "session" and tags & {"pi", "queued"}:
+                log_retrieval("search", "quality_excluded", path=path, reason="queued-session-capture")
+                continue
+            factor = 1.0
+            if note_type == "session":
+                factor *= session_factor
+            elif not note_type:
+                factor *= untyped_factor
+            certainty = meta.get("certainty")
+            if certainty is not None and certainty <= 2:
+                factor *= low_certainty_factor
+            if factor != 1.0:
+                r["score"] = round(r.get("score", 0.0) * factor, 4)
+        kept.append(r)
+
+    kept.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+    return kept
+
+
+def enhance_results(results, config=None, cwd=None, require_project_match=False):
     """Apply all retrieval enhancements to search results.
 
     Pipeline order:
       1. Temporal decay (age-based score adjustment)
-      2. PageRank boost (centrality-based score boost)
-      3. Project filter (scope to current project)
-      4. PPR expansion (Personalized PageRank link traversal)
+      2. Quality signals (drop/penalize low-quality note classes)
+      3. PageRank boost (centrality-based score boost)
+      4. Project filter (scope to current project)
+      5. PPR expansion (Personalized PageRank link traversal)
          Falls back to naive wikilink expansion if networkx unavailable.
 
     Call this after qmd_search to improve result quality.
-    Pass cwd to filter out notes from unrelated projects.
+    Pass cwd to filter out notes from unrelated projects;
+    require_project_match=True demands a positive project match (used by
+    tool-context, where notes without project metadata were the junk class).
     """
     if config is None:
         config = get_config()
 
     results = apply_temporal_decay(results, config)
+    results = apply_quality_signals(results, config)
 
     # PageRank boost + PPR expansion (requires networkx + graph)
     graph = None
@@ -733,7 +817,7 @@ def enhance_results(results, config=None, cwd=None):
         results = apply_pagerank_boost(results, pagerank, config)
 
     if cwd:
-        results = filter_by_project(results, cwd)
+        results = filter_by_project(results, cwd, require_match=require_project_match)
 
     # PPR expansion replaces naive wikilink expansion when graph is available
     if graph and config.get("ppr_enabled", True):

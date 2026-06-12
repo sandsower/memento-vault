@@ -87,6 +87,11 @@ DEFAULT_CONFIG = {
     # RRF (Reciprocal Rank Fusion) hybrid search
     "rrf_enabled": True,
     "rrf_k": 60,
+    # Retrieval quality signals (drop/penalize low-quality note classes)
+    "quality_signals_enabled": True,
+    "quality_session_note_factor": 0.85,
+    "quality_untyped_factor": 0.95,
+    "quality_low_certainty_factor": 0.9,
     # Cross-encoder reranking (Tier 2)
     "reranker_enabled": True,
     "reranker_top_k": 10,

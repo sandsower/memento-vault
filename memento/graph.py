@@ -18,7 +18,7 @@ def read_note_metadata(note_name):
 
     Returns:
         Dict with: date (str|None), certainty (int|None), type (str|None),
-        links (list of wikilink target names).
+        tags (list of str), links (list of wikilink target names).
         Returns None if the note file doesn't exist.
     """
     vault = get_vault()
@@ -35,6 +35,7 @@ def read_note_metadata(note_name):
     certainty = None
     note_type = None
     project = None
+    tags = []
     links = []
 
     try:
@@ -63,6 +64,10 @@ def read_note_metadata(note_name):
                         note_type = stripped[5:].strip()
                     elif stripped.startswith("project:"):
                         project = stripped[8:].strip().strip('"').strip("'")
+                    elif stripped.startswith("tags:"):
+                        raw_tags = stripped[5:].strip()
+                        if raw_tags.startswith("[") and raw_tags.endswith("]"):
+                            tags = [t.strip().strip('"').strip("'") for t in raw_tags[1:-1].split(",") if t.strip()]
                 if past_frontmatter:
                     # Extract wikilinks from body
                     for match in re.finditer(r"\[\[([^\]]+)\]\]", line):
@@ -70,7 +75,14 @@ def read_note_metadata(note_name):
     except OSError:
         return None
 
-    return {"date": date, "certainty": certainty, "type": note_type, "project": project, "links": links}
+    return {
+        "date": date,
+        "certainty": certainty,
+        "type": note_type,
+        "project": project,
+        "tags": tags,
+        "links": links,
+    }
 
 
 def note_is_superseded(note_name):
