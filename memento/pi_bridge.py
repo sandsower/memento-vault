@@ -528,6 +528,114 @@ def _queue_list(limit: int = 20, include_body: bool = False) -> dict[str, Any]:
     return {"count": len(captures), "captures": visible, "queue_path": str(_queue_file())}
 
 
+_THINKING_DUMP_SIGNAL = '"type":"thinking"'
+_RAW_DUMP_PREFIXES = ("- assistant: [{", "- toolResult: [{", "- user: [{")
+_CLEANUP_DISCARDABLE_CLASSES = ("raw_dump", "low_value", "invalid")
+_CLEANUP_DEFAULT_DISCARD_CLASSES = ("raw_dump", "invalid")
+
+
+def _classify_queued_capture(capture: dict[str, Any]) -> tuple[str, str]:
+    """Cheap, deterministic classification of a queued capture.
+
+    Classes: manual (always preserved), durable_candidate (retained),
+    raw_dump / low_value / invalid (discardable). No LLM calls — this must
+    stay much faster than full curator processing.
+    """
+    if capture.get("error") == "invalid-json":
+        return "invalid", "unparseable queue line"
+    source_event = str(capture.get("source_event") or "")
+    if source_event not in _LIFECYCLE_SOURCE_EVENTS:
+        return "manual", f"non-lifecycle source_event {source_event or 'unknown'!r}"
+    body = str(capture.get("body") or "")
+    if _THINKING_DUMP_SIGNAL in body:
+        return "raw_dump", "body embeds raw thinking-block JSON"
+    if body.lstrip().startswith(_RAW_DUMP_PREFIXES):
+        return "raw_dump", "body is a raw lifecycle message dump"
+    if not _MEANINGFUL_KEYWORDS.search(body):
+        return "low_value", "lifecycle capture without durable-signal keywords"
+    return "durable_candidate", "lifecycle capture with durable-signal keywords"
+
+
+def _queue_cleanup(
+    apply: bool = False,
+    discard_classes: list[str] | None = None,
+    samples: int = 3,
+    vault: Path | None = None,
+) -> dict[str, Any]:
+    """Classify queued captures and optionally archive the low-value ones.
+
+    Dry-run by default: nothing is written unless apply=True. Applying never
+    deletes data — discarded captures move to a timestamped archive JSONL
+    next to the queue (full original entry plus discard provenance), and the
+    pre-cleanup queue is kept as a .bak copy.
+    """
+    discard_set = set(discard_classes or _CLEANUP_DEFAULT_DISCARD_CLASSES)
+    unknown = discard_set.difference(_CLEANUP_DISCARDABLE_CLASSES)
+    if unknown:
+        return {"error": f"non-discardable classes requested: {sorted(unknown)}"}
+
+    queue_path = _queue_file(vault)
+    captures = _load_queue(vault)
+    by_class: dict[str, int] = {}
+    sample_by_class: dict[str, list[dict[str, Any]]] = {}
+    retained: list[dict[str, Any]] = []
+    discarded: list[tuple[dict[str, Any], str, str]] = []
+    for capture in captures:
+        klass, reason = _classify_queued_capture(capture)
+        by_class[klass] = by_class.get(klass, 0) + 1
+        bucket = sample_by_class.setdefault(klass, [])
+        if len(bucket) < max(0, int(samples)):
+            bucket.append(
+                {
+                    "id": capture.get("id"),
+                    "title": capture.get("title"),
+                    "reason": reason,
+                    "created_at": capture.get("created_at"),
+                    "body_excerpt": _body_excerpt(str(capture.get("body") or "")),
+                }
+            )
+        if klass in discard_set:
+            discarded.append((capture, klass, reason))
+        else:
+            retained.append(capture)
+
+    result: dict[str, Any] = {
+        "queue_path": str(queue_path),
+        "dry_run": not apply,
+        "total": len(captures),
+        "retained": len(retained),
+        "discarded": len(discarded),
+        "by_class": by_class,
+        "discard_classes": sorted(discard_set),
+        "samples": sample_by_class,
+    }
+    if not apply or not discarded:
+        return result
+
+    lock_path = _lock_file()
+    if lock_path.exists():
+        lock = _read_processing_lock(lock_path)
+        if _is_pid_alive(int(lock.get("pid", 0))):
+            result["blocked"] = f"processing run active (pid {lock.get('pid')}, run {lock.get('run_id')})"
+            result["dry_run"] = True
+            return result
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = queue_path.with_name(f"{queue_path.name}.bak-{stamp}-cleanup")
+    backup_path.write_text(queue_path.read_text(errors="replace") if queue_path.exists() else "")
+    archive_path = queue_path.with_name(f"pi-captures-discarded-{stamp}.jsonl")
+    discarded_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    with archive_path.open("a") as handle:
+        for capture, klass, reason in discarded:
+            entry = dict(capture)
+            entry["cleanup"] = {"discarded_at": discarded_at, "class": klass, "reason": reason}
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _write_queue(retained, vault)
+    result["backup_path"] = str(backup_path)
+    result["archive_path"] = str(archive_path)
+    return result
+
+
 def _safe_segment(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-._")
     return cleaned[:120] or uuid.uuid4().hex
@@ -1202,6 +1310,22 @@ def build_parser() -> argparse.ArgumentParser:
         "process-finalize", help="Finalize a processing run and dequeue validated captures"
     )
     process_finalize.add_argument("--run-id", required=True)
+    cleanup = queue_sub.add_parser(
+        "cleanup", help="Classify queued captures and archive low-value ones (dry-run by default)"
+    )
+    cleanup.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rewrite the queue, archiving discarded captures; without this flag nothing is written",
+    )
+    cleanup.add_argument(
+        "--discard-class",
+        action="append",
+        choices=list(_CLEANUP_DISCARDABLE_CLASSES),
+        dest="discard_classes",
+        help="Class to discard (repeatable; default: raw_dump, invalid). Manual captures are never discarded.",
+    )
+    cleanup.add_argument("--samples", type=int, default=3, help="Sample entries shown per class")
 
     return parser
 
@@ -1273,6 +1397,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_json("queue", _queue_process_status, args.run_id)
         if args.queue_command == "process-finalize":
             return _run_json("queue", _queue_process_finalize, args.run_id)
+        if args.queue_command == "cleanup":
+            return _run_json("queue", _queue_cleanup, args.apply, args.discard_classes, args.samples)
     raise AssertionError(f"unhandled command: {args.command}")
 
 

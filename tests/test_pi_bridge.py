@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 from unittest.mock import patch
 
 from memento.lifecycle import LifecycleResult
@@ -1147,3 +1149,169 @@ def test_pi_bridge_briefing_outputs_error_payload_on_failure(capsys):
     assert payload["reason"] == "error"
     assert payload["metadata"]["error"] == "boom"
     assert payload["metadata"]["error_type"] == "RuntimeError"
+
+
+def _seed_cleanup_queue(tmp_path):
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    entries = [
+        {
+            "id": "raw1",
+            "created_at": "2026-05-24T20:00:00Z",
+            "title": "Pi session candidate capture",
+            "body": '- assistant: [{"type":"thinking","thinking":"secret reasoning"}]',
+            "reason": "lifecycle",
+            "source_event": "agent_end",
+            "metadata": {"project": "repo"},
+        },
+        {
+            "id": "raw2",
+            "created_at": "2026-05-24T20:01:00Z",
+            "title": "Pi session candidate capture",
+            "body": '- toolResult: [{"type":"text","text":"Process preview"}]',
+            "reason": "lifecycle",
+            "source_event": "session_shutdown",
+            "metadata": {"project": "repo"},
+        },
+        {
+            "id": "chatter1",
+            "created_at": "2026-05-25T10:00:00Z",
+            "title": "Session wrap-up",
+            "body": "Looked around the repo and read some files.",
+            "reason": "lifecycle",
+            "source_event": "agent_end",
+            "metadata": {"project": "repo"},
+        },
+        {
+            "id": "durable1",
+            "created_at": "2026-05-25T11:00:00Z",
+            "title": "Cache bug session",
+            "body": "Found the root cause of the cache bug and fixed the TTL handling.",
+            "reason": "lifecycle",
+            "source_event": "agent_end",
+            "metadata": {"project": "repo"},
+        },
+        {
+            "id": "manual1",
+            "created_at": "2026-05-25T12:00:00Z",
+            "title": "Manually queued decision",
+            "body": '- assistant: [{"type":"thinking","thinking":"raw"}]',
+            "reason": "manual",
+            "source_event": "tool",
+            "metadata": {"project": "repo"},
+        },
+    ]
+    queue_file.write_text("".join(json.dumps(e) + "\n" for e in entries) + "not json at all\n")
+    return queue_file
+
+
+def test_pi_bridge_queue_cleanup_dry_run_classifies_without_writing(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = _seed_cleanup_queue(tmp_path)
+    before = queue_file.read_text()
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "cleanup"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True
+    assert payload["total"] == 6
+    assert payload["by_class"] == {
+        "raw_dump": 2,
+        "low_value": 1,
+        "durable_candidate": 1,
+        "manual": 1,
+        "invalid": 1,
+    }
+    # default discard set is conservative: raw dumps + unparseable lines only
+    assert payload["discard_classes"] == ["invalid", "raw_dump"]
+    assert payload["discarded"] == 3
+    assert payload["retained"] == 3
+    assert payload["samples"]["raw_dump"][0]["id"] == "raw1"
+    assert queue_file.read_text() == before
+    assert not list(queue_file.parent.glob("pi-captures-discarded-*.jsonl"))
+
+
+def test_pi_bridge_queue_cleanup_apply_archives_discarded_with_provenance(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = _seed_cleanup_queue(tmp_path)
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(
+            [
+                "queue",
+                "cleanup",
+                "--apply",
+                "--discard-class",
+                "raw_dump",
+                "--discard-class",
+                "low_value",
+                "--discard-class",
+                "invalid",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is False
+    assert payload["discarded"] == 4
+    assert payload["retained"] == 2
+
+    remaining_ids = [json.loads(line)["id"] for line in queue_file.read_text().splitlines() if line.strip()]
+    assert remaining_ids == ["durable1", "manual1"]
+
+    archive = Path(payload["archive_path"])
+    assert archive.exists()
+    archived = [json.loads(line) for line in archive.read_text().splitlines()]
+    assert {entry["id"] for entry in archived if "id" in entry} >= {"raw1", "raw2", "chatter1"}
+    for entry in archived:
+        assert entry["cleanup"]["class"] in {"raw_dump", "low_value", "invalid"}
+        assert entry["cleanup"]["reason"]
+        assert entry["cleanup"]["discarded_at"]
+
+    backup = Path(payload["backup_path"])
+    assert backup.exists()
+    assert "raw1" in backup.read_text()
+
+
+def test_pi_bridge_queue_cleanup_never_discards_manual_captures(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = _seed_cleanup_queue(tmp_path)
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(
+            [
+                "queue",
+                "cleanup",
+                "--apply",
+                "--discard-class",
+                "raw_dump",
+                "--discard-class",
+                "low_value",
+                "--discard-class",
+                "invalid",
+            ]
+        )
+
+    assert code == 0
+    remaining_ids = [json.loads(line)["id"] for line in queue_file.read_text().splitlines() if line.strip()]
+    # manual1's body looks like a raw dump, but manual captures are preserved
+    assert "manual1" in remaining_ids
+
+
+def test_pi_bridge_queue_cleanup_apply_blocked_during_active_processing_run(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = _seed_cleanup_queue(tmp_path)
+    before = queue_file.read_text()
+    lock = tmp_path / "state" / "processing.lock"
+    lock.write_text(json.dumps({"pid": os.getpid(), "run_id": "active-run"}))
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "cleanup", "--apply"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "processing run active" in payload["blocked"]
+    assert payload["dry_run"] is True
+    assert queue_file.read_text() == before
