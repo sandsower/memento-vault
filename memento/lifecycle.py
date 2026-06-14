@@ -1832,14 +1832,86 @@ def _session_context_char_budget(token_budget: int | None) -> tuple[int, int]:
     return normalized_tokens, normalized_tokens * 4
 
 
-def _queue_capture_count(vault: Path) -> int:
-    queue_path = vault / "queue" / "pi-captures.jsonl"
-    if not queue_path.exists():
-        return 0
+def _pi_state_root() -> Path:
+    raw = os.environ.get("MEMENTO_PI_STATE_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
+    return base / "memento" / "pi"
+
+
+def _pi_queue_path_source() -> str:
+    if os.environ.get("MEMENTO_PI_STATE_HOME"):
+        return "memento_pi_state_home"
+    if os.environ.get("XDG_STATE_HOME"):
+        return "xdg_state_home"
+    return "default_xdg_state"
+
+
+def _pi_queue_file() -> Path:
+    return _pi_state_root() / "queue" / "pi-captures.jsonl"
+
+
+def _legacy_pi_queue_file(vault: Path) -> Path:
+    return vault / "queue" / "pi-captures.jsonl"
+
+
+def _queue_capture_keys(path: Path) -> list[str]:
+    if not path.exists():
+        return []
     try:
-        return sum(1 for line in queue_path.read_text(errors="replace").splitlines() if line.strip())
+        lines = path.read_text(errors="replace").splitlines()
     except OSError:
-        return 0
+        return []
+
+    keys = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            capture = json.loads(line)
+        except json.JSONDecodeError:
+            keys.append(f"id:invalid-{len(keys) + 1}")
+            continue
+        if isinstance(capture, dict) and capture.get("id"):
+            keys.append(f"id:{capture['id']}")
+        else:
+            keys.append(f"no-id:{path}:{len(keys) + 1}:{line}")
+    return keys
+
+
+def _queue_capture_count(path: Path) -> int:
+    return len(_queue_capture_keys(path))
+
+
+def _queue_capture_status(vault: Path) -> dict[str, object]:
+    queue_path = _pi_queue_file()
+    legacy_queue_path = _legacy_pi_queue_file(vault)
+    current_capture_keys = _queue_capture_keys(queue_path)
+    legacy_capture_keys = [] if queue_path == legacy_queue_path else _queue_capture_keys(legacy_queue_path)
+    current_queued_capture_count = len(current_capture_keys)
+    legacy_queued_capture_count = len(legacy_capture_keys)
+    combined_queued_capture_count = len(dict.fromkeys(current_capture_keys + legacy_capture_keys))
+    legacy_queue_exists = False if queue_path == legacy_queue_path else legacy_queue_path.exists()
+
+    status: dict[str, object] = {
+        "queued_capture_count": combined_queued_capture_count,
+        "queued_capture_count_source": "current",
+        "current_queued_capture_count": current_queued_capture_count,
+        "queue_path": str(queue_path),
+        "queue_path_source": _pi_queue_path_source(),
+        "legacy_queue_path": str(legacy_queue_path),
+        "legacy_queue_exists": legacy_queue_exists,
+        "legacy_queued_capture_count": legacy_queued_capture_count,
+    }
+    if current_queued_capture_count == 0 and legacy_queued_capture_count:
+        status["queued_capture_count_source"] = "legacy_fallback"
+        status["queue_status_note"] = "using legacy vault queue fallback; pi_bridge migrates this queue to XDG state"
+    elif legacy_queued_capture_count:
+        status["queued_capture_count_source"] = "current_plus_legacy"
+        status["queue_status_note"] = "including legacy vault queue captures pending pi_bridge migration"
+    return status
 
 
 def _compact_session_result(result: dict) -> dict:
@@ -2012,11 +2084,16 @@ def build_session_context(
             f"[vault] Status: {status['note_count']} notes, qmd {'available' if status['qmd_available'] else 'unavailable'}"
         )
 
-        queued_capture_count = _queue_capture_count(vault)
-        queue = {"queued_capture_count": queued_capture_count, "queue_path": str(vault / "queue" / "pi-captures.jsonl")}
+        queue = _queue_capture_status(vault)
+        queued_capture_count = int(queue["queued_capture_count"])
         sections["queue"] = queue
         if queued_capture_count:
-            content_blocks.append(f"[vault] Capture queue: {queued_capture_count} queued pi capture(s)")
+            suffix = ""
+            if queue.get("queued_capture_count_source") == "legacy_fallback":
+                suffix = " (legacy fallback)"
+            elif queue.get("queued_capture_count_source") == "current_plus_legacy":
+                suffix = " (includes legacy queue)"
+            content_blocks.append(f"[vault] Capture queue: {queued_capture_count} queued pi capture(s){suffix}")
 
     if include_tool_context_preview:
         sections["tool_context_preview"] = {

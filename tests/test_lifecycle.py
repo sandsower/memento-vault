@@ -22,6 +22,13 @@ from memento.lifecycle import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_pi_queue_state(monkeypatch, tmp_path):
+    """Keep session-context queue status tests away from the user's real pi queue."""
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
 def test_lifecycle_result_to_dict_includes_required_fields():
     result = LifecycleResult(
         should_inject=True,
@@ -67,12 +74,16 @@ def test_empty_result_defaults_to_no_results_reason():
     }
 
 
-def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_path):
-    queue_file = tmp_path / "queue" / "pi-captures.jsonl"
-    queue_file.parent.mkdir()
+def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    xdg_state = tmp_path / "state"
+    queue_file = xdg_state / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
     queue_file.write_text('{"id":"q1"}\n')
-    (tmp_path / "notes").mkdir()
-    (tmp_path / "notes" / "a.md").write_text("# A")
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state))
+    (vault / "notes").mkdir(parents=True)
+    (vault / "notes" / "a.md").write_text("# A")
 
     briefing = LifecycleResult(True, "[vault] Project: repo | 1 sessions | 1 notes", "briefing")
     recall = LifecycleResult(
@@ -86,7 +97,7 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     with (
         patch("memento.lifecycle.build_briefing", return_value=briefing) as mock_briefing,
         patch("memento.lifecycle.build_recall", return_value=recall) as mock_recall,
-        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.get_vault", return_value=vault),
         patch("memento.lifecycle.has_qmd", return_value=True),
         patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: triage failing"),
     ):
@@ -104,11 +115,132 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     assert payload["sections"]["status"]["vault_exists"] is True
     assert payload["sections"]["status"]["qmd_available"] is True
     assert payload["sections"]["queue"]["queued_capture_count"] == 1
+    assert payload["sections"]["queue"]["queued_capture_count_source"] == "current"
+    assert payload["sections"]["queue"]["current_queued_capture_count"] == 1
+    assert payload["sections"]["queue"]["queue_path"] == str(queue_file)
+    assert payload["sections"]["queue"]["queue_path_source"] == "xdg_state_home"
+    assert payload["sections"]["queue"]["legacy_queue_path"] == str(vault / "queue" / "pi-captures.jsonl")
+    assert payload["sections"]["queue"]["legacy_queue_exists"] is False
     assert payload["metadata"]["warnings"] == ["[vault] WARN: triage failing"]
     assert payload["metadata"]["expandable_paths"] == ["notes/cache.md"]
     assert payload["metadata"]["truncated"] is False
     mock_briefing.assert_called_once_with("/repo", "s1", allow_deferred=False)
     mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1", record=False)
+
+
+def test_build_session_context_explicitly_reports_legacy_queue_fallback(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    xdg_state = tmp_path / "state"
+    legacy_queue_file = vault / "queue" / "pi-captures.jsonl"
+    legacy_queue_file.parent.mkdir(parents=True)
+    legacy_queue_file.write_text('{"id":"legacy-q1"}\n')
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state))
+    (vault / "notes").mkdir(parents=True)
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=vault),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=200, include_recall=False)
+
+    current_queue_file = xdg_state / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    queue_section = payload["sections"]["queue"]
+    assert queue_section["queued_capture_count"] == 1
+    assert queue_section["queued_capture_count_source"] == "legacy_fallback"
+    assert queue_section["current_queued_capture_count"] == 0
+    assert queue_section["queue_path"] == str(current_queue_file)
+    assert queue_section["queue_path_source"] == "xdg_state_home"
+    assert queue_section["legacy_queue_path"] == str(legacy_queue_file)
+    assert queue_section["legacy_queue_exists"] is True
+    assert queue_section["legacy_queued_capture_count"] == 1
+    assert "legacy" in queue_section["queue_status_note"]
+
+
+def test_build_session_context_reports_memento_pi_state_home_queue_source(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    state_home = tmp_path / "pi-state"
+    queue_file = state_home / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text('{"id":"q1"}\n')
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ignored-xdg-state"))
+    (vault / "notes").mkdir(parents=True)
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=vault),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=200, include_recall=False)
+
+    queue_section = payload["sections"]["queue"]
+    assert queue_section["queued_capture_count"] == 1
+    assert queue_section["queued_capture_count_source"] == "current"
+    assert queue_section["current_queued_capture_count"] == 1
+    assert queue_section["queue_path"] == str(queue_file)
+    assert queue_section["queue_path_source"] == "memento_pi_state_home"
+
+
+def test_build_session_context_counts_current_plus_unmigrated_legacy_queue(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    xdg_state = tmp_path / "state"
+    current_queue_file = xdg_state / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    current_queue_file.parent.mkdir(parents=True)
+    current_queue_file.write_text('{"id":"q1"}\n')
+    legacy_queue_file = vault / "queue" / "pi-captures.jsonl"
+    legacy_queue_file.parent.mkdir(parents=True)
+    legacy_queue_file.write_text('{"id":"q1"}\n{"id":"legacy-q2"}\n')
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state))
+    (vault / "notes").mkdir(parents=True)
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=vault),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=200, include_recall=False)
+
+    queue_section = payload["sections"]["queue"]
+    assert queue_section["queued_capture_count"] == 2
+    assert queue_section["queued_capture_count_source"] == "current_plus_legacy"
+    assert queue_section["current_queued_capture_count"] == 1
+    assert queue_section["legacy_queued_capture_count"] == 2
+    assert queue_section["queue_path"] == str(current_queue_file)
+    assert "includes legacy queue" in payload["content"]
+
+
+def test_build_session_context_mirrors_bridge_migration_count_for_malformed_queue_rows(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    xdg_state = tmp_path / "state"
+    current_queue_file = xdg_state / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    current_queue_file.parent.mkdir(parents=True)
+    current_queue_file.write_text('not json\n{"title":"current no id"}\n')
+    legacy_queue_file = vault / "queue" / "pi-captures.jsonl"
+    legacy_queue_file.parent.mkdir(parents=True)
+    legacy_queue_file.write_text('not json\n{"title":"legacy no id"}\n')
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state))
+    (vault / "notes").mkdir(parents=True)
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=vault),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=200, include_recall=False)
+
+    queue_section = payload["sections"]["queue"]
+    assert queue_section["queued_capture_count"] == 3
+    assert queue_section["queued_capture_count_source"] == "current_plus_legacy"
+    assert queue_section["current_queued_capture_count"] == 2
+    assert queue_section["legacy_queued_capture_count"] == 2
 
 
 def test_build_session_context_respects_budget_and_reports_expandable_paths(tmp_path):
@@ -131,7 +263,7 @@ def test_build_session_context_respects_budget_and_reports_expandable_paths(tmp_
         patch("memento.lifecycle.has_qmd", return_value=True),
         patch("memento.lifecycle.triage_health_warning", return_value=None),
     ):
-        payload = build_session_context("/repo", "memory", "s1", token_budget=30)
+        payload = build_session_context("/repo", "memory", "s1", token_budget=100)
 
     assert len(payload["content"]) <= payload["metadata"]["char_budget"]
     assert payload["metadata"]["truncated"] is True
@@ -157,7 +289,7 @@ def test_build_session_context_compacts_structured_payload_under_budget_overhead
         patch("memento.lifecycle.has_qmd", return_value=True),
         patch("memento.lifecycle.triage_health_warning", return_value=None),
     ):
-        payload = build_session_context("/repo", "memory", "s1", token_budget=30)
+        payload = build_session_context("/repo", "memory", "s1", token_budget=100)
 
     serialized = json.dumps(payload)
     assert len(serialized) <= payload["metadata"]["packet_char_budget"]
