@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# Run the memento-vault Rondo profile with the project defaults.
+#
+# Usage:
+#   ./scripts/run-rondo                    # long-running poller + dashboard on :4000
+#   ./scripts/run-rondo --no-dashboard     # long-running poller without Phoenix
+#   ./scripts/run-rondo --port 4001        # long-running poller + dashboard on :4001
+#   ./scripts/run-rondo run-once --issue MEM-41
+#   ./scripts/run-rondo run-once --manifest ./request.json
+#
+# Environment overrides:
+#   RONDO_ROOT=/path/to/rondo/elixir
+#   RONDO_BIN=/path/to/rondo
+#   RONDO_PORT=4000
+#   RONDO_LOGS_ROOT=/path/to/logs
+
+set -euo pipefail
+
+ACK_FLAG="--i-understand-that-this-will-be-running-without-the-usual-guardrails"
+
+usage() {
+  cat <<'EOF'
+Run the memento-vault Rondo profile with the project defaults.
+
+Usage:
+  ./scripts/run-rondo                    # long-running poller + dashboard on :4000
+  ./scripts/run-rondo --no-dashboard     # long-running poller without Phoenix
+  ./scripts/run-rondo --port 4001        # long-running poller + dashboard on :4001
+  ./scripts/run-rondo run-once --issue MEM-41
+  ./scripts/run-rondo run-once --manifest ./request.json
+
+Environment overrides:
+  RONDO_ROOT=/path/to/rondo/elixir
+  RONDO_BIN=/path/to/rondo
+  RONDO_PORT=4000
+  RONDO_LOGS_ROOT=/path/to/logs
+EOF
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+if [[ "${1:-}" == "run-once" ]]; then
+  case "${2:-}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+  esac
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workflow_path="${RONDO_WORKFLOW:-$repo_root/WORKFLOW.md}"
+
+if [[ -z "${LINEAR_API_KEY:-}" ]]; then
+  echo "error: LINEAR_API_KEY is not set" >&2
+  exit 2
+fi
+
+if [[ -n "${RONDO_BIN:-}" ]]; then
+  rondo_bin="$RONDO_BIN"
+  if [[ "$rondo_bin" != /* ]]; then
+    rondo_bin="$(pwd)/$rondo_bin"
+  fi
+  rondo_dir="$(cd "$(dirname "$rondo_bin")/.." && pwd)"
+else
+  rondo_dir="${RONDO_ROOT:-}"
+  if [[ -z "$rondo_dir" ]]; then
+    for candidate in \
+      "$repo_root/../rondo/elixir" \
+      "$HOME/Personal/rondo/elixir" \
+      "$HOME/code/rondo/elixir"; do
+      if [[ -d "$candidate" ]]; then
+        rondo_dir="$candidate"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$rondo_dir" || ! -d "$rondo_dir" ]]; then
+    echo "error: could not find Rondo checkout; set RONDO_ROOT=/path/to/rondo/elixir" >&2
+    exit 2
+  fi
+
+  rondo_bin="$rondo_dir/bin/rondo"
+fi
+
+if [[ ! -x "$rondo_bin" ]]; then
+  echo "Rondo binary not found at $rondo_bin; building it..." >&2
+  if command -v mise >/dev/null 2>&1; then
+    (cd "$rondo_dir" && mise exec -- mix build)
+  else
+    (cd "$rondo_dir" && mix build)
+  fi
+fi
+
+if [[ ! -x "$rondo_bin" ]]; then
+  echo "error: Rondo binary still missing after build: $rondo_bin" >&2
+  exit 2
+fi
+
+runner=()
+if command -v mise >/dev/null 2>&1 && [[ -f "$rondo_dir/mise.toml" ]]; then
+  # Run from the Rondo checkout so mise loads Rondo's Erlang/Elixir toolchain.
+  runner=(mise exec --cd "$rondo_dir" --)
+elif head -n 1 "$rondo_bin" 2>/dev/null | grep -q 'escript' && ! command -v escript >/dev/null 2>&1; then
+  echo "error: $rondo_bin is an escript, but escript is not on PATH and mise is unavailable for $rondo_dir" >&2
+  echo "Install Erlang/Elixir, install mise, or set RONDO_BIN to a runnable Rondo binary." >&2
+  exit 2
+fi
+
+exec_rondo() {
+  if [[ ${#runner[@]} -gt 0 ]]; then
+    exec "${runner[@]}" "$@"
+  else
+    exec "$@"
+  fi
+}
+
+logs_args=()
+if [[ -n "${RONDO_LOGS_ROOT:-}" ]]; then
+  logs_args=(--logs-root "$RONDO_LOGS_ROOT")
+fi
+
+mode="service"
+if [[ "${1:-}" == "run-once" ]]; then
+  mode="run-once"
+  shift
+fi
+
+if [[ "$mode" == "run-once" ]]; then
+  cmd=("$rondo_bin" run-once "$ACK_FLAG")
+  if [[ ${#logs_args[@]} -gt 0 ]]; then
+    cmd+=("${logs_args[@]}")
+  fi
+  cmd+=("$workflow_path" "$@")
+  exec_rondo "${cmd[@]}"
+fi
+
+port="${RONDO_PORT:-4000}"
+port_args=(--port "$port")
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-dashboard)
+      port_args=()
+      shift
+      ;;
+    --port)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --port requires a value" >&2
+        exit 2
+      fi
+      port_args=(--port "$2")
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      echo "error: unknown wrapper argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+cmd=("$rondo_bin" "$ACK_FLAG")
+if [[ ${#port_args[@]} -gt 0 ]]; then
+  cmd+=("${port_args[@]}")
+fi
+if [[ ${#logs_args[@]} -gt 0 ]]; then
+  cmd+=("${logs_args[@]}")
+fi
+cmd+=("$workflow_path" "$@")
+exec_rondo "${cmd[@]}"

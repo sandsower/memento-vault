@@ -1,6 +1,6 @@
 ---
 # Rondo execution profile — memento-vault
-# Run rondo against this profile to execute Linear issues from the
+# Run `./scripts/run-rondo` against this profile to execute Linear issues from the
 # "Rondo intake — memento" project. Adding an issue to that project is the
 # explicit AFK opt-in. Envelope-driven runs use `rondo run-once --manifest`
 # and override tracker polling entirely (pilot envelopes: docs/plans/envelopes/).
