@@ -47,3 +47,6 @@ quote-style = "double"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: tests that require slow or network-dependent external resources",
+]
