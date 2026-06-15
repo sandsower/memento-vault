@@ -299,10 +299,15 @@ class TestModelCachePath:
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(
+    os.environ.get("MEMENTO_RUN_SLOW_INTEGRATION") != "1",
+    reason="set MEMENTO_RUN_SLOW_INTEGRATION=1 to run network/model-download embedding integration tests",
+)
 class TestNomicLocalProviderIntegration:
     """Tests that require onnxruntime and the actual nomic model.
 
-    Mark with @pytest.mark.slow — skipped unless running with -m slow.
+    Mark with @pytest.mark.slow — skipped unless explicitly enabled with
+    MEMENTO_RUN_SLOW_INTEGRATION=1.
     """
 
     @pytest.fixture(autouse=True)

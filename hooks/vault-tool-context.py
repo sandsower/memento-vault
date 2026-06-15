@@ -37,11 +37,16 @@ def main() -> None:
         log_retrieval("tool-context", "hook_input_failed", error=str(exc))
         sys.exit(0)
 
+    # The transcript file is stable across session resumes while session_id
+    # is not; use its stem as the injection-cap lineage when available.
+    transcript_path = hook_input.get("transcript_path") or ""
+    lineage_id = Path(transcript_path).stem if transcript_path else None
     result = build_tool_context(
         hook_input.get("tool_name", ""),
         hook_input.get("tool_input", {}).get("file_path", ""),
         hook_input.get("cwd", ""),
         hook_input.get("session_id", "unknown"),
+        lineage_id=lineage_id,
     )
     if result.should_inject:
         output_context(result.content)
