@@ -2552,7 +2552,7 @@ def build_tool_context(
             return no_context("no-results")
 
     recall_paths = get_recall_paths(session_id)
-    already_injected = session_injected_paths(cache, session_id)
+    already_injected = session_injected_paths(cache, lineage)
     exclude = recall_paths | already_injected
     filtered = [r for r in results if r.get("path", "") not in exclude]
     if not filtered:
