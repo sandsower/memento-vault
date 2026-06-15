@@ -58,8 +58,6 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
   command: '.venv/bin/python scripts/release_smoke.py'
 - name: install-exec-smoke
   command: '.venv/bin/python scripts/release_smoke.py --install-exec'
-- name: claude-sandbox-smoke
-  command: '.venv/bin/python scripts/claude_sandbox_smoke.py'
 ```
 
 ## Action policy
