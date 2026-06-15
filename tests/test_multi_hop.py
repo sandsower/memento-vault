@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from memento.graph import extract_wikilinks
 from memento.search import multi_hop_search, qmd_get
+from memento.search_backend import reset_backend
 
 
 class TestExtractWikilinks:
@@ -58,6 +59,12 @@ class TestExtractWikilinks:
 
 class TestQmdGet:
     """Fetch a single note by path via qmd get."""
+
+    def setup_method(self):
+        reset_backend()
+
+    def teardown_method(self):
+        reset_backend()
 
     def test_returns_note_dict(self):
         mock_output = '{"file": "notes/foo.md", "title": "Foo", "content": "Some content with [[bar]]."}'
