@@ -115,6 +115,7 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     assert payload["sections"]["status"]["vault_exists"] is True
     assert payload["sections"]["status"]["qmd_available"] is True
     assert payload["sections"]["queue"]["queued_capture_count"] == 1
+    assert payload["sections"]["queue"]["count"] == 1
     assert payload["sections"]["queue"]["queued_capture_count_source"] == "current"
     assert payload["sections"]["queue"]["current_queued_capture_count"] == 1
     assert payload["sections"]["queue"]["queue_path"] == str(queue_file)
@@ -149,6 +150,7 @@ def test_build_session_context_explicitly_reports_legacy_queue_fallback(tmp_path
     current_queue_file = xdg_state / "memento" / "pi" / "queue" / "pi-captures.jsonl"
     queue_section = payload["sections"]["queue"]
     assert queue_section["queued_capture_count"] == 1
+    assert queue_section["count"] == 1
     assert queue_section["queued_capture_count_source"] == "legacy_fallback"
     assert queue_section["current_queued_capture_count"] == 0
     assert queue_section["queue_path"] == str(current_queue_file)
@@ -179,6 +181,7 @@ def test_build_session_context_reports_memento_pi_state_home_queue_source(tmp_pa
 
     queue_section = payload["sections"]["queue"]
     assert queue_section["queued_capture_count"] == 1
+    assert queue_section["count"] == 1
     assert queue_section["queued_capture_count_source"] == "current"
     assert queue_section["current_queued_capture_count"] == 1
     assert queue_section["queue_path"] == str(queue_file)
@@ -208,6 +211,7 @@ def test_build_session_context_counts_current_plus_unmigrated_legacy_queue(tmp_p
 
     queue_section = payload["sections"]["queue"]
     assert queue_section["queued_capture_count"] == 2
+    assert queue_section["count"] == 2
     assert queue_section["queued_capture_count_source"] == "current_plus_legacy"
     assert queue_section["current_queued_capture_count"] == 1
     assert queue_section["legacy_queued_capture_count"] == 2
@@ -238,6 +242,7 @@ def test_build_session_context_mirrors_bridge_migration_count_for_malformed_queu
 
     queue_section = payload["sections"]["queue"]
     assert queue_section["queued_capture_count"] == 3
+    assert queue_section["count"] == 3
     assert queue_section["queued_capture_count_source"] == "current_plus_legacy"
     assert queue_section["current_queued_capture_count"] == 2
     assert queue_section["legacy_queued_capture_count"] == 2

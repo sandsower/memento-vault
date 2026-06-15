@@ -1897,6 +1897,7 @@ def _queue_capture_status(vault: Path) -> dict[str, object]:
 
     status: dict[str, object] = {
         "queued_capture_count": combined_queued_capture_count,
+        "count": combined_queued_capture_count,
         "queued_capture_count_source": "current",
         "current_queued_capture_count": current_queued_capture_count,
         "queue_path": str(queue_path),
