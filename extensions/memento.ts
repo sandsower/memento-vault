@@ -14,6 +14,7 @@ import {
 	renderMementoStatusText,
 	type MementoPanelState,
 } from "./memento-ui.js";
+import { addSessionPointerDigest, sanitizeEventDetails, summarizeMessages, summarizeSessionEntries } from "./transcript-sanitizer.js";
 
 interface LifecycleResult {
 	should_inject: boolean;
@@ -144,30 +145,6 @@ function capText(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}\n[vault] truncated by memento pi bridge cap (${maxChars} chars)`;
 }
 
-function summarizeMessages(messages: unknown): string {
-	if (!Array.isArray(messages)) return "Pi agent turn ended; message details unavailable.";
-	const summary = messages
-		.slice(-8)
-		.map((message, index) => summarizeRecord(message, `message-${index + 1}`))
-		.filter((line) => line.length > 4)
-		.join("\n");
-	return summary || "Pi agent turn ended; no message summary available.";
-}
-
-function summarizeRecord(value: unknown, fallbackRole: string): string {
-	const record = value as Record<string, unknown>;
-	const nested = record.message as Record<string, unknown> | undefined;
-	const role = String(nested?.role ?? record.role ?? record.type ?? fallbackRole);
-	const rawContent = nested?.content ?? record.content ?? record.summary ?? record.text ?? "";
-	const content = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent).slice(0, 500);
-	return `- ${role}: ${content.replace(/\s+/g, " ").trim().slice(0, 500)}`;
-}
-
-function summarizeSessionEntries(entries: unknown, reason: string): string {
-	if (!Array.isArray(entries)) return `Pi ${reason}; session entry details unavailable.`;
-	const recent = entries.slice(-12).map((entry, index) => summarizeRecord(entry, `entry-${index + 1}`));
-	return [`Pi ${reason}.`, "", "Recent session entries:", ...recent].join("\n");
-}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -331,12 +308,13 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	async function queueLifecycleCapture(ctx: ExtensionContext, title: string, body: string, reason: string, sourceEvent: string) {
 		if (!config.enabled || !config.autoCapture || !config.captureQueue) return undefined;
 		const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
+		const queuedBody = addSessionPointerDigest(body, sessionFile);
 		const payload = await runJson(pi, ctx, [
 			"capture",
 			"--title",
 			title,
 			"--body",
-			body,
+			queuedBody,
 			"--cwd",
 			ctx.cwd,
 			"--session-id",
@@ -490,7 +468,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_compact", async (event, ctx) => {
-		const body = `Pi compacted the current session.\n\nEvent details:\n${JSON.stringify(event, null, 2).slice(0, 2000)}`;
+		const body = `Pi compacted the current session.\n\nEvent details:\n${sanitizeEventDetails(event, 2000)}`;
 		await queueLifecycleCapture(ctx, "Pi compaction candidate capture", body, "session_compact", "session_compact");
 	});
 
