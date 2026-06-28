@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -384,6 +385,68 @@ class TestToolSelectionDescriptions:
         assert "Do not use for topical discovery; search first" in extension
         assert "separate from interactive /memento skill workflows" in extension
         assert "not for prior decisions, project history, or note content" in extension
+
+    def test_pi_extension_lifecycle_sanitizer_excludes_reasoning_and_renders_tools(self):
+        helper = Path(__file__).parents[1] / "extensions" / "transcript-sanitizer.ts"
+        script = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const sanitizer = await import(pathToFileURL(process.argv[1]).href);
+
+const assistant = sanitizer.summarizeRecord({
+  message: {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "secret reasoning", thinkingSignature: "sig", encrypted_content: "blob" },
+      { type: "reasoning", text: "hidden chain of thought" },
+      { type: "text", text: "Use the lifecycle queue gate for captures." },
+    ],
+  },
+}, "assistant");
+assert.match(assistant, /Use the lifecycle queue gate/);
+assert.doesNotMatch(assistant, /secret reasoning|hidden chain|thinkingSignature|encrypted_content|blob/);
+
+const tools = sanitizer.summarizeRecord({
+  message: {
+    role: "assistant",
+    content: [
+      { type: "toolCall", name: "read", arguments: { path: "extensions/memento.ts", huge: "x".repeat(1400) } },
+      { type: "toolResult", content: "y".repeat(450) },
+    ],
+  },
+}, "assistant");
+assert.match(tools, /\[tool call\] read/);
+assert.match(tools, /extensions\/memento\.ts/);
+assert.match(tools, /\[tool result\]/);
+assert.match(tools, /tool result truncated/);
+assert.ok(tools.length < 620);
+
+const normal = sanitizer.summarizeMessages([
+  { message: { role: "user", content: "Please remember the API decision." } },
+  { message: { role: "assistant", content: [{ type: "text", text: "Captured the durable decision." }] } },
+]);
+assert.match(normal, /- user: Please remember the API decision\./);
+assert.match(normal, /- assistant: Captured the durable decision\./);
+
+const eventDetails = sanitizer.sanitizeEventDetails({
+  content: [{ type: "redacted_thinking", encrypted_content: "ciphertext" }, { type: "text", text: "compact summary" }],
+});
+assert.match(eventDetails, /compact summary/);
+assert.doesNotMatch(eventDetails, /redacted_thinking|encrypted_content|ciphertext/);
+
+const pointer = sanitizer.addSessionPointerDigest(normal, "/tmp/pi-session.jsonl");
+assert.match(pointer, /Session transcript: \/tmp\/pi-session\.jsonl/);
+assert.match(pointer, /Sanitized summary digest: sha256:[0-9a-f]{16}/);
+assert.match(pointer, /Sanitized lifecycle summary:/);
+"""
+        subprocess.run(
+            ["node", "--experimental-strip-types", "--input-type=module", "-e", script, str(helper)],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
 
 # --- lifecycle retrieval tools ---
