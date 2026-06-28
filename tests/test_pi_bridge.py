@@ -528,6 +528,54 @@ def test_pi_bridge_capture_can_queue_instead_of_write(capsys, tmp_path, monkeypa
     assert queued["metadata"]["session_id"] == "s1"
 
 
+def test_pi_bridge_capture_writes_type_tags_certainty_and_session_metadata_as_frontmatter(
+    capsys, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+    ):
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Typed pi memory",
+                "--body",
+                "Use the deterministic dedup packet before creating notes.",
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "/Users/vic/.pi/agent/sessions/session.jsonl",
+                "--note-type",
+                "decision",
+                "--branch",
+                "original/pi-branch",
+                "--tag",
+                "dedup",
+                "--tag",
+                "curation",
+                "--certainty",
+                "4",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    note = tmp_path / payload["path"]
+    text = note.read_text()
+    frontmatter, body = text.split("---", 2)[1:]
+    assert "type: decision" in frontmatter
+    assert "tags: [pi, repo, dedup, curation]" in frontmatter
+    assert "certainty: 4" in frontmatter
+    assert "project: repo" in frontmatter
+    assert "branch: original/pi-branch" in frontmatter
+    assert "session_id: /Users/vic/.pi/agent/sessions/session.jsonl" in frontmatter
+    assert "/Users/vic/.pi/agent/sessions/session.jsonl" not in body
+    assert "Session ID:" not in body
+
+
 def test_pi_bridge_queue_migrates_to_local_state_and_processes(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     legacy_queue_file = tmp_path / "queue" / "pi-captures.jsonl"
@@ -784,6 +832,66 @@ def test_pi_bridge_process_start_includes_small_cleaned_transcript(capsys, tmp_p
     packet = (run_dir / "inputs" / f"{group['group_id']}.md").read_text()
     assert "## Cleaned session transcript" in packet
     assert "Important decision" in packet
+
+
+def test_pi_bridge_process_start_writes_deterministic_dedup_context(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "redis-cache-ttl.md").write_text(
+        "---\n"
+        "title: Redis cache requires explicit TTL\n"
+        "type: decision\n"
+        "tags: [repo, redis, cache]\n"
+        "project: repo\n"
+        "---\n\nExisting note body.\n"
+    )
+    (notes / "unrelated.md").write_text("---\ntitle: Unrelated deployment note\ntags: [deploy]\n---\n\nBody.\n")
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "Redis cache TTL decision",
+                "body": "We decided Redis cache entries need explicit TTLs.",
+                "metadata": {"project": "repo", "branch": "b", "cwd": "/repo", "session_id": "s1"},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    run_dir = tmp_path / "state" / "processing" / started["run_id"]
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    group = manifest["groups"][0]
+    assert group["dedup_context"] == [
+        {
+            "path": "notes/redis-cache-ttl.md",
+            "title": "Redis cache requires explicit TTL",
+            "type": "decision",
+            "tags": ["repo", "redis", "cache"],
+            "project": "repo",
+        }
+    ]
+    packet = (run_dir / "inputs" / f"{group['group_id']}.md").read_text()
+    assert "## Deduplication context" in packet
+    assert "notes/redis-cache-ttl.md: Redis cache requires explicit TTL" in packet
+    assert "Unrelated deployment note" not in packet
+
+
+def test_pi_process_worker_prompt_bans_session_path_boilerplate_in_note_bodies():
+    worker = Path("extensions/memento-process-worker.mjs").read_text()
+    assert (
+        "Preserve the original project/cwd/branch/session metadata from the input packet in captured note bodies"
+        not in worker
+    )
+    assert "Store metadata as memento_capture arguments/frontmatter, never as prose body boilerplate" in worker
+    assert "Note bodies must not include labels or raw values for Session ID, CWD, Branch, Capture IDs" in worker
+    assert "pass note_type, tags, certainty, cwd, branch, and session_id to memento_capture" in worker
 
 
 def test_pi_bridge_process_start_skips_transcript_outside_allowed_roots(capsys, tmp_path, monkeypatch):

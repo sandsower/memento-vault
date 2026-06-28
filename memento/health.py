@@ -780,8 +780,18 @@ def _check_mcp_config() -> list[CheckResult]:
     return checks
 
 
-_PI_BOOL_KEYS = {"enabled", "briefing", "promptRecall", "toolContext", "autoCapture", "captureQueue"}
-_PI_INT_KEYS = {"maxInjectedChars", "maxToolContextPerSession"}
+_PI_BOOL_KEYS = {
+    "enabled",
+    "briefing",
+    "promptRecall",
+    "toolContext",
+    "autoCapture",
+    "captureQueue",
+    "processQueue",
+    "processQueueOnSessionClose",
+}
+_PI_INT_KEYS = {"maxInjectedChars", "maxToolContextPerSession", "processQueueMaxCaptures"}
+_PI_STRING_OR_NULL_KEYS = {"processQueueModel"}
 
 
 def _check_pi_bridge_config() -> CheckResult:
@@ -808,6 +818,10 @@ def _check_pi_bridge_config() -> CheckResult:
         value = candidate.get(key)
         if key in candidate and (type(value) is not int or value < 0):
             invalid.append(key)
+    for key in sorted(_PI_STRING_OR_NULL_KEYS):
+        value = candidate.get(key)
+        if key in candidate and not (isinstance(value, str) or value is None):
+            invalid.append(key)
     if invalid:
         return CheckResult(
             "pi bridge",
@@ -815,7 +829,9 @@ def _check_pi_bridge_config() -> CheckResult:
             f"Pi bridge config has invalid key types: {', '.join(invalid)}",
             {"path": str(path), "invalid_keys": invalid},
         )
-    configured = sorted(key for key in candidate if key in _PI_BOOL_KEYS or key in _PI_INT_KEYS)
+    configured = sorted(
+        key for key in candidate if key in _PI_BOOL_KEYS or key in _PI_INT_KEYS or key in _PI_STRING_OR_NULL_KEYS
+    )
     return CheckResult(
         "pi bridge", PASS, "Pi bridge config shape looks valid", {"path": str(path), "configured_keys": configured}
     )
