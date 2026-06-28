@@ -306,9 +306,9 @@ Past knowledge flows back into active sessions via three hooks:
 
 - **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens. Fast sync output (<50ms), QMD search deferred to background.
 - **Prompt recall** (UserPromptSubmit): searches each prompt against the vault and surfaces matching notes before Claude processes it. Adaptive pipeline: fast BM25 path for confident matches, deep path (PRF, RRF, multi-hop wikilink-following, cross-encoder reranking) for low-confidence queries.
-- **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. Directory-level BM25 with caching and rate limiting.
+- **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. It uses cwd-relative path keywords, directory-level BM25 caching, rate limiting, a higher relevance threshold, and a positive project-match gate because file-read context is unsolicited.
 
-All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, and vendor directories.
+All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, agent/bridge files, and vendor directories. Enable `retrieval_log: true` or `MEMENTO_DEBUG=1` and run `tools/analyze-retrieval.py` to audit tool-context skip reasons, injection rate, injected paths, and latency.
 
 ### Performance
 
@@ -524,6 +524,8 @@ auto_commit: true
 session_briefing: true
 prompt_recall: true
 tool_context: true
+# When retrieval_log/MEMENTO_DEBUG is enabled, log tool-context decisions.
+tool_context_diagnostics: true
 
 # Retrieval pipeline
 prf_enabled: true            # pseudo-relevance feedback query expansion

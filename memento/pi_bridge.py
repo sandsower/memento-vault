@@ -430,9 +430,11 @@ def _get(path: str) -> dict[str, Any]:
     return {"error": f"Note not found: {note_path}"}
 
 
-def _capture_note_tags(tags: list[str], project_slug: str) -> list[str]:
+def _capture_note_tags(tags: list[str], project_slug: str, source_event: str = "manual") -> list[str]:
     """Merge caller-provided tags with Pi/project tags while preserving order."""
     merged = ["pi"]
+    if source_event in {"manual", "tool"}:
+        merged.append("manual")
     if project_slug != "unknown":
         merged.append(project_slug)
     for tag in tags:
@@ -473,7 +475,8 @@ def _capture(
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
     branch = str(branch_override).strip() if branch_override else _git_branch(cwd)
     clean_note_type = str(note_type or "session").strip() or "session"
-    merged_tags = _capture_note_tags(tags or [], project_slug)
+    merged_tags = _capture_note_tags(tags or [], project_slug, source_event)
+    clean_certainty = certainty if certainty not in (None, "") else 2
     if queue:
         if _is_lifecycle_source(source_event):
             decision = _lifecycle_queue_decision(session_id, cwd, body, source_event)
@@ -500,7 +503,7 @@ def _capture(
                 "session_id": session_id,
                 "note_type": clean_note_type,
                 "tags": merged_tags,
-                "certainty": certainty,
+                "certainty": clean_certainty,
             },
         }
         captures = _load_queue(vault)
@@ -516,9 +519,10 @@ def _capture(
         clean_body,
         clean_note_type,
         merged_tags,
-        certainty=certainty,
-        source="pi",
-        project=project_slug if project_slug != "unknown" else None,
+        certainty=clean_certainty,
+        source="pi-capture",
+        origin=f"pi_bridge:{source_event or reason or 'manual'}",
+        project=cwd or None,
         branch=branch,
         session_id=session_id if session_id != "unknown" else None,
     )

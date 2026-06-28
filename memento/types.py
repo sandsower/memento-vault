@@ -20,6 +20,7 @@ class NoteMetadata(TypedDict, total=False):
     tags: list[str]
     certainty: int | None
     source: str
+    origin: str | None
     date: str
     project: str | None
     branch: str | None

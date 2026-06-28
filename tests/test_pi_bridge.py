@@ -206,7 +206,13 @@ def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["path"].startswith("notes/pi-bridge")
-    assert (tmp_path / payload["path"]).exists()
+    note_text = (tmp_path / payload["path"]).read_text()
+    assert "type: discovery" in note_text
+    assert 'tags: ["pi", "manual", "repo"]' in note_text
+    assert "source: pi-capture" in note_text
+    assert "origin: pi_bridge:manual" in note_text
+    assert "certainty: 2" in note_text
+    assert "project: /repo" in note_text
 
 
 def test_pi_bridge_capture_records_manual_session_state(capsys, tmp_path, monkeypatch):
@@ -567,9 +573,9 @@ def test_pi_bridge_capture_writes_type_tags_certainty_and_session_metadata_as_fr
     text = note.read_text()
     frontmatter, body = text.split("---", 2)[1:]
     assert "type: decision" in frontmatter
-    assert "tags: [pi, repo, dedup, curation]" in frontmatter
+    assert 'tags: ["pi", "manual", "repo", "dedup", "curation"]' in frontmatter
     assert "certainty: 4" in frontmatter
-    assert "project: repo" in frontmatter
+    assert "project: /repo" in frontmatter
     assert "branch: original/pi-branch" in frontmatter
     assert "session_id: /Users/vic/.pi/agent/sessions/session.jsonl" in frontmatter
     assert "/Users/vic/.pi/agent/sessions/session.jsonl" not in body

@@ -91,18 +91,18 @@ Claude reads a file
     v
 vault-tool-context.py (PreToolUse hook, Read matcher)
     |
-    +---> skip check: system paths, vendor dirs, config files, assets
+    +---> skip check: system paths, vendor dirs, config files, assets, bridge files
     +---> session injection cap (max 5)
     +---> directory cache check (hit = use cached, miss = continue)
     +---> cooldown check (1s between QMD calls)
-    +---> extract keywords from file path (split camelCase, filter stop segments)
-    +---> BM25 search against keywords
-    +---> enhance_results() pipeline
+    +---> extract cwd-relative keywords from file path (split camelCase, filter stop segments)
+    +---> BM25 search against keywords (default min_score 0.75)
+    +---> enhance_results() pipeline with positive project-match required
     +---> dedup against recall + prior tool-context injections
     +---> return JSON with additionalContext --> Claude sees it before the file
 ```
 
-All three hooks are zero-cost when they have nothing relevant to say -- no output, no context overhead. When they do inject, overhead is ~150 input units per session on average. See [performance-analysis.md](performance-analysis.md) for benchmarks.
+All three hooks are zero-cost when they have nothing relevant to say -- no output, no context overhead. When `retrieval_log: true` or `MEMENTO_DEBUG=1` is enabled, tool context records one terminal `tool-context/decision` event per call so usefulness can be audited from skip reasons, injected paths, cache/search source, latency, and optional candidate summaries. When the hooks do inject, overhead is ~150 input units per session on average. See [performance-analysis.md](performance-analysis.md) for benchmarks.
 
 ## What gets captured
 
