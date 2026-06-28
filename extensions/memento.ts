@@ -607,7 +607,14 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			];
 			if (params.note_type) args.push("--note-type", params.note_type);
 			if (params.branch) args.push("--branch", params.branch);
-			if (typeof params.certainty === "number" && Number.isFinite(params.certainty)) args.push("--certainty", String(Math.floor(params.certainty)));
+			if (typeof params.certainty === "number" && Number.isFinite(params.certainty)) {
+				const certainty = Math.floor(params.certainty);
+				if (certainty < 1 || certainty > 5) {
+					const payload = { error: "certainty must be an integer from 1 to 5" };
+					return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload, isError: true };
+				}
+				args.push("--certainty", String(certainty));
+			}
 			for (const tag of params.tags ?? []) if (tag.trim()) args.push("--tag", tag.trim());
 			if (params.queue) args.push("--queue", "--reason", "manual", "--source-event", "tool");
 			const payload = await runJson(pi, ctx, args);

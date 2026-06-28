@@ -452,6 +452,19 @@ def _capture_note_tags(tags: list[str], project_slug: str, source_event: str = "
     return deduped
 
 
+def _capture_certainty(certainty: int | str | None) -> int | dict[str, str]:
+    """Normalize Pi capture certainty, rejecting values outside the 1-5 contract."""
+    if certainty in (None, ""):
+        return 2
+    try:
+        value = int(certainty)
+    except (TypeError, ValueError):
+        return {"error": "certainty must be an integer from 1 to 5"}
+    if 1 <= value <= 5:
+        return value
+    return {"error": "certainty must be an integer from 1 to 5"}
+
+
 def _capture(
     title: str,
     body: str,
@@ -476,7 +489,9 @@ def _capture(
     branch = str(branch_override).strip() if branch_override else _git_branch(cwd)
     clean_note_type = str(note_type or "session").strip() or "session"
     merged_tags = _capture_note_tags(tags or [], project_slug, source_event)
-    clean_certainty = certainty if certainty not in (None, "") else 2
+    clean_certainty = _capture_certainty(certainty)
+    if isinstance(clean_certainty, dict):
+        return clean_certainty
     if queue:
         if _is_lifecycle_source(source_event):
             decision = _lifecycle_queue_decision(session_id, cwd, body, source_event)
@@ -861,7 +876,7 @@ def _dedup_context_for_group(vault: Path, group: dict[str, Any], limit: int = 20
         overlap = len(query_tokens & _dedup_tokens(haystack))
         note_tag_set = {tag.lower() for tag in tags}
         project_match = int(bool(project) and (note_project.lower() == project or project in note_tag_set))
-        if overlap <= 0 and not project_match:
+        if overlap <= 0:
             continue
         rel_path = str(note_path.relative_to(vault))
         item = {
