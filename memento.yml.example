@@ -118,6 +118,15 @@ tool_context_max_injections: 5
 # Seconds between QMD calls (rate limiting)
 tool_context_cooldown: 3
 
+# Hours before directory-level tool-context cache entries are refreshed (0 disables expiry)
+tool_context_cache_ttl_hours: 24
+
+# Log one terminal decision per tool-context call when retrieval_log/MEMENTO_DEBUG is enabled.
+# Candidate summaries are off by default to keep diagnostic logs compact.
+tool_context_diagnostics: true
+tool_context_diagnostics_include_candidates: false
+tool_context_diagnostics_max_candidates: 10
+
 # --- Multi-hop retrieval (experimental) ---
 # Chain follow-up searches when a prompt references past decisions or other projects.
 # Extracts entities from initial results and searches again.

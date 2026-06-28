@@ -64,10 +64,14 @@ recall_skip_patterns:
 
 # Inject vault notes on file reads
 tool_context: true
-tool_context_min_score: 0.65
+tool_context_min_score: 0.75
 tool_context_max_notes: 2
 tool_context_max_injections: 5
 tool_context_cooldown: 1       # seconds between QMD calls
+tool_context_cache_ttl_hours: 24
+tool_context_diagnostics: true
+tool_context_diagnostics_include_candidates: false
+tool_context_diagnostics_max_candidates: 10
 ```
 
 ## Health diagnostics
@@ -185,13 +189,13 @@ Deduplication is automatic -- if the top result matches the last injection, it s
 
 ### Tool context
 
-When Claude reads a file, `vault-tool-context` extracts keywords from the file path and injects matching vault notes. Scoped to directories you've worked in before, skips vendor dirs, config files, and system paths.
+When Claude reads a file, `vault-tool-context` extracts cwd-relative keywords from the file path and injects matching vault notes. Tool context is an unsolicited surface, so it is deliberately gated: it skips vendor/config/system/agent files, requires QMD, requires a positive project match, deduplicates against recall and prior tool-context injections, and uses a higher default BM25 threshold than prompt recall. Requires QMD.
 
 ```yaml
 # Disable tool context
 tool_context: false
 
-# Tighter relevance threshold (default 0.65)
+# Tighter relevance threshold (default 0.75)
 tool_context_min_score: 0.85
 
 # More notes per file read (default 2)
@@ -202,9 +206,19 @@ tool_context_max_injections: 8
 
 # Rate limit between QMD calls in seconds (default 1)
 tool_context_cooldown: 3
+
+# Refresh directory-level cached results after N hours (default 24; 0 disables expiry)
+tool_context_cache_ttl_hours: 24
+
+# With retrieval_log: true or MEMENTO_DEBUG=1, log one terminal decision per call.
+tool_context_diagnostics: true
+
+# Include compact path/title/score candidate summaries in those decision logs.
+tool_context_diagnostics_include_candidates: false
+tool_context_diagnostics_max_candidates: 10
 ```
 
-Deduplicates against recall and prior tool-context injections. Requires QMD.
+Use `python tools/analyze-retrieval.py --since 7` to summarize tool-context call volume, skip reasons, injection rate, injected paths, latency, and cache/search split from retrieval logs.
 
 ### Multi-hop retrieval (wikilink-following)
 

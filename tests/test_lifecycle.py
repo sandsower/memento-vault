@@ -2,6 +2,7 @@ import copy
 import importlib.util
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1154,6 +1155,19 @@ def test_tool_context_relative_path_without_cwd_uses_process_cwd(_has_qmd, tmp_p
     assert result.metadata["file_path"] == os.path.realpath(str(project / "src" / "authMiddleware.ts"))
 
 
+def test_tool_context_keywords_are_relative_to_session_cwd(tmp_path):
+    from memento.lifecycle import extract_tool_context_keywords
+
+    project = tmp_path / "rondo-workspaces" / "MEM-59"
+    file_path = project / "memento" / "lifecycle.py"
+    file_path.parent.mkdir(parents=True)
+    file_path.touch()
+
+    query = extract_tool_context_keywords(str(file_path), str(project))
+
+    assert query == "memento lifecycle"
+
+
 def test_load_cache_drops_pre_schema_dir_entries(tmp_path, monkeypatch):
     import memento.lifecycle as lifecycle_module
 
@@ -1229,6 +1243,59 @@ def test_tool_context_searches_and_formats_results(_has_qmd, mock_search, _enhan
     _, kwargs = mock_search.call_args
     assert kwargs["semantic"] is False
     assert kwargs["min_score"] == 0.75
+    decision = [call.kwargs for call in _log.call_args_list if call.args[:2] == ("tool-context", "decision")][-1]
+    assert decision["decision"] == "injected"
+    assert decision["injected_paths"] == ["notes/auth-boundary.md"]
+    assert decision["query"] == "auth middleware"
+
+
+@patch("memento.lifecycle.log_retrieval")
+@patch("memento.lifecycle.has_qmd", return_value=True)
+def test_tool_context_diagnostics_logs_terminal_skip(_has_qmd, mock_log):
+    config = dict(DEFAULT_CONFIG)
+    config["tool_context"] = True
+    with patch("memento.lifecycle.get_config", return_value=config):
+        with patch(
+            "memento.lifecycle.load_cache", return_value={"dirs": {}, "last_qmd_call": time.time(), "injections": {}}
+        ):
+            result = build_tool_context("Read", "src/server/authMiddleware.ts", "/repo", "s1")
+
+    assert result.reason == "cooldown"
+    decision = [call.kwargs for call in mock_log.call_args_list if call.args[:2] == ("tool-context", "decision")][-1]
+    assert decision["decision"] == "cooldown"
+    assert decision["file_path"].endswith("/repo/src/server/authMiddleware.ts")
+
+
+@patch("memento.lifecycle.log_retrieval")
+@patch("memento.lifecycle.enhance_results", side_effect=lambda results, *args, **kwargs: results)
+@patch("memento.lifecycle.qmd_search_with_extras")
+@patch("memento.lifecycle.has_qmd", return_value=True)
+def test_tool_context_diagnostics_can_include_candidate_summaries(_has_qmd, mock_search, _enhance, mock_log):
+    mock_search.return_value = [
+        {
+            "path": "notes/auth-boundary.md",
+            "title": "Auth boundary lives in middleware",
+            "score": 0.78,
+            "snippet": "Middleware owns auth checks.",
+        }
+    ]
+
+    config = dict(DEFAULT_CONFIG)
+    config["tool_context_diagnostics_include_candidates"] = True
+    with patch("memento.lifecycle.get_config", return_value=config):
+        with patch("memento.lifecycle.load_cache", return_value={"dirs": {}, "last_qmd_call": 0, "injections": {}}):
+            with patch("memento.lifecycle.save_cache"):
+                build_tool_context("Read", "src/server/authMiddleware.ts", "/repo", "s1")
+
+    decision = [call.kwargs for call in mock_log.call_args_list if call.args[:2] == ("tool-context", "decision")][-1]
+    assert decision["candidates"] == [
+        {
+            "path": "notes/auth-boundary.md",
+            "title": "Auth boundary lives in middleware",
+            "score": 0.78,
+            "decision": "candidate",
+        }
+    ]
 
 
 def test_tool_context_hook_adapter_outputs_claude_json(capsys):

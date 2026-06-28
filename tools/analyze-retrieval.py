@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Analyze the full memento pipeline from retrieval logs.
 
-Covers triage decisions, retrieval (recall + multi-hop), and inception triggers.
+Covers triage decisions, retrieval (recall + multi-hop), tool-context decisions, and inception triggers.
 
 Usage:
     python tools/analyze-retrieval.py
@@ -168,6 +168,43 @@ def analyze_briefing(entries):
     print()
 
 
+def analyze_tool_context(entries):
+    tool_context = [e for e in entries if e.get("hook") == "tool-context"]
+    if not tool_context:
+        print("  No tool-context entries yet. Enable retrieval_log or MEMENTO_DEBUG to collect decisions.\n")
+        return
+
+    decisions = [e for e in tool_context if e.get("action") == "decision"]
+    # Older logs only had inject/no-results/cache-hit actions. Prefer the new
+    # terminal decision events when present because they count every call once.
+    population = decisions or tool_context
+    injected = [e for e in population if e.get("decision") == "injected" or e.get("action") == "inject"]
+    reasons = Counter(e.get("decision") or e.get("reason") or e.get("action", "unknown") for e in population)
+    sources = Counter(e.get("source", "unknown") for e in decisions)
+    latencies = [e["latency_ms"] for e in population if "latency_ms" in e]
+    chars = [e.get("injected_chars", 0) for e in injected]
+    injected_paths = Counter(path for e in injected for path in e.get("injected_paths", []))
+
+    print(f"  Total calls: {len(population)}" + (" (terminal decisions)" if decisions else " (legacy events)"))
+    print(f"  Injected: {len(injected)} ({pct(len(injected), len(population))})")
+    if chars:
+        print(f"  Chars injected: avg {avg(chars)}, total {sum(chars)}")
+    if latencies:
+        print(f"  Latency: avg {avg(latencies)}ms, p95 {p95(latencies)}ms")
+    if sources:
+        print("  Source distribution:")
+        for source, count in sources.most_common():
+            print(f"    {source}: {count} ({pct(count, len(decisions))})")
+    print("  Decision distribution:")
+    for reason, count in reasons.most_common():
+        print(f"    {reason}: {count} ({pct(count, len(population))})")
+    if injected_paths:
+        print("  Top injected paths:")
+        for path, count in injected_paths.most_common(5):
+            print(f"    {path}: {count}")
+    print()
+
+
 def main():
     days = None
     if "--since" in sys.argv:
@@ -189,6 +226,9 @@ def main():
 
     print("--- Retrieval (recall) ---")
     analyze_recall(entries)
+
+    print("--- Tool context ---")
+    analyze_tool_context(entries)
 
     print("--- Briefing ---")
     analyze_briefing(entries)
