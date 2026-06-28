@@ -572,6 +572,33 @@ class TestMementoStore:
         assert not (tmp_vault / "notes" / "legacy-mcp-note-2.md").exists()
 
     @pytest.mark.usefixtures("_use_vault_config")
+    def test_mcp_store_does_not_idempotently_match_other_sources(self, tmp_vault):
+        note_path = tmp_vault / "notes" / "manual-source-note.md"
+        note_path.write_text(
+            "---\n"
+            "title: Manual source note\n"
+            "type: discovery\n"
+            "tags: [sync]\n"
+            "source: manual\n"
+            "certainty: 4\n"
+            "date: 2026-06-28T19:00\n"
+            "---\n\n"
+            "Same body.\n\n"
+            "## Related\n"
+        )
+
+        result = memento_store(
+            title="Manual source note",
+            body="Same body.",
+            note_type="discovery",
+            tags=["sync"],
+            certainty=4,
+        )
+
+        assert result["path"] == "notes/manual-source-note-2.md"
+        assert (tmp_vault / "notes" / "manual-source-note-2.md").exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
     def test_same_title_different_content_still_creates_suffix(self, tmp_vault):
         first = memento_store(
             title="Conflicting note",

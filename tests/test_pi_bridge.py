@@ -208,7 +208,7 @@ def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     assert payload["path"].startswith("notes/pi-bridge")
     note_text = (tmp_path / payload["path"]).read_text()
     assert "type: discovery" in note_text
-    assert "tags: [pi, manual, repo]" in note_text
+    assert 'tags: ["pi", "manual", "repo"]' in note_text
     assert "source: pi-capture" in note_text
     assert "origin: pi_bridge:manual" in note_text
     assert "certainty: 2" in note_text

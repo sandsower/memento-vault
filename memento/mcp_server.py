@@ -71,6 +71,7 @@ def _note_payload_matches(
     note_type: str,
     tags: list[str],
     certainty: int | None = None,
+    source: str | None = None,
     project: str | None = None,
     branch: str | None = None,
     validity_context: str | None = None,
@@ -110,6 +111,7 @@ def _note_payload_matches(
     ]
 
     optional_fields = {
+        "source": source,
         "certainty": str(int(certainty)) if certainty is not None else None,
         "project": project,
         "branch": branch,
@@ -453,6 +455,7 @@ def memento_store(
             note_type=contract["note_type"],
             tags=contract["tags"],
             certainty=contract["certainty"],
+            source=contract["source"],
             project=contract["project"],
             branch=contract["branch"],
             validity_context=contract["validity_context"],

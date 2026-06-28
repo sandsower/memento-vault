@@ -78,7 +78,7 @@ class TestWriteNote:
         assert text.startswith("---\n")
         assert "title: Redis cache requires TTL" in text
         assert "type: discovery" in text
-        assert "tags: [redis, caching]" in text
+        assert 'tags: ["redis", "caching"]' in text
         assert "source: session" in text
         assert "certainty: 3" in text
 
@@ -122,7 +122,7 @@ class TestWriteNote:
 
         text = path.read_text()
         assert "type: discovery" in text
-        assert "tags: [pi]" in text
+        assert 'tags: ["pi"]' in text
         assert "source: pi-capture" in text
         assert "origin: pi_bridge:tool" in text
         assert "certainty: 4" in text
@@ -138,6 +138,20 @@ class TestWriteNote:
         )
 
         assert "type: bugfix" in path.read_text()
+
+    def test_write_note_serializes_tags_and_supersedes_as_valid_yaml_scalars(self, tmp_vault):
+        path = write_note(
+            tmp_vault,
+            title="Safe frontmatter",
+            body="Body",
+            note_type="discovery",
+            tags=["cache,redis", 'Alice "beta"'],
+            supersedes='Alice "beta" note',
+        )
+
+        text = path.read_text()
+        assert 'tags: ["cache,redis", "Alice \\"beta\\""]' in text
+        assert 'supersedes: "Alice \\"beta\\" note"' in text
 
     def test_write_note_maps_bug_fix_alias_to_bugfix(self, tmp_vault):
         underscore = write_note(

@@ -421,7 +421,7 @@ _CERTAINTY_LABELS = {
     "verified": 5,
 }
 
-_CANONICAL_NOTE_TYPES = {"decision", "discovery", "pattern", "bugfix", "tool", "architecture", "daily"}
+_CANONICAL_NOTE_TYPES = {"decision", "discovery", "pattern", "bugfix", "tool", "architecture"}
 _LEGACY_NOTE_TYPE_ALIASES = {
     "debug": "bugfix",
     "debugging": "bugfix",
@@ -558,7 +558,7 @@ def write_note(
         "---",
         f"title: {safe_title}",
         f"type: {contract['note_type']}",
-        f"tags: [{', '.join(contract['tags'])}]",
+        f"tags: {json.dumps(contract['tags'], ensure_ascii=False)}",
         f"source: {contract['source']}",
     ]
     if contract["origin"]:
@@ -568,7 +568,7 @@ def write_note(
     if contract["validity_context"]:
         lines.append(f"validity-context: {contract['validity_context']}")
     if contract["supersedes"]:
-        lines.append(f'supersedes: "{contract["supersedes"]}"')
+        lines.append(f"supersedes: {json.dumps(contract['supersedes'], ensure_ascii=False)}")
     if contract["project"]:
         lines.append(f"project: {contract['project']}")
     if contract["branch"]:
