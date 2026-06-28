@@ -2575,6 +2575,8 @@ def build_tool_context(
         source = "cache"
         results = cached_entry.get("results", [])
         search_query = cached_entry.get("query")
+        raw_result_count = cached_entry.get("raw_result_count")
+        enhanced_result_count = cached_entry.get("enhanced_result_count")
         if search_query:
             metadata["query"] = search_query
         if not results:
@@ -2596,19 +2598,40 @@ def build_tool_context(
         min_score = config.get("tool_context_min_score", 0.75)
         max_notes = config.get("tool_context_max_notes", 2)
         t0 = time.time()
-        raw_results = qmd_search_with_extras(
-            search_query,
-            limit=max_notes + 5,
-            semantic=False,
-            timeout=2,
-            min_score=min_score,
-        )
-        raw_result_count = len(raw_results)
+        try:
+            raw_results = qmd_search_with_extras(
+                search_query,
+                limit=max_notes + 5,
+                semantic=False,
+                timeout=2,
+                min_score=min_score,
+            )
+            raw_result_count = len(raw_results)
+            # Tool-context is unsolicited injection: require a positive project
+            # match instead of letting untagged notes through as general knowledge.
+            results = enhance_results(raw_results, config, cwd=cwd, require_project_match=True)
+            enhanced_result_count = len(results)
+        except Exception as exc:
+            latency_ms = int((time.time() - t0) * 1000)
+            cache["last_qmd_call"] = time.time()
+            save_cache(cache)
+            log_retrieval(
+                "tool-context",
+                "backend-error",
+                query=search_query,
+                file_path=normalized_path,
+                latency_ms=latency_ms,
+                error_type=type(exc).__name__,
+            )
+            return no_context(
+                "backend-error",
+                dir_key=dir_key,
+                source=source,
+                latency_ms=latency_ms,
+                error_type=type(exc).__name__,
+                min_score=min_score,
+            )
         latency_ms = int((time.time() - t0) * 1000)
-        # Tool-context is unsolicited injection: require a positive project
-        # match instead of letting untagged notes through as general knowledge.
-        results = enhance_results(raw_results, config, cwd=cwd, require_project_match=True)
-        enhanced_result_count = len(results)
 
         cache["last_qmd_call"] = time.time()
         cache.setdefault("dirs", {})[dir_key] = {

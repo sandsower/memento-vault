@@ -116,7 +116,7 @@ tool_context_max_notes: 2
 tool_context_max_injections: 5
 
 # Seconds between QMD calls (rate limiting)
-tool_context_cooldown: 3
+tool_context_cooldown: 1
 
 # Hours before directory-level tool-context cache entries are refreshed (0 disables expiry)
 tool_context_cache_ttl_hours: 24

@@ -180,7 +180,8 @@ def analyze_tool_context(entries):
     population = decisions or tool_context
     injected = [e for e in population if e.get("decision") == "injected" or e.get("action") == "inject"]
     reasons = Counter(e.get("decision") or e.get("reason") or e.get("action", "unknown") for e in population)
-    sources = Counter(e.get("source", "unknown") for e in decisions)
+    sourced_decisions = [e for e in decisions if e.get("source") in {"cache", "search"}]
+    sources = Counter(e["source"] for e in sourced_decisions)
     latencies = [e["latency_ms"] for e in population if "latency_ms" in e]
     chars = [e.get("injected_chars", 0) for e in injected]
     injected_paths = Counter(path for e in injected for path in e.get("injected_paths", []))
@@ -194,7 +195,7 @@ def analyze_tool_context(entries):
     if sources:
         print("  Source distribution:")
         for source, count in sources.most_common():
-            print(f"    {source}: {count} ({pct(count, len(decisions))})")
+            print(f"    {source}: {count} ({pct(count, len(sourced_decisions))})")
     print("  Decision distribution:")
     for reason, count in reasons.most_common():
         print(f"    {reason}: {count} ({pct(count, len(population))})")

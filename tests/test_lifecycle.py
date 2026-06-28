@@ -1931,6 +1931,65 @@ class TestToolContextCacheTTLAndScoping:
         assert result.should_inject is True
         mock_search.assert_not_called()
 
+    def test_cache_hit_restores_result_count_diagnostics(self):
+        import time as _time
+
+        from memento.lifecycle import _tool_context_dir_key
+
+        key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
+        cache = {
+            "schema": 3,
+            "dirs": {
+                key: {
+                    "results": [{"path": "notes/auth.md", "title": "Auth note", "score": 0.8, "snippet": ""}],
+                    "ts": _time.time(),
+                    "query": "auth middleware",
+                    "raw_result_count": 7,
+                    "enhanced_result_count": 1,
+                }
+            },
+            "last_qmd_call": 0,
+            "injections": {},
+        }
+
+        result, mock_search, _, mock_log, _ = self._call(cache)
+
+        assert result.should_inject is True
+        mock_search.assert_not_called()
+        decision = [call.kwargs for call in mock_log.call_args_list if call.args[:2] == ("tool-context", "decision")][
+            -1
+        ]
+        assert decision["source"] == "cache"
+        assert decision["raw_result_count"] == 7
+        assert decision["enhanced_result_count"] == 1
+
+    def test_search_backend_error_fails_open_with_terminal_decision(self):
+        from memento.lifecycle import build_tool_context
+
+        config = dict(DEFAULT_CONFIG)
+        cache = {"schema": 3, "dirs": {}, "last_qmd_call": 0, "injections": {}}
+        saved = {}
+
+        with (
+            patch("memento.lifecycle.has_qmd", return_value=True),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.load_cache", return_value=cache),
+            patch("memento.lifecycle.save_cache", side_effect=lambda c: saved.update(c)),
+            patch("memento.lifecycle.qmd_search_with_extras", side_effect=RuntimeError("boom")) as mock_search,
+            patch("memento.lifecycle.log_retrieval") as mock_log,
+        ):
+            result = build_tool_context("Read", "/workspace/src/server/authMiddleware.ts", "/repo", "s1")
+
+        assert result.should_inject is False
+        assert result.reason == "backend-error"
+        mock_search.assert_called_once()
+        assert saved["last_qmd_call"] > 0
+        decision = [call.kwargs for call in mock_log.call_args_list if call.args[:2] == ("tool-context", "decision")][
+            -1
+        ]
+        assert decision["decision"] == "backend-error"
+        assert decision["error_type"] == "RuntimeError"
+
     def test_expired_cache_entry_triggers_fresh_search(self):
         import time as _time
 
