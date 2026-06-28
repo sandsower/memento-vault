@@ -497,6 +497,8 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
                 note_type=note.get("type", "discovery"),
                 tags=note.get("tags", []),
                 certainty=note.get("certainty"),
+                source="session",
+                origin=f"claude_triage:{meta.get('agent') or 'claude'}",
                 validity_context=note.get("validity_context") or note.get("validity-context"),
                 supersedes=note.get("supersedes"),
                 project=meta.get("cwd"),

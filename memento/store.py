@@ -421,6 +421,74 @@ _CERTAINTY_LABELS = {
     "verified": 5,
 }
 
+_CANONICAL_NOTE_TYPES = {"decision", "discovery", "pattern", "bugfix", "tool", "architecture"}
+_LEGACY_NOTE_TYPE_ALIASES = {
+    "debug": "bugfix",
+    "debugging": "bugfix",
+    "fix": "bugfix",
+    "bug-fix": "bugfix",
+    "session": "discovery",
+}
+
+
+def _normalize_note_type(note_type):
+    """Return the canonical note type used by durable atomic notes."""
+    raw = _safe_yaml_scalar(note_type or "discovery").lower().replace("_", "-")
+    normalized = _LEGACY_NOTE_TYPE_ALIASES.get(raw, raw)
+    if normalized in _CANONICAL_NOTE_TYPES:
+        return normalized
+    return "discovery"
+
+
+def _normalize_tags(tags):
+    """Return stable, non-empty tags for frontmatter."""
+    normalized = []
+    seen = set()
+    for tag in tags or []:
+        safe = _safe_yaml_scalar(tag).strip()
+        if not safe:
+            continue
+        key = safe.lower()
+        if key in seen:
+            continue
+        normalized.append(safe)
+        seen.add(key)
+    return normalized
+
+
+def normalize_note_contract(
+    *,
+    note_type="discovery",
+    tags=None,
+    certainty=None,
+    source="session",
+    origin=None,
+    validity_context=None,
+    supersedes=None,
+    project=None,
+    branch=None,
+    session_id=None,
+):
+    """Normalize metadata to the shared durable-note contract.
+
+    All capture/write paths should pass through this adapter before frontmatter
+    is written so Claude triage, Pi capture, Pi curation, and MCP writes use the
+    same typed schema. Legacy `type: session` inputs are accepted and written as
+    typed discoveries; existing legacy notes are handled in retrieval metadata.
+    """
+    return {
+        "note_type": _normalize_note_type(note_type),
+        "tags": _normalize_tags(tags),
+        "certainty": _coerce_certainty(certainty),
+        "source": _safe_yaml_scalar(source or "session") or "session",
+        "origin": _safe_yaml_scalar(origin) or None,
+        "validity_context": _safe_yaml_scalar(validity_context) or None,
+        "supersedes": _safe_yaml_scalar(supersedes) or None,
+        "project": _safe_yaml_scalar(project) or None,
+        "branch": _safe_yaml_scalar(branch) or None,
+        "session_id": _safe_yaml_scalar(session_id) or None,
+    }
+
 
 def _coerce_certainty(certainty):
     """Return a schema-valid certainty int, or None for unusable input."""
@@ -448,13 +516,14 @@ def write_note(
     tags,
     certainty=None,
     source="session",
+    origin=None,
     validity_context=None,
     supersedes=None,
     project=None,
     branch=None,
     session_id=None,
 ):
-    """Write an atomic note with frontmatter to notes/ using an atomic rename."""
+    """Write an atomic note with normalized frontmatter to notes/ using an atomic rename."""
     notes_dir = Path(vault_path) / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
 
@@ -470,33 +539,43 @@ def write_note(
     tmp = notes_dir / f".tmp-{slug}.md"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
-    # Sanitize all scalar fields to prevent frontmatter injection
+    # Sanitize and normalize all contract fields to prevent frontmatter injection.
     safe_title = _safe_yaml_scalar(title)
-    safe_type = _safe_yaml_scalar(note_type)
-    safe_source = _safe_yaml_scalar(source)
-    safe_tags = [_safe_yaml_scalar(t) for t in tags]
+    contract = normalize_note_contract(
+        note_type=note_type,
+        tags=tags,
+        certainty=certainty,
+        source=source,
+        origin=origin,
+        validity_context=validity_context,
+        supersedes=supersedes,
+        project=project,
+        branch=branch,
+        session_id=session_id,
+    )
 
     lines = [
         "---",
         f"title: {safe_title}",
-        f"type: {safe_type}",
-        f"tags: [{', '.join(safe_tags)}]",
-        f"source: {safe_source}",
+        f"type: {contract['note_type']}",
+        f"tags: {json.dumps(contract['tags'], ensure_ascii=False)}",
+        f"source: {contract['source']}",
     ]
-    certainty_value = _coerce_certainty(certainty)
-    if certainty_value is not None:
-        lines.append(f"certainty: {certainty_value}")
-    if validity_context:
-        lines.append(f"validity-context: {_safe_yaml_scalar(validity_context)}")
-    if supersedes:
-        lines.append(f'supersedes: "{_safe_yaml_scalar(supersedes)}"')
-    if project:
-        lines.append(f"project: {_safe_yaml_scalar(project)}")
-    if branch:
-        lines.append(f"branch: {_safe_yaml_scalar(branch)}")
+    if contract["origin"]:
+        lines.append(f"origin: {contract['origin']}")
+    if contract["certainty"] is not None:
+        lines.append(f"certainty: {contract['certainty']}")
+    if contract["validity_context"]:
+        lines.append(f"validity-context: {contract['validity_context']}")
+    if contract["supersedes"]:
+        lines.append(f"supersedes: {json.dumps(contract['supersedes'], ensure_ascii=False)}")
+    if contract["project"]:
+        lines.append(f"project: {contract['project']}")
+    if contract["branch"]:
+        lines.append(f"branch: {contract['branch']}")
     lines.append(f"date: {now}")
-    if session_id:
-        lines.append(f"session_id: {_safe_yaml_scalar(session_id)}")
+    if contract["session_id"]:
+        lines.append(f"session_id: {contract['session_id']}")
 
     # Append the canonical "## Related" placeholder only if the body doesn't
     # already contain one — otherwise callers that include their own ## Related

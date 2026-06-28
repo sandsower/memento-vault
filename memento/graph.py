@@ -18,8 +18,9 @@ def read_note_metadata(note_name):
 
     Returns:
         Dict with: date (str|None), certainty (int|None), type (str|None),
-        tags (list of str), links (list of wikilink target names).
-        Returns None if the note file doesn't exist.
+        source/origin/supersedes/project metadata, tags (list of str), and
+        links (list of wikilink target names). Returns None if the note file
+        doesn't exist.
     """
     vault = get_vault()
     # Normalize: accept both 'some-note' and 'notes/some-note.md'
@@ -35,6 +36,9 @@ def read_note_metadata(note_name):
     certainty = None
     note_type = None
     project = None
+    source = None
+    origin = None
+    supersedes = None
     tags = []
     links = []
 
@@ -64,6 +68,12 @@ def read_note_metadata(note_name):
                         note_type = stripped[5:].strip()
                     elif stripped.startswith("project:"):
                         project = stripped[8:].strip().strip('"').strip("'")
+                    elif stripped.startswith("source:"):
+                        source = stripped[7:].strip().strip('"').strip("'")
+                    elif stripped.startswith("origin:"):
+                        origin = stripped[7:].strip().strip('"').strip("'")
+                    elif stripped.startswith("supersedes:"):
+                        supersedes = stripped[10:].strip().strip('"').strip("'")
                     elif stripped.startswith("tags:"):
                         raw_tags = stripped[5:].strip()
                         if raw_tags.startswith("[") and raw_tags.endswith("]"):
@@ -80,6 +90,9 @@ def read_note_metadata(note_name):
         "certainty": certainty,
         "type": note_type,
         "project": project,
+        "source": source,
+        "origin": origin,
+        "supersedes": supersedes,
         "tags": tags,
         "links": links,
     }

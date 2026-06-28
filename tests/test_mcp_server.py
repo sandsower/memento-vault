@@ -510,6 +510,7 @@ class TestMementoStore:
         content = note_path.read_text()
         assert "title: Test discovery" in content
         assert "source: mcp" in content
+        assert "origin: mcp_store" in content
         assert "certainty: 3" in content
 
     @pytest.mark.usefixtures("_use_vault_config")
@@ -537,6 +538,65 @@ class TestMementoStore:
         assert second["created"] is False
         assert second["idempotent"] is True
         assert not (tmp_vault / "notes" / "duplicate-safe-note-2.md").exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_legacy_mcp_note_without_origin_is_idempotent(self, tmp_vault):
+        note_path = tmp_vault / "notes" / "legacy-mcp-note.md"
+        note_path.write_text(
+            "---\n"
+            "title: Legacy MCP note\n"
+            "type: discovery\n"
+            "tags: [sync]\n"
+            "source: mcp\n"
+            "certainty: 4\n"
+            "project: /home/vic/Projects/memento-vault\n"
+            "branch: main\n"
+            "date: 2026-06-28T19:00\n"
+            "---\n\n"
+            "Same body.\n\n"
+            "## Related\n"
+        )
+
+        result = memento_store(
+            title="Legacy MCP note",
+            body="Same body.",
+            note_type="discovery",
+            tags=["sync"],
+            certainty=4,
+            project="/home/vic/Projects/memento-vault",
+            branch="main",
+        )
+
+        assert result["path"] == "notes/legacy-mcp-note.md"
+        assert result["idempotent"] is True
+        assert not (tmp_vault / "notes" / "legacy-mcp-note-2.md").exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_mcp_store_does_not_idempotently_match_other_sources(self, tmp_vault):
+        note_path = tmp_vault / "notes" / "manual-source-note.md"
+        note_path.write_text(
+            "---\n"
+            "title: Manual source note\n"
+            "type: discovery\n"
+            "tags: [sync]\n"
+            "source: manual\n"
+            "certainty: 4\n"
+            "date: 2026-06-28T19:00\n"
+            "---\n\n"
+            "Same body.\n\n"
+            "## Related\n"
+        )
+
+        result = memento_store(
+            title="Manual source note",
+            body="Same body.",
+            note_type="discovery",
+            tags=["sync"],
+            certainty=4,
+        )
+
+        assert result["path"] == "notes/manual-source-note-2.md"
+        assert (tmp_vault / "notes" / "manual-source-note-2.md").exists()
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_same_title_different_content_still_creates_suffix(self, tmp_vault):
@@ -760,7 +820,10 @@ class TestMementoCapture:
         note_path = tmp_vault / result["note_path"]
         assert note_path.exists()
         content = note_path.read_text()
+        assert "type: discovery" in content
         assert "source: mcp-capture" in content
+        assert "origin: mcp_capture:cursor" in content
+        assert "certainty: 2" in content
         assert "auth.py" in content
 
         # Verify fleeting was written

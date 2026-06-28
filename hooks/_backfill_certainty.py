@@ -7,6 +7,7 @@ Inference rules:
   source: manual          -> certainty 3
   type: decision          -> certainty 3
   type: discovery, source: session -> certainty 2
+  legacy type: session (Pi/manual captures) -> certainty 2
   type: pattern, source: inception -> certainty 3
   type: tool              -> certainty 3
   default                 -> certainty 2
@@ -25,6 +26,8 @@ def infer_certainty(source, note_type):
     if note_type == "decision":
         return 3
     if note_type == "discovery" and source == "session":
+        return 2
+    if note_type == "session":
         return 2
     if note_type == "pattern" and source == "inception":
         return 3

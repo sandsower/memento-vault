@@ -84,7 +84,7 @@ class TestApplyQualitySignals:
         assert log_shaped == ["fleeting/2026-06-10.md", "projects/memento-vault.md"]
 
     def test_penalizes_plain_session_notes(self, vault):
-        path = _write_note(vault, "pi-manual-note", ["title: Manual Pi note", "type: session", "tags: [memento]"])
+        path = _write_note(vault, "plain-session-note", ["title: Manual note", "type: session", "tags: [memento]"])
         results = [_result(path, 0.8)]
 
         with patch("memento.graph.get_vault", return_value=vault):
@@ -92,6 +92,16 @@ class TestApplyQualitySignals:
 
         assert len(kept) == 1
         assert kept[0]["score"] == pytest.approx(0.8 * 0.85)
+
+    def test_legacy_pi_session_notes_are_handled_as_low_certainty_discoveries(self, vault):
+        path = _write_note(vault, "pi-manual-note", ["title: Manual Pi note", "type: session", "tags: [pi]"])
+        results = [_result(path, 0.8)]
+
+        with patch("memento.graph.get_vault", return_value=vault):
+            kept = apply_quality_signals(results, config={"quality_signals_enabled": True})
+
+        assert len(kept) == 1
+        assert kept[0]["score"] == pytest.approx(0.8 * 0.9)
 
     def test_penalizes_low_certainty(self, vault):
         path = _write_note(vault, "uncertain", ["title: Uncertain", "type: discovery", "certainty: 1"])
