@@ -31,6 +31,7 @@ from memento.store import (
     append_fleeting_session,
     append_project_session_line,
     log_retrieval,
+    normalize_note_contract,
     release_vault_write_lock,
     update_project_index,
     write_daily_snapshot,
@@ -75,6 +76,7 @@ def _note_payload_matches(
     validity_context: str | None = None,
     supersedes: str | None = None,
     session_id: str | None = None,
+    origin: str | None = None,
 ) -> bool:
     """Return True when an existing note represents the same store payload."""
     try:
@@ -114,6 +116,7 @@ def _note_payload_matches(
         "validity-context": validity_context,
         "supersedes": supersedes,
         "session_id": session_id,
+        "origin": origin,
     }
     for key, expected in optional_fields.items():
         if expected is not None:
@@ -387,6 +390,7 @@ def memento_store(
     session_id: str | None = None,
     validity_context: str | None = None,
     supersedes: str | None = None,
+    origin: str | None = None,
 ) -> dict:
     """Store a new note in the memento vault (low-level primitive).
 
@@ -400,7 +404,7 @@ def memento_store(
     Args:
         title: Note title (used as the filename slug).
         body: Note body content (markdown).
-        note_type: Note type -- one of: discovery, decision, pattern, debugging, architecture.
+        note_type: Note type -- one of: discovery, decision, pattern, bugfix, tool, architecture. Legacy debugging/session aliases are normalized.
         tags: List of tags for categorization.
         certainty: Confidence level 1-5 (5 = proven fact, 1 = speculation).
         project: Project path or identifier this note belongs to.
@@ -408,6 +412,7 @@ def memento_store(
         session_id: Session identifier for traceability.
         validity_context: Conditions under which this note remains valid.
         supersedes: Title of a note this one replaces.
+        origin: Optional integration path that created the note.
 
     Returns:
         Dict with the path of the written note, or an error.
@@ -422,6 +427,19 @@ def memento_store(
         return {"error": f"Vault not found at {vault}"}
 
     sanitized_body = sanitize_secrets(body)
+    explicit_origin = origin is not None
+    contract = normalize_note_contract(
+        note_type=note_type,
+        tags=tags or [],
+        certainty=certainty,
+        source="mcp",
+        origin=origin or "mcp_store",
+        validity_context=validity_context,
+        supersedes=supersedes,
+        project=project,
+        branch=branch,
+        session_id=session_id,
+    )
 
     if not acquire_vault_write_lock():
         return {"error": "Could not acquire vault write lock (another write in progress)"}
@@ -432,14 +450,15 @@ def memento_store(
             target,
             title=title,
             body=sanitized_body,
-            note_type=note_type,
-            tags=tags or [],
-            certainty=certainty,
-            project=project,
-            branch=branch,
-            validity_context=validity_context,
-            supersedes=supersedes,
-            session_id=session_id,
+            note_type=contract["note_type"],
+            tags=contract["tags"],
+            certainty=contract["certainty"],
+            project=contract["project"],
+            branch=contract["branch"],
+            validity_context=contract["validity_context"],
+            supersedes=contract["supersedes"],
+            session_id=contract["session_id"],
+            origin=contract["origin"] if explicit_origin else None,
         ):
             rel_path = str(target.relative_to(vault))
             log_retrieval("mcp", "store_idempotent", title=title, path=rel_path)
@@ -454,15 +473,16 @@ def memento_store(
             vault,
             title=title.strip(),
             body=sanitized_body,
-            note_type=note_type,
-            tags=tags or [],
-            certainty=certainty,
-            source="mcp",
-            validity_context=validity_context,
-            supersedes=supersedes,
-            project=project,
-            branch=branch,
-            session_id=session_id,
+            note_type=contract["note_type"],
+            tags=contract["tags"],
+            certainty=contract["certainty"],
+            source=contract["source"],
+            origin=contract["origin"],
+            validity_context=contract["validity_context"],
+            supersedes=contract["supersedes"],
+            project=contract["project"],
+            branch=contract["branch"],
+            session_id=contract["session_id"],
         )
 
         # Update project index if we can derive a project slug
@@ -891,6 +911,7 @@ def memento_capture(
             tags=[agent, project_slug] if project_slug != "unknown" else [agent],
             certainty=2,
             source="mcp-capture",
+            origin=f"mcp_capture:{agent}",
             project=cwd or None,
             branch=branch or None,
             session_id=session_id,
