@@ -64,6 +64,10 @@ auto_commit: true
 # Claude model to use for generating atomic notes
 agent_model: sonnet
 
+# Optional hardened mode for detached Claude workers.
+# When true, headless Claude calls add --bare and require API-key or apiKeyHelper auth.
+claude_bare_headless: false
+
 # Seconds to wait before committing agent-generated notes
 # (gives the background agent time to finish writing)
 agent_delay_seconds: 90

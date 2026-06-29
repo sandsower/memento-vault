@@ -76,6 +76,7 @@ class TestLoadConfig:
         assert "llm_backend" in DEFAULT_CONFIG
         assert DEFAULT_CONFIG["llm_backend"] == "claude"
         assert DEFAULT_CONFIG["llm_model"] is None
+        assert DEFAULT_CONFIG["claude_bare_headless"] is False
 
     def test_recall_diagnostics_defaults_disabled(self):
         assert DEFAULT_CONFIG["recall_diagnostics"] is False

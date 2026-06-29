@@ -72,6 +72,24 @@ class TestCliBackends:
         assert "MultiEdit" not in denylist
 
     @patch("memento.llm.subprocess.run")
+    def test_claude_backend_can_enable_bare_headless_mode(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}\n", stderr="")
+
+        llm_complete(
+            "transcript",
+            {
+                "llm_backend": "claude",
+                "claude_bare_headless": True,
+            },
+        )
+
+        cmd = mock_run.call_args[0][0]
+        assert "--bare" in cmd
+        assert cmd[cmd.index("--bare") + 1] == "--tools"
+        assert cmd[cmd.index("--permission-mode") + 1] == "default"
+        assert cmd[cmd.index("--mcp-config") + 1] == '{"mcpServers": {}}'
+
+    @patch("memento.llm.subprocess.run")
     def test_claude_backend_adds_actionable_invalid_mcp_hint(self, mock_run):
         stderr = "Error: Invalid MCP configuration:\nmcpServers: Does not adhere to MCP server configuration schema"
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr=stderr)

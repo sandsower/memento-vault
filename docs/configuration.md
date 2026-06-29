@@ -42,6 +42,11 @@ auto_commit: true
 # Claude model for generating atomic notes
 agent_model: sonnet
 
+# Optional hardened mode for detached Claude workers.
+# When true, memento/llm.py adds --bare to headless Claude calls.
+# This skips hook/plugin/skill discovery and requires API-key or apiKeyHelper auth.
+claude_bare_headless: false
+
 # Seconds to wait before committing agent-written notes
 agent_delay_seconds: 90
 

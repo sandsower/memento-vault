@@ -139,6 +139,7 @@ DEFAULT_CONFIG = {
     # LLM backend (agent-agnostic)
     "llm_backend": "claude",
     "llm_model": None,  # None = use agent_model for backwards compat
+    "claude_bare_headless": False,
     "llm_api_key": None,
     "llm_api_base": None,
 }
