@@ -124,7 +124,7 @@ Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.js
       "processQueue": true,
       "processQueueOnSessionClose": false,
       "processQueueMaxCaptures": 3,
-      "processQueueModel": null,
+      "processQueueModel": "claude-sonnet-4-20250514",
       "maxInjectedChars": 4000,
       "maxToolContextPerSession": 5
     }
@@ -147,9 +147,9 @@ Environment variables override file config:
 | `MEMENTO_PI_PROCESS_QUEUE` | `true` | Enable manual queued-capture processing. |
 | `MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE` | `false` | Reserved future automation route for processing a small batch on session close. |
 | `MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES` | `3` | Reserved future cap for session-close processing. |
-| `MEMENTO_PI_PROCESS_QUEUE_MODEL` | unset | Optional model override for processor sessions. |
+| `MEMENTO_PI_PROCESS_QUEUE_MODEL` | `claude-sonnet-4-20250514` | Model for processor sessions; set config/env explicitly to override or `null` in config to use pi's default. |
 
-When automatic capture is enabled, pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
+When automatic capture is enabled, pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. The processor prompt receives deterministic existing-note deduplication context and instructs curators to store original project/cwd/branch/session metadata as note frontmatter via `memento_capture`, not as prose boilerplate. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
 
 Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
 

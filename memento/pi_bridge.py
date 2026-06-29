@@ -430,6 +430,41 @@ def _get(path: str) -> dict[str, Any]:
     return {"error": f"Note not found: {note_path}"}
 
 
+def _capture_note_tags(tags: list[str], project_slug: str, source_event: str = "manual") -> list[str]:
+    """Merge caller-provided tags with Pi/project tags while preserving order."""
+    merged = ["pi"]
+    if source_event in {"manual", "tool"}:
+        merged.append("manual")
+    if project_slug != "unknown":
+        merged.append(project_slug)
+    for tag in tags:
+        clean = str(tag).strip()
+        if clean:
+            merged.append(clean)
+    deduped = []
+    seen = set()
+    for tag in merged:
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(tag)
+    return deduped
+
+
+def _capture_certainty(certainty: int | str | None) -> int | dict[str, str]:
+    """Normalize Pi capture certainty, rejecting values outside the 1-5 contract."""
+    if certainty in (None, ""):
+        return 2
+    try:
+        value = int(certainty)
+    except (TypeError, ValueError):
+        return {"error": "certainty must be an integer from 1 to 5"}
+    if 1 <= value <= 5:
+        return value
+    return {"error": "certainty must be an integer from 1 to 5"}
+
+
 def _capture(
     title: str,
     body: str,
@@ -438,6 +473,10 @@ def _capture(
     queue: bool = False,
     reason: str = "manual",
     source_event: str = "manual",
+    note_type: str = "session",
+    tags: list[str] | None = None,
+    certainty: int | str | None = None,
+    branch_override: str | None = None,
 ) -> dict[str, Any]:
     if not title.strip():
         return {"error": "title is required"}
@@ -447,7 +486,12 @@ def _capture(
     if not vault.exists():
         return {"error": f"Vault not found at {vault}"}
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
-    branch = _git_branch(cwd)
+    branch = str(branch_override).strip() if branch_override else _git_branch(cwd)
+    clean_note_type = str(note_type or "session").strip() or "session"
+    merged_tags = _capture_note_tags(tags or [], project_slug, source_event)
+    clean_certainty = _capture_certainty(certainty)
+    if isinstance(clean_certainty, dict):
+        return clean_certainty
     if queue:
         if _is_lifecycle_source(source_event):
             decision = _lifecycle_queue_decision(session_id, cwd, body, source_event)
@@ -472,6 +516,9 @@ def _capture(
                 "project": project_slug,
                 "branch": branch,
                 "session_id": session_id,
+                "note_type": clean_note_type,
+                "tags": merged_tags,
+                "certainty": clean_certainty,
             },
         }
         captures = _load_queue(vault)
@@ -485,9 +532,9 @@ def _capture(
         vault,
         clean_title,
         clean_body,
-        "discovery",
-        ["pi", "manual", project_slug] if project_slug != "unknown" else ["pi", "manual"],
-        certainty=2,
+        clean_note_type,
+        merged_tags,
+        certainty=clean_certainty,
         source="pi-capture",
         origin=f"pi_bridge:{source_event or reason or 'manual'}",
         project=cwd or None,
@@ -780,6 +827,71 @@ def _group_captures(captures: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(groups.values())
 
 
+def _dedup_tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _frontmatter_value(text: str, key: str) -> str:
+    match = re.search(rf"^{re.escape(key)}:\s*(.+)$", text, re.MULTILINE)
+    return match.group(1).strip().strip("\"'") if match else ""
+
+
+def _frontmatter_tags(text: str) -> list[str]:
+    match = re.search(r"^tags:\s*\[([^\]]*)\]", text, re.MULTILINE)
+    if not match:
+        return []
+    return [item.strip().strip("\"'") for item in match.group(1).split(",") if item.strip()]
+
+
+def _dedup_context_for_group(vault: Path, group: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
+    """Return deterministic existing-note context for queued-capture curation.
+
+    The curator runs in a separate Pi session, so it must receive note titles and
+    paths up front rather than relying on voluntary search calls to discover
+    duplicates. Ranking is deterministic: project matches first, then lexical
+    overlap against queued capture titles/bodies, then path.
+    """
+    notes_dir = vault / "notes"
+    if not notes_dir.exists():
+        return []
+
+    project = str(group.get("project") or "").strip().lower()
+    query_parts: list[str] = []
+    for capture in group.get("captures", []):
+        query_parts.append(str(capture.get("title") or ""))
+        query_parts.append(str(capture.get("body") or "")[:1000])
+    query_tokens = _dedup_tokens("\n".join(query_parts))
+
+    ranked: list[tuple[int, int, str, dict[str, Any]]] = []
+    for note_path in sorted(notes_dir.glob("*.md"), key=lambda path: path.name):
+        try:
+            text = note_path.read_text(errors="replace")
+        except OSError:
+            continue
+        title = _frontmatter_value(text, "title") or note_path.stem
+        note_type = _frontmatter_value(text, "type")
+        note_project = _frontmatter_value(text, "project")
+        tags = _frontmatter_tags(text)
+        haystack = " ".join([title, note_type, note_project, " ".join(tags)])
+        overlap = len(query_tokens & _dedup_tokens(haystack))
+        note_tag_set = {tag.lower() for tag in tags}
+        project_match = int(bool(project) and (note_project.lower() == project or project in note_tag_set))
+        if overlap <= 0:
+            continue
+        rel_path = str(note_path.relative_to(vault))
+        item = {
+            "path": rel_path,
+            "title": title,
+            "type": note_type,
+            "tags": tags,
+            "project": note_project,
+        }
+        ranked.append((project_match, overlap, rel_path, item))
+
+    ranked.sort(key=lambda row: (-row[0], -row[1], row[2]))
+    return [item for *_rank, item in ranked[: max(0, int(limit))]]
+
+
 def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "") -> str:
     lines = [
         f"# Memento processing input: {group['group_id']}",
@@ -791,8 +903,21 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
         f"- CWD: {group.get('cwd') or '(unknown)'}",
         f"- Capture IDs: {', '.join(str(x) for x in group.get('capture_ids', []))}",
         "",
-        "## Queued captures",
+        "## Deduplication context",
     ]
+    dedup_context = group.get("dedup_context") or []
+    if dedup_context:
+        lines.append(
+            "Existing notes selected deterministically from the vault. Treat matching titles/topics as likely duplicates; read a candidate with memento_get before deciding to create overlapping notes."
+        )
+        for item in dedup_context:
+            tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+            tag_text = f" tags=[{', '.join(str(tag) for tag in tags)}]" if tags else ""
+            type_text = f" type={item.get('type')}" if item.get("type") else ""
+            lines.append(f"- {item.get('path')}: {item.get('title')}{type_text}{tag_text}")
+    else:
+        lines.append("- No existing note candidates matched this group deterministically.")
+    lines.extend(["", "## Queued captures"])
     for capture in group.get("captures", []):
         metadata = capture.get("metadata") or {}
         lines.extend(
@@ -984,6 +1109,7 @@ def _queue_process_start(
             directory.mkdir(parents=True, exist_ok=True)
         manifest_groups = []
         for group in groups:
+            group["dedup_context"] = _dedup_context_for_group(vault, group)
             transcript_info = {"included": False}
             transcript_markdown = ""
             if group.get("session_id"):
@@ -1019,6 +1145,7 @@ def _queue_process_start(
                     "input_markdown": str(inputs_dir / f"{group_id}.md"),
                     "result_json": str(results_dir / f"{group_id}.json"),
                     "log_markdown": str(logs_dir / f"{group_id}.md"),
+                    "dedup_context": group.get("dedup_context", []),
                     "transcript": transcript_info,
                 }
             )
@@ -1288,6 +1415,10 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--queue", action="store_true", help="Queue for later review instead of writing a note")
     capture.add_argument("--reason", default="manual")
     capture.add_argument("--source-event", default="manual")
+    capture.add_argument("--note-type", default="session")
+    capture.add_argument("--tag", action="append", default=[])
+    capture.add_argument("--certainty", default=None)
+    capture.add_argument("--branch", default=None)
 
     queue = sub.add_parser("queue", help="Inspect or process queued pi captures")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
@@ -1377,6 +1508,10 @@ def main(argv: list[str] | None = None) -> int:
             args.queue,
             args.reason,
             args.source_event,
+            args.note_type,
+            args.tag,
+            args.certainty,
+            args.branch,
         )
     if args.command == "queue":
         if args.queue_command == "list":

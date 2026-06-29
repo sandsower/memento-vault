@@ -40,6 +40,8 @@ interface BridgeConfig {
 	maxToolContextPerSession: number;
 }
 
+const DEFAULT_PROCESS_QUEUE_MODEL = "claude-sonnet-4-20250514";
+
 const defaultConfig: BridgeConfig = {
 	enabled: true,
 	briefing: true,
@@ -50,7 +52,7 @@ const defaultConfig: BridgeConfig = {
 	processQueue: true,
 	processQueueOnSessionClose: false,
 	processQueueMaxCaptures: 3,
-	processQueueModel: null,
+	processQueueModel: DEFAULT_PROCESS_QUEUE_MODEL,
 	maxInjectedChars: 4000,
 	maxToolContextPerSession: 5,
 };
@@ -582,10 +584,16 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			title: Type.String({ description: "Short note title for the durable memory" }),
 			body: Type.String({ description: "Durable decision, discovery, fix, or reusable pattern to capture" }),
+			note_type: Type.Optional(Type.String({ description: "Frontmatter type such as decision, discovery, pattern, bugfix, or tool" })),
+			tags: Type.Optional(Type.Array(Type.String(), { description: "Frontmatter tags for this note" })),
+			certainty: Type.Optional(Type.Number({ description: "Frontmatter certainty from 1 to 5" })),
+			cwd: Type.Optional(Type.String({ description: "Original project cwd for frontmatter/project detection; defaults to current cwd" })),
+			branch: Type.Optional(Type.String({ description: "Original git branch for frontmatter; defaults to the branch detected from cwd" })),
+			session_id: Type.Optional(Type.String({ description: "Original session identifier for frontmatter; defaults to current pi session" })),
 			queue: Type.Optional(Type.Boolean({ description: "Queue for review instead of writing a note immediately" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
+			const sessionFile = params.session_id ?? ctx.sessionManager.getSessionFile() ?? "unknown";
 			const args = [
 				"capture",
 				"--title",
@@ -593,10 +601,21 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				"--body",
 				params.body,
 				"--cwd",
-				ctx.cwd,
+				params.cwd ?? ctx.cwd,
 				"--session-id",
 				sessionFile,
 			];
+			if (params.note_type) args.push("--note-type", params.note_type);
+			if (params.branch) args.push("--branch", params.branch);
+			if (typeof params.certainty === "number" && Number.isFinite(params.certainty)) {
+				const certainty = Math.floor(params.certainty);
+				if (certainty < 1 || certainty > 5) {
+					const payload = { error: "certainty must be an integer from 1 to 5" };
+					return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload, isError: true };
+				}
+				args.push("--certainty", String(certainty));
+			}
+			for (const tag of params.tags ?? []) if (tag.trim()) args.push("--tag", tag.trim());
 			if (params.queue) args.push("--queue", "--reason", "manual", "--source-event", "tool");
 			const payload = await runJson(pi, ctx, args);
 			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
