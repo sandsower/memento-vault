@@ -191,7 +191,7 @@ Deduplication is automatic -- if the top result matches the last injection, it s
 
 ### Tool context
 
-When Claude reads a file, `vault-tool-context` extracts cwd-relative keywords from the file path and injects matching vault notes. Tool context is an unsolicited surface, so it is deliberately gated: it skips vendor/config/system/agent files, requires QMD, requires a positive project match, deduplicates against recall and prior tool-context injections, and uses a higher default BM25 threshold than prompt recall. Requires QMD.
+When Claude reads a file, `vault-tool-context` extracts cwd-relative keywords from the file path and injects matching vault notes. Tool context is on by default in fresh installs. It is an unsolicited surface, so it is deliberately gated: it skips vendor/config/system/agent files, requires QMD, requires a positive project match, deduplicates against recall and prior tool-context injections, and uses a higher default BM25 threshold than prompt recall. Requires QMD.
 
 ```yaml
 # Disable tool context
@@ -300,13 +300,15 @@ Only fires on the deep path (BM25 score below `recall_high_confidence`). Adds ~1
 auto_commit: false
 ```
 
-**No QMD** (grep-only search, no Tenet):
+**No QMD** (grep-only search, disables retrieval hooks):
 
 ```yaml
 qmd_collection: ""
 ```
 
-**No Tenet** (capture only, no retrieval):
+**Disable retrieval hooks** (capture only, no briefing/recall/tool context):
+
+These three toggles default to `true` in fresh installs.
 
 ```yaml
 session_briefing: false

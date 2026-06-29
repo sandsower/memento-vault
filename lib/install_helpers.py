@@ -117,9 +117,11 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
     """Inject hooks and permissions into Claude Code settings.json."""
     hooks_dir = claude_dir + "/hooks/"
     prefix = hook_env_prefix
-    is_experimental = experimental == "true"
 
-    # Build the hooks we want present
+    # Build the hooks we want present.
+    # The retrieval hooks are now part of the default posture; experimental
+    # installs add other extras elsewhere, but these hooks should always be
+    # present so capture/context defaults stay aligned across hosts.
     wanted = {
         "SessionEnd": {
             "matcher": "",
@@ -132,9 +134,7 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
                 }
             ],
         },
-    }
-    if is_experimental:
-        wanted["SessionStart"] = {
+        "SessionStart": {
             "matcher": "",
             "hooks": [
                 {
@@ -143,8 +143,8 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
                     "timeout": 8,
                 }
             ],
-        }
-        wanted["UserPromptSubmit"] = {
+        },
+        "UserPromptSubmit": {
             "matcher": "",
             "hooks": [
                 {
@@ -153,8 +153,8 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
                     "timeout": 5,
                 }
             ],
-        }
-        wanted["PreToolUse"] = {
+        },
+        "PreToolUse": {
             "matcher": "Read",
             "hooks": [
                 {
@@ -163,7 +163,8 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
                     "timeout": 2,
                 }
             ],
-        }
+        },
+    }
 
     # Load or create settings
     if os.path.exists(settings_path):
