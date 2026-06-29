@@ -776,6 +776,29 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "memento_contradictions",
+		label: "Memento Contradictions",
+		description: "Inspect a topic for disagreements, stale conclusions, and supersession chains. Use when comparing competing notes about the same topic or when you need explicit superseded notes marked alongside their source paths and certainty/date context.",
+		parameters: Type.Object({
+			topic: Type.String({ description: "Topic or question to inspect for contradictions" }),
+			limit: Type.Optional(Type.Number({ description: "Maximum results, default 20" })),
+			min_certainty: Type.Optional(Type.Number({ description: "Minimum certainty to include, default 2" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const payload = await runJson(pi, ctx, [
+				"contradictions",
+				"--topic",
+				params.topic,
+				"--limit",
+				String(params.limit ?? 20),
+				"--min-certainty",
+				String(params.min_certainty ?? 2),
+			]);
+			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+		},
+	});
+
+	pi.registerTool({
 		name: "memento_get",
 		label: "Memento Get",
 		description: "Read the full content of a specific memento note by path or note name. Use after memento_search when a result path needs full content, or directly when the user already supplied an exact note path/name. Do not use for topical discovery; search first.",

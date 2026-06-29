@@ -23,6 +23,7 @@ from memento.mcp_server import (
     _bind_host,
     _strip_injection,
     memento_capture,
+    memento_contradictions,
     memento_daily_snapshot,
     memento_get,
     memento_list,
@@ -369,6 +370,13 @@ class TestToolSelectionDescriptions:
         assert "Use this after memento_search" in doc
         assert "search first with memento_search" in doc
 
+    def test_contradictions_docstring_guides_comparison_use(self):
+        doc = memento_contradictions.__doc__ or ""
+
+        assert "disagreements" in doc
+        assert "superseded" in doc
+        assert "certainty/date" in doc
+
     def test_lifecycle_tool_docstrings_mark_host_adapter_primitives(self):
         for tool in (
             mcp_server.memento_briefing,
@@ -591,6 +599,25 @@ class TestLifecycleRetrievalTools:
             True,
             True,
         )
+
+
+class TestContradictionInspectionTool:
+    @patch("memento.mcp_server.inspect_contradictions")
+    def test_contradictions_delegates_to_helper(self, mock_inspect):
+        expected = {
+            "topic": "redis cache",
+            "results": [],
+            "groups": [],
+            "contradictions": [],
+            "supersession": [],
+            "summary": "0 notes; no obvious contradictions",
+        }
+        mock_inspect.return_value = expected
+
+        result = mcp_server.memento_contradictions("redis cache", limit=7, min_certainty=3)
+
+        assert result == expected
+        mock_inspect.assert_called_once_with("redis cache", limit=7, min_certainty=3)
 
 
 # --- memento_store ---

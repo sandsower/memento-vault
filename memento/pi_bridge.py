@@ -38,6 +38,7 @@ from memento.search import (
     qmd_search_with_extras,
     resolve_concrete_mode,
 )
+from memento.contradictions import inspect_contradictions
 from memento import store as store_module
 from memento.remote_client import get as remote_get
 from memento.remote_client import is_remote, search_envelope as remote_search_envelope, status as remote_status
@@ -828,6 +829,33 @@ def _search(query: str, limit: int, cwd: str = "", concrete: object = "auto") ->
             }
         )
     return {"results": sanitized}
+
+
+def _contradictions(topic: str, limit: int, min_certainty: int = 2) -> dict[str, Any]:
+    payload = inspect_contradictions(topic, limit, min_certainty)
+    if isinstance(payload, dict):
+        for result in payload.get("results", []):
+            result["title"] = strip_injection(result.get("title", ""))
+            result["snippet"] = strip_injection(result.get("snippet", ""))
+            result["status"] = strip_injection(result.get("status", ""))
+            result["polarity"] = strip_injection(result.get("polarity", ""))
+            result["path"] = strip_injection(result.get("path", ""))
+        for group in payload.get("groups", []):
+            group["theme"] = strip_injection(group.get("theme", ""))
+            group["summary"] = strip_injection(group.get("summary", ""))
+            group["note_paths"] = [strip_injection(path) for path in group.get("note_paths", [])]
+        for item in payload.get("contradictions", []):
+            item["kind"] = strip_injection(item.get("kind", ""))
+            item["paths"] = [strip_injection(path) for path in item.get("paths", [])]
+            item["titles"] = [strip_injection(title) for title in item.get("titles", [])]
+        for item in payload.get("supersession", []):
+            item["older_path"] = strip_injection(item.get("older_path", ""))
+            item["newer_path"] = strip_injection(item.get("newer_path", ""))
+            item["older_title"] = strip_injection(item.get("older_title", ""))
+            item["newer_title"] = strip_injection(item.get("newer_title", ""))
+        if isinstance(payload.get("summary"), str):
+            payload["summary"] = strip_injection(payload["summary"])
+    return payload
 
 
 def _get(path: str) -> dict[str, Any]:
@@ -2178,6 +2206,11 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--cwd", default="")
     search.add_argument("--concrete", default="auto", choices=("auto", "true", "false"))
 
+    contradictions = sub.add_parser("contradictions", help="Inspect contradictory or superseded notes")
+    contradictions.add_argument("--topic", default="")
+    contradictions.add_argument("--limit", type=int, default=20)
+    contradictions.add_argument("--min-certainty", type=int, default=2)
+
     get = sub.add_parser("get", help="Read a memento note")
     get.add_argument("--path", default="")
 
@@ -2307,6 +2340,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_json("status", _status, args.cwd)
     if args.command == "search":
         return _run_json("search", _search, args.query, args.limit, args.cwd, args.concrete)
+    if args.command == "contradictions":
+        return _run_json("contradictions", _contradictions, args.topic, args.limit, args.min_certainty)
     if args.command == "get":
         return _run_json("get", _get, args.path)
     if args.command == "capture":

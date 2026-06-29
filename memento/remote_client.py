@@ -1,7 +1,7 @@
 """HTTP client for connecting to a remote memento vault server.
 
 Used by hooks when MEMENTO_VAULT_URL is set. Provides the same operations
-as the local vault (search, store, get, capture, status) but over HTTP,
+as the local vault (search, contradictions, store, get, capture, status) but over HTTP,
 calling the remote MCP server's tools via a simple REST-like wrapper.
 
 The MCP streamable-http transport uses JSON-RPC over HTTP POST. This client
@@ -173,6 +173,16 @@ def search(
     )
     results = envelope.get("results")
     return results if isinstance(results, list) else []
+
+
+def contradictions(topic: str, limit: int = 20, min_certainty: int = 2, timeout: int = 30) -> dict:
+    """Inspect remote notes for disagreement and supersession candidates."""
+    result = _call_tool(
+        "memento_contradictions",
+        {"topic": topic, "limit": limit, "min_certainty": min_certainty},
+        timeout=timeout,
+    )
+    return result if isinstance(result, dict) else {"results": []}
 
 
 def get(path: str, timeout: int = 30) -> dict | None:

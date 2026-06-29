@@ -249,6 +249,38 @@ def test_pi_bridge_search_reports_project_filter_removed_all(capsys):
     assert payload["miss"]["details"] == {"cwd": "/repo/fundid"}
 
 
+def test_pi_bridge_contradictions_outputs_json(capsys):
+    expected = {
+        "topic": "redis cache",
+        "results": [
+            {
+                "path": "notes/redis-cache-v1.md",
+                "title": "Redis cache needs TTL",
+                "status": "superseded",
+                "polarity": "positive",
+                "snippet": "Use the shared cache.",
+            }
+        ],
+        "groups": [
+            {
+                "theme": "Redis cache needs TTL",
+                "summary": "1 notes, 1 marked, 0 contradiction(s)",
+                "note_paths": ["notes/redis-cache-v1.md"],
+            }
+        ],
+        "contradictions": [],
+        "supersession": [],
+        "summary": "1 notes; 1 marked supersession note(s); no obvious contradictions",
+    }
+    with patch("memento.pi_bridge.inspect_contradictions", return_value=expected) as mock_inspect:
+        code = pi_bridge.main(["contradictions", "--topic", "redis cache", "--limit", "4", "--min-certainty", "3"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == expected
+    mock_inspect.assert_called_once_with("redis cache", 4, 3)
+
+
 def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     (tmp_path / "notes").mkdir()
     with (
