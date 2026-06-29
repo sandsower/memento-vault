@@ -288,6 +288,7 @@ Use `/inception` to run manually, or `/inception --dry-run` to preview clusters 
 | `/memento` | Capture insights from the current session |
 | `/inception` | Find cross-session patterns and synthesize pattern notes |
 | `/memento-defrag` | Archive stale notes (low certainty, old bugfixes, superseded) |
+| `/preserve` | Archive artifact bundles intact with manifests and project links |
 | `/start-fresh` | Capture session + save pending work + prompt to clear context |
 | `/continue-work` | Recover context from git state, MEMORY.md, and optionally the vault |
 
@@ -307,7 +308,7 @@ Notes accumulate. `/memento-defrag` handles decay:
 - Hub notes (linked by 3+ others) -> never archive
 - Certainty 4-5 -> never archive
 
-Archived notes move to `archive/`, are removed from the QMD index, but remain in git history and are searchable via grep.
+Archived notes and preserved bundles move to `archive/`, are removed from the QMD index, but remain in git history and are searchable via grep.
 
 ## Automation consumption
 

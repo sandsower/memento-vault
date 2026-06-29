@@ -103,6 +103,12 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
         "Low-level SessionEnd equivalent for agents without hook support; not a replacement for interactive `/memento` workflows.",
     ),
     McpToolInventoryItem(
+        "memento_preserve",
+        "Write",
+        "Archive a file or directory bundle under `archive/<slug>/` with a manifest, a lightweight index note, and optional project-linking.",
+        "Use for evidence packets, screenshots, handoff bundles, or other artifacts that should stay intact; copy by default, move only when explicitly requested. Do not use it for ordinary knowledge capture or atomic notes.",
+    ),
+    McpToolInventoryItem(
         "memento_reindex",
         "Maintenance",
         "Rebuild the search index from all markdown files after out-of-band changes.",

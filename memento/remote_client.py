@@ -1,8 +1,8 @@
 """HTTP client for connecting to a remote memento vault server.
 
 Used by hooks when MEMENTO_VAULT_URL is set. Provides the same operations
-as the local vault (search, contradictions, store, get, capture, status) but over HTTP,
-calling the remote MCP server's tools via a simple REST-like wrapper.
+as the local vault (search, contradictions, store, get, capture, preserve, status)
+but over HTTP, calling the remote MCP server's tools via a simple REST-like wrapper.
 
 The MCP streamable-http transport uses JSON-RPC over HTTP POST. This client
 speaks that protocol directly — no MCP client library needed.
@@ -244,6 +244,42 @@ def capture(
     if fleeting_only:
         args["fleeting_only"] = True
     return _call_tool("memento_capture", args, timeout=timeout)
+
+
+def preserve(
+    path: str,
+    title: str | None = None,
+    slug: str | None = None,
+    project: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    move: bool = False,
+    include_manifest: bool = True,
+    link_project_index: bool = True,
+    cwd: str = "",
+    branch: str = "",
+    session_id: str | None = None,
+    timeout: int = 30,
+) -> dict:
+    """Preserve a file or directory bundle in the remote archive."""
+    args = {"path": path, "move": move, "include_manifest": include_manifest, "link_project_index": link_project_index}
+    if title:
+        args["title"] = title
+    if slug:
+        args["slug"] = slug
+    if project:
+        args["project"] = project
+    if description:
+        args["description"] = description
+    if tags:
+        args["tags"] = tags
+    if cwd:
+        args["cwd"] = cwd
+    if branch:
+        args["branch"] = branch
+    if session_id:
+        args["session_id"] = session_id
+    return _call_tool("memento_preserve", args, timeout=timeout)
 
 
 def status(timeout: int = 30) -> dict:
