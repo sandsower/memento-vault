@@ -347,6 +347,47 @@ def _write_capture_session_state(session_id: str, cwd: str, state: dict[str, Any
         print(f"[memento] warning: could not write pi capture session state: {exc}", file=sys.stderr)
 
 
+def _capture_audit_file(vault: Path | None = None) -> Path:
+    return _state_root() / "audit" / "pi-lifecycle-audit.jsonl"
+
+
+def _append_capture_audit(record: dict[str, Any], vault: Path | None = None) -> None:
+    path = _capture_audit_file(vault)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"[memento] warning: could not write pi capture audit: {exc}", file=sys.stderr)
+
+
+def _capture_lifecycle_metadata(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    metadata: dict[str, Any] = {}
+    for key, value in raw.items():
+        if value is None or value == "":
+            continue
+        metadata[str(key)] = value
+    return metadata
+
+
+def _parse_lifecycle_metadata(raw: object) -> tuple[dict[str, Any], str | None]:
+    if raw in (None, ""):
+        return {}, None
+    if isinstance(raw, dict):
+        return _capture_lifecycle_metadata(raw), None
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return {}, f"invalid lifecycle metadata: {exc.msg}"
+        if isinstance(parsed, dict):
+            return _capture_lifecycle_metadata(parsed), None
+        return {}, "lifecycle metadata must be a JSON object"
+    return {}, f"unsupported lifecycle metadata type: {type(raw).__name__}"
+
+
 def _body_hash(title: str, body: str) -> str:
     return hashlib.sha256(f"{title.strip()}\n{body.strip()}".encode("utf-8")).hexdigest()[:16]
 
@@ -371,9 +412,17 @@ def _meaningful_lifecycle_signal(body: str, source_event: str) -> tuple[bool, st
 
 
 def _mark_manual_capture_state(
-    session_id: str, cwd: str, project_slug: str, branch: str | None, title: str, body: str, now: datetime
+    session_id: str,
+    cwd: str,
+    project_slug: str,
+    branch: str | None,
+    title: str,
+    body: str,
+    now: datetime,
+    lifecycle_metadata: dict[str, Any] | None = None,
 ) -> None:
     state = _load_capture_session_state(session_id, cwd)
+    metadata = _capture_lifecycle_metadata(lifecycle_metadata)
     state.update(
         {
             "session_id": session_id,
@@ -382,15 +431,39 @@ def _mark_manual_capture_state(
             "branch": branch,
             "manual_capture_at": now.isoformat(timespec="seconds"),
             "manual_capture_body_hash": _body_hash(title, body),
+            "manual_capture_body_excerpt": _body_excerpt(body),
+            "manual_capture_body_char_count": len(body),
+            "manual_capture_lifecycle_metadata": metadata,
             "last_lifecycle_decision": "manual_capture_recorded",
         }
     )
     _write_capture_session_state(session_id, cwd, state)
+    _append_capture_audit(
+        {
+            "ts": now.isoformat(timespec="seconds"),
+            "decision": "manual_capture_recorded",
+            "queued": False,
+            "skipped": False,
+            "session_id": session_id,
+            "cwd": cwd,
+            "project": project_slug,
+            "branch": branch,
+            "title": title.strip(),
+            "body_hash": _body_hash(title, body),
+            "body_excerpt": _body_excerpt(body),
+            "body_char_count": len(body),
+            "lifecycle": metadata,
+        },
+        None,
+    )
 
 
-def _lifecycle_queue_decision(session_id: str, cwd: str, body: str, source_event: str) -> dict[str, Any]:
+def _lifecycle_queue_decision(
+    session_id: str, cwd: str, body: str, source_event: str, lifecycle_metadata: dict[str, Any] | None = None
+) -> dict[str, Any]:
     state = _load_capture_session_state(session_id, cwd)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    metadata = _capture_lifecycle_metadata(lifecycle_metadata)
     if not body.strip():
         decision = {"queue": False, "reason": "empty_body"}
     elif not state.get("manual_capture_at"):
@@ -407,11 +480,34 @@ def _lifecycle_queue_decision(session_id: str, cwd: str, body: str, source_event
             "last_lifecycle_source_event": source_event,
             "last_lifecycle_decision": "queued" if decision["queue"] else "skipped",
             "last_lifecycle_reason": decision["reason"],
+            "last_lifecycle_body_hash": _body_hash(source_event or "lifecycle", body),
+            "last_lifecycle_body_excerpt": _body_excerpt(body),
+            "last_lifecycle_lifecycle_metadata": metadata,
         }
     )
     if decision["queue"]:
         state["lifecycle_queue_count"] = int(state.get("lifecycle_queue_count") or 0) + 1
     _write_capture_session_state(session_id, cwd, state)
+    _append_capture_audit(
+        {
+            "ts": now,
+            "decision": "queued" if decision["queue"] else "skipped",
+            "queued": bool(decision["queue"]),
+            "skipped": not bool(decision["queue"]),
+            "session_id": session_id,
+            "cwd": cwd,
+            "source_event": source_event,
+            "reason": decision["reason"],
+            "body_hash": _body_hash(source_event or "lifecycle", body),
+            "body_excerpt": _body_excerpt(body),
+            "body_char_count": len(body),
+            "manual_capture_present": bool(state.get("manual_capture_at")),
+            "manual_capture_body_hash": state.get("manual_capture_body_hash"),
+            "manual_capture_at": state.get("manual_capture_at"),
+            "lifecycle": metadata,
+        },
+        None,
+    )
     return decision
 
 
@@ -632,6 +728,13 @@ def _status(cwd: str = "") -> dict[str, Any]:
             remote_error = remote.get("error") if isinstance(remote, dict) else None
         except Exception as exc:
             remote_error = str(exc)
+    audit_path = _capture_audit_file(vault)
+    audit_count = 0
+    last_audit: dict[str, Any] | None = None
+    if audit_path.exists():
+        for rec in _iter_jsonl(audit_path):
+            audit_count += 1
+            last_audit = rec
     return {
         "vault_path": str(vault),
         "vault_exists": vault.exists(),
@@ -646,6 +749,17 @@ def _status(cwd: str = "") -> dict[str, Any]:
         "queue_path": str(_queue_file(vault)),
         "legacy_queue_path": str(_legacy_queue_file(vault)),
         "legacy_queue_exists": _legacy_queue_file(vault).exists(),
+        "capture_audit_path": str(audit_path),
+        "capture_audit_count": audit_count,
+        "last_capture_audit": {
+            "decision": (last_audit or {}).get("decision"),
+            "queued": (last_audit or {}).get("queued"),
+            "skipped": (last_audit or {}).get("skipped"),
+            "reason": (last_audit or {}).get("reason"),
+            "source_event": (last_audit or {}).get("source_event"),
+            "manual_capture_present": (last_audit or {}).get("manual_capture_present"),
+            "manual_capture_at": (last_audit or {}).get("manual_capture_at"),
+        },
         "pi_bridge_health": _bridge_health_status(),
         "lifecycle": {
             "briefing": get_config().get("session_briefing", True),
@@ -804,6 +918,7 @@ def _capture(
     tags: list[str] | None = None,
     certainty: int | str | None = None,
     branch_override: str | None = None,
+    lifecycle_metadata: object | None = None,
 ) -> dict[str, Any]:
     if not title.strip():
         return {"error": "title is required"}
@@ -817,9 +932,28 @@ def _capture(
     clean_note_type = str(note_type or "session").strip() or "session"
     merged_tags = _capture_note_tags(tags or [], project_slug, source_event)
     clean_certainty = _capture_certainty(certainty)
+    lifecycle_metadata_value, lifecycle_metadata_error = _parse_lifecycle_metadata(lifecycle_metadata)
     if isinstance(clean_certainty, dict):
         return clean_certainty
     if queue and os.environ.get("MEMENTO_PI_PROCESSOR") == "true" and _is_lifecycle_source(source_event):
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _append_capture_audit(
+            {
+                "ts": now,
+                "decision": "processor_session_skipped",
+                "queued": False,
+                "skipped": True,
+                "session_id": session_id,
+                "cwd": cwd,
+                "source_event": source_event,
+                "reason": "processor_session",
+                "body_hash": _body_hash(source_event or "lifecycle", body),
+                "body_excerpt": _body_excerpt(body),
+                "body_char_count": len(body),
+                "lifecycle": lifecycle_metadata_value,
+            },
+            None,
+        )
         return {
             "queued": False,
             "skipped": True,
@@ -829,7 +963,7 @@ def _capture(
         }
     if queue:
         if _is_lifecycle_source(source_event):
-            decision = _lifecycle_queue_decision(session_id, cwd, body, source_event)
+            decision = _lifecycle_queue_decision(session_id, cwd, body, source_event, lifecycle_metadata_value)
             if not decision["queue"]:
                 return {
                     "queued": False,
@@ -850,6 +984,10 @@ def _capture(
         }
         if os.environ.get("MEMENTO_PI_PROCESSOR") == "true":
             metadata["memento_processor"] = True
+        if lifecycle_metadata_value:
+            metadata["lifecycle"] = lifecycle_metadata_value
+        if lifecycle_metadata_error:
+            metadata["lifecycle_metadata_error"] = lifecycle_metadata_error
         capture = {
             "id": capture_id,
             "title": title.strip(),
@@ -885,7 +1023,14 @@ def _capture(
         )
         if reason == "manual" or source_event in {"manual", "tool"}:
             _mark_manual_capture_state(
-                session_id, cwd, project_slug, branch, clean_title, clean_body, datetime.now(timezone.utc)
+                session_id,
+                cwd,
+                project_slug,
+                branch,
+                clean_title,
+                clean_body,
+                datetime.now(timezone.utc),
+                lifecycle_metadata_value,
             )
         _commit_and_reindex_locked(vault, f"pi: capture {clean_title[:80]}")
     return {"path": str(note_path.relative_to(vault)), "title": clean_title, "queued": False}
@@ -906,6 +1051,29 @@ def _capture_review_metadata(capture: dict[str, Any]) -> dict[str, Any]:
         "body_char_count": len(body),
         "body_size_bytes": size_bytes,
         "body_kb": round(size_bytes / 1024, 1),
+    }
+
+
+def _capture_lifecycle_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
+    metadata = capture.get("metadata") or {}
+    lifecycle = metadata.get("lifecycle") if isinstance(metadata, dict) else {}
+    if not isinstance(lifecycle, dict):
+        lifecycle = {}
+    return {
+        "source_event": str(capture.get("source_event") or lifecycle.get("source_event") or ""),
+        "reason": str(capture.get("reason") or lifecycle.get("reason") or ""),
+        "event_timestamp": lifecycle.get("event_timestamp"),
+        "event_index": lifecycle.get("event_index"),
+        "turn_count": lifecycle.get("turn_count"),
+        "user_message_count": lifecycle.get("user_message_count"),
+        "assistant_message_count": lifecycle.get("assistant_message_count"),
+        "tool_call_count": lifecycle.get("tool_call_count"),
+        "file_edit_count": lifecycle.get("file_edit_count"),
+        "file_read_count": lifecycle.get("file_read_count"),
+        "session_entry_count": lifecycle.get("session_entry_count"),
+        "session_last_entry_at": lifecycle.get("session_last_entry_at"),
+        "summary": lifecycle.get("summary"),
+        "body_digest": lifecycle.get("body_digest"),
     }
 
 
@@ -1040,6 +1208,7 @@ def _capture_queue_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
     metadata = capture.get("metadata") or {}
     body = str(capture.get("body") or "")
     size_bytes = len(body.encode("utf-8"))
+    lifecycle = _capture_lifecycle_snapshot(capture)
     return {
         "id": capture.get("id"),
         "title": capture.get("title"),
@@ -1053,6 +1222,12 @@ def _capture_queue_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
         "body_char_count": len(body),
         "body_size_bytes": size_bytes,
         "body_kb": round(size_bytes / 1024, 1),
+        "lifecycle": lifecycle,
+        "lifecycle_reason": lifecycle.get("reason"),
+        "turn_count": lifecycle.get("turn_count"),
+        "tool_call_count": lifecycle.get("tool_call_count"),
+        "file_edit_count": lifecycle.get("file_edit_count"),
+        "file_read_count": lifecycle.get("file_read_count"),
     }
 
 
@@ -1389,6 +1564,29 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
     lines.extend(["", "## Queued captures"])
     for capture in group.get("captures", []):
         metadata = capture.get("metadata") or {}
+        lifecycle = metadata.get("lifecycle") if isinstance(metadata, dict) else {}
+        if not isinstance(lifecycle, dict):
+            lifecycle = {}
+        lifecycle_lines = []
+        if lifecycle:
+            file_edits = lifecycle.get("file_edits") if isinstance(lifecycle.get("file_edits"), list) else []
+            file_reads = lifecycle.get("file_reads") if isinstance(lifecycle.get("file_reads"), list) else []
+            file_edits_text = ", ".join(str(path) for path in file_edits[:5]) if file_edits else ""
+            file_reads_text = ", ".join(str(path) for path in file_reads[:5]) if file_reads else ""
+            lifecycle_lines = [
+                "",
+                "- Lifecycle context:",
+                f"  - Source event: {lifecycle.get('source_event') or capture.get('source_event') or ''}",
+                f"  - Reason: {lifecycle.get('reason') or capture.get('reason') or ''}",
+                f"  - Event timestamp: {lifecycle.get('event_timestamp') or ''}",
+                f"  - Event index: {lifecycle.get('event_index') or ''}",
+                f"  - Turns: {lifecycle.get('turn_count') or ''}",
+                f"  - Tool calls: {lifecycle.get('tool_call_count') or ''}",
+                f"  - File edits: {file_edits_text}",
+                f"  - File reads: {file_reads_text}",
+                f"  - Session entries: {lifecycle.get('session_entry_count') or ''}",
+                f"  - Last session entry: {lifecycle.get('session_last_entry_at') or ''}",
+            ]
         lines.extend(
             [
                 "",
@@ -1399,6 +1597,9 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
                 f"- Source event: {capture.get('source_event') or ''}",
                 f"- Project: {metadata.get('project') or ''}",
                 f"- Branch: {metadata.get('branch') or ''}",
+            ]
+            + lifecycle_lines
+            + [
                 "",
                 str(capture.get("body") or ""),
             ]
@@ -1992,6 +2193,11 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--tag", action="append", default=[])
     capture.add_argument("--certainty", default=None)
     capture.add_argument("--branch", default=None)
+    capture.add_argument(
+        "--lifecycle-metadata",
+        default=None,
+        help="Optional JSON object with richer Pi lifecycle context and audit metadata",
+    )
 
     queue = sub.add_parser("queue", help="Inspect or process queued pi captures")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
@@ -2118,6 +2324,7 @@ def main(argv: list[str] | None = None) -> int:
             args.tag,
             args.certainty,
             args.branch,
+            args.lifecycle_metadata,
             health_metadata={"cwd": args.cwd, "session_id": args.session_id},
         )
     if args.command == "queue":
