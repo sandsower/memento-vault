@@ -1444,10 +1444,15 @@ def _summarize_process_status(payload: dict[str, Any], active: bool) -> dict[str
     completed_statuses = {"processed", "processed_no_notes"}
     completed = sum(1 for group in groups if group.get("status") in completed_statuses)
     failed = sum(1 for group in groups if group.get("status") == "failed")
+    retryable_capture_count = sum(
+        len(group.get("capture_ids", [])) for group in groups if group.get("status") == "failed"
+    )
     pending = max(0, len(groups) - completed - failed)
     payload["active"] = active
     payload["completed_group_count"] = completed
     payload["failed_group_count"] = failed
+    payload["retryable_group_count"] = failed
+    payload["retryable_capture_count"] = retryable_capture_count
     payload["pending_group_count"] = pending
     payload.setdefault("group_count", len(groups))
     payload.setdefault("selected_capture_count", sum(len(group.get("capture_ids", [])) for group in groups))
@@ -1507,6 +1512,51 @@ def _queue_process_status(run_id: str = "") -> dict[str, Any]:
         "dequeued_capture_ids": manifest.get("dequeued_capture_ids", []),
     }
     return _summarize_process_status(payload, lock_active)
+
+
+def _queue_process_retry(run_id: str = "", group_ids: list[str] | None = None) -> dict[str, Any]:
+    status = _queue_process_status(run_id)
+    target_run_id = str(status.get("run_id") or run_id or "")
+    groups = status.get("groups") if isinstance(status.get("groups"), list) else []
+    if status.get("status") == "idle" or not target_run_id:
+        return {"error": "processing run not found", "reason": "run_not_found"}
+
+    requested_group_ids = {str(group_id).strip() for group_id in (group_ids or []) if str(group_id).strip()}
+    retry_groups = [
+        group
+        for group in groups
+        if str(group.get("status") or "") == "failed"
+        and (not requested_group_ids or str(group.get("group_id") or "") in requested_group_ids)
+    ]
+    if not retry_groups:
+        return {
+            "error": "no failed groups to retry",
+            "reason": "no_failed_groups",
+            "run_id": target_run_id,
+            "group_count": len(groups),
+            "groups": groups,
+        }
+
+    selected_capture_ids: list[str] = []
+    for group in retry_groups:
+        for capture_id in group.get("capture_ids", []):
+            capture = str(capture_id).strip()
+            if capture and capture not in selected_capture_ids:
+                selected_capture_ids.append(capture)
+
+    return {
+        "run_id": target_run_id,
+        "source_run_id": target_run_id,
+        "group_count": len(groups),
+        "retry_group_count": len(retry_groups),
+        "selected_group_ids": [
+            str(group.get("group_id") or "") for group in retry_groups if str(group.get("group_id") or "")
+        ],
+        "selected_capture_count": len(selected_capture_ids),
+        "selected_capture_ids": selected_capture_ids,
+        "groups": retry_groups,
+        "queue_path": str(_queue_file(get_vault())),
+    }
 
 
 def _reported_note_exists_in_vault(vault: Path, path: str) -> bool:
@@ -1700,6 +1750,16 @@ def build_parser() -> argparse.ArgumentParser:
         "process-finalize", help="Finalize a processing run and dequeue validated captures"
     )
     process_finalize.add_argument("--run-id", required=True)
+    process_retry = queue_sub.add_parser(
+        "process-retry", help="Resolve failed groups from a prior processing run into a retry selection"
+    )
+    process_retry.add_argument("--run-id", default="")
+    process_retry.add_argument(
+        "--group-id",
+        action="append",
+        default=[],
+        help="Failed group id to retry (repeatable; default: all failed groups)",
+    )
     cleanup = queue_sub.add_parser(
         "cleanup", help="Classify queued captures and archive low-value ones (dry-run by default)"
     )
@@ -1800,6 +1860,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_json("queue", _queue_process_status, args.run_id)
         if args.queue_command == "process-finalize":
             return _run_json("queue", _queue_process_finalize, args.run_id)
+        if args.queue_command == "process-retry":
+            return _run_json("queue", _queue_process_retry, args.run_id, args.group_id)
         if args.queue_command == "cleanup":
             return _run_json("queue", _queue_cleanup, args.apply, args.discard_classes, args.samples)
         if args.queue_command == "discard":

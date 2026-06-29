@@ -35,6 +35,7 @@ export type MementoPanelAction =
 	| { type: "inspect-group" }
 	| { type: "dry-run" }
 	| { type: "process" }
+	| { type: "retry-failed" }
 	| { type: "discard" };
 
 const ACTIONS = [
@@ -81,6 +82,7 @@ export function reduceMementoPanelState(
 	if (key === " " && state.view === "queue") return { state: { ...state, selectedIndex }, action: { type: "toggle-capture" } };
 	if (key === "x" && state.view === "queue") return { state: { ...state, selectedIndex }, action: { type: "request-discard" } };
 	if (key === "i" && state.view === "process") return { state: { ...state, inspectIndex: selectedIndex }, action: { type: "inspect-group" } };
+	if (key === "t" && state.view === "process") return { state: { ...state, selectedIndex }, action: { type: "retry-failed" } };
 	if (key === "d") return { state: { ...state, view: "process", selectedIndex: 0, inspectIndex: undefined }, action: { type: "dry-run" } };
 	if (key === "p") return { state: { ...state, view: "process", selectedIndex: 0, inspectIndex: undefined, confirmProcess: true } };
 	if (key === "enter") {
@@ -114,7 +116,10 @@ export function renderMementoPanelLines(
 	else if (state.view === "status") body.push(...formatStatusLines(data.status, { includeDetails: true }));
 	else if (state.view === "queue") body.push(...formatQueueLines(data.queue, { limit: 10, selectedIds: state.selectedCaptureIds, cursorIndex: state.selectedIndex }));
 	else body.push(...formatProcessLines(data.process, { cursorIndex: state.selectedIndex, inspectIndex: state.inspectIndex }));
-	body.push("", "↑↓/j/k move · space select · x discard · i inspect · d dry-run · p process · r refresh · q back");
+	const help = state.view === "process"
+		? "↑↓/j/k move · i inspect · t retry failed · d dry-run · p process · r refresh · q back"
+		: "↑↓/j/k move · space select · x discard · i inspect · d dry-run · p process · r refresh · q back";
+	body.push("", help);
 	return frameLines("Memento Vault", body, Math.max(1, width));
 }
 
@@ -124,7 +129,10 @@ export function renderMementoStatusText(status?: Record<string, unknown>, queue?
 	const processStatus = String(process?.status ?? "");
 	const queueCount = numberValue(queue?.count ?? status?.queued_capture_count);
 	if (processStatus === "running") return `🧠 processing ${numberValue(process?.completed_group_count)}/${numberValue(process?.group_count)} · ${queueCount}q · /memento`;
-	if (["failed", "interrupted"].includes(processStatus)) return `🧠 processing ${processStatus} · ${queueCount}q · /memento`;
+	if (["failed", "interrupted"].includes(processStatus)) {
+		const failedCount = numberValue(process?.failed_group_count ?? process?.retryable_group_count);
+		return `🧠 processing ${processStatus}${failedCount > 0 ? ` · ${failedCount} failed` : ""} · ${queueCount}q · /memento`;
+	}
 	const vault = status?.vault_exists === false ? "!" : "✓";
 	const notes = numberValue(status?.note_count);
 	if (queueCount > 0 || options.pinned) return `🧠 ${queueCount}q · ${vault} · ${notes}n · /memento`;
@@ -215,7 +223,10 @@ export function formatProcessLines(payload?: Record<string, unknown>, options: {
 		if (group.session_id) lines.push(`     session: ${shortPath(String(group.session_id), 84)}`);
 		if (group.discard_reason) lines.push(`     no notes: ${fitLine(String(group.discard_reason), 80)}`);
 		if (group.error || group.reason) lines.push(`     ${fitLine(String(group.error ?? group.reason), 80)}`);
+		if (group.status === "failed" && group.log_markdown) lines.push(`     log: ${shortPath(String(group.log_markdown), 78)}`);
 	}
+	const retryable = numberValue(payload.retryable_group_count ?? groups.filter((group) => String(group.status ?? "") === "failed").length);
+	if (retryable > 0) lines.push(`Retryable failed groups: ${retryable} · select one and press t`);
 	const inspected = options.inspectIndex !== undefined ? groups[options.inspectIndex] : undefined;
 	if (inspected) {
 		lines.push("", `Artifacts for ${String(inspected.group_id ?? `group ${options.inspectIndex + 1}`)}:`);

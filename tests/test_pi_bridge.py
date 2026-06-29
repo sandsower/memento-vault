@@ -1260,6 +1260,140 @@ def test_pi_bridge_process_status_falls_back_to_manifest_results(capsys, tmp_pat
     assert payload["groups"][1]["status"] == "pending"
 
 
+def _seed_process_retry_run(tmp_path):
+    run_dir = tmp_path / "state" / "processing" / "run1"
+    results_dir = run_dir / "results"
+    logs_dir = run_dir / "logs"
+    inputs_dir = run_dir / "inputs"
+    results_dir.mkdir(parents=True)
+    logs_dir.mkdir()
+    inputs_dir.mkdir()
+
+    fixture = {
+        "g1": {
+            "capture_ids": ["q1"],
+            "result_path": results_dir / "g1.json",
+            "log_path": logs_dir / "g1.md",
+            "input_path": inputs_dir / "g1.md",
+            "result": {
+                "processed_capture_ids": ["q1"],
+                "status": "failed",
+                "created": [],
+                "skipped_duplicates": [],
+                "error": "curator result end sentinel missing",
+                "reason": "curator result end sentinel missing",
+                "result_state": "no_output",
+            },
+        },
+        "g2": {
+            "capture_ids": ["q2", "q3"],
+            "result_path": results_dir / "g2.json",
+            "log_path": logs_dir / "g2.md",
+            "input_path": inputs_dir / "g2.md",
+            "result": {
+                "processed_capture_ids": ["q2", "q3"],
+                "status": "failed",
+                "created": [],
+                "skipped_duplicates": [],
+                "error": "curator result JSON invalid: boom",
+                "reason": "curator result JSON invalid: boom",
+                "result_state": "malformed_output",
+            },
+        },
+        "g3": {
+            "capture_ids": ["q4"],
+            "result_path": results_dir / "g3.json",
+            "log_path": logs_dir / "g3.md",
+            "input_path": inputs_dir / "g3.md",
+            "result": {
+                "processed_capture_ids": ["q4"],
+                "status": "processed_no_notes",
+                "created": [],
+                "discard_reason": "noise",
+            },
+        },
+    }
+    for group_id, group in fixture.items():
+        group["log_path"].write_text(f"# log for {group_id}\n")
+        group["input_path"].write_text(f"# input for {group_id}\n")
+        group["result_path"].write_text(json.dumps(group["result"]))
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run1",
+                "status": "running",
+                "created_at": "2026-01-01T00:00:00Z",
+                "selected_capture_count": 4,
+                "group_count": 3,
+                "groups": [
+                    {
+                        "group_id": "g1",
+                        "capture_ids": fixture["g1"]["capture_ids"],
+                        "session_id": "s1",
+                        "project": "repo",
+                        "branch": "feature/pi",
+                        "input_markdown": str(fixture["g1"]["input_path"]),
+                        "result_json": str(fixture["g1"]["result_path"]),
+                        "log_markdown": str(fixture["g1"]["log_path"]),
+                    },
+                    {
+                        "group_id": "g2",
+                        "capture_ids": fixture["g2"]["capture_ids"],
+                        "session_id": "s2",
+                        "project": "repo",
+                        "branch": "feature/pi",
+                        "input_markdown": str(fixture["g2"]["input_path"]),
+                        "result_json": str(fixture["g2"]["result_path"]),
+                        "log_markdown": str(fixture["g2"]["log_path"]),
+                    },
+                    {
+                        "group_id": "g3",
+                        "capture_ids": fixture["g3"]["capture_ids"],
+                        "session_id": "s3",
+                        "project": "repo",
+                        "branch": "feature/pi",
+                        "input_markdown": str(fixture["g3"]["input_path"]),
+                        "result_json": str(fixture["g3"]["result_path"]),
+                        "log_markdown": str(fixture["g3"]["log_path"]),
+                    },
+                ],
+            }
+        )
+    )
+    return fixture
+
+
+def test_pi_bridge_process_retry_plans_all_failed_groups(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    fixture = _seed_process_retry_run(tmp_path)
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-retry", "--run-id", "run1"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source_run_id"] == "run1"
+    assert payload["retry_group_count"] == 2
+    assert payload["selected_group_ids"] == ["g1", "g2"]
+    assert payload["selected_capture_ids"] == ["q1", "q2", "q3"]
+    assert payload["selected_capture_count"] == 3
+    assert payload["groups"][0]["log_markdown"] == str(fixture["g1"]["log_path"])
+    assert payload["groups"][0]["reason"] == "curator result end sentinel missing"
+
+
+def test_pi_bridge_process_retry_filters_single_group(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    _seed_process_retry_run(tmp_path)
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-retry", "--run-id", "run1", "--group-id", "g2"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["retry_group_count"] == 1
+    assert payload["selected_group_ids"] == ["g2"]
+    assert payload["selected_capture_ids"] == ["q2", "q3"]
+    assert payload["selected_capture_count"] == 2
+
+
 def test_pi_bridge_process_finalize_dequeues_no_note_results_with_discard_reason(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
