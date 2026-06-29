@@ -8,18 +8,21 @@ memento.lifecycle; this module only translates CLI JSON to LifecycleResult JSON.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
-import sys
 import re
 import subprocess
+import sys
+import threading
 import time
 import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Generator, Optional
 
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context, strip_injection
@@ -97,6 +100,91 @@ def _read_queue_file(path: Path) -> list[dict[str, Any]]:
     return captures
 
 
+_QUEUE_LOCK_STATE = threading.local()
+
+
+def _queue_lock_file(vault: Path | None = None) -> Path:
+    return _state_root() / "queue" / "pi-captures.lock"
+
+
+@contextlib.contextmanager
+def _queue_lock(vault: Path | None = None) -> Generator[None, None, None]:
+    """Acquire an exclusive flock on the queue lock file.
+
+    The lock is blocking and re-entrant within a thread so nested queue
+    migrations can safely reuse the same critical section.
+    """
+    path = _queue_lock_file(vault)
+    depth = getattr(_QUEUE_LOCK_STATE, "depth", 0)
+    if depth:
+        _QUEUE_LOCK_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _QUEUE_LOCK_STATE.depth = depth
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        yield
+        return
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _QUEUE_LOCK_STATE.depth = 1
+        try:
+            yield
+        finally:
+            _QUEUE_LOCK_STATE.depth = 0
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex[:8]}")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        fd = os.open(str(tmp_path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(str(tmp_path), str(path))
+        dir_flag = getattr(os, "O_DIRECTORY", None)
+        if dir_flag is not None:
+            try:
+                dir_fd = os.open(str(path.parent), dir_flag)
+            except OSError:
+                dir_fd = None
+            if dir_fd is not None:
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _write_queue_file(captures: list[dict[str, Any]], path: Path) -> None:
+    """Atomically write the queue file using tmp+fsync+rename."""
+    _atomic_write_text(path, "".join(json.dumps(capture, ensure_ascii=False) + "\n" for capture in captures))
+
+
+def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> None:
+    _write_queue_file(captures, _queue_file(vault))
+
+
 def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
     legacy = _legacy_queue_file(vault)
     if not legacy.exists():
@@ -106,33 +194,34 @@ def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
         legacy.unlink()
         return {"migrated": True, "migrated_count": 0, "deleted_legacy_queue": True}
     new_path = _state_root() / "queue" / "pi-captures.jsonl"
-    current = _read_queue_file(new_path)
-    seen = {capture.get("id") for capture in current if capture.get("id")}
-    migrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    additions = []
-    for capture in old:
-        capture_id = capture.get("id")
-        if capture_id and capture_id in seen:
-            continue
-        item = dict(capture)
-        metadata = dict(item.get("metadata") or {})
-        metadata.setdefault("migrated_from", str(legacy))
-        metadata.setdefault("migrated_at", migrated_at)
-        item["metadata"] = metadata
-        additions.append(item)
-        if capture_id:
-            seen.add(capture_id)
-    combined = current + additions
-    _write_queue_file(combined, new_path)
-    reread_ids = {capture.get("id") for capture in _read_queue_file(new_path)}
-    old_ids = {capture.get("id") for capture in old if capture.get("id")}
-    if not old_ids.issubset(reread_ids):
-        return {
-            "migrated": False,
-            "reason": "verification_failed",
-            "legacy_queue_path": str(legacy),
-            "queue_path": str(new_path),
-        }
+    with _queue_lock(vault):
+        current = _read_queue_file(new_path)
+        seen = {capture.get("id") for capture in current if capture.get("id")}
+        migrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        additions = []
+        for capture in old:
+            capture_id = capture.get("id")
+            if capture_id and capture_id in seen:
+                continue
+            item = dict(capture)
+            metadata = dict(item.get("metadata") or {})
+            metadata.setdefault("migrated_from", str(legacy))
+            metadata.setdefault("migrated_at", migrated_at)
+            item["metadata"] = metadata
+            additions.append(item)
+            if capture_id:
+                seen.add(capture_id)
+        combined = current + additions
+        _write_queue_file(combined, new_path)
+        reread_ids = {capture.get("id") for capture in _read_queue_file(new_path)}
+        old_ids = {capture.get("id") for capture in old if capture.get("id")}
+        if not old_ids.issubset(reread_ids):
+            return {
+                "migrated": False,
+                "reason": "verification_failed",
+                "legacy_queue_path": str(legacy),
+                "queue_path": str(new_path),
+            }
     legacy.unlink()
     try:
         legacy.parent.rmdir()
@@ -149,15 +238,6 @@ def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
 
 def _load_queue(vault: Path | None = None) -> list[dict[str, Any]]:
     return _read_queue_file(_queue_file(vault))
-
-
-def _write_queue_file(captures: list[dict[str, Any]], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(capture, ensure_ascii=False) + "\n" for capture in captures))
-
-
-def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> None:
-    _write_queue_file(captures, _queue_file(vault))
 
 
 def _queue_count(vault: Path | None = None) -> int:
@@ -199,7 +279,7 @@ def _write_capture_session_state(session_id: str, cwd: str, state: dict[str, Any
     path = _capture_session_state_file(session_id, cwd)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        _atomic_write_text(path, json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     except OSError as exc:
         # Session state is an optimization for lifecycle queue suppression; capture commands must still succeed.
         print(f"[memento] warning: could not write pi capture session state: {exc}", file=sys.stderr)
@@ -521,9 +601,10 @@ def _capture(
                 "certainty": clean_certainty,
             },
         }
-        captures = _load_queue(vault)
-        captures.append(capture)
-        _write_queue(captures, vault)
+        with _queue_lock(vault):
+            captures = _load_queue(vault)
+            captures.append(capture)
+            _write_queue(captures, vault)
         return {"id": capture_id, "title": title.strip(), "queued": True, "queue_path": str(_queue_file(vault))}
 
     clean_title = title.strip()
@@ -679,7 +760,15 @@ def _queue_cleanup(
             entry = dict(capture)
             entry["cleanup"] = {"discarded_at": discarded_at, "class": klass, "reason": reason}
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    _write_queue(retained, vault)
+    with _queue_lock(vault):
+        current = _load_queue(vault)
+        still_discardable = []
+        for capture in current:
+            klass, _reason = _classify_queued_capture(capture)
+            if klass in discard_set:
+                still_discardable.append(capture)
+        final_retained = [c for c in current if c not in still_discardable]
+        _write_queue(final_retained, vault)
     result["backup_path"] = str(backup_path)
     result["archive_path"] = str(archive_path)
     return result
@@ -1131,8 +1220,8 @@ def _queue_process_start(
                 else:
                     transcript_info = {"path": str(transcript_path), "included": False, "reason": "missing"}
             group_id = group["group_id"]
-            (inputs_dir / f"{group_id}.json").write_text(json.dumps(group, ensure_ascii=False, indent=2))
-            (inputs_dir / f"{group_id}.md").write_text(_render_capture_packet(group, transcript_markdown))
+            _atomic_write_text(inputs_dir / f"{group_id}.json", json.dumps(group, ensure_ascii=False, indent=2))
+            _atomic_write_text(inputs_dir / f"{group_id}.md", _render_capture_packet(group, transcript_markdown))
             manifest_groups.append(
                 {
                     "group_id": group_id,
@@ -1160,7 +1249,7 @@ def _queue_process_start(
             "groups": manifest_groups,
             "status": "running",
         }
-        (run_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+        _atomic_write_text(run_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         return {
             "run_id": run_id,
             "run_dir": str(run_dir),
@@ -1300,60 +1389,63 @@ def _queue_process_finalize(run_id: str) -> dict[str, Any]:
     if not manifest_path.exists():
         return {"error": f"processing run not found: {run_id}", "reason": "run_not_found"}
     manifest = json.loads(manifest_path.read_text(errors="replace"))
-    captures = _load_queue(vault)
-    dequeue_ids: set[str] = set()
-    group_results = []
-    for group in manifest.get("groups", []):
-        expected_ids = set(str(x) for x in group.get("capture_ids", []))
-        result_path = Path(group.get("result_json", ""))
-        if not result_path.exists():
-            group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"})
-            continue
-        try:
-            result = json.loads(result_path.read_text(errors="replace"))
-        except json.JSONDecodeError:
-            group_results.append(
-                {"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"}
-            )
-            continue
-        processed_ids = set(str(x) for x in result.get("processed_capture_ids", []))
-        status = result.get("status")
-        valid = processed_ids == expected_ids and status in {"processed", "processed_no_notes"}
-        reason = "ok"
-        if not valid:
-            reason = "invalid_status_or_capture_ids"
-        elif status == "processed_no_notes" and not str(result.get("discard_reason") or "").strip():
-            valid = False
-            reason = "missing_discard_reason"
-        elif status == "processed":
-            created = result.get("created", [])
-            if not created:
+    with _queue_lock():
+        captures = _load_queue(vault)
+        dequeue_ids: set[str] = set()
+        group_results = []
+        for group in manifest.get("groups", []):
+            expected_ids = set(str(x) for x in group.get("capture_ids", []))
+            result_path = Path(group.get("result_json", ""))
+            if not result_path.exists():
+                group_results.append(
+                    {"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"}
+                )
+                continue
+            try:
+                result = json.loads(result_path.read_text(errors="replace"))
+            except json.JSONDecodeError:
+                group_results.append(
+                    {"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"}
+                )
+                continue
+            processed_ids = set(str(x) for x in result.get("processed_capture_ids", []))
+            status = result.get("status")
+            valid = processed_ids == expected_ids and status in {"processed", "processed_no_notes"}
+            reason = "ok"
+            if not valid:
+                reason = "invalid_status_or_capture_ids"
+            elif status == "processed_no_notes" and not str(result.get("discard_reason") or "").strip():
                 valid = False
-                reason = "missing_created_note"
-            for note in created:
-                path = note.get("path") if isinstance(note, dict) else note
-                if not path or not _reported_note_exists_in_vault(vault, str(path)):
+                reason = "missing_discard_reason"
+            elif status == "processed":
+                created = result.get("created", [])
+                if not created:
                     valid = False
                     reason = "missing_created_note"
-                    break
-        if valid:
-            dequeue_ids.update(expected_ids)
-            group_results.append(
-                {
-                    "group_id": group.get("group_id"),
-                    "status": status,
-                    "reason": reason,
-                    "dequeued_capture_ids": sorted(expected_ids),
-                }
-            )
-        else:
-            group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": reason})
-    remaining = [capture for capture in captures if str(capture.get("id")) not in dequeue_ids]
-    _write_queue(remaining, vault)
+                for note in created:
+                    path = note.get("path") if isinstance(note, dict) else note
+                    if not path or not _reported_note_exists_in_vault(vault, str(path)):
+                        valid = False
+                        reason = "missing_created_note"
+                        break
+            if valid:
+                dequeue_ids.update(expected_ids)
+                group_results.append(
+                    {
+                        "group_id": group.get("group_id"),
+                        "status": status,
+                        "reason": reason,
+                        "dequeued_capture_ids": sorted(expected_ids),
+                    }
+                )
+            else:
+                group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": reason})
+        remaining = [capture for capture in captures if str(capture.get("id")) not in dequeue_ids]
+        _write_queue(remaining, vault)
     manifest["status"] = "finalized"
     manifest["finalized_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     manifest["dequeued_capture_ids"] = sorted(dequeue_ids)
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    _atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
     _release_processing_lock(run_id)
     return {"run_id": run_id, "dequeued": len(dequeue_ids), "remaining": len(remaining), "groups": group_results}
 
