@@ -572,6 +572,14 @@ def _capture(
     clean_certainty = _capture_certainty(certainty)
     if isinstance(clean_certainty, dict):
         return clean_certainty
+    if queue and os.environ.get("MEMENTO_PI_PROCESSOR") == "true" and _is_lifecycle_source(source_event):
+        return {
+            "queued": False,
+            "skipped": True,
+            "reason": "processor_session",
+            "source_event": source_event,
+            "session_id": session_id,
+        }
     if queue:
         if _is_lifecycle_source(source_event):
             decision = _lifecycle_queue_decision(session_id, cwd, body, source_event)
@@ -584,6 +592,17 @@ def _capture(
                     "session_id": session_id,
                 }
         capture_id = f"pi-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        metadata = {
+            "cwd": cwd,
+            "project": project_slug,
+            "branch": branch,
+            "session_id": session_id,
+            "note_type": clean_note_type,
+            "tags": merged_tags,
+            "certainty": clean_certainty,
+        }
+        if os.environ.get("MEMENTO_PI_PROCESSOR") == "true":
+            metadata["memento_processor"] = True
         capture = {
             "id": capture_id,
             "title": title.strip(),
@@ -591,15 +610,7 @@ def _capture(
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "reason": reason,
             "source_event": source_event,
-            "metadata": {
-                "cwd": cwd,
-                "project": project_slug,
-                "branch": branch,
-                "session_id": session_id,
-                "note_type": clean_note_type,
-                "tags": merged_tags,
-                "certainty": clean_certainty,
-            },
+            "metadata": metadata,
         }
         with _queue_lock(vault):
             captures = _load_queue(vault)
@@ -1296,7 +1307,15 @@ def _group_status_from_result(group: dict[str, Any]) -> dict[str, Any]:
         "result_json": group.get("result_json"),
         "log_markdown": group.get("log_markdown"),
     }
-    for key in ("created", "skipped_duplicates", "discard_reason", "error", "reason"):
+    for key in (
+        "created",
+        "skipped_duplicates",
+        "discard_reason",
+        "error",
+        "reason",
+        "result_state",
+        "result_protocol",
+    ):
         if key in result:
             item[key] = result[key]
     return item
@@ -1389,64 +1408,87 @@ def _queue_process_finalize(run_id: str) -> dict[str, Any]:
     if not manifest_path.exists():
         return {"error": f"processing run not found: {run_id}", "reason": "run_not_found"}
     manifest = json.loads(manifest_path.read_text(errors="replace"))
-    with _queue_lock():
-        captures = _load_queue(vault)
-        dequeue_ids: set[str] = set()
-        group_results = []
-        for group in manifest.get("groups", []):
-            expected_ids = set(str(x) for x in group.get("capture_ids", []))
-            result_path = Path(group.get("result_json", ""))
-            if not result_path.exists():
-                group_results.append(
-                    {"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"}
-                )
-                continue
-            try:
-                result = json.loads(result_path.read_text(errors="replace"))
-            except json.JSONDecodeError:
-                group_results.append(
-                    {"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"}
-                )
-                continue
-            processed_ids = set(str(x) for x in result.get("processed_capture_ids", []))
-            status = result.get("status")
-            valid = processed_ids == expected_ids and status in {"processed", "processed_no_notes"}
-            reason = "ok"
-            if not valid:
-                reason = "invalid_status_or_capture_ids"
-            elif status == "processed_no_notes" and not str(result.get("discard_reason") or "").strip():
-                valid = False
-                reason = "missing_discard_reason"
-            elif status == "processed":
-                created = result.get("created", [])
-                if not created:
+    captures: list[dict[str, Any]] = []
+    dequeue_ids: set[str] = set()
+    group_results: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    try:
+        with _queue_lock():
+            captures = _load_queue(vault)
+            for group in manifest.get("groups", []):
+                expected_ids = set(str(x) for x in group.get("capture_ids", []))
+                result_path = Path(group.get("result_json", ""))
+                if not result_path.exists():
+                    group_results.append(
+                        {"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"}
+                    )
+                    continue
+                try:
+                    result = json.loads(result_path.read_text(errors="replace"))
+                except json.JSONDecodeError:
+                    group_results.append(
+                        {"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"}
+                    )
+                    continue
+                processed_ids = set(str(x) for x in result.get("processed_capture_ids", []))
+                status = str(result.get("status") or "")
+                result_state = str(result.get("result_state") or "")
+                if status == "failed":
+                    group_results.append(
+                        {
+                            "group_id": group.get("group_id"),
+                            "status": "failed",
+                            "reason": result_state or str(result.get("reason") or "failed_result"),
+                            "result_state": result_state or "failed",
+                        }
+                    )
+                    continue
+                valid = processed_ids == expected_ids and status in {"processed", "processed_no_notes"}
+                reason = "ok"
+                if not valid:
+                    reason = "invalid_status_or_capture_ids"
+                elif status == "processed_no_notes" and not str(result.get("discard_reason") or "").strip():
                     valid = False
-                    reason = "missing_created_note"
-                for note in created:
-                    path = note.get("path") if isinstance(note, dict) else note
-                    if not path or not _reported_note_exists_in_vault(vault, str(path)):
+                    reason = "missing_discard_reason"
+                elif status == "processed":
+                    created = result.get("created", [])
+                    if not created:
                         valid = False
                         reason = "missing_created_note"
-                        break
-            if valid:
-                dequeue_ids.update(expected_ids)
-                group_results.append(
-                    {
-                        "group_id": group.get("group_id"),
-                        "status": status,
-                        "reason": reason,
-                        "dequeued_capture_ids": sorted(expected_ids),
-                    }
-                )
-            else:
-                group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": reason})
-        remaining = [capture for capture in captures if str(capture.get("id")) not in dequeue_ids]
-        _write_queue(remaining, vault)
-    manifest["status"] = "finalized"
-    manifest["finalized_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    manifest["dequeued_capture_ids"] = sorted(dequeue_ids)
-    _atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
-    _release_processing_lock(run_id)
+                    for note in created:
+                        path = note.get("path") if isinstance(note, dict) else note
+                        if not path or not _reported_note_exists_in_vault(vault, str(path)):
+                            valid = False
+                            reason = "missing_created_note"
+                            break
+                if valid:
+                    dequeue_ids.update(expected_ids)
+                    group_results.append(
+                        {
+                            "group_id": group.get("group_id"),
+                            "status": status,
+                            "reason": reason,
+                            "result_state": result_state or "success",
+                            "dequeued_capture_ids": sorted(expected_ids),
+                        }
+                    )
+                else:
+                    group_results.append(
+                        {
+                            "group_id": group.get("group_id"),
+                            "status": "failed",
+                            "reason": reason,
+                            "result_state": result_state or "invalid_result",
+                        }
+                    )
+            remaining = [capture for capture in captures if str(capture.get("id")) not in dequeue_ids]
+            _write_queue(remaining, vault)
+            manifest["status"] = "finalized"
+            manifest["finalized_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            manifest["dequeued_capture_ids"] = sorted(dequeue_ids)
+            _atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
+    finally:
+        _release_processing_lock(run_id)
     return {"run_id": run_id, "dequeued": len(dequeue_ids), "remaining": len(remaining), "groups": group_results}
 
 

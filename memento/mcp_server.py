@@ -6,6 +6,7 @@ When running over HTTP, authentication is enforced via bearer tokens.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -14,7 +15,129 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:  # pragma: no cover - fallback for stripped test envs
+
+    class FastMCP:  # type: ignore[no-redef]
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self._tools = {}
+
+        def tool(self, *decorator_args, **decorator_kwargs):
+            def decorator(func):
+                name = decorator_kwargs.get("name") or getattr(func, "__name__", "tool")
+                self._tools[name] = func
+                return func
+
+            if decorator_args and callable(decorator_args[0]) and not decorator_kwargs:
+                return decorator(decorator_args[0])
+            return decorator
+
+        def _jsonrpc_app(self):
+            async def app(scope, receive, send):
+                if scope["type"] != "http":
+                    return
+                path = scope.get("path") or ""
+                if path.rstrip("/") not in {"/mcp", "mcp"}:
+                    body = b"Not Found"
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 404,
+                            "headers": [[b"content-type", b"text/plain"], [b"content-length", str(len(body)).encode()]],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": body})
+                    return
+                if scope.get("method") != "POST":
+                    body = b"Method Not Allowed"
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 405,
+                            "headers": [[b"content-type", b"text/plain"], [b"content-length", str(len(body)).encode()]],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": body})
+                    return
+
+                chunks = []
+                while True:
+                    event = await receive()
+                    if event.get("type") != "http.request":
+                        continue
+                    if event.get("body"):
+                        chunks.append(event["body"])
+                    if not event.get("more_body"):
+                        break
+                try:
+                    payload = json.loads(b"".join(chunks).decode() or "{}")
+                except json.JSONDecodeError as exc:
+                    response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
+                else:
+                    response = await self._handle_jsonrpc(payload)
+
+                body = json.dumps(response).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                            [b"content-length", str(len(body)).encode()],
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+
+            return app
+
+        async def _handle_jsonrpc(self, payload):
+            if not isinstance(payload, dict):
+                return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
+            request_id = payload.get("id")
+            method = payload.get("method")
+            params = payload.get("params") or {}
+            if method != "tools/call":
+                return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "Method not found"}}
+            tool_name = params.get("name")
+            arguments = params.get("arguments") or {}
+            if not isinstance(tool_name, str):
+                return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Missing tool name"}}
+            tool = globals().get(tool_name)
+            if tool is None:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
+                }
+            try:
+                result = tool(**arguments)
+                if inspect.isawaitable(result):
+                    result = await result
+                safe_result = json.loads(json.dumps(result, default=str))
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(exc)}}
+            text_result = json.dumps(safe_result, ensure_ascii=False)
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "content": [{"type": "text", "text": text_result}],
+                    "structuredContent": {"result": safe_result},
+                },
+            }
+
+        def run(self, *args, **kwargs):
+            raise RuntimeError("mcp package is required to run the MCP server")
+
+        def streamable_http_app(self):
+            return self._jsonrpc_app()
+
+        def sse_app(self):
+            return self._jsonrpc_app()
+
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
 from memento.health import build_automation_memory_readiness
