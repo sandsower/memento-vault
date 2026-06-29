@@ -40,11 +40,14 @@ _PI_EVENT_TYPES = {
 
 def _read_records(transcript_path: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    with open(transcript_path) as f:
+    with open(transcript_path, encoding="utf-8") as f:
         for raw in f:
             if not raw.strip():
                 continue
-            data = json.loads(raw)
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
             if isinstance(data, dict):
                 records.append(data)
     return records
@@ -271,15 +274,18 @@ def parse_transcript(transcript_path: str):
     }
 
 
-def _render_tool_call(part: dict[str, Any]) -> str:
-    name = part.get("name") or part.get("tool") or "tool"
-    arguments = part.get("arguments") or part.get("input") or {}
+def _format_tool_call(name: Any, arguments: Any) -> str:
+    name = name or "tool"
     if not isinstance(arguments, dict):
         arguments = {"value": arguments}
     path = _tool_path(arguments)
     if path:
         return f"Assistant tool {name}: {path}"
     return f"Assistant tool {name}: {json.dumps(arguments, ensure_ascii=False)[:1000]}"
+
+
+def _render_tool_call(part: dict[str, Any]) -> str:
+    return _format_tool_call(part.get("name") or part.get("tool"), part.get("arguments") or part.get("input") or {})
 
 
 def _payload_text(payload: Any) -> str:
@@ -354,13 +360,7 @@ def _render_tool_execution(entry: dict[str, Any], per_tool_cap: int) -> str | No
     name = entry.get("toolName") or "tool"
     entry_type = entry.get("type")
     if entry_type == "tool_execution_start":
-        arguments = entry.get("args") or {}
-        if not isinstance(arguments, dict):
-            arguments = {"value": arguments}
-        path = _tool_path(arguments)
-        if path:
-            return f"Assistant tool {name}: {path}"
-        return f"Assistant tool {name}: {json.dumps(arguments, ensure_ascii=False)[:1000]}"
+        return _format_tool_call(name, entry.get("args") or {})
     if entry_type == "tool_execution_end":
         result = _payload_text(entry.get("result") or "")
         return f"Tool result {name}: {_cap_tool_result(result, per_tool_cap)}"

@@ -700,6 +700,7 @@ class TestPiAdapter:
         assert meta["cwd"] == "/repo/memento-vault"
         assert meta["session_id"] == "pi-s1"
         assert meta["exchange_count"] == 1
+        assert meta["user_messages"] == 1
         assert meta["files_read"] == ["memento/adapters/__init__.py"]
         assert meta["files_edited"] == ["memento/adapters/pi.py"]
         assert meta["first_prompt"] == "Fix the adapter"
@@ -816,6 +817,30 @@ class TestPiAdapter:
         assert meta["exchange_count"] == 0
         assert meta["files_edited"] == []
         assert render_pi(str(transcript)) == ""
+
+    def test_malformed_jsonl_records_are_skipped(self, tmp_path):
+        transcript = tmp_path / "partial.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "session", "id": "pi-s1", "cwd": "/repo"})
+            + "\n"
+            + '{"type":"message",'
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "message",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "keep this"}]},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        meta = parse_pi(str(transcript))
+        rendered = render_pi(str(transcript))
+
+        assert meta["session_id"] == "pi-s1"
+        assert meta["first_prompt"] == "keep this"
+        assert "User: keep this" in rendered
 
     def test_oversize_render_can_be_truncated_by_shared_budget(self, tmp_path):
         records = [

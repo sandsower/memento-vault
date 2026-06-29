@@ -839,6 +839,7 @@ class TestMementoCapture:
     def test_captures_pi_transcript_from_pi_session_dir(self, tmp_vault, tmp_path, monkeypatch):
         pi_dir = tmp_path / "pi-sessions"
         pi_dir.mkdir()
+        monkeypatch.setattr(mcp_server.tempfile, "gettempdir", lambda: str(tmp_path / "other-temp-root"))
         transcript = pi_dir / "session.jsonl"
         transcript.write_text(
             json.dumps(
