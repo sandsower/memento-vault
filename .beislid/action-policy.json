@@ -1,7 +1,11 @@
 {
   "modes": {
     "supervised-auto": {
-      "rules": { "dependency-install": "allow", "git-remote": "allow", "workspace-write": "allow" },
+      "rules": {
+        "dependency-install": "allow",
+        "git-remote": "allow",
+        "workspace-write": "allow"
+      },
       "actions": {
         "dependency.install": "allow",
         "ticket.fetch": "allow",
@@ -13,12 +17,34 @@
         "git.push": "allow",
         "gh.pr.create": "allow",
         "gh.pr.merge": "allow",
-        "review.fix": "allow"
+        "review.fix": "allow",
+        "tracker.issue.transition": "allow",
+        "workspace.lifecycle.create": "allow",
+        "workspace.hook.after_create": "allow",
+        "workspace.hook.before_run": "allow",
+        "workspace.hook.after_run": "allow",
+        "workspace.hook.before_remove": "allow",
+        "gate.ruff-check": "allow",
+        "gate.ruff-format-check": "allow",
+        "gate.python-compileall": "allow",
+        "gate.targeted-tests": "allow",
+        "gate.retrieval-tests": "allow",
+        "gate.mcp-server-tests": "allow",
+        "gate.install-tests": "allow",
+        "gate.release-smoke": "allow",
+        "gate.install-exec-smoke": "allow"
       },
-      "sandbox": { "on_uncommitted_changes": "allow" }
+      "sandbox": {
+        "on_uncommitted_changes": "allow",
+        "minimum": "none"
+      }
     },
     "unattended-auto": {
-      "rules": { "dependency-install": "allow", "git-remote": "allow", "workspace-write": "allow" },
+      "rules": {
+        "dependency-install": "allow",
+        "git-remote": "deny",
+        "workspace-write": "allow"
+      },
       "actions": {
         "dependency.install": "allow",
         "ticket.fetch": "allow",
@@ -27,7 +53,26 @@
         "git.branch": "allow",
         "git.commit": "allow",
         "git.push": "allow",
-        "gh.pr.create": "allow"
+        "gh.pr.create": "allow",
+        "tracker.issue.transition": "allow",
+        "workspace.lifecycle.create": "allow",
+        "workspace.hook.after_create": "allow",
+        "workspace.hook.before_run": "allow",
+        "workspace.hook.after_run": "allow",
+        "workspace.hook.before_remove": "allow",
+        "gate.ruff-check": "allow",
+        "gate.ruff-format-check": "allow",
+        "gate.python-compileall": "allow",
+        "gate.targeted-tests": "allow",
+        "gate.retrieval-tests": "allow",
+        "gate.mcp-server-tests": "allow",
+        "gate.install-tests": "allow",
+        "gate.release-smoke": "allow",
+        "gate.install-exec-smoke": "allow"
+      },
+      "sandbox": {
+        "on_uncommitted_changes": "allow",
+        "minimum": "non-default-branch"
       }
     }
   }

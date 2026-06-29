@@ -7,6 +7,8 @@ Provides an EmbeddingProvider protocol and concrete providers:
 - GoogleProvider: Google Generative AI embeddings API
 """
 
+from __future__ import annotations
+
 import importlib
 import json
 import logging

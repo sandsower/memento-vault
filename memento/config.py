@@ -1,5 +1,7 @@
 """Configuration loading, project detection, vault identity, and runtime paths."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -57,10 +59,14 @@ DEFAULT_CONFIG = {
     "wikilink_max_expanded": 3,
     # Tool context hook (PreToolUse)
     "tool_context": True,
-    "tool_context_min_score": 0.65,
+    "tool_context_min_score": 0.75,
     "tool_context_max_notes": 2,
     "tool_context_max_injections": 5,
     "tool_context_cooldown": 1,
+    "tool_context_cache_ttl_hours": 24,  # 0 disables expiry
+    "tool_context_diagnostics": True,
+    "tool_context_diagnostics_include_candidates": False,
+    "tool_context_diagnostics_max_candidates": 10,
     # Inception (background consolidation)
     "inception_enabled": False,
     "inception_backend": "codex",
@@ -181,7 +187,7 @@ def load_config():
     config["vault_path"] = str(Path(config["vault_path"]).expanduser())
 
     # Handle floats that simple YAML parser returns as strings
-    for key in ("briefing_min_score", "recall_min_score", "inception_cluster_threshold"):
+    for key in ("briefing_min_score", "recall_min_score", "tool_context_min_score", "inception_cluster_threshold"):
         if isinstance(config.get(key), str):
             try:
                 config[key] = float(config[key])

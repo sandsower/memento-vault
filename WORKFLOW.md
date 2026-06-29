@@ -1,6 +1,6 @@
 ---
 # Rondo execution profile — memento-vault
-# Run rondo against this profile to execute Linear issues from the
+# Run `./scripts/run-rondo` against this profile to execute Linear issues from the
 # "Rondo intake — memento" project. Adding an issue to that project is the
 # explicit AFK opt-in. Envelope-driven runs use `rondo run-once --manifest`
 # and override tracker polling entirely (pilot envelopes: docs/plans/envelopes/).
@@ -53,7 +53,7 @@ pi:
 action_policy:
   command: beislid
   run_mode: unattended-auto
-  policy_file: /Users/vicvalenzuela/Personal/memento-vault/.beislid/action-policy.json
+  policy_file: .beislid/action-policy.json
 process_provider:
   kind: beislid
   required: false
@@ -86,6 +86,9 @@ Instructions:
    acceptance input; execute it before considering the work complete.
 5. Project conventions live in `.beislid/workflow.md` (gates, action policy,
    ticket/PR conventions). Run the configured gates before any push.
-6. Out-of-scope discoveries become new Linear issues in the same project,
+6. After gates pass, unattended handoff may push the non-default feature branch
+   and create/update a draft PR when permitted by `.beislid/action-policy.json`;
+   never merge automatically.
+7. Out-of-scope discoveries become new Linear issues in the same project,
    linked `related`, never scope expansion.
-7. Final message reports completed actions and blockers only.
+8. Final message reports completed actions and blockers only.

@@ -58,13 +58,22 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
   command: '.venv/bin/python scripts/release_smoke.py'
 - name: install-exec-smoke
   command: '.venv/bin/python scripts/release_smoke.py --install-exec'
-- name: claude-sandbox-smoke
-  command: '.venv/bin/python scripts/claude_sandbox_smoke.py'
 ```
 
 ## Action policy
 
+Unattended completion handoff is allowed for feature branches only after the configured gates pass. Use the repo policy file when evaluating remote handoff actions:
+
+```bash
+beislid action-policy evaluate --policy-file .beislid/action-policy.json --mode unattended-auto --action git.push --class git-remote --sandbox-baseline non-default-branch
+beislid action-policy evaluate --policy-file .beislid/action-policy.json --mode unattended-auto --action gh.pr.create --class git-remote --sandbox-baseline non-default-branch
+```
+
+The permitted terminal path for unattended agents is: finish local work, run all configured gates, push the non-default feature branch, create or update a draft PR, link it on the Linear ticket, and leave the ticket in `In Review`. Unattended agents must not push from the default branch and must not merge automatically.
+
 ```beislid:action_policy
+policy_file: .beislid/action-policy.json
+run_mode: unattended-auto
 modes:
   supervised-auto:
     rules:
@@ -75,6 +84,22 @@ modes:
       git.merge: allow
       review.fix: allow
     sandbox:
+      minimum: none
+      on_uncommitted_changes: allow
+  unattended-auto:
+    rules:
+      workspace-write: allow
+      dependency-install: allow
+      git-remote: deny
+    actions:
+      git.branch: allow
+      git.commit: allow
+      git.push: allow
+      gh.pr.create: allow
+      tracker.issue.transition: allow
+      ticket.comment: allow
+    sandbox:
+      minimum: non-default-branch
       on_uncommitted_changes: allow
 ```
 

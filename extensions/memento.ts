@@ -14,6 +14,7 @@ import {
 	renderMementoStatusText,
 	type MementoPanelState,
 } from "./memento-ui.js";
+import { addSessionPointerDigest, sanitizeEventDetails, summarizeMessages, summarizeSessionEntries } from "./transcript-sanitizer.js";
 
 interface LifecycleResult {
 	should_inject: boolean;
@@ -39,6 +40,8 @@ interface BridgeConfig {
 	maxToolContextPerSession: number;
 }
 
+const DEFAULT_PROCESS_QUEUE_MODEL = "claude-sonnet-4-20250514";
+
 const defaultConfig: BridgeConfig = {
 	enabled: true,
 	briefing: true,
@@ -49,7 +52,7 @@ const defaultConfig: BridgeConfig = {
 	processQueue: true,
 	processQueueOnSessionClose: false,
 	processQueueMaxCaptures: 3,
-	processQueueModel: null,
+	processQueueModel: DEFAULT_PROCESS_QUEUE_MODEL,
 	maxInjectedChars: 4000,
 	maxToolContextPerSession: 5,
 };
@@ -144,30 +147,6 @@ function capText(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}\n[vault] truncated by memento pi bridge cap (${maxChars} chars)`;
 }
 
-function summarizeMessages(messages: unknown): string {
-	if (!Array.isArray(messages)) return "Pi agent turn ended; message details unavailable.";
-	const summary = messages
-		.slice(-8)
-		.map((message, index) => summarizeRecord(message, `message-${index + 1}`))
-		.filter((line) => line.length > 4)
-		.join("\n");
-	return summary || "Pi agent turn ended; no message summary available.";
-}
-
-function summarizeRecord(value: unknown, fallbackRole: string): string {
-	const record = value as Record<string, unknown>;
-	const nested = record.message as Record<string, unknown> | undefined;
-	const role = String(nested?.role ?? record.role ?? record.type ?? fallbackRole);
-	const rawContent = nested?.content ?? record.content ?? record.summary ?? record.text ?? "";
-	const content = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent).slice(0, 500);
-	return `- ${role}: ${content.replace(/\s+/g, " ").trim().slice(0, 500)}`;
-}
-
-function summarizeSessionEntries(entries: unknown, reason: string): string {
-	if (!Array.isArray(entries)) return `Pi ${reason}; session entry details unavailable.`;
-	const recent = entries.slice(-12).map((entry, index) => summarizeRecord(entry, `entry-${index + 1}`));
-	return [`Pi ${reason}.`, "", "Recent session entries:", ...recent].join("\n");
-}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -331,12 +310,13 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	async function queueLifecycleCapture(ctx: ExtensionContext, title: string, body: string, reason: string, sourceEvent: string) {
 		if (!config.enabled || !config.autoCapture || !config.captureQueue) return undefined;
 		const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
+		const queuedBody = addSessionPointerDigest(body, sessionFile);
 		const payload = await runJson(pi, ctx, [
 			"capture",
 			"--title",
 			title,
 			"--body",
-			body,
+			queuedBody,
 			"--cwd",
 			ctx.cwd,
 			"--session-id",
@@ -490,7 +470,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_compact", async (event, ctx) => {
-		const body = `Pi compacted the current session.\n\nEvent details:\n${JSON.stringify(event, null, 2).slice(0, 2000)}`;
+		const body = `Pi compacted the current session.\n\nEvent details:\n${sanitizeEventDetails(event, 2000)}`;
 		await queueLifecycleCapture(ctx, "Pi compaction candidate capture", body, "session_compact", "session_compact");
 	});
 
@@ -604,10 +584,16 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			title: Type.String({ description: "Short note title for the durable memory" }),
 			body: Type.String({ description: "Durable decision, discovery, fix, or reusable pattern to capture" }),
+			note_type: Type.Optional(Type.String({ description: "Frontmatter type such as decision, discovery, pattern, bugfix, or tool" })),
+			tags: Type.Optional(Type.Array(Type.String(), { description: "Frontmatter tags for this note" })),
+			certainty: Type.Optional(Type.Number({ description: "Frontmatter certainty from 1 to 5" })),
+			cwd: Type.Optional(Type.String({ description: "Original project cwd for frontmatter/project detection; defaults to current cwd" })),
+			branch: Type.Optional(Type.String({ description: "Original git branch for frontmatter; defaults to the branch detected from cwd" })),
+			session_id: Type.Optional(Type.String({ description: "Original session identifier for frontmatter; defaults to current pi session" })),
 			queue: Type.Optional(Type.Boolean({ description: "Queue for review instead of writing a note immediately" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
+			const sessionFile = params.session_id ?? ctx.sessionManager.getSessionFile() ?? "unknown";
 			const args = [
 				"capture",
 				"--title",
@@ -615,10 +601,21 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				"--body",
 				params.body,
 				"--cwd",
-				ctx.cwd,
+				params.cwd ?? ctx.cwd,
 				"--session-id",
 				sessionFile,
 			];
+			if (params.note_type) args.push("--note-type", params.note_type);
+			if (params.branch) args.push("--branch", params.branch);
+			if (typeof params.certainty === "number" && Number.isFinite(params.certainty)) {
+				const certainty = Math.floor(params.certainty);
+				if (certainty < 1 || certainty > 5) {
+					const payload = { error: "certainty must be an integer from 1 to 5" };
+					return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload, isError: true };
+				}
+				args.push("--certainty", String(certainty));
+			}
+			for (const tag of params.tags ?? []) if (tag.trim()) args.push("--tag", tag.trim());
 			if (params.queue) args.push("--queue", "--reason", "manual", "--source-event", "tool");
 			const payload = await runJson(pi, ctx, args);
 			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };

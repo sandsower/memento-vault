@@ -1,6 +1,8 @@
+import copy
 import importlib.util
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +22,13 @@ from memento.lifecycle import (
     should_append_project_to_recall,
     triage_health_warning,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_pi_queue_state(monkeypatch, tmp_path):
+    """Keep session-context queue status tests away from the user's real pi queue."""
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
 
 def test_lifecycle_result_to_dict_includes_required_fields():
@@ -67,12 +76,16 @@ def test_empty_result_defaults_to_no_results_reason():
     }
 
 
-def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_path):
-    queue_file = tmp_path / "queue" / "pi-captures.jsonl"
-    queue_file.parent.mkdir()
+def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    xdg_state = tmp_path / "state"
+    queue_file = xdg_state / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
     queue_file.write_text('{"id":"q1"}\n')
-    (tmp_path / "notes").mkdir()
-    (tmp_path / "notes" / "a.md").write_text("# A")
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state))
+    (vault / "notes").mkdir(parents=True)
+    (vault / "notes" / "a.md").write_text("# A")
 
     briefing = LifecycleResult(True, "[vault] Project: repo | 1 sessions | 1 notes", "briefing")
     recall = LifecycleResult(
@@ -86,7 +99,7 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     with (
         patch("memento.lifecycle.build_briefing", return_value=briefing) as mock_briefing,
         patch("memento.lifecycle.build_recall", return_value=recall) as mock_recall,
-        patch("memento.lifecycle.get_vault", return_value=tmp_path),
+        patch("memento.lifecycle.get_vault", return_value=vault),
         patch("memento.lifecycle.has_qmd", return_value=True),
         patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: triage failing"),
     ):
@@ -104,11 +117,137 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     assert payload["sections"]["status"]["vault_exists"] is True
     assert payload["sections"]["status"]["qmd_available"] is True
     assert payload["sections"]["queue"]["queued_capture_count"] == 1
+    assert payload["sections"]["queue"]["count"] == 1
+    assert payload["sections"]["queue"]["queued_capture_count_source"] == "current"
+    assert payload["sections"]["queue"]["current_queued_capture_count"] == 1
+    assert payload["sections"]["queue"]["queue_path"] == str(queue_file)
+    assert payload["sections"]["queue"]["queue_path_source"] == "xdg_state_home"
+    assert payload["sections"]["queue"]["legacy_queue_path"] == str(vault / "queue" / "pi-captures.jsonl")
+    assert payload["sections"]["queue"]["legacy_queue_exists"] is False
     assert payload["metadata"]["warnings"] == ["[vault] WARN: triage failing"]
     assert payload["metadata"]["expandable_paths"] == ["notes/cache.md"]
     assert payload["metadata"]["truncated"] is False
     mock_briefing.assert_called_once_with("/repo", "s1", allow_deferred=False)
     mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1", record=False)
+
+
+def test_build_session_context_explicitly_reports_legacy_queue_fallback(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    xdg_state = tmp_path / "state"
+    legacy_queue_file = vault / "queue" / "pi-captures.jsonl"
+    legacy_queue_file.parent.mkdir(parents=True)
+    legacy_queue_file.write_text('{"id":"legacy-q1"}\n')
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state))
+    (vault / "notes").mkdir(parents=True)
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=vault),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=200, include_recall=False)
+
+    current_queue_file = xdg_state / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    queue_section = payload["sections"]["queue"]
+    assert queue_section["queued_capture_count"] == 1
+    assert queue_section["count"] == 1
+    assert queue_section["queued_capture_count_source"] == "legacy_fallback"
+    assert queue_section["current_queued_capture_count"] == 0
+    assert queue_section["queue_path"] == str(current_queue_file)
+    assert queue_section["queue_path_source"] == "xdg_state_home"
+    assert queue_section["legacy_queue_path"] == str(legacy_queue_file)
+    assert queue_section["legacy_queue_exists"] is True
+    assert queue_section["legacy_queued_capture_count"] == 1
+    assert "legacy" in queue_section["queue_status_note"]
+
+
+def test_build_session_context_reports_memento_pi_state_home_queue_source(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    state_home = tmp_path / "pi-state"
+    queue_file = state_home / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text('{"id":"q1"}\n')
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ignored-xdg-state"))
+    (vault / "notes").mkdir(parents=True)
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=vault),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=200, include_recall=False)
+
+    queue_section = payload["sections"]["queue"]
+    assert queue_section["queued_capture_count"] == 1
+    assert queue_section["count"] == 1
+    assert queue_section["queued_capture_count_source"] == "current"
+    assert queue_section["current_queued_capture_count"] == 1
+    assert queue_section["queue_path"] == str(queue_file)
+    assert queue_section["queue_path_source"] == "memento_pi_state_home"
+
+
+def test_build_session_context_counts_current_plus_unmigrated_legacy_queue(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    xdg_state = tmp_path / "state"
+    current_queue_file = xdg_state / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    current_queue_file.parent.mkdir(parents=True)
+    current_queue_file.write_text('{"id":"q1"}\n')
+    legacy_queue_file = vault / "queue" / "pi-captures.jsonl"
+    legacy_queue_file.parent.mkdir(parents=True)
+    legacy_queue_file.write_text('{"id":"q1"}\n{"id":"legacy-q2"}\n')
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state))
+    (vault / "notes").mkdir(parents=True)
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=vault),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=200, include_recall=False)
+
+    queue_section = payload["sections"]["queue"]
+    assert queue_section["queued_capture_count"] == 2
+    assert queue_section["count"] == 2
+    assert queue_section["queued_capture_count_source"] == "current_plus_legacy"
+    assert queue_section["current_queued_capture_count"] == 1
+    assert queue_section["legacy_queued_capture_count"] == 2
+    assert queue_section["queue_path"] == str(current_queue_file)
+    assert "includes legacy queue" in payload["content"]
+
+
+def test_build_session_context_mirrors_bridge_migration_count_for_malformed_queue_rows(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    xdg_state = tmp_path / "state"
+    current_queue_file = xdg_state / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    current_queue_file.parent.mkdir(parents=True)
+    current_queue_file.write_text('not json\n{"title":"current no id"}\n')
+    legacy_queue_file = vault / "queue" / "pi-captures.jsonl"
+    legacy_queue_file.parent.mkdir(parents=True)
+    legacy_queue_file.write_text('not json\n{"title":"legacy no id"}\n')
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state))
+    (vault / "notes").mkdir(parents=True)
+
+    with (
+        patch("memento.lifecycle.build_briefing", return_value=empty_result("briefing", "disabled")),
+        patch("memento.lifecycle.get_vault", return_value=vault),
+        patch("memento.lifecycle.has_qmd", return_value=True),
+        patch("memento.lifecycle.triage_health_warning", return_value=None),
+    ):
+        payload = build_session_context("/repo", "", "s1", token_budget=200, include_recall=False)
+
+    queue_section = payload["sections"]["queue"]
+    assert queue_section["queued_capture_count"] == 3
+    assert queue_section["count"] == 3
+    assert queue_section["queued_capture_count_source"] == "current_plus_legacy"
+    assert queue_section["current_queued_capture_count"] == 2
+    assert queue_section["legacy_queued_capture_count"] == 2
 
 
 def test_build_session_context_respects_budget_and_reports_expandable_paths(tmp_path):
@@ -131,7 +270,7 @@ def test_build_session_context_respects_budget_and_reports_expandable_paths(tmp_
         patch("memento.lifecycle.has_qmd", return_value=True),
         patch("memento.lifecycle.triage_health_warning", return_value=None),
     ):
-        payload = build_session_context("/repo", "memory", "s1", token_budget=30)
+        payload = build_session_context("/repo", "memory", "s1", token_budget=100)
 
     assert len(payload["content"]) <= payload["metadata"]["char_budget"]
     assert payload["metadata"]["truncated"] is True
@@ -157,7 +296,7 @@ def test_build_session_context_compacts_structured_payload_under_budget_overhead
         patch("memento.lifecycle.has_qmd", return_value=True),
         patch("memento.lifecycle.triage_health_warning", return_value=None),
     ):
-        payload = build_session_context("/repo", "memory", "s1", token_budget=30)
+        payload = build_session_context("/repo", "memory", "s1", token_budget=100)
 
     serialized = json.dumps(payload)
     assert len(serialized) <= payload["metadata"]["packet_char_budget"]
@@ -1016,6 +1155,19 @@ def test_tool_context_relative_path_without_cwd_uses_process_cwd(_has_qmd, tmp_p
     assert result.metadata["file_path"] == os.path.realpath(str(project / "src" / "authMiddleware.ts"))
 
 
+def test_tool_context_keywords_are_relative_to_session_cwd(tmp_path):
+    from memento.lifecycle import extract_tool_context_keywords
+
+    project = tmp_path / "rondo-workspaces" / "MEM-59"
+    file_path = project / "memento" / "lifecycle.py"
+    file_path.parent.mkdir(parents=True)
+    file_path.touch()
+
+    query = extract_tool_context_keywords(str(file_path), str(project))
+
+    assert query == "memento lifecycle"
+
+
 def test_load_cache_drops_pre_schema_dir_entries(tmp_path, monkeypatch):
     import memento.lifecycle as lifecycle_module
 
@@ -1091,6 +1243,59 @@ def test_tool_context_searches_and_formats_results(_has_qmd, mock_search, _enhan
     _, kwargs = mock_search.call_args
     assert kwargs["semantic"] is False
     assert kwargs["min_score"] == 0.75
+    decision = [call.kwargs for call in _log.call_args_list if call.args[:2] == ("tool-context", "decision")][-1]
+    assert decision["decision"] == "injected"
+    assert decision["injected_paths"] == ["notes/auth-boundary.md"]
+    assert decision["query"] == "auth middleware"
+
+
+@patch("memento.lifecycle.log_retrieval")
+@patch("memento.lifecycle.has_qmd", return_value=True)
+def test_tool_context_diagnostics_logs_terminal_skip(_has_qmd, mock_log):
+    config = dict(DEFAULT_CONFIG)
+    config["tool_context"] = True
+    with patch("memento.lifecycle.get_config", return_value=config):
+        with patch(
+            "memento.lifecycle.load_cache", return_value={"dirs": {}, "last_qmd_call": time.time(), "injections": {}}
+        ):
+            result = build_tool_context("Read", "src/server/authMiddleware.ts", "/repo", "s1")
+
+    assert result.reason == "cooldown"
+    decision = [call.kwargs for call in mock_log.call_args_list if call.args[:2] == ("tool-context", "decision")][-1]
+    assert decision["decision"] == "cooldown"
+    assert decision["file_path"].endswith("/repo/src/server/authMiddleware.ts")
+
+
+@patch("memento.lifecycle.log_retrieval")
+@patch("memento.lifecycle.enhance_results", side_effect=lambda results, *args, **kwargs: results)
+@patch("memento.lifecycle.qmd_search_with_extras")
+@patch("memento.lifecycle.has_qmd", return_value=True)
+def test_tool_context_diagnostics_can_include_candidate_summaries(_has_qmd, mock_search, _enhance, mock_log):
+    mock_search.return_value = [
+        {
+            "path": "notes/auth-boundary.md",
+            "title": "Auth boundary lives in middleware",
+            "score": 0.78,
+            "snippet": "Middleware owns auth checks.",
+        }
+    ]
+
+    config = dict(DEFAULT_CONFIG)
+    config["tool_context_diagnostics_include_candidates"] = True
+    with patch("memento.lifecycle.get_config", return_value=config):
+        with patch("memento.lifecycle.load_cache", return_value={"dirs": {}, "last_qmd_call": 0, "injections": {}}):
+            with patch("memento.lifecycle.save_cache"):
+                build_tool_context("Read", "src/server/authMiddleware.ts", "/repo", "s1")
+
+    decision = [call.kwargs for call in mock_log.call_args_list if call.args[:2] == ("tool-context", "decision")][-1]
+    assert decision["candidates"] == [
+        {
+            "path": "notes/auth-boundary.md",
+            "title": "Auth boundary lives in middleware",
+            "score": 0.78,
+            "decision": "candidate",
+        }
+    ]
 
 
 def test_tool_context_hook_adapter_outputs_claude_json(capsys):
@@ -1111,7 +1316,7 @@ def test_tool_context_hook_adapter_outputs_claude_json(capsys):
         with patch.object(module, "build_tool_context", return_value=result) as mock_build:
             module.main()
 
-    mock_build.assert_called_once_with("Read", "src/server/authMiddleware.ts", "/repo", "s1")
+    mock_build.assert_called_once_with("Read", "src/server/authMiddleware.ts", "/repo", "s1", lineage_id=None)
     output = json.loads(capsys.readouterr().out)
     assert output == {
         "hookSpecificOutput": {
@@ -1120,6 +1325,34 @@ def test_tool_context_hook_adapter_outputs_claude_json(capsys):
             "additionalContext": "[connected-to-vault]\n  - Auth boundary",
         }
     }
+
+
+def test_tool_context_hook_adapter_derives_lineage_from_transcript(capsys):
+    hook_path = Path(__file__).parent.parent / "hooks" / "vault-tool-context.py"
+    spec = importlib.util.spec_from_file_location("vault_tool_context_hook_lineage", hook_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    hook_input = {
+        "tool_name": "Read",
+        "tool_input": {"file_path": "src/server/authMiddleware.ts"},
+        "cwd": "/repo",
+        "session_id": "resumed-session-2",
+        "transcript_path": "/home/vic/.claude/projects/x/original-session.jsonl",
+    }
+    result = LifecycleResult(False, "", "tool-context", reason="no-results")
+    with patch.object(module, "read_hook_input", return_value=hook_input):
+        with patch.object(module, "build_tool_context", return_value=result) as mock_build:
+            module.main()
+
+    mock_build.assert_called_once_with(
+        "Read",
+        "src/server/authMiddleware.ts",
+        "/repo",
+        "resumed-session-2",
+        lineage_id="original-session",
+    )
 
 
 def test_triage_health_warning_reads_always_on_health_log(tmp_path):
@@ -1644,3 +1877,226 @@ class TestRecallDedupPerSessionMultiPath:
 
         assert reason == "duplicate"
         assert lines == []
+
+
+class TestToolContextCacheTTLAndScoping:
+    def _call(self, cache, qmd_results=None, cwd="/repo", session_id="s1", lineage_id=None, config_extra=None):
+        import time as _time
+
+        from memento.lifecycle import build_tool_context
+
+        config = dict(DEFAULT_CONFIG)
+        config["tool_context_min_score"] = 0.75
+        if config_extra:
+            config.update(config_extra)
+        saved = {}
+
+        with (
+            patch("memento.lifecycle.has_qmd", return_value=True),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.load_cache", return_value=cache),
+            patch("memento.lifecycle.save_cache", side_effect=lambda c: saved.update(c)),
+            patch(
+                "memento.lifecycle.qmd_search_with_extras",
+                return_value=qmd_results if qmd_results is not None else [],
+            ) as mock_search,
+            patch("memento.lifecycle.enhance_results", side_effect=lambda results, *a, **k: results),
+            patch("memento.lifecycle.log_retrieval") as mock_log,
+        ):
+            result = build_tool_context(
+                "Read", "/workspace/src/server/authMiddleware.ts", cwd, session_id, lineage_id=lineage_id
+            )
+        return result, mock_search, saved, mock_log, _time
+
+    def test_fresh_cache_entry_serves_hit_without_search(self):
+        import time as _time
+
+        from memento.lifecycle import _tool_context_dir_key
+
+        key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
+        cache = {
+            "schema": 3,
+            "dirs": {
+                key: {
+                    "results": [{"path": "notes/auth.md", "title": "Auth note", "score": 0.8, "snippet": ""}],
+                    "ts": _time.time(),
+                }
+            },
+            "last_qmd_call": 0,
+            "injections": {},
+        }
+
+        result, mock_search, _, _, _ = self._call(cache)
+
+        assert result.should_inject is True
+        mock_search.assert_not_called()
+
+    def test_cache_hit_restores_result_count_diagnostics(self):
+        import time as _time
+
+        from memento.lifecycle import _tool_context_dir_key
+
+        key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
+        cache = {
+            "schema": 3,
+            "dirs": {
+                key: {
+                    "results": [{"path": "notes/auth.md", "title": "Auth note", "score": 0.8, "snippet": ""}],
+                    "ts": _time.time(),
+                    "query": "auth middleware",
+                    "raw_result_count": 7,
+                    "enhanced_result_count": 1,
+                }
+            },
+            "last_qmd_call": 0,
+            "injections": {},
+        }
+
+        result, mock_search, _, mock_log, _ = self._call(cache)
+
+        assert result.should_inject is True
+        mock_search.assert_not_called()
+        decision = [call.kwargs for call in mock_log.call_args_list if call.args[:2] == ("tool-context", "decision")][
+            -1
+        ]
+        assert decision["source"] == "cache"
+        assert decision["raw_result_count"] == 7
+        assert decision["enhanced_result_count"] == 1
+
+    def test_search_backend_error_fails_open_with_terminal_decision(self):
+        from memento.lifecycle import build_tool_context
+
+        config = dict(DEFAULT_CONFIG)
+        cache = {"schema": 3, "dirs": {}, "last_qmd_call": 0, "injections": {}}
+        saved = {}
+
+        with (
+            patch("memento.lifecycle.has_qmd", return_value=True),
+            patch("memento.lifecycle.get_config", return_value=config),
+            patch("memento.lifecycle.load_cache", return_value=cache),
+            patch("memento.lifecycle.save_cache", side_effect=lambda c: saved.update(c)),
+            patch("memento.lifecycle.qmd_search_with_extras", side_effect=RuntimeError("boom")) as mock_search,
+            patch("memento.lifecycle.log_retrieval") as mock_log,
+        ):
+            result = build_tool_context("Read", "/workspace/src/server/authMiddleware.ts", "/repo", "s1")
+
+        assert result.should_inject is False
+        assert result.reason == "backend-error"
+        mock_search.assert_called_once()
+        assert saved["last_qmd_call"] > 0
+        decision = [call.kwargs for call in mock_log.call_args_list if call.args[:2] == ("tool-context", "decision")][
+            -1
+        ]
+        assert decision["decision"] == "backend-error"
+        assert decision["error_type"] == "RuntimeError"
+
+    def test_expired_cache_entry_triggers_fresh_search(self):
+        import time as _time
+
+        from memento.lifecycle import _tool_context_dir_key
+
+        key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
+        cache = {
+            "schema": 3,
+            "dirs": {
+                key: {
+                    "results": [{"path": "notes/stale.md", "title": "Stale", "score": 0.8, "snippet": ""}],
+                    "ts": _time.time() - 48 * 3600,
+                }
+            },
+            "last_qmd_call": 0,
+            "injections": {},
+        }
+        fresh = [{"path": "notes/fresh.md", "title": "Fresh note", "score": 0.9, "snippet": ""}]
+
+        result, mock_search, saved, mock_log, _ = self._call(cache, qmd_results=fresh)
+
+        mock_search.assert_called_once()
+        assert result.should_inject is True
+        assert "Fresh note" in result.content
+        assert saved["dirs"][key]["results"][0]["path"] == "notes/fresh.md"
+        assert saved["dirs"][key]["ts"] > _time.time() - 60
+        assert any(call.args[:2] == ("tool-context", "cache-expired") for call in mock_log.call_args_list)
+
+    def test_ttl_zero_disables_expiry(self):
+        from memento.lifecycle import _tool_context_dir_key
+
+        key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
+        cache = {
+            "schema": 3,
+            "dirs": {
+                key: {
+                    "results": [{"path": "notes/old.md", "title": "Old note", "score": 0.8, "snippet": ""}],
+                    "ts": 1,
+                }
+            },
+            "last_qmd_call": 0,
+            "injections": {},
+        }
+
+        result, mock_search, _, _, _ = self._call(cache, config_extra={"tool_context_cache_ttl_hours": 0})
+
+        assert result.should_inject is True
+        mock_search.assert_not_called()
+
+    def test_cache_entries_scoped_per_project(self):
+        fresh = [{"path": "notes/x.md", "title": "X note", "score": 0.9, "snippet": ""}]
+        cache = {"schema": 3, "dirs": {}, "last_qmd_call": 0, "injections": {}}
+
+        _, search_a, saved_a, _, _ = self._call(copy.deepcopy(cache), qmd_results=fresh, cwd="/project-a")
+        _, search_b, saved_b, _, _ = self._call(copy.deepcopy(cache), qmd_results=fresh, cwd="/project-b")
+
+        search_a.assert_called_once()
+        search_b.assert_called_once()
+        (key_a,) = saved_a["dirs"].keys()
+        (key_b,) = saved_b["dirs"].keys()
+        assert key_a != key_b
+        assert key_a.endswith("::/workspace/src/server")
+        assert key_b.endswith("::/workspace/src/server")
+
+    def test_injection_cap_keyed_by_lineage_survives_resume(self):
+        cache = {
+            "schema": 3,
+            "dirs": {},
+            "last_qmd_call": 0,
+            "injections": {"original-session": {"count": 5, "paths": []}},
+        }
+
+        result, mock_search, _, _, _ = self._call(cache, session_id="resumed-session-2", lineage_id="original-session")
+
+        assert result.reason == "cap-reached"
+        mock_search.assert_not_called()
+
+    def test_injection_cap_falls_back_to_session_id(self):
+        cache = {
+            "schema": 3,
+            "dirs": {},
+            "last_qmd_call": 0,
+            "injections": {"s1": {"count": 5, "paths": []}},
+        }
+
+        result, _, _, _, _ = self._call(cache, session_id="s1")
+
+        assert result.reason == "cap-reached"
+
+    def test_duplicate_paths_keyed_by_lineage_survive_resume(self):
+        import time as _time
+
+        from memento.lifecycle import _tool_context_dir_key
+
+        key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
+        cache = {
+            "schema": 3,
+            "dirs": {
+                key: {
+                    "results": [{"path": "notes/auth.md", "title": "Auth note", "score": 0.8, "snippet": ""}],
+                    "ts": _time.time(),
+                }
+            },
+            "last_qmd_call": 0,
+            "injections": {"original-session": {"count": 1, "paths": ["notes/auth.md"]}},
+        }
+
+        result, _, _, _, _ = self._call(cache, session_id="resumed-session-2", lineage_id="original-session")
+
+        assert result.reason == "duplicate"

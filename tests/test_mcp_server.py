@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -385,6 +386,68 @@ class TestToolSelectionDescriptions:
         assert "separate from interactive /memento skill workflows" in extension
         assert "not for prior decisions, project history, or note content" in extension
 
+    def test_pi_extension_lifecycle_sanitizer_excludes_reasoning_and_renders_tools(self):
+        helper = Path(__file__).parents[1] / "extensions" / "transcript-sanitizer.ts"
+        script = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const sanitizer = await import(pathToFileURL(process.argv[1]).href);
+
+const assistant = sanitizer.summarizeRecord({
+  message: {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "secret reasoning", thinkingSignature: "sig", encrypted_content: "blob" },
+      { type: "reasoning", text: "hidden chain of thought" },
+      { type: "text", text: "Use the lifecycle queue gate for captures." },
+    ],
+  },
+}, "assistant");
+assert.match(assistant, /Use the lifecycle queue gate/);
+assert.doesNotMatch(assistant, /secret reasoning|hidden chain|thinkingSignature|encrypted_content|blob/);
+
+const tools = sanitizer.summarizeRecord({
+  message: {
+    role: "assistant",
+    content: [
+      { type: "toolCall", name: "read", arguments: { path: "extensions/memento.ts", huge: "x".repeat(1400) } },
+      { type: "toolResult", content: "y".repeat(450) },
+    ],
+  },
+}, "assistant");
+assert.match(tools, /\[tool call\] read/);
+assert.match(tools, /extensions\/memento\.ts/);
+assert.match(tools, /\[tool result\]/);
+assert.match(tools, /tool result truncated/);
+assert.ok(tools.length < 620);
+
+const normal = sanitizer.summarizeMessages([
+  { message: { role: "user", content: "Please remember the API decision." } },
+  { message: { role: "assistant", content: [{ type: "text", text: "Captured the durable decision." }] } },
+]);
+assert.match(normal, /- user: Please remember the API decision\./);
+assert.match(normal, /- assistant: Captured the durable decision\./);
+
+const eventDetails = sanitizer.sanitizeEventDetails({
+  content: [{ type: "redacted_thinking", encrypted_content: "ciphertext" }, { type: "text", text: "compact summary" }],
+});
+assert.match(eventDetails, /compact summary/);
+assert.doesNotMatch(eventDetails, /redacted_thinking|encrypted_content|ciphertext/);
+
+const pointer = sanitizer.addSessionPointerDigest(normal, "/tmp/pi-session.jsonl");
+assert.match(pointer, /Session transcript: \/tmp\/pi-session\.jsonl/);
+assert.match(pointer, /Sanitized summary digest: sha256:[0-9a-f]{16}/);
+assert.match(pointer, /Sanitized lifecycle summary:/);
+"""
+        subprocess.run(
+            ["node", "--experimental-strip-types", "--input-type=module", "-e", script, str(helper)],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
 
 # --- lifecycle retrieval tools ---
 
@@ -510,6 +573,7 @@ class TestMementoStore:
         content = note_path.read_text()
         assert "title: Test discovery" in content
         assert "source: mcp" in content
+        assert "origin: mcp_store" in content
         assert "certainty: 3" in content
 
     @pytest.mark.usefixtures("_use_vault_config")
@@ -537,6 +601,65 @@ class TestMementoStore:
         assert second["created"] is False
         assert second["idempotent"] is True
         assert not (tmp_vault / "notes" / "duplicate-safe-note-2.md").exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_legacy_mcp_note_without_origin_is_idempotent(self, tmp_vault):
+        note_path = tmp_vault / "notes" / "legacy-mcp-note.md"
+        note_path.write_text(
+            "---\n"
+            "title: Legacy MCP note\n"
+            "type: discovery\n"
+            "tags: [sync]\n"
+            "source: mcp\n"
+            "certainty: 4\n"
+            "project: /home/vic/Projects/memento-vault\n"
+            "branch: main\n"
+            "date: 2026-06-28T19:00\n"
+            "---\n\n"
+            "Same body.\n\n"
+            "## Related\n"
+        )
+
+        result = memento_store(
+            title="Legacy MCP note",
+            body="Same body.",
+            note_type="discovery",
+            tags=["sync"],
+            certainty=4,
+            project="/home/vic/Projects/memento-vault",
+            branch="main",
+        )
+
+        assert result["path"] == "notes/legacy-mcp-note.md"
+        assert result["idempotent"] is True
+        assert not (tmp_vault / "notes" / "legacy-mcp-note-2.md").exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_mcp_store_does_not_idempotently_match_other_sources(self, tmp_vault):
+        note_path = tmp_vault / "notes" / "manual-source-note.md"
+        note_path.write_text(
+            "---\n"
+            "title: Manual source note\n"
+            "type: discovery\n"
+            "tags: [sync]\n"
+            "source: manual\n"
+            "certainty: 4\n"
+            "date: 2026-06-28T19:00\n"
+            "---\n\n"
+            "Same body.\n\n"
+            "## Related\n"
+        )
+
+        result = memento_store(
+            title="Manual source note",
+            body="Same body.",
+            note_type="discovery",
+            tags=["sync"],
+            certainty=4,
+        )
+
+        assert result["path"] == "notes/manual-source-note-2.md"
+        assert (tmp_vault / "notes" / "manual-source-note-2.md").exists()
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_same_title_different_content_still_creates_suffix(self, tmp_vault):
@@ -760,7 +883,10 @@ class TestMementoCapture:
         note_path = tmp_vault / result["note_path"]
         assert note_path.exists()
         content = note_path.read_text()
+        assert "type: discovery" in content
         assert "source: mcp-capture" in content
+        assert "origin: mcp_capture:cursor" in content
+        assert "certainty: 2" in content
         assert "auth.py" in content
 
         # Verify fleeting was written

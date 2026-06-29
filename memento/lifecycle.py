@@ -1832,14 +1832,87 @@ def _session_context_char_budget(token_budget: int | None) -> tuple[int, int]:
     return normalized_tokens, normalized_tokens * 4
 
 
-def _queue_capture_count(vault: Path) -> int:
-    queue_path = vault / "queue" / "pi-captures.jsonl"
-    if not queue_path.exists():
-        return 0
+def _pi_state_root() -> Path:
+    raw = os.environ.get("MEMENTO_PI_STATE_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
+    return base / "memento" / "pi"
+
+
+def _pi_queue_path_source() -> str:
+    if os.environ.get("MEMENTO_PI_STATE_HOME"):
+        return "memento_pi_state_home"
+    if os.environ.get("XDG_STATE_HOME"):
+        return "xdg_state_home"
+    return "default_xdg_state"
+
+
+def _pi_queue_file() -> Path:
+    return _pi_state_root() / "queue" / "pi-captures.jsonl"
+
+
+def _legacy_pi_queue_file(vault: Path) -> Path:
+    return vault / "queue" / "pi-captures.jsonl"
+
+
+def _queue_capture_keys(path: Path) -> list[str]:
+    if not path.exists():
+        return []
     try:
-        return sum(1 for line in queue_path.read_text(errors="replace").splitlines() if line.strip())
+        lines = path.read_text(errors="replace").splitlines()
     except OSError:
-        return 0
+        return []
+
+    keys = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            capture = json.loads(line)
+        except json.JSONDecodeError:
+            keys.append(f"id:invalid-{len(keys) + 1}")
+            continue
+        if isinstance(capture, dict) and capture.get("id"):
+            keys.append(f"id:{capture['id']}")
+        else:
+            keys.append(f"no-id:{path}:{len(keys) + 1}:{line}")
+    return keys
+
+
+def _queue_capture_count(path: Path) -> int:
+    return len(_queue_capture_keys(path))
+
+
+def _queue_capture_status(vault: Path) -> dict[str, object]:
+    queue_path = _pi_queue_file()
+    legacy_queue_path = _legacy_pi_queue_file(vault)
+    current_capture_keys = _queue_capture_keys(queue_path)
+    legacy_capture_keys = [] if queue_path == legacy_queue_path else _queue_capture_keys(legacy_queue_path)
+    current_queued_capture_count = len(current_capture_keys)
+    legacy_queued_capture_count = len(legacy_capture_keys)
+    combined_queued_capture_count = len(dict.fromkeys(current_capture_keys + legacy_capture_keys))
+    legacy_queue_exists = False if queue_path == legacy_queue_path else legacy_queue_path.exists()
+
+    status: dict[str, object] = {
+        "queued_capture_count": combined_queued_capture_count,
+        "count": combined_queued_capture_count,
+        "queued_capture_count_source": "current",
+        "current_queued_capture_count": current_queued_capture_count,
+        "queue_path": str(queue_path),
+        "queue_path_source": _pi_queue_path_source(),
+        "legacy_queue_path": str(legacy_queue_path),
+        "legacy_queue_exists": legacy_queue_exists,
+        "legacy_queued_capture_count": legacy_queued_capture_count,
+    }
+    if current_queued_capture_count == 0 and legacy_queued_capture_count:
+        status["queued_capture_count_source"] = "legacy_fallback"
+        status["queue_status_note"] = "using legacy vault queue fallback; pi_bridge migrates this queue to XDG state"
+    elif legacy_queued_capture_count:
+        status["queued_capture_count_source"] = "current_plus_legacy"
+        status["queue_status_note"] = "including legacy vault queue captures pending pi_bridge migration"
+    return status
 
 
 def _compact_session_result(result: dict) -> dict:
@@ -2012,11 +2085,16 @@ def build_session_context(
             f"[vault] Status: {status['note_count']} notes, qmd {'available' if status['qmd_available'] else 'unavailable'}"
         )
 
-        queued_capture_count = _queue_capture_count(vault)
-        queue = {"queued_capture_count": queued_capture_count, "queue_path": str(vault / "queue" / "pi-captures.jsonl")}
+        queue = _queue_capture_status(vault)
+        queued_capture_count = int(queue["queued_capture_count"])
         sections["queue"] = queue
         if queued_capture_count:
-            content_blocks.append(f"[vault] Capture queue: {queued_capture_count} queued pi capture(s)")
+            suffix = ""
+            if queue.get("queued_capture_count_source") == "legacy_fallback":
+                suffix = " (legacy fallback)"
+            elif queue.get("queued_capture_count_source") == "current_plus_legacy":
+                suffix = " (includes legacy queue)"
+            content_blocks.append(f"[vault] Capture queue: {queued_capture_count} queued pi capture(s){suffix}")
 
     if include_tool_context_preview:
         sections["tool_context_preview"] = {
@@ -2226,9 +2304,23 @@ def should_skip_tool_context_path(file_path: str) -> bool:
     return path.name in SKIP_FILENAMES
 
 
-def extract_tool_context_keywords(file_path: str) -> str:
-    """Extract searchable keywords from a file path for BM25 query."""
+def extract_tool_context_keywords(file_path: str, cwd: str = "") -> str:
+    """Extract searchable keywords from a file path for BM25 query.
+
+    File-read hooks pass absolute normalized paths, but BM25 queries should be
+    about the code area, not the user's checkout/worktree scaffolding. Prefer a
+    path relative to the session cwd when possible, then fall back to stripping
+    the home directory.
+    """
     path = file_path
+    if cwd:
+        try:
+            rel = os.path.relpath(os.path.realpath(file_path), os.path.realpath(os.path.expanduser(cwd)))
+            if rel and not rel.startswith("..") and not os.path.isabs(rel):
+                path = rel
+        except (OSError, ValueError):
+            pass
+
     home = str(Path.home())
     if path.startswith(home):
         path = path[len(home) :]
@@ -2258,7 +2350,11 @@ def extract_tool_context_keywords(file_path: str) -> str:
 
 # v2: caches written before the relative-path cwd fix hold dir entries
 # poisoned by paths resolved against the wrong project; drop them once.
-TOOL_CONTEXT_CACHE_SCHEMA = 2
+# v3: dir entries become project-scoped ("<cwd>::<dir>") and carry a ts for
+# TTL expiry; pre-v3 keys are shape-incompatible, so drop them once.
+# v4: query extraction became cwd-relative; old dir entries may be poisoned by
+# checkout/worktree path terms and must be recomputed.
+TOOL_CONTEXT_CACHE_SCHEMA = 4
 
 
 def load_cache() -> dict:
@@ -2287,6 +2383,29 @@ def save_cache(cache: dict) -> None:
             json.dump(cache, f)
     except OSError:
         pass
+
+
+def _tool_context_dir_key(cwd: str, normalized_path: str) -> str:
+    """Scope cache entries by project (cwd) as well as directory.
+
+    A directory shared between checkouts (or a mis-resolved path) must not
+    replay one project's cached results into another project's sessions.
+    """
+    try:
+        scope = os.path.realpath(os.path.expanduser(cwd)).rstrip("/") if cwd else "-"
+    except (OSError, ValueError):
+        scope = "-"
+    return f"{scope}::{Path(normalized_path).parent}"
+
+
+def _tool_context_entry_fresh(entry: dict, config: dict) -> bool:
+    try:
+        ttl_hours = float(config.get("tool_context_cache_ttl_hours", 24))
+    except (TypeError, ValueError):
+        ttl_hours = 24.0
+    if ttl_hours <= 0:
+        return True  # TTL disabled
+    return (time.time() - float(entry.get("ts", 0))) < ttl_hours * 3600
 
 
 def get_recall_paths(session_id: str = "unknown") -> set[str]:
@@ -2342,17 +2461,72 @@ def format_tool_context_result(result: dict) -> str:
     return line
 
 
+def tool_context_diagnostics_enabled(config: dict) -> bool:
+    """Return whether retrieval logs should include tool-context decisions."""
+    return bool(config.get("tool_context_diagnostics", True))
+
+
+def log_tool_context_decision(
+    config: dict,
+    decision: str,
+    metadata: dict,
+    *,
+    candidates: list[dict] | None = None,
+    **kwargs,
+) -> None:
+    """Log one terminal tool-context decision for diagnostic analysis.
+
+    ``log_retrieval`` still controls whether anything is written (via
+    retrieval_log/MEMENTO_DEBUG). This helper makes the tool-context path
+    measurable when diagnostic logging is enabled: every call emits a terminal
+    decision, and optional candidate summaries explain why a note did or did
+    not survive gating.
+    """
+    if not tool_context_diagnostics_enabled(config):
+        return
+
+    payload = {
+        "decision": decision,
+        "reason": decision,
+        "cwd": metadata.get("cwd", ""),
+        "session_id": metadata.get("session_id", ""),
+        "tool_name": metadata.get("tool_name", ""),
+        "file_path": metadata.get("file_path", ""),
+    }
+    if metadata.get("lineage_id"):
+        payload["lineage_id"] = metadata.get("lineage_id")
+    if metadata.get("query"):
+        payload["query"] = metadata.get("query")
+    payload.update(kwargs)
+
+    if candidates is not None and config.get("tool_context_diagnostics_include_candidates", False):
+        max_candidates = int(config.get("tool_context_diagnostics_max_candidates", 10) or 10)
+        payload["candidates"] = [_candidate_summary(result) for result in candidates[: max(0, max_candidates)]]
+
+    log_retrieval("tool-context", "decision", **payload)
+
+
 def build_tool_context(
     tool_name: str,
     file_path: str,
     cwd: str = "",
     session_id: str = "unknown",
+    lineage_id: str | None = None,
 ) -> LifecycleResult:
-    """Build context for a file-read tool result."""
-    config = get_config()
-    metadata = {"cwd": cwd, "session_id": session_id, "tool_name": tool_name, "file_path": file_path}
+    """Build context for a file-read tool result.
 
-    def no_context(reason: str) -> LifecycleResult:
+    lineage_id, when provided, keys the per-session injection caps instead of
+    session_id: resumed sessions get fresh session ids but share a transcript,
+    and caps keyed on the transient id reset on every resume.
+    """
+    config = get_config()
+    lineage = lineage_id or session_id
+    metadata = {"cwd": cwd, "session_id": session_id, "tool_name": tool_name, "file_path": file_path}
+    if lineage_id:
+        metadata["lineage_id"] = lineage_id
+
+    def no_context(reason: str, **diagnostics) -> LifecycleResult:
+        log_tool_context_decision(config, reason, metadata, **diagnostics)
         return LifecycleResult(False, "", "tool-context", reason=reason, metadata=metadata)
 
     if not config.get("tool_context", True):
@@ -2383,48 +2557,90 @@ def build_tool_context(
 
     cache = load_cache()
     max_injections = config.get("tool_context_max_injections", 5)
-    if session_injection_count(cache, session_id) >= max_injections:
-        return no_context("cap-reached")
+    if session_injection_count(cache, lineage) >= max_injections:
+        return no_context("cap-reached", max_injections=max_injections)
 
-    dir_key = str(Path(normalized_path).parent)
+    dir_key = _tool_context_dir_key(cwd, normalized_path)
     search_query = None
     latency_ms = 0
-    if dir_key in cache.get("dirs", {}):
-        cached = cache["dirs"][dir_key]
-        results = cached.get("results", [])
+    source = "search"
+    raw_result_count = None
+    enhanced_result_count = None
+    cached_entry = cache.get("dirs", {}).get(dir_key)
+    if cached_entry is not None and not _tool_context_entry_fresh(cached_entry, config):
+        del cache["dirs"][dir_key]
+        cached_entry = None
+        log_retrieval("tool-context", "cache-expired", dir_key=dir_key)
+    if cached_entry is not None:
+        source = "cache"
+        results = cached_entry.get("results", [])
+        search_query = cached_entry.get("query")
+        raw_result_count = cached_entry.get("raw_result_count")
+        enhanced_result_count = cached_entry.get("enhanced_result_count")
+        if search_query:
+            metadata["query"] = search_query
         if not results:
-            return no_context("no-results")
+            return no_context("no-results", dir_key=dir_key, source=source)
         log_retrieval("tool-context", "cache-hit", file_path=normalized_path, dir_key=dir_key)
     else:
         cooldown = config.get("tool_context_cooldown", 3)
         last_call = cache.get("last_qmd_call", 0)
         if time.time() - last_call < cooldown:
-            return no_context("cooldown")
+            return no_context("cooldown", cooldown=cooldown, seconds_since_last_call=round(time.time() - last_call, 3))
 
-        search_query = extract_tool_context_keywords(normalized_path)
+        search_query = extract_tool_context_keywords(normalized_path, cwd)
         metadata["query"] = search_query
         if not search_query or len(search_query.split()) < 2:
-            cache.setdefault("dirs", {})[dir_key] = {"results": []}
+            cache.setdefault("dirs", {})[dir_key] = {"results": [], "ts": time.time(), "query": search_query}
             save_cache(cache)
-            return no_context("insufficient-keywords")
+            return no_context("insufficient-keywords", dir_key=dir_key, query=search_query)
 
         min_score = config.get("tool_context_min_score", 0.75)
         max_notes = config.get("tool_context_max_notes", 2)
         t0 = time.time()
-        results = qmd_search_with_extras(
-            search_query,
-            limit=max_notes + 5,
-            semantic=False,
-            timeout=2,
-            min_score=min_score,
-        )
+        try:
+            raw_results = qmd_search_with_extras(
+                search_query,
+                limit=max_notes + 5,
+                semantic=False,
+                timeout=2,
+                min_score=min_score,
+            )
+            raw_result_count = len(raw_results)
+            # Tool-context is unsolicited injection: require a positive project
+            # match instead of letting untagged notes through as general knowledge.
+            results = enhance_results(raw_results, config, cwd=cwd, require_project_match=True)
+            enhanced_result_count = len(results)
+        except Exception as exc:
+            latency_ms = int((time.time() - t0) * 1000)
+            cache["last_qmd_call"] = time.time()
+            save_cache(cache)
+            log_retrieval(
+                "tool-context",
+                "backend-error",
+                query=search_query,
+                file_path=normalized_path,
+                latency_ms=latency_ms,
+                error_type=type(exc).__name__,
+            )
+            return no_context(
+                "backend-error",
+                dir_key=dir_key,
+                source=source,
+                latency_ms=latency_ms,
+                error_type=type(exc).__name__,
+                min_score=min_score,
+            )
         latency_ms = int((time.time() - t0) * 1000)
-        # Tool-context is unsolicited injection: require a positive project
-        # match instead of letting untagged notes through as general knowledge.
-        results = enhance_results(results, config, cwd=cwd, require_project_match=True)
 
         cache["last_qmd_call"] = time.time()
-        cache.setdefault("dirs", {})[dir_key] = {"results": results}
+        cache.setdefault("dirs", {})[dir_key] = {
+            "results": results,
+            "ts": time.time(),
+            "query": search_query,
+            "raw_result_count": raw_result_count,
+            "enhanced_result_count": enhanced_result_count,
+        }
         save_cache(cache)
 
         if not results:
@@ -2435,14 +2651,29 @@ def build_tool_context(
                 file_path=normalized_path,
                 latency_ms=latency_ms,
             )
-            return no_context("no-results")
+            return no_context(
+                "no-results",
+                dir_key=dir_key,
+                source=source,
+                latency_ms=latency_ms,
+                raw_result_count=raw_result_count,
+                enhanced_result_count=enhanced_result_count,
+                min_score=min_score,
+            )
 
     recall_paths = get_recall_paths(session_id)
-    already_injected = session_injected_paths(cache, session_id)
+    already_injected = session_injected_paths(cache, lineage)
     exclude = recall_paths | already_injected
     filtered = [r for r in results if r.get("path", "") not in exclude]
     if not filtered:
-        return no_context("duplicate")
+        return no_context(
+            "duplicate",
+            dir_key=dir_key,
+            source=source,
+            result_count=len(results),
+            recall_excluded_count=len(recall_paths),
+            session_excluded_count=len(already_injected),
+        )
 
     max_notes = config.get("tool_context_max_notes", 2)
     selected = filtered[:max_notes]
@@ -2460,11 +2691,29 @@ def build_tool_context(
         file_path=normalized_path,
         query=search_query or dir_key,
         injected_titles=injected_titles,
+        injected_paths=injected_paths,
         injected_chars=len(injected_text),
         latency_ms=latency_ms,
     )
+    log_tool_context_decision(
+        config,
+        "injected",
+        metadata,
+        candidates=filtered,
+        dir_key=dir_key,
+        source=source,
+        result_count=len(results),
+        filtered_count=len(filtered),
+        selected_count=len(selected),
+        injected_titles=injected_titles,
+        injected_paths=injected_paths,
+        injected_chars=len(injected_text),
+        latency_ms=latency_ms,
+        raw_result_count=raw_result_count,
+        enhanced_result_count=enhanced_result_count,
+    )
 
-    record_injection(cache, session_id, injected_paths)
+    record_injection(cache, lineage, injected_paths)
     save_cache(cache)
     return LifecycleResult(
         should_inject=True,

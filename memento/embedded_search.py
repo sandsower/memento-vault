@@ -5,6 +5,8 @@ Uses a single search.db file stored alongside the vault. The markdown files
 remain the source of truth; the database is a derived, disposable index.
 """
 
+from __future__ import annotations
+
 import logging
 import re
 import sqlite3

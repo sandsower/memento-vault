@@ -4,6 +4,8 @@ Stubs for PR3 — will be used as return type annotations on MCP tools
 and as parameter types in store/search once the full typing pass lands.
 """
 
+from __future__ import annotations
+
 from typing import TypedDict
 
 
@@ -20,6 +22,7 @@ class NoteMetadata(TypedDict, total=False):
     tags: list[str]
     certainty: int | None
     source: str
+    origin: str | None
     date: str
     project: str | None
     branch: str | None

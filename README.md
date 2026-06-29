@@ -124,7 +124,7 @@ Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.js
       "processQueue": true,
       "processQueueOnSessionClose": false,
       "processQueueMaxCaptures": 3,
-      "processQueueModel": null,
+      "processQueueModel": "claude-sonnet-4-20250514",
       "maxInjectedChars": 4000,
       "maxToolContextPerSession": 5
     }
@@ -147,9 +147,9 @@ Environment variables override file config:
 | `MEMENTO_PI_PROCESS_QUEUE` | `true` | Enable manual queued-capture processing. |
 | `MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE` | `false` | Reserved future automation route for processing a small batch on session close. |
 | `MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES` | `3` | Reserved future cap for session-close processing. |
-| `MEMENTO_PI_PROCESS_QUEUE_MODEL` | unset | Optional model override for processor sessions. |
+| `MEMENTO_PI_PROCESS_QUEUE_MODEL` | `claude-sonnet-4-20250514` | Model for processor sessions; set config/env explicitly to override or `null` in config to use pi's default. |
 
-When automatic capture is enabled, pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
+When automatic capture is enabled, pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. The processor prompt receives deterministic existing-note deduplication context and instructs curators to store original project/cwd/branch/session metadata as note frontmatter via `memento_capture`, not as prose boilerplate. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
 
 Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
 
@@ -191,7 +191,7 @@ cd memento-vault && git pull && ./install.sh --experimental
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.10+
 - Git
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (for hook-based setup)
 - [QMD](https://github.com/tobi/qmd) (optional, semantic search)
@@ -306,9 +306,9 @@ Past knowledge flows back into active sessions via three hooks:
 
 - **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens. Fast sync output (<50ms), QMD search deferred to background.
 - **Prompt recall** (UserPromptSubmit): searches each prompt against the vault and surfaces matching notes before Claude processes it. Adaptive pipeline: fast BM25 path for confident matches, deep path (PRF, RRF, multi-hop wikilink-following, cross-encoder reranking) for low-confidence queries.
-- **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. Directory-level BM25 with caching and rate limiting.
+- **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. It uses cwd-relative path keywords, directory-level BM25 caching, rate limiting, a higher relevance threshold, and a positive project-match gate because file-read context is unsolicited.
 
-All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, and vendor directories.
+All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, agent/bridge files, and vendor directories. Enable `retrieval_log: true` or `MEMENTO_DEBUG=1` and run `tools/analyze-retrieval.py` to audit tool-context skip reasons, injection rate, injected paths, and latency.
 
 ### Performance
 
@@ -524,6 +524,8 @@ auto_commit: true
 session_briefing: true
 prompt_recall: true
 tool_context: true
+# When retrieval_log/MEMENTO_DEBUG is enabled, log tool-context decisions.
+tool_context_diagnostics: true
 
 # Retrieval pipeline
 prf_enabled: true            # pseudo-relevance feedback query expansion
