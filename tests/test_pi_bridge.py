@@ -286,6 +286,7 @@ def test_pi_bridge_capture_runs_commit_and_reindex_under_vault_lock(capsys, tmp_
 
 def test_pi_bridge_commit_and_reindex_helper_runs_commit_before_reindex(tmp_path):
     tmp_path.joinpath(".git").mkdir()
+    tmp_path.joinpath("notes").mkdir()
     call_order: list[tuple[str, object, object]] = []
 
     class FakeBackend:

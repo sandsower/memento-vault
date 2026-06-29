@@ -430,18 +430,19 @@ def _commit_and_reindex_locked(vault: Path, commit_message: str, collection: str
         payload["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         return payload
 
-    if config.get("auto_commit", True) and (vault / ".git").exists():
+    notes_dir = vault / "notes"
+    if config.get("auto_commit", True) and (vault / ".git").exists() and notes_dir.exists():
         payload["commit"]["attempted"] = True
         try:
             subprocess.run(
-                ["git", "-C", str(vault), "add", "-A"],
+                ["git", "-C", str(vault), "add", "-A", "notes"],
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=False,
             )
             diff_check = subprocess.run(
-                ["git", "-C", str(vault), "diff", "--cached", "--quiet"],
+                ["git", "-C", str(vault), "diff", "--cached", "--quiet", "--", "notes"],
                 capture_output=True,
                 text=True,
                 timeout=30,
