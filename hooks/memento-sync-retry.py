@@ -16,6 +16,8 @@ Every replay appends a new ledger entry (ok or error), so the ledger stays
 the single source of truth for what's pending.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import re

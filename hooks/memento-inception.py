@@ -4,6 +4,8 @@ Inception — background consolidation agent for memento-vault.
 Clusters vault notes by embedding similarity and produces pattern notes.
 """
 
+from __future__ import annotations
+
 import json
 import math
 import os
