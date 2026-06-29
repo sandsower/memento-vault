@@ -40,11 +40,15 @@ def write_note(source="session"):
 
 def capture():
     write_note(source="custom-capture")
+
+
+def wrapper(source="wrapper-default"):
+    write_note(source=source)
 """.strip(),
         encoding="utf-8",
     )
 
-    assert checker.implemented_atomic_sources((writer,)) == {"session", "custom-capture"}
+    assert checker.implemented_atomic_sources((writer,)) == {"session", "custom-capture", "wrapper-default"}
 
 
 def test_frontmatter_schema_checker_detects_missing_documented_field(tmp_path):

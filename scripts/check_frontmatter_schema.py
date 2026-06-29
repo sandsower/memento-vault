@@ -158,14 +158,39 @@ def _function_name(node: ast.AST) -> str | None:
     return None
 
 
+def _source_parameter_default(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    positional_args = node.args.posonlyargs + node.args.args
+    defaults = [None] * (len(positional_args) - len(node.args.defaults)) + list(node.args.defaults)
+    for arg, default in zip(positional_args, defaults):
+        if arg.arg == "source":
+            return _string_constant(default)
+
+    for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+        if arg.arg == "source":
+            return _string_constant(default)
+
+    return None
+
+
+def _forwards_source_parameter_to_writer(node: ast.FunctionDef | ast.AsyncFunctionDef, writer_names: set[str]) -> bool:
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call) or _function_name(child.func) not in writer_names:
+            continue
+        for keyword in child.keywords:
+            if keyword.arg == "source" and isinstance(keyword.value, ast.Name) and keyword.value.id == "source":
+                return True
+    return False
+
+
 def implemented_atomic_sources(source_paths: tuple[Path, ...] | None = None) -> set[str]:
     """Return source values implemented by ordinary atomic-note write paths.
 
     Sources are derived from code, not copied into this checker: function
-    defaults on the shared store contract and literal `source=` arguments at
-    writer/call-site boundaries. Variant writers with custom frontmatter
-    (`write_daily_snapshot` and Inception) are covered by generated/template
-    fixtures in `expected_schema()`.
+    defaults on the shared store contract, wrapper defaults forwarded to shared
+    writers, and literal `source=` arguments at writer/call-site boundaries.
+    Variant writers with custom frontmatter (`write_daily_snapshot` and
+    Inception) are covered by generated/template fixtures in
+    `expected_schema()`.
     """
     source_paths = WRITER_SOURCE_PATHS if source_paths is None else source_paths
     sources: set[str] = set()
@@ -175,20 +200,13 @@ def implemented_atomic_sources(source_paths: tuple[Path, ...] | None = None) -> 
     for path in source_paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in functions_with_source_default:
-                positional_args = node.args.posonlyargs + node.args.args
-                defaults = [None] * (len(positional_args) - len(node.args.defaults)) + list(node.args.defaults)
-                for arg, default in zip(positional_args, defaults):
-                    if arg.arg == "source":
-                        value = _string_constant(default)
-                        if value:
-                            sources.add(value)
-
-                for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
-                    if arg.arg == "source":
-                        value = _string_constant(default)
-                        if value:
-                            sources.add(value)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                value = _source_parameter_default(node)
+                if value and (
+                    node.name in functions_with_source_default
+                    or _forwards_source_parameter_to_writer(node, calls_with_source_keyword)
+                ):
+                    sources.add(value)
 
             if isinstance(node, ast.Call) and _function_name(node.func) in calls_with_source_keyword:
                 for keyword in node.keywords:
