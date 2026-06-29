@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -189,12 +190,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.check:
         inventory = inventory_tool_names()
         registered = registered_tool_names()
-        if set(inventory) != set(registered):
+        inventory_counts = Counter(inventory)
+        registered_counts = Counter(registered)
+        if inventory_counts != registered_counts:
             print("MCP tool inventory drift detected")
             print(f"inventory:  {inventory}")
             print(f"registered: {registered}")
-            print(f"missing from inventory: {sorted(set(registered) - set(inventory))}")
-            print(f"extra in inventory:     {sorted(set(inventory) - set(registered))}")
+            print(f"missing from inventory: {sorted((registered_counts - inventory_counts).elements())}")
+            print(f"extra in inventory:     {sorted((inventory_counts - registered_counts).elements())}")
             return 1
         print(f"MCP tool inventory covers {len(inventory)} registered tools.")
         return 0

@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import subprocess
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -330,8 +331,8 @@ class TestMementoSearch:
 
 
 class TestMcpToolInventoryDocs:
-    def test_inventory_covers_registered_mcp_tools(self):
-        assert set(inventory_tool_names()) == set(registered_tool_names())
+    def test_inventory_covers_registered_mcp_tools_without_duplicates(self):
+        assert Counter(inventory_tool_names()) == Counter(registered_tool_names())
 
     def test_readme_mcp_tool_inventory_is_generated_from_source_of_truth(self):
         readme = (Path(__file__).parents[1] / "README.md").read_text()
