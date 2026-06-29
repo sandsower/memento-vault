@@ -634,13 +634,11 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
         latency_ms = int((_time.time() - t0) * 1000)
 
         results = enhance_results(results, cwd=params.get("cwd", ""))
-        record_access_hits(
-            "briefing", "deferred-search", results, query=query, session_id=params.get("session_id", "unknown")
-        )
 
         # Format results, dedup against linked notes
         seen = set()
         note_lines = []
+        note_paths = []
 
         for result in results:
             title = result.get("title", "")
@@ -648,6 +646,7 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
                 continue
             seen.add(title)
             note_lines.append(format_qmd_result(result))
+            note_paths.append(result.get("path", ""))
 
         for note_name in linked_notes:
             if note_name in seen or len(note_lines) >= max_notes:
@@ -656,8 +655,19 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
             oneliner = read_note_oneliner(note_name)
             if oneliner:
                 note_lines.append(f"  - {oneliner}")
+                note_paths.append(f"notes/{note_name}.md")
 
         final_notes = note_lines[:max_notes]
+        final_paths = [path for path in note_paths[:max_notes] if path]
+        if final_paths:
+            record_access(
+                final_paths,
+                hook="briefing",
+                tool="deferred-search",
+                query=query,
+                session_id=params.get("session_id", "unknown"),
+                result_count=len(final_paths),
+            )
         with open(path, "w") as f:
             json.dump(
                 {
@@ -2049,9 +2059,8 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown", *, rec
             return result
         return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)
-    if top_path:
-        if record:
-            record_recall([r.get("path", "") for r in results], session_id)
+    if top_path and record:
+        record_recall([r.get("path", "") for r in results], session_id)
         record_access_hits("recall", "inject", results, query=prompt, session_id=session_id)
     return LifecycleResult(
         should_inject=True,

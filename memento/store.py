@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memento.config import RUNTIME_DIR, get_config, slugify
+from memento.config import RUNTIME_DIR, get_config, get_vault_id, slugify
 
 RETRIEVAL_LOG_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
@@ -30,6 +30,7 @@ AUTOMATION_MEMORY_HEALTH_LOG_PATH = os.path.join(
 )
 
 ACCESS_LOG_PATH = os.path.join(RUNTIME_DIR, "access-log.jsonl")
+ACCESS_LOG_STATS_PATH = os.path.join(RUNTIME_DIR, "access-log-stats.json")
 
 INCEPTION_STATE_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
@@ -133,10 +134,29 @@ def log_automation_memory_health(action, **kwargs):
 
 
 _ACCESS_LOG_CACHE = {"signature": None, "stats": {}}
+_ACCESS_LOG_EVENT_CAP = 200
 
 
 def _should_track_access():
     return get_config().get("access_log_enabled", True)
+
+
+def _current_vault_id():
+    try:
+        vault_id = get_vault_id()
+        if vault_id:
+            return str(vault_id)
+    except Exception:
+        pass
+
+    try:
+        vault_path = str(get_config().get("vault_path") or "")
+        if vault_path:
+            return hashlib.sha256(vault_path.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        pass
+
+    return "unknown"
 
 
 def _access_log_query_summary(query):
@@ -174,53 +194,56 @@ def _parse_access_log_ts(value):
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def record_access(paths, *, hook="unknown", tool="unknown", query=None, session_id=None, result_count=None):
-    """Append derived access-log entries for successful retrievals.
-
-    The access log lives in runtime state, not the vault, so it can be rebuilt
-    or discarded without touching Markdown notes or git history.
-    """
-    if not _should_track_access():
-        return
-
-    if isinstance(paths, (str, Path)):
-        path_list = [paths]
-    else:
-        path_list = list(paths or [])
-
-    path_list = [str(path) for path in path_list if str(path).strip()]
-    if not path_list:
-        return
-
-    query_summary = _access_log_query_summary(query)
-    query_hash = _access_log_query_hash(query_summary)
-    entry_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-    for rank, path in enumerate(path_list, start=1):
-        entry = {"ts": entry_ts, "path": path, "hook": hook, "tool": tool, "rank": rank}
-        if query_summary:
-            entry["query_summary"] = query_summary
-            entry["query_hash"] = query_hash
-        if session_id:
-            entry["session_id"] = session_id
-        if result_count is not None:
-            entry["result_count"] = result_count
-        _append_jsonl(ACCESS_LOG_PATH, entry, "_access_log_warned")
-
-
-def load_access_log_stats():
-    """Load aggregated access-log events keyed by note path."""
+def _normalize_access_path(path):
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/")
     try:
-        stat = os.stat(ACCESS_LOG_PATH)
-    except OSError:
-        _ACCESS_LOG_CACHE["signature"] = None
-        _ACCESS_LOG_CACHE["stats"] = {}
-        return {}
+        vault = Path(get_config()["vault_path"]).expanduser().resolve()
+        candidate = Path(text).expanduser()
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+            if resolved == vault:
+                return ""
+            try:
+                return str(resolved.relative_to(vault)).replace(os.sep, "/")
+            except ValueError:
+                return normalized
+    except Exception:
+        pass
+    return normalized
 
-    signature = (stat.st_mtime_ns, stat.st_size)
-    if _ACCESS_LOG_CACHE.get("signature") == signature:
-        return _ACCESS_LOG_CACHE.get("stats", {})
 
+def _read_access_log_stats_file():
+    try:
+        with open(ACCESS_LOG_STATS_PATH) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"vaults": {}}
+    if not isinstance(data, dict):
+        return {"vaults": {}}
+    vaults = data.get("vaults")
+    if not isinstance(vaults, dict):
+        data["vaults"] = {}
+    return data
+
+
+def _write_access_log_stats_file(data):
+    os.makedirs(os.path.dirname(ACCESS_LOG_STATS_PATH), exist_ok=True)
+    tmp = ACCESS_LOG_STATS_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, separators=(",", ":"), sort_keys=True)
+    os.replace(tmp, ACCESS_LOG_STATS_PATH)
+
+
+def _trim_access_events(events):
+    if len(events) > _ACCESS_LOG_EVENT_CAP:
+        return events[-_ACCESS_LOG_EVENT_CAP:]
+    return events
+
+
+def _events_from_raw_access_log(vault_id):
     stats = {}
     try:
         with open(ACCESS_LOG_PATH) as f:
@@ -231,6 +254,8 @@ def load_access_log_stats():
                 try:
                     entry = json.loads(raw)
                 except json.JSONDecodeError:
+                    continue
+                if str(entry.get("vault_id") or "") != vault_id:
                     continue
                 path = str(entry.get("path") or "").strip()
                 if not path:
@@ -245,7 +270,126 @@ def load_access_log_stats():
                 bucket = stats.setdefault(path, {"events": []})
                 bucket["events"].append({"ts": ts, "rank": rank})
     except OSError:
-        stats = {}
+        return {}
+
+    for bucket in stats.values():
+        bucket["events"] = _trim_access_events(bucket["events"])
+    return stats
+
+
+def _update_access_log_stats(vault_id, entries):
+    if not entries:
+        return
+
+    try:
+        data = _read_access_log_stats_file()
+        vaults = data.setdefault("vaults", {})
+        vault_entry = vaults.setdefault(vault_id, {"paths": {}, "updated_at": None})
+        paths = vault_entry.setdefault("paths", {})
+
+        for entry in entries:
+            path = entry["path"]
+            bucket = paths.setdefault(path, {"events": []})
+            bucket_events = bucket.setdefault("events", [])
+            bucket_events.append({"ts": entry["ts"], "rank": entry["rank"]})
+            bucket["events"] = _trim_access_events(bucket_events)
+
+        vault_entry["updated_at"] = entries[-1]["ts"]
+        _write_access_log_stats_file(data)
+    except OSError:
+        pass
+
+
+def record_access(paths, *, hook="unknown", tool="unknown", query=None, session_id=None, result_count=None):
+    """Append derived access-log entries for successful retrievals.
+
+    The access log lives in runtime state, not the vault, so it can be rebuilt
+    or discarded without touching Markdown notes or git history.
+    """
+    if not _should_track_access():
+        return
+
+    if isinstance(paths, (str, Path)):
+        path_list = [paths]
+    else:
+        path_list = list(paths or [])
+
+    path_list = [_normalize_access_path(path) for path in path_list]
+    path_list = [path for path in path_list if path]
+    if not path_list:
+        return
+
+    vault_id = _current_vault_id()
+    query_summary = _access_log_query_summary(query)
+    query_hash = _access_log_query_hash(query_summary)
+    entry_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    stats_entries = []
+
+    for rank, path in enumerate(path_list, start=1):
+        entry = {"ts": entry_ts, "path": path, "hook": hook, "tool": tool, "rank": rank, "vault_id": vault_id}
+        if query_summary:
+            entry["query_summary"] = query_summary
+            entry["query_hash"] = query_hash
+        if session_id:
+            entry["session_id"] = session_id
+        if result_count is not None:
+            entry["result_count"] = result_count
+        _append_jsonl(ACCESS_LOG_PATH, entry, "_access_log_warned")
+        stats_entries.append({"path": path, "ts": entry_ts, "rank": rank})
+
+    _update_access_log_stats(vault_id, stats_entries)
+
+
+def load_access_log_stats():
+    """Load aggregated access-log events keyed by note path for this vault."""
+    vault_id = _current_vault_id()
+    try:
+        stat = os.stat(ACCESS_LOG_STATS_PATH)
+    except OSError:
+        signature = (vault_id, None, None)
+        if _ACCESS_LOG_CACHE.get("signature") == signature:
+            return _ACCESS_LOG_CACHE.get("stats", {})
+        stats = _events_from_raw_access_log(vault_id)
+        _ACCESS_LOG_CACHE["signature"] = signature
+        _ACCESS_LOG_CACHE["stats"] = stats
+        return stats
+
+    signature = (vault_id, stat.st_mtime_ns, stat.st_size)
+    if _ACCESS_LOG_CACHE.get("signature") == signature:
+        return _ACCESS_LOG_CACHE.get("stats", {})
+
+    data = _read_access_log_stats_file()
+    vault_stats = data.get("vaults", {}).get(vault_id, {}) if isinstance(data.get("vaults"), dict) else {}
+    stats = {}
+    for path, bucket in (vault_stats.get("paths") or {}).items():
+        events = []
+        for event in (bucket.get("events") or [])[-_ACCESS_LOG_EVENT_CAP:]:
+            ts = _parse_access_log_ts(event.get("ts"))
+            if ts is None:
+                continue
+            try:
+                rank = max(1, int(event.get("rank") or 1))
+            except (TypeError, ValueError):
+                rank = 1
+            events.append({"ts": ts, "rank": rank})
+        if events:
+            stats[path] = {"events": events}
+
+    if not stats:
+        stats = _events_from_raw_access_log(vault_id)
+        if stats:
+            data.setdefault("vaults", {})[vault_id] = {
+                "paths": {
+                    path: {
+                        "events": [{"ts": event["ts"].isoformat(), "rank": event["rank"]} for event in bucket["events"]]
+                    }
+                    for path, bucket in stats.items()
+                },
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _write_access_log_stats_file(data)
+            stat = os.stat(ACCESS_LOG_STATS_PATH)
+            signature = (vault_id, stat.st_mtime_ns, stat.st_size)
 
     _ACCESS_LOG_CACHE["signature"] = signature
     _ACCESS_LOG_CACHE["stats"] = stats
@@ -285,7 +429,7 @@ def apply_access_log_boost(results, config=None, now=None):
             continue
 
         signal = 0.0
-        for event in events[-200:]:
+        for event in events[-_ACCESS_LOG_EVENT_CAP:]:
             event_ts = event.get("ts")
             if not isinstance(event_ts, datetime):
                 continue

@@ -316,6 +316,21 @@ def _strip_injection(text: str) -> str:
     return text
 
 
+def _vault_relative_access_path(vault: Path, path: str) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        candidate = Path(text).expanduser()
+        vault_resolved = vault.resolve()
+        resolved = candidate.resolve() if candidate.is_absolute() else (vault / candidate).resolve()
+        if resolved == vault_resolved:
+            return ""
+        return str(resolved.relative_to(vault_resolved)).replace(os.sep, "/")
+    except Exception:
+        return text.replace("\\", "/")
+
+
 @mcp.tool()
 def memento_search(
     query: str,
@@ -420,7 +435,7 @@ def memento_search(
     output = []
     for r in results[:limit]:
         entry = {
-            "path": r.get("path", ""),
+            "path": _vault_relative_access_path(vault, r.get("path", "")),
             "title": _strip_injection(r.get("title", "")),
             "score": round(r.get("score", 0.0), 4),
             "snippet": _strip_injection(r.get("snippet", "")),
@@ -878,8 +893,9 @@ def memento_get(path: str) -> dict:
         if title_match:
             title = title_match.group(1).strip().strip('"').strip("'")
 
+        logged_path = _vault_relative_access_path(vault, path)
         result = {
-            "path": path,
+            "path": logged_path or path,
             "title": _strip_injection(title),
             "content": _strip_injection(content),
         }
@@ -890,7 +906,7 @@ def memento_get(path: str) -> dict:
     result = qmd_get(path)
     if result:
         result_payload = {
-            "path": result.get("path", path),
+            "path": _vault_relative_access_path(vault, result.get("path", path)) or result.get("path", path),
             "title": _strip_injection(result.get("title", "")),
             "content": _strip_injection(result.get("content", "")),
         }
@@ -904,7 +920,8 @@ def memento_get(path: str) -> dict:
         remote_result = remote_get(path)
         if remote_result:
             result_payload = {
-                "path": remote_result.get("path", path),
+                "path": _vault_relative_access_path(vault, remote_result.get("path", path))
+                or remote_result.get("path", path),
                 "title": _strip_injection(remote_result.get("title", "")),
                 "content": _strip_injection(remote_result.get("content", "")),
             }

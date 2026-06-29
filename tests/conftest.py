@@ -50,6 +50,7 @@ def isolate_recall_dedup_state(monkeypatch, tmp_path):
 def isolate_access_log_state(monkeypatch, tmp_path):
     """Keep derived access logs out of the user's real runtime dir."""
     monkeypatch.setattr("memento.store.ACCESS_LOG_PATH", str(tmp_path / "access-log.jsonl"), raising=False)
+    monkeypatch.setattr("memento.store.ACCESS_LOG_STATS_PATH", str(tmp_path / "access-log-stats.json"), raising=False)
     monkeypatch.setattr("memento.store._ACCESS_LOG_CACHE", {"signature": None, "stats": {}}, raising=False)
 
 
