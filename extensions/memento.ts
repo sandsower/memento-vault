@@ -812,9 +812,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 									const remainingIds = new Set(captureIdsFromQueue(latestQueue));
 									const nextSelected = selectionSnapshot.filter((captureId) => remainingIds.has(captureId));
 									const nextIndex = Math.min(cursorSnapshot, Math.max(0, captureIdsFromQueue(latestQueue).length - 1));
+									const succeeded = !payload.error;
 									state = {
 										...state,
-										selectedCaptureIds: nextSelected,
+										selectedCaptureIds: succeeded ? nextSelected : selectionSnapshot,
 										selectedIndex: nextIndex,
 										confirmDiscard: false,
 										discardCapture: undefined,

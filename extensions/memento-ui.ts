@@ -42,7 +42,7 @@ const ACTIONS = [
 	{ label: "Review queued captures", action: { type: "show", view: "queue" } as MementoPanelAction },
 	{ label: "Preview queued processing", action: { type: "dry-run" } as MementoPanelAction },
 	{ label: "Process queued captures", action: { type: "process" } as MementoPanelAction },
-	{ label: "Discard selected queued captures", action: { type: "request-discard" } as MementoPanelAction },
+	{ label: "Discard highlighted queued capture", action: { type: "request-discard" } as MementoPanelAction },
 	{ label: "Status / diagnostics", action: { type: "show", view: "status" } as MementoPanelAction },
 	{ label: "Toggle footer details", action: { type: "toggle-widget" } as MementoPanelAction },
 ];

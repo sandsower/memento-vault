@@ -862,6 +862,8 @@ def _queue_discard(
         _write_queue(retained, vault)
     result["backup_path"] = str(backup_path)
     result["archive_path"] = str(archive_path)
+    result["retained"] = len(retained)
+    result["remaining"] = len(retained)
     return result
 
 
