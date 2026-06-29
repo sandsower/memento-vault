@@ -208,7 +208,7 @@ The MCP server currently registers **14 tools**. This table is generated from `m
 
 | Tool | Category | What it does | When to use it |
 |------|----------|--------------|----------------|
-| `memento_search` | Read | Search vault notes with BM25, optional semantic search, hybrid ranking, temporal decay, PageRank boost, and `concrete: auto\|true\|false` for exact identifiers and quoted phrases. | Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path. |
+| `memento_search` | Read | Search vault notes with BM25, optional semantic search, hybrid ranking, temporal decay, PageRank/access-log boosts, and `concrete: auto\|true\|false` for exact identifiers and quoted phrases. | Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path. |
 | `memento_contradictions` | Read | Inspect a topic for disagreements, stale conclusions, supersession chains, and opposite-language hints. | Use when comparing competing notes about the same topic or when you need explicit superseded notes marked alongside their source paths and certainty/date context. |
 | `memento_briefing` | Lifecycle | Build a compact session-start briefing payload for host adapters. | Host-adapter primitive for automatic injection; not a general user-answering tool. |
 | `memento_recall` | Lifecycle | Build prompt-time recall context for host adapters. | Host-adapter primitive for automatic injection before an agent turn; not a general user-answering tool. |

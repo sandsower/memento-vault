@@ -159,6 +159,7 @@ from memento.store import (
     append_project_session_line,
     log_retrieval,
     normalize_note_contract,
+    record_access,
     release_vault_write_lock,
     update_project_index,
     write_daily_snapshot,
@@ -316,6 +317,21 @@ def _strip_injection(text: str) -> str:
     return text
 
 
+def _vault_relative_access_path(vault: Path, path: str) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        candidate = Path(text).expanduser()
+        vault_resolved = vault.resolve()
+        resolved = candidate.resolve() if candidate.is_absolute() else (vault / candidate).resolve()
+        if resolved == vault_resolved:
+            return ""
+        return str(resolved.relative_to(vault_resolved)).replace(os.sep, "/")
+    except Exception:
+        return text.replace("\\", "/")
+
+
 @mcp.tool()
 def memento_search(
     query: str,
@@ -420,7 +436,7 @@ def memento_search(
     output = []
     for r in results[:limit]:
         entry = {
-            "path": r.get("path", ""),
+            "path": _vault_relative_access_path(vault, r.get("path", "")),
             "title": _strip_injection(r.get("title", "")),
             "score": round(r.get("score", 0.0), 4),
             "snippet": _strip_injection(r.get("snippet", "")),
@@ -440,6 +456,13 @@ def memento_search(
         output.append(entry)
 
     log_retrieval("mcp", "search", query=query, results=len(output))
+    record_access(
+        [entry["path"] for entry in output if entry.get("path")],
+        hook="mcp",
+        tool="search",
+        query=query,
+        result_count=len(output),
+    )
     return output
 
 
@@ -871,20 +894,25 @@ def memento_get(path: str) -> dict:
         if title_match:
             title = title_match.group(1).strip().strip('"').strip("'")
 
-        return {
-            "path": path,
+        logged_path = _vault_relative_access_path(vault, path)
+        result = {
+            "path": logged_path or path,
             "title": _strip_injection(title),
             "content": _strip_injection(content),
         }
+        record_access([result["path"]], hook="mcp", tool="get", query=path, result_count=1)
+        return result
 
     # Fall back to QMD get
     result = qmd_get(path)
     if result:
-        return {
-            "path": result.get("path", path),
+        result_payload = {
+            "path": _vault_relative_access_path(vault, result.get("path", path)) or result.get("path", path),
             "title": _strip_injection(result.get("title", "")),
             "content": _strip_injection(result.get("content", "")),
         }
+        record_access([result_payload["path"]], hook="mcp", tool="get", query=path, result_count=1)
+        return result_payload
 
     # Fall back to remote vault if configured
     from memento.remote_client import is_remote, get as remote_get
@@ -892,11 +920,14 @@ def memento_get(path: str) -> dict:
     if is_remote():
         remote_result = remote_get(path)
         if remote_result:
-            return {
-                "path": remote_result.get("path", path),
+            result_payload = {
+                "path": _vault_relative_access_path(vault, remote_result.get("path", path))
+                or remote_result.get("path", path),
                 "title": _strip_injection(remote_result.get("title", "")),
                 "content": _strip_injection(remote_result.get("content", "")),
             }
+            record_access([result_payload["path"]], hook="mcp", tool="get", query=path, result_count=1)
+            return result_payload
 
     return {"error": f"Note not found: {path}"}
 

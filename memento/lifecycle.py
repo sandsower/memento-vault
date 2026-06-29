@@ -33,7 +33,13 @@ from memento.search import (
     resolve_concrete_mode,
     rrf_fuse,
 )
-from memento.store import RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, log_automation_memory_health, log_retrieval
+from memento.store import (
+    RETRIEVAL_LOG_PATH,
+    TRIAGE_HEALTH_LOG_PATH,
+    log_automation_memory_health,
+    log_retrieval,
+    record_access,
+)
 from memento.utils import read_hook_input, sanitize_secrets
 
 TRIAGE_HEALTH_WINDOW_HOURS = 24
@@ -632,6 +638,7 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
         # Format results, dedup against linked notes
         seen = set()
         note_lines = []
+        note_paths = []
 
         for result in results:
             title = result.get("title", "")
@@ -639,6 +646,7 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
                 continue
             seen.add(title)
             note_lines.append(format_qmd_result(result))
+            note_paths.append(result.get("path", ""))
 
         for note_name in linked_notes:
             if note_name in seen or len(note_lines) >= max_notes:
@@ -647,8 +655,19 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
             oneliner = read_note_oneliner(note_name)
             if oneliner:
                 note_lines.append(f"  - {oneliner}")
+                note_paths.append(f"notes/{note_name}.md")
 
         final_notes = note_lines[:max_notes]
+        final_paths = [path for path in note_paths[:max_notes] if path]
+        if final_paths:
+            record_access(
+                final_paths,
+                hook="briefing",
+                tool="deferred-search",
+                query=query,
+                session_id=params.get("session_id", "unknown"),
+                result_count=len(final_paths),
+            )
         with open(path, "w") as f:
             json.dump(
                 {
@@ -793,6 +812,7 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
                 for note in map_notes[:max_notes]:
                     title = note.get("title", "")
                     note_lines.append(f"  - {title}")
+                record_access_hits("briefing", "project-maps", map_notes[:max_notes], session_id=session_id)
                 scope = _deferred_scope(project_slug, session_id, cwd)
                 with open(deferred_briefing_path(project_slug, session_id, cwd), "w") as f:
                     json.dump(
@@ -1224,6 +1244,16 @@ def record_recall(paths, session_id="unknown"):
         entry["updated"] = time.time()
 
     _mutate_recall_dedup(write)
+
+
+def record_access_hits(
+    hook: str, tool: str, results: list[dict], *, query: str | None = None, session_id: str = "unknown"
+):
+    """Write derived access-log entries for successful retrieval hits."""
+    paths = [str(result.get("path", "")).strip() for result in results if str(result.get("path", "")).strip()]
+    if not paths:
+        return
+    record_access(paths, hook=hook, tool=tool, query=query, session_id=session_id, result_count=len(paths))
 
 
 def bump_prompts_since(session_id="unknown"):
@@ -2031,6 +2061,7 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown", *, rec
     content = "\n".join(lines)
     if top_path and record:
         record_recall([r.get("path", "") for r in results], session_id)
+        record_access_hits("recall", "inject", results, query=prompt, session_id=session_id)
     return LifecycleResult(
         should_inject=True,
         content=content,
@@ -2962,6 +2993,7 @@ def build_tool_context(
         injected_chars=len(injected_text),
         latency_ms=latency_ms,
     )
+    record_access_hits("tool-context", "inject", selected, query=search_query or dir_key, session_id=session_id)
     log_tool_context_decision(
         config,
         "injected",
