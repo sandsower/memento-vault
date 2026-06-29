@@ -813,7 +813,7 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
 
 
 def _allowed_transcript_roots() -> list[Path]:
-    roots = [Path.home() / ".pi" / "agent" / "sessions"]
+    roots = [Path.home() / ".pi" / "agent" / "sessions", Path.home() / ".pi" / "agent" / "subagents"]
     session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
     if session_dir:
         roots.append(Path(session_dir).expanduser())

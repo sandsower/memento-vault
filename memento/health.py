@@ -408,6 +408,8 @@ _CRITICAL_MANAGED_KEYS = {
     "memento/pi_bridge.py",
     "memento/adapters/__init__.py",
     "memento/adapters/claude.py",
+    "memento/adapters/opencode.py",
+    "memento/adapters/pi.py",
 }
 
 
