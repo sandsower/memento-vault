@@ -9,6 +9,7 @@ import {
 	formatProcessLines,
 	formatQueueLines,
 	formatStatusLines,
+	queueCaptureSummary,
 	reduceMementoPanelState,
 	renderMementoPanelLines,
 	renderMementoStatusText,
@@ -763,7 +764,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 							void refreshAmbientWidget(ctx);
 							state = { ...state, message: `Footer status ${footerDetailsPinned ? "detailed" : "compact"}.` };
 						}
-						if (next.action?.type === "refresh" || next.action?.type === "show") void refresh();
+						if (next.action?.type === "refresh" || next.action?.type === "show") {
+							state = { ...state, confirmDiscard: false, discardCapture: undefined };
+							void refresh();
+						}
 						if (next.action?.type === "toggle-capture") {
 							const ids = captureIdsFromQueue(latestQueue);
 							const id = ids[state.selectedIndex];
@@ -778,8 +782,47 @@ export default function mementoExtension(pi: ExtensionAPI) {
 								state = { ...state, selectedCaptureIds: [...selected], message: `${selected.size} capture(s) selected.` };
 							}
 						}
+						if (next.action?.type === "request-discard") {
+							const capture = queueCaptureSummary(latestQueue, state.selectedIndex);
+							if (!capture) {
+								state = { ...state, message: "Select a queued capture first." };
+							} else {
+								state = { ...state, confirmDiscard: true, discardCapture: capture, message: `Discard ${capture.id}? y/N` };
+							}
+						}
 						if (next.action?.type === "inspect-group") {
 							state = { ...state, message: "Showing artifact paths for selected group." };
+						}
+						if (next.action?.type === "discard") {
+							const target = state.discardCapture;
+							if (!target?.id) {
+								state = { ...state, message: "Select a queued capture first.", confirmDiscard: false, discardCapture: undefined };
+							} else {
+								const discardId = target.id;
+								const selectionSnapshot = [...(state.selectedCaptureIds ?? [])];
+								const cursorSnapshot = state.selectedIndex;
+								state = { ...state, view: "queue", message: `Discarding ${discardId}…` };
+								requestRender();
+								void (async () => {
+									const payload = await runJson(pi, ctx, ["queue", "discard", "--id", discardId, "--apply"]);
+									latestQueue = await loadQueue(ctx, false, 10);
+									latestProcess = await loadProcessStatus(ctx);
+									syncCounts();
+									const remainingIds = new Set(captureIdsFromQueue(latestQueue));
+									const nextSelected = selectionSnapshot.filter((captureId) => remainingIds.has(captureId));
+									const nextIndex = Math.min(cursorSnapshot, Math.max(0, captureIdsFromQueue(latestQueue).length - 1));
+									state = {
+										...state,
+										selectedCaptureIds: nextSelected,
+										selectedIndex: nextIndex,
+										confirmDiscard: false,
+										discardCapture: undefined,
+										message: payload.error ? `Discard failed: ${String(payload.error)}` : `Discarded ${discardId}.`,
+									};
+									await refreshAmbientWidget(ctx);
+									requestRender();
+								})();
+							}
 						}
 						if (next.action?.type === "dry-run") {
 							if ((state.selectedCaptureIds ?? []).length === 0) {

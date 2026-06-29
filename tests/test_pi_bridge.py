@@ -1570,6 +1570,110 @@ def test_pi_bridge_queue_cleanup_never_discards_manual_captures(capsys, tmp_path
     assert "manual1" in remaining_ids
 
 
+def test_pi_bridge_queue_discard_dry_run_reports_target_without_writing(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "Discard me",
+                "body": "Candidate for archive",
+                "created_at": "2026-05-25T12:00:00Z",
+                "reason": "lifecycle",
+                "source_event": "agent_end",
+                "metadata": {"project": "repo", "branch": "feature/pi", "session_id": "s1"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "q2",
+                "title": "Keep me",
+                "body": "Retain this one",
+                "created_at": "2026-05-25T12:05:00Z",
+                "reason": "lifecycle",
+                "source_event": "agent_end",
+                "metadata": {"project": "repo", "branch": "feature/pi", "session_id": "s2"},
+            }
+        )
+        + "\n"
+    )
+    before = queue_file.read_text()
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "discard", "--id", "q1"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True
+    assert payload["discarded"] == 1
+    assert payload["captures"][0]["id"] == "q1"
+    assert payload["captures"][0]["title"] == "Discard me"
+    assert payload["captures"][0]["project"] == "repo"
+    assert payload["captures"][0]["branch"] == "feature/pi"
+    assert payload["captures"][0]["body_excerpt"] == "Candidate for archive"
+    assert queue_file.read_text() == before
+    assert not list(queue_file.parent.glob("pi-captures-discarded-*.jsonl"))
+
+
+def test_pi_bridge_queue_discard_apply_archives_selected_capture_with_provenance(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "Discard me",
+                "body": "Candidate for archive",
+                "created_at": "2026-05-25T12:00:00Z",
+                "reason": "lifecycle",
+                "source_event": "agent_end",
+                "metadata": {"project": "repo", "branch": "feature/pi", "session_id": "s1"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "q2",
+                "title": "Keep me",
+                "body": "Retain this one",
+                "created_at": "2026-05-25T12:05:00Z",
+                "reason": "lifecycle",
+                "source_event": "agent_end",
+                "metadata": {"project": "repo", "branch": "feature/pi", "session_id": "s2"},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "discard", "--id", "q1", "--apply"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is False
+    assert payload["discarded"] == 1
+    assert payload["remaining"] == 1
+
+    remaining_ids = [json.loads(line)["id"] for line in queue_file.read_text().splitlines() if line.strip()]
+    assert remaining_ids == ["q2"]
+
+    archive = Path(payload["archive_path"])
+    assert archive.exists()
+    archived = [json.loads(line) for line in archive.read_text().splitlines()]
+    assert archived[0]["id"] == "q1"
+    assert archived[0]["discard"]["reason"] == "manual_discard"
+    assert archived[0]["discard"]["source"] == "queue-discard"
+    assert archived[0]["discard"]["discarded_at"]
+
+    backup = Path(payload["backup_path"])
+    assert backup.exists()
+    assert "q1" in backup.read_text()
+
+
 def test_pi_bridge_queue_cleanup_apply_blocked_during_active_processing_run(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     queue_file = _seed_cleanup_queue(tmp_path)
