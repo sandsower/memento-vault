@@ -114,11 +114,14 @@ def test_deep_search_probe_uses_selected_backend(monkeypatch):
 
 def test_deep_mcp_probe_calls_tools(monkeypatch):
     calls = []
-    fake_module = SimpleNamespace(
-        memento_status=lambda: {"vault_exists": True, "qmd_available": True},
-        memento_search=lambda *args, **kwargs: calls.append((args, kwargs)) or [{"path": "notes/probe.md"}],
+    import memento.mcp_server as mcp_server
+
+    monkeypatch.setattr(mcp_server, "memento_status", lambda: {"vault_exists": True, "qmd_available": True})
+    monkeypatch.setattr(
+        mcp_server,
+        "memento_search",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or [{"path": "notes/probe.md"}],
     )
-    monkeypatch.setitem(sys.modules, "memento.mcp_server", fake_module)
 
     result = health._check_deep_mcp_probe(vault=Path("/tmp/vault"), probe_timeout_seconds=5)
 
