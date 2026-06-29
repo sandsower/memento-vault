@@ -1,6 +1,7 @@
 """Tests for the MCP server tools."""
 
 import json
+import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -440,8 +441,19 @@ assert.match(pointer, /Session transcript: \/tmp\/pi-session\.jsonl/);
 assert.match(pointer, /Sanitized summary digest: sha256:[0-9a-f]{16}/);
 assert.match(pointer, /Sanitized lifecycle summary:/);
 """
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node is required for the TypeScript sanitizer smoke test")
+        flag_check = subprocess.run(
+            [node, "--experimental-strip-types", "--version"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if flag_check.returncode != 0:
+            pytest.skip("node does not support --experimental-strip-types")
         subprocess.run(
-            ["node", "--experimental-strip-types", "--input-type=module", "-e", script, str(helper)],
+            [node, "--experimental-strip-types", "--input-type=module", "-e", script, str(helper)],
             check=True,
             text=True,
             stdout=subprocess.PIPE,
