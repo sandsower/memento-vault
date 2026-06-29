@@ -81,7 +81,7 @@ def test_automation_memory_reports_recall_failure_rate_and_reasons():
     Path(health.RETRIEVAL_LOG_PATH).write_text(
         "\n".join(
             [
-                json.dumps({"ts": datetime.now().isoformat(timespec="seconds"), "hook": "recall", "action": "search"}),
+                json.dumps({"ts": datetime.now().isoformat(timespec="seconds"), "hook": "recall", "action": "inject"}),
                 json.dumps(
                     {
                         "ts": datetime.now().isoformat(timespec="seconds"),
@@ -110,9 +110,122 @@ def test_automation_memory_reports_recall_failure_rate_and_reasons():
     assert recall["events"] == 3
     assert recall["failures"] == 2
     assert recall["failure_rate"] == 0.6667
+    assert recall["backend_unavailable"] == 1
+    assert recall["backend_exceptions"] == 1
     assert token not in json.dumps(readiness)
     reasons = readiness["metadata"]["common_failure_reasons"]
     assert any(reason["reason"] == "auth failed [REDACTED_API_KEY]" for reason in reasons)
+
+
+def test_retrieval_health_distinguishes_failures_misses_and_low_signal_skips():
+    Path(health.RETRIEVAL_LOG_PATH).write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": datetime.now().isoformat(timespec="seconds"), "hook": "recall", "action": "inject"}),
+                json.dumps(
+                    {"ts": datetime.now().isoformat(timespec="seconds"), "hook": "recall", "action": "no-results"}
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "mcp",
+                        "action": "search_miss",
+                        "reason": "backend_unavailable",
+                        "error": "qmd missing",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "search",
+                        "action": "qmd_search_unexpected",
+                        "error": "sqlite locked",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "recall",
+                        "action": "low-signal-prompt",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "retrieval")
+
+    assert check.status == "warn"
+    assert check.details["events"] == 4
+    assert check.details["failures"] == 2
+    assert check.details["no_results"] == 1
+    assert check.details["backend_unavailable"] == 1
+    assert check.details["backend_exceptions"] == 1
+    assert check.details["low_signal_skips"] == 1
+    assert check.details["last_error"] == "sqlite locked"
+    assert "backend failures 2/4" in check.message
+    assert check.details["remediation"]
+
+
+def test_retrieval_health_keeps_no_results_out_of_failure_rate():
+    Path(health.RETRIEVAL_LOG_PATH).write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": datetime.now().isoformat(timespec="seconds"), "hook": "mcp", "action": "search"}),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "mcp",
+                        "action": "search_miss",
+                        "reason": "no_exact_match",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "recall",
+                        "action": "low-signal-prompt",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "retrieval")
+
+    assert check.status == "pass"
+    assert check.details["events"] == 2
+    assert check.details["failures"] == 0
+    assert check.details["no_results"] == 1
+    assert check.details["low_signal_skips"] == 1
+
+
+def test_retrieval_last_error_is_redacted_and_truncated():
+    token = "ghp_" + "a" * 36
+    long_error = f"boom {token} " + "x" * 900
+    Path(health.RETRIEVAL_LOG_PATH).write_text(
+        json.dumps(
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "hook": "search",
+                "action": "qmd_search_unexpected",
+                "error": long_error,
+            }
+        )
+        + "\n"
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "retrieval")
+
+    assert token not in json.dumps(check.details)
+    assert "[REDACTED_GITHUB_TOKEN]" in check.details["last_error"]
+    assert check.details["last_error_truncated"] is True
+    assert len(check.details["last_error"]) <= 503
 
 
 def test_automation_memory_reports_stale_embedded_index(tmp_path):

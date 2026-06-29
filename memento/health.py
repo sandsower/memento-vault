@@ -25,6 +25,34 @@ _CORE_DIRS = ("notes", "fleeting", "projects")
 _HEALTH_WINDOW_HOURS = 24
 _STALE_LOCK_SECONDS = 600
 _RECENT_FAILURE_ACTION_MARKERS = ("failed", "failure", "error", "unexpected", "unavailable")
+_RETRIEVAL_SKIP_ACTIONS = {
+    "broad-project-query",
+    "deferred-ready",
+    "low-signal-prompt",
+    "query_too_broad",
+    "skipped-prompt",
+}
+_RETRIEVAL_NO_RESULT_REASONS = {
+    "dedup-skip",
+    "duplicate",
+    "filtered-empty",
+    "literal_mode_auto_selected",
+    "no-results",
+    "no_concrete_match",
+    "no_exact_match",
+    "project-mismatch-filtered-empty",
+    "project_filter_removed_all",
+    "threshold_too_high",
+}
+_RETRIEVAL_BACKEND_UNAVAILABLE_REASONS = {
+    "backend_unavailable",
+    "empty_vault",
+    "index_stale_or_missing",
+    "qmd-unavailable",
+    "semantic_mode_not_available",
+}
+_RETRIEVAL_BACKEND_EXCEPTION_ACTIONS = {"extra_collection_failed", "qmd_get_unexpected", "qmd_search_unexpected"}
+_RETRIEVAL_ERROR_DETAIL_LIMIT = 500
 _STALE_MCP_HINT = (
     "likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
     'copied hooks should use {"mcpServers": {}} for --mcp-config'
@@ -144,7 +172,7 @@ def build_report() -> HealthReport:
     checks.append(_check_mcp_registration())
     checks.append(_check_pi_bridge_config())
     checks.append(_check_triage_health())
-    checks.append(_check_retrieval_health())
+    checks.append(_check_retrieval_health(config=config, search_check=search_check))
     checks.append(_check_locks())
     checks.append(_check_inception(config))
     automation_memory = build_automation_memory_readiness(config=config, vault=vault, checks=checks)
@@ -382,7 +410,7 @@ def build_automation_memory_readiness(
         vault, config
     )
     search = _automation_search_metadata(vault, config, search_check, qmd_available=qmd_available)
-    recall = _automation_recall_metadata()
+    recall = _automation_recall_metadata(config=config, search_check=search_check)
     remote_sync = _automation_remote_sync_metadata(vault)
     last_packet = _last_successful_automation_packet()
     common_failure_reasons = _common_automation_failure_reasons(vault)
@@ -513,32 +541,31 @@ def _embedded_index_staleness(vault: Path, config: dict[str, Any]) -> dict[str, 
     return metadata
 
 
-def _automation_recall_metadata() -> dict[str, Any]:
+def _automation_recall_metadata(
+    *, config: dict[str, Any] | None = None, search_check: CheckResult | None = None
+) -> dict[str, Any]:
     path = Path(RETRIEVAL_LOG_PATH)
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
-    total = failed = 0
-    last_error = None
-    for rec in _iter_recent_jsonl(path, cutoff):
-        hook = rec.get("hook")
-        if hook not in {"recall", "search"}:
-            continue
-        action = str(rec.get("action") or "")
-        if action in {"low-signal-prompt", "skipped-prompt", "deferred-ready"}:
-            continue
-        total += 1
-        if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
-            failed += 1
-            last_error = rec.get("error") or action
-    failure_rate = round(failed / total, 4) if total else 0.0
-    status = WARN if total >= 3 and failure_rate >= 0.5 else PASS
-    return {
+    diagnostics = _scan_retrieval_logs(path, cutoff)
+    status = WARN if diagnostics["events"] >= 3 and diagnostics["failure_rate"] >= 0.5 else PASS
+    metadata = {
         "log_path": str(path),
-        "events": total,
-        "failures": failed,
-        "failure_rate": failure_rate,
+        "events": diagnostics["events"],
+        "failures": diagnostics["failures"],
+        "failure_rate": diagnostics["failure_rate"],
         "status": status,
-        "last_error": last_error,
+        "last_error": diagnostics["last_error"],
+        "last_error_truncated": diagnostics["last_error_truncated"],
+        "no_results": diagnostics["no_results"],
+        "backend_unavailable": diagnostics["backend_unavailable"],
+        "backend_exceptions": diagnostics["backend_exceptions"],
+        "low_signal_skips": diagnostics["low_signal_skips"],
+        "other_failures": diagnostics["other_failures"],
     }
+    remediation = _retrieval_remediation(diagnostics, config or {}, search_check)
+    if remediation:
+        metadata["remediation"] = remediation
+    return metadata
 
 
 def _automation_remote_sync_metadata(vault: Path) -> dict[str, Any]:
@@ -1225,38 +1252,193 @@ def _scan_triage_log(path: Path, cutoff: datetime, legacy: bool) -> tuple[str | 
     return (str(path), total, failed, invalid_mcp_failed, stale_certainty_failed, last_error)
 
 
-def _check_retrieval_health() -> CheckResult:
+def _check_retrieval_health(
+    *, config: dict[str, Any] | None = None, search_check: CheckResult | None = None
+) -> CheckResult:
     path = Path(RETRIEVAL_LOG_PATH)
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
     if not path.exists():
         return CheckResult(
             "retrieval", WARN, "retrieval log not found; recall/search failure rate unavailable", {"path": str(path)}
         )
-    total = failed = 0
-    last_error = None
-    for rec in _iter_recent_jsonl(path, cutoff):
-        hook = rec.get("hook")
-        if hook not in {"recall", "search"}:
-            continue
-        action = str(rec.get("action") or "")
-        if action in {"low-signal-prompt", "skipped-prompt", "deferred-ready"}:
-            continue
-        total += 1
-        if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
-            failed += 1
-            last_error = rec.get("error") or action
+
+    diagnostics = _scan_retrieval_logs(path, cutoff)
+    remediation = _retrieval_remediation(diagnostics, config or {}, search_check)
+    details = dict(diagnostics)
+    details["log_path"] = str(path)
+    details["window_hours"] = _HEALTH_WINDOW_HOURS
+    if remediation:
+        details["remediation"] = remediation
+
+    total = diagnostics["events"]
+    failed = diagnostics["failures"]
     if total == 0:
-        return CheckResult("retrieval", PASS, "no recent recall/search failures recorded", {"log_path": str(path)})
-    if failed / total >= 0.5:
-        return CheckResult(
-            "retrieval",
-            WARN,
-            f"recall/search failures {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h",
-            {"log_path": str(path), "last_error": last_error},
-        )
-    return CheckResult(
-        "retrieval", PASS, f"recent recall/search health ok ({failed}/{total} failures)", {"log_path": str(path)}
+        if diagnostics["low_signal_skips"]:
+            return CheckResult(
+                "retrieval",
+                PASS,
+                f"only low-signal recall/search skips recorded in last {_HEALTH_WINDOW_HOURS}h",
+                details,
+            )
+        return CheckResult("retrieval", PASS, "no recent recall/search failures recorded", details)
+
+    category_summary = (
+        f"backend unavailable {diagnostics['backend_unavailable']}, "
+        f"backend exceptions {diagnostics['backend_exceptions']}, "
+        f"no-results {diagnostics['no_results']}, "
+        f"low-signal skips {diagnostics['low_signal_skips']}"
     )
+    if diagnostics["failure_rate"] >= 0.5:
+        message = (
+            f"recall/search backend failures {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h ({category_summary})"
+        )
+        if remediation:
+            message += f"; {remediation[0]}"
+        return CheckResult("retrieval", WARN, message, details)
+
+    return CheckResult(
+        "retrieval",
+        PASS,
+        f"recent recall/search health ok ({failed}/{total} failures; {category_summary})",
+        details,
+    )
+
+
+def _scan_retrieval_logs(path: Path, cutoff: datetime) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "events": 0,
+        "successes": 0,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "no_results": 0,
+        "backend_unavailable": 0,
+        "backend_exceptions": 0,
+        "low_signal_skips": 0,
+        "other_failures": 0,
+        "last_error": None,
+        "last_error_truncated": False,
+        "last_error_kind": None,
+    }
+    for rec in _iter_recent_jsonl(path, cutoff):
+        kind = _classify_retrieval_record(rec)
+        if kind is None:
+            continue
+        if kind == "low_signal_skip":
+            diagnostics["low_signal_skips"] += 1
+            continue
+
+        diagnostics["events"] += 1
+        if kind == "success":
+            diagnostics["successes"] += 1
+        elif kind == "no_result":
+            diagnostics["no_results"] += 1
+        elif kind == "backend_unavailable":
+            diagnostics["backend_unavailable"] += 1
+            _record_retrieval_error(diagnostics, rec, kind)
+        elif kind == "backend_exception":
+            diagnostics["backend_exceptions"] += 1
+            _record_retrieval_error(diagnostics, rec, kind)
+        else:
+            diagnostics["other_failures"] += 1
+            _record_retrieval_error(diagnostics, rec, kind)
+
+    diagnostics["failures"] = (
+        diagnostics["backend_unavailable"] + diagnostics["backend_exceptions"] + diagnostics["other_failures"]
+    )
+    if diagnostics["events"]:
+        diagnostics["failure_rate"] = round(diagnostics["failures"] / diagnostics["events"], 4)
+    return diagnostics
+
+
+def _classify_retrieval_record(rec: dict[str, Any]) -> str | None:
+    hook = str(rec.get("hook") or "")
+    action = str(rec.get("action") or "")
+    reason = str(rec.get("reason") or "")
+    if hook not in {"recall", "search", "mcp"}:
+        return None
+    if hook == "mcp" and action not in {"search", "search_miss"}:
+        return None
+    if action.startswith("diagnostic-"):
+        return None
+
+    reason_or_action = reason if action == "search_miss" and reason else action
+    normalized = _normalize_retrieval_reason(reason_or_action)
+    if normalized in _RETRIEVAL_SKIP_ACTIONS:
+        return "low_signal_skip"
+    if action in {"inject", "search"} and normalized not in _RETRIEVAL_BACKEND_UNAVAILABLE_REASONS:
+        return "success"
+    if normalized in _RETRIEVAL_BACKEND_UNAVAILABLE_REASONS:
+        return "backend_unavailable"
+    if action in _RETRIEVAL_BACKEND_EXCEPTION_ACTIONS:
+        return "backend_exception"
+    if normalized in _RETRIEVAL_NO_RESULT_REASONS:
+        return "no_result"
+    if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
+        return "backend_exception" if hook == "search" else "other_failure"
+    return None
+
+
+def _normalize_retrieval_reason(reason: str) -> str:
+    aliases = {
+        "broad-project-query": "query_too_broad",
+        "filtered-empty": "filtered-empty",
+        "low-signal-prompt": "low-signal-prompt",
+        "no-results": "no-results",
+        "project-mismatch-filtered-empty": "project-mismatch-filtered-empty",
+        "qmd-unavailable": "backend_unavailable",
+        "skipped-prompt": "skipped-prompt",
+        "vault-unavailable": "empty_vault",
+    }
+    return aliases.get(reason, reason)
+
+
+def _record_retrieval_error(diagnostics: dict[str, Any], rec: dict[str, Any], kind: str) -> None:
+    value = rec.get("error") or rec.get("reason") or rec.get("action") or kind
+    text, truncated = _safe_retrieval_error(value)
+    diagnostics["last_error"] = text
+    diagnostics["last_error_truncated"] = truncated
+    diagnostics["last_error_kind"] = kind
+
+
+def _safe_retrieval_error(value: Any) -> tuple[str, bool]:
+    text = _safe_text(" ".join(str(value or "").split()))
+    truncated = len(text) > _RETRIEVAL_ERROR_DETAIL_LIMIT
+    if truncated:
+        text = text[:_RETRIEVAL_ERROR_DETAIL_LIMIT] + "..."
+    return text, truncated
+
+
+def _retrieval_remediation(
+    diagnostics: dict[str, Any], config: dict[str, Any], search_check: CheckResult | None
+) -> list[str]:
+    if diagnostics.get("failures", 0) == 0:
+        return []
+    backend = str(config.get("search_backend") or "auto")
+    hints: list[str] = []
+    if diagnostics.get("backend_unavailable", 0):
+        if backend == "qmd":
+            hints.append(
+                "qmd search backend is configured but unavailable; verify qmd is on PATH or choose embedded/grep"
+            )
+        elif backend == "embedded":
+            hints.append(
+                "embedded search backend is configured but unavailable; run memento_reindex and verify the index path"
+            )
+        elif backend == "grep":
+            hints.append(
+                "grep search backend is configured but unavailable; verify the vault notes/projects directories"
+            )
+        else:
+            hints.append(
+                "search backend is unavailable; run memento health/status and reindex or reinstall the configured backend"
+            )
+    if diagnostics.get("backend_exceptions", 0):
+        hints.append(
+            "search backend raised exceptions; inspect --verbose last_error and run memento_reindex if index state is stale"
+        )
+    if search_check and search_check.status == FAIL:
+        hints.append(search_check.message)
+    return list(dict.fromkeys(hints))
 
 
 def _check_locks() -> CheckResult:
