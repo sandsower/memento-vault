@@ -690,6 +690,82 @@ def test_pi_bridge_capture_can_queue_instead_of_write(capsys, tmp_path, monkeypa
     assert queued["metadata"]["session_id"] == "s1"
 
 
+def test_pi_bridge_capture_queues_rich_lifecycle_metadata_and_audits_decision(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    lifecycle_metadata = {
+        "source_event": "agent_end",
+        "reason": "agent_end",
+        "event_timestamp": "2026-06-29T21:00:00Z",
+        "event_index": 19,
+        "turn_count": 4,
+        "user_message_count": 4,
+        "assistant_message_count": 4,
+        "tool_call_count": 3,
+        "file_edit_count": 2,
+        "file_read_count": 1,
+        "file_edits": ["memento/pi_bridge.py", "memento/lifecycle.py"],
+        "file_reads": ["memento/store.py"],
+        "session_entry_count": 19,
+        "session_last_entry_at": "2026-06-29T20:59:58Z",
+        "summary_digest": "abc123",
+    }
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+    ):
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Queued lifecycle capture",
+                "--body",
+                "- user: root cause identified\n- assistant: fixed the bridge",
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "s1",
+                "--queue",
+                "--reason",
+                "agent_end",
+                "--source-event",
+                "agent_end",
+                "--lifecycle-metadata",
+                json.dumps(lifecycle_metadata),
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queued"] is True
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queued = json.loads(queue_file.read_text().splitlines()[0])
+    assert queued["metadata"]["lifecycle"]["turn_count"] == 4
+    assert queued["metadata"]["lifecycle"]["tool_call_count"] == 3
+    assert queued["metadata"]["lifecycle"]["file_edits"] == ["memento/pi_bridge.py", "memento/lifecycle.py"]
+    assert queued["metadata"]["lifecycle"]["source_event"] == "agent_end"
+
+    audit_file = tmp_path / "state" / "audit" / "pi-lifecycle-audit.jsonl"
+    audit_entries = [json.loads(line) for line in audit_file.read_text().splitlines()]
+    assert audit_entries[-1]["decision"] == "queued"
+    assert audit_entries[-1]["source_event"] == "agent_end"
+    assert audit_entries[-1]["lifecycle"]["summary_digest"] == "abc123"
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge.get_config", return_value={}),
+        patch("memento.pi_bridge.is_remote", return_value=False),
+    ):
+        code = pi_bridge.main(["status", "--cwd", "/repo"])
+
+    assert code == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["capture_audit_count"] == 1
+    assert status["last_capture_audit"]["decision"] == "queued"
+    assert status["last_capture_audit"]["source_event"] == "agent_end"
+
+
 def test_pi_bridge_capture_writes_type_tags_certainty_and_session_metadata_as_frontmatter(
     capsys, tmp_path, monkeypatch
 ):

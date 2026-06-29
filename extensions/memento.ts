@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -367,7 +368,135 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	let latestQueue: Record<string, unknown> | undefined;
 	let latestProcess: Record<string, unknown> | undefined;
 
-	async function queueLifecycleCapture(ctx: ExtensionContext, title: string, body: string, reason: string, sourceEvent: string) {
+	function isRecord(value: unknown): value is Record<string, unknown> {
+		return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+	}
+
+	function firstString(...values: unknown[]): string {
+		for (const value of values) {
+			if (typeof value === "string" && value.trim()) return value.trim();
+		}
+		return "";
+	}
+
+	function digestText(text: string): string {
+		return createHash("sha256").update(text).digest("hex").slice(0, 16);
+	}
+
+	function toolPathFromArgs(args: unknown): string {
+		if (!isRecord(args)) return "";
+		return firstString(args.path, args.file_path, args.filePath, args.file);
+	}
+
+	function collectLifecycleMetadata(sourceEvent: string, reason: string, body: string, event: unknown, ctx: ExtensionContext): Record<string, unknown> {
+		const sessionEntries = ctx.sessionManager.getEntries();
+		const entries = Array.isArray(sessionEntries) ? sessionEntries : [];
+		const fileEdits = new Set<string>();
+		const fileReads = new Set<string>();
+		let userMessageCount = 0;
+		let assistantMessageCount = 0;
+		let toolCallCount = 0;
+		let firstEntryAt = "";
+		let lastEntryAt = "";
+
+		const noteTimestamp = (value: unknown) => {
+			const stamp = firstString(value);
+			if (!stamp) return;
+			if (!firstEntryAt) firstEntryAt = stamp;
+			lastEntryAt = stamp;
+		};
+
+		const scanContent = (content: unknown) => {
+			if (typeof content === "string") return;
+			if (Array.isArray(content)) {
+				for (const part of content) scanContent(part);
+				return;
+			}
+			if (!isRecord(content)) return;
+			const type = firstString(content.type).toLowerCase();
+			if (type === "toolcall") {
+				toolCallCount += 1;
+				const name = firstString(content.name, content.tool, content.toolName).toLowerCase();
+				const path = toolPathFromArgs(content.arguments ?? content.input ?? content.parameters ?? content.args);
+				if (path) {
+					if (["edit", "write", "patch", "apply_patch", "multiedit"].includes(name)) fileEdits.add(path);
+					if (name === "read") fileReads.add(path);
+				}
+				return;
+			}
+			if (type === "toolresult" || type === "tool_result" || type === "function_call_output") {
+				return;
+			}
+			if (content.content !== undefined) scanContent(content.content);
+			if (content.message !== undefined) scanContent(content.message);
+			if (content.args !== undefined) scanContent(content.args);
+			if (content.input !== undefined) scanContent(content.input);
+			if (content.result !== undefined) scanContent(content.result);
+		};
+
+		const inspectMessage = (message: unknown) => {
+			if (!isRecord(message)) return;
+			const role = firstString(message.role).toLowerCase();
+			if (role === "user") userMessageCount += 1;
+			if (role === "assistant") assistantMessageCount += 1;
+			scanContent(message.content);
+		};
+
+		for (const entry of entries) {
+			if (!isRecord(entry)) continue;
+			noteTimestamp(entry.timestamp ?? entry.created_at ?? entry.createdAt ?? entry.time);
+			const type = firstString(entry.type).toLowerCase();
+			if (type === "message" || type === "message_start" || type === "message_end") {
+				inspectMessage(entry.message);
+				continue;
+			}
+			if (type === "tool_execution_start") {
+				toolCallCount += 1;
+				const path = toolPathFromArgs(entry.args ?? entry.input ?? entry.arguments ?? {});
+				const name = firstString(entry.toolName, entry.name).toLowerCase();
+				if (path) {
+					if (["edit", "write", "patch", "apply_patch", "multiedit"].includes(name)) fileEdits.add(path);
+					if (name === "read") fileReads.add(path);
+				}
+				continue;
+			}
+			if (type === "custom_message") {
+				scanContent(entry.content);
+				continue;
+			}
+			inspectMessage(entry.message);
+			scanContent(entry.content);
+			scanContent(entry.result);
+		}
+
+		const summaryDigest = digestText(body);
+		return {
+			source_event: sourceEvent,
+			reason,
+			event_timestamp: new Date().toISOString(),
+			event_index: entries.length,
+			turn_count: Math.min(userMessageCount, assistantMessageCount),
+			user_message_count: userMessageCount,
+			assistant_message_count: assistantMessageCount,
+			tool_call_count: toolCallCount,
+			file_edit_count: fileEdits.size,
+			file_read_count: fileReads.size,
+			file_edits: Array.from(fileEdits).slice(0, 20),
+			file_reads: Array.from(fileReads).slice(0, 20),
+			session_entry_count: entries.length,
+			session_first_entry_at: firstEntryAt,
+			session_last_entry_at: lastEntryAt,
+			summary: body,
+			summary_digest: summaryDigest,
+			tool_context_count: toolContextCount,
+			last_lifecycle_reason: lastLifecycleReason,
+			lifecycle_capture_queued: lifecycleCaptureQueued,
+			project_slug: String(latestStatus?.project_slug ?? "unknown"),
+			session_file: ctx.sessionManager.getSessionFile() ?? "unknown",
+		};
+	}
+
+	async function queueLifecycleCapture(ctx: ExtensionContext, title: string, body: string, reason: string, sourceEvent: string, event?: unknown) {
 		if (!config.enabled || !config.autoCapture || !config.captureQueue) return undefined;
 		if (isProcessorSession()) {
 			lastLifecycleReason = `${sourceEvent}-capture-skipped:processor_session`;
@@ -376,6 +505,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		}
 		const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
 		const queuedBody = addSessionPointerDigest(body, sessionFile);
+		const lifecycleMetadata = collectLifecycleMetadata(sourceEvent, reason, queuedBody, event, ctx);
 		const payload = await runJson(
 			pi,
 			ctx,
@@ -394,6 +524,8 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				reason,
 				"--source-event",
 				sourceEvent,
+				"--lifecycle-metadata",
+				JSON.stringify(lifecycleMetadata),
 			],
 			{ operation: "capture", cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
 		);
@@ -540,24 +672,24 @@ export default function mementoExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (event, ctx) => {
 		const body = summarizeMessages((event as { messages?: unknown }).messages);
-		await queueLifecycleCapture(ctx, "Pi session candidate capture", body, "agent_end", "agent_end");
+		await queueLifecycleCapture(ctx, "Pi session candidate capture", body, "agent_end", "agent_end", event);
 	});
 
 	pi.on("session_before_compact", async (_event, ctx) => {
 		const body = summarizeSessionEntries(ctx.sessionManager.getEntries(), "is about to compact the current session");
-		await queueLifecycleCapture(ctx, "Pi pre-compaction candidate capture", body, "session_before_compact", "session_before_compact");
+		await queueLifecycleCapture(ctx, "Pi pre-compaction candidate capture", body, "session_before_compact", "session_before_compact", _event);
 	});
 
 	pi.on("session_compact", async (event, ctx) => {
 		const body = `Pi compacted the current session.\n\nEvent details:\n${sanitizeEventDetails(event, 2000)}`;
-		await queueLifecycleCapture(ctx, "Pi compaction candidate capture", body, "session_compact", "session_compact");
+		await queueLifecycleCapture(ctx, "Pi compaction candidate capture", body, "session_compact", "session_compact", event);
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
 		if (!lifecycleCaptureQueued) {
 			const reason = String((event as { reason?: unknown }).reason ?? "shutdown");
 			const body = summarizeSessionEntries(ctx.sessionManager.getEntries(), `session is shutting down (${reason})`);
-			await queueLifecycleCapture(ctx, "Pi shutdown candidate capture", body, `session_shutdown:${reason}`, "session_shutdown");
+			await queueLifecycleCapture(ctx, "Pi shutdown candidate capture", body, `session_shutdown:${reason}`, "session_shutdown", event);
 		}
 		ctx.ui.setStatus("memento", "🧠 stopped");
 		if (ctx.hasUI) ctx.ui.setWidget("memento", undefined);
@@ -695,7 +827,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				args.push("--certainty", String(certainty));
 			}
 			for (const tag of params.tags ?? []) if (tag.trim()) args.push("--tag", tag.trim());
-			if (params.queue) args.push("--queue", "--reason", "manual", "--source-event", "tool");
+			if (params.queue) {
+				args.push("--queue", "--reason", "manual", "--source-event", "tool");
+				args.push("--lifecycle-metadata", JSON.stringify(collectLifecycleMetadata("tool", "manual", params.body, undefined, ctx)));
+			}
 			const payload = await runJson(pi, ctx, args, { operation: "capture", cwd: params.cwd ?? ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources });
 			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
 		},

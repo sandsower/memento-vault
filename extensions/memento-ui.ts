@@ -133,14 +133,16 @@ export function renderMementoStatusText(status?: Record<string, unknown>, queue?
 	const bridgeHealth = recordValue(status?.pi_bridge_health) ?? recordValue(piBridge?.health);
 	const bridgeCount = numberValue(bridgeHealth?.recent_failure_count ?? bridgeHealth?.failures ?? bridgeHealth?.events);
 	const bridgeSuffix = bridgeHealth?.status === "warn" ? ` · bridge ${bridgeCount || "!"}` : "";
+	const auditCount = numberValue(status?.capture_audit_count);
+	const auditSuffix = auditCount > 0 ? ` · audit ${auditCount}` : "";
 	if (["failed", "interrupted"].includes(processStatus)) {
 		const failedCount = numberValue(process?.failed_group_count ?? process?.retryable_group_count);
 		return `🧠 processing ${processStatus}${failedCount > 0 ? ` · ${failedCount} failed` : ""} · ${queueCount}q${bridgeSuffix} · /memento`;
 	}
 	const vault = status?.vault_exists === false ? "!" : "✓";
 	const notes = numberValue(status?.note_count);
-	if (queueCount > 0 || options.pinned || bridgeHealth?.status === "warn") return `🧠 ${queueCount}q · ${vault} · ${notes}n${bridgeSuffix} · /memento`;
-	return `🧠 ${vault}${bridgeSuffix} · /memento`;
+	if (queueCount > 0 || options.pinned || bridgeHealth?.status === "warn" || auditCount > 0) return `🧠 ${queueCount}q · ${vault} · ${notes}n${bridgeSuffix}${auditSuffix} · /memento`;
+	return `🧠 ${vault}${bridgeSuffix}${auditSuffix} · /memento`;
 }
 
 export function renderMementoWidgetLines(status?: Record<string, unknown>, queue?: Record<string, unknown>, width = 100): string[] | undefined {
@@ -174,9 +176,11 @@ export function formatStatusLines(status?: Record<string, unknown>, options: { i
 		lines.push(`Pi bridge: ${count || 1} recent failure${count === 1 ? "" : "s"}${lastError ? ` · last: ${fitLine(lastError, 72)}` : ""}`);
 	}
 	if (options.includeDetails) {
+		const lastAudit = recordValue(status.last_capture_audit) ?? recordValue(piBridge?.lastCaptureAudit);
 		lines.push(
 			`Config: enabled ${boolMark(bridgeConfig?.enabled)} · auto capture ${boolMark(bridgeConfig?.autoCapture)} · process queue ${boolMark(bridgeConfig?.processQueue)}`,
 			`Last lifecycle: ${String(piBridge?.lastLifecycleReason ?? "unknown")}`,
+			`Capture audit: ${numberValue(status.capture_audit_count ?? 0)} record${numberValue(status.capture_audit_count ?? 0) === 1 ? "" : "s"}${lastAudit ? ` · last ${String(lastAudit?.decision ?? lastAudit?.reason ?? "unknown")}` : ""}`,
 		);
 		if (bridgeHealth) {
 			const lastFailure = recordValue(bridgeHealth.last_failure);
@@ -213,6 +217,18 @@ export function formatQueueLines(queue?: Record<string, unknown>, options: { lim
 		lines.push(`    ${fitLine(`${project}${branch ? `/${branch}` : ""}${session ? ` · session: ${shortPath(session, 42)}` : ""}`, 88)}`);
 		const excerpt = String(capture.body_excerpt ?? "");
 		if (excerpt) lines.push(`    ${fitLine(excerpt, 88)}`);
+		const lifecycle = recordValue(capture.lifecycle);
+		if (lifecycle) {
+			const lifecycleSummary = [
+				String(lifecycle.source_event ?? capture.source_event ?? ""),
+				lifecycle.turn_count !== undefined ? `turns ${String(lifecycle.turn_count)}` : "",
+				lifecycle.tool_call_count !== undefined ? `tools ${String(lifecycle.tool_call_count)}` : "",
+				lifecycle.file_edit_count !== undefined ? `edits ${String(lifecycle.file_edit_count)}` : "",
+			]
+				.filter(Boolean)
+				.join(" · ");
+			if (lifecycleSummary) lines.push(`    lifecycle: ${fitLine(lifecycleSummary, 88)}`);
+		}
 	}
 	if (count > captures.length) lines.push(`… ${count - captures.length} more not loaded`);
 	return lines;
