@@ -28,19 +28,21 @@ def main() -> None:
         run_deep_recall_worker(sys.argv[2], sys.argv[3])
         return
 
-    deferred_lines = consume_deferred_briefing()
-    deep_recall_lines = consume_deep_recall()
-
     try:
         hook_input = read_hook_input()
     except Exception as exc:
         log_retrieval("recall", "hook_input_failed", error=str(exc))
         hook_input = {}
 
+    cwd = hook_input.get("cwd", "")
+    session_id = hook_input.get("session_id", "unknown")
+    deferred_lines = consume_deferred_briefing(cwd, session_id)
+    deep_recall_lines = consume_deep_recall()
+
     result = build_recall(
         hook_input.get("prompt", ""),
-        hook_input.get("cwd", ""),
-        hook_input.get("session_id", "unknown"),
+        cwd,
+        session_id,
     )
 
     output = deferred_lines + deep_recall_lines

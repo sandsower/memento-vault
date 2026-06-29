@@ -1366,6 +1366,11 @@ def _run_json(source: str, fn, *args: Any) -> int:
         return _emit({"error": str(exc), "source": source, "reason": "error", "error_type": type(exc).__name__})
 
 
+def _build_pi_briefing(cwd: str, session_id: str) -> Any:
+    """Build Pi briefing without spawning Claude-style deferred work Pi cannot consume."""
+    return build_briefing(cwd, session_id, allow_deferred=False)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Memento pi lifecycle JSON adapter")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1466,7 +1471,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "briefing":
-        return _run_lifecycle("briefing", build_briefing, args.cwd, args.session_id)
+        return _run_lifecycle("briefing", _build_pi_briefing, args.cwd, args.session_id)
     if args.command == "recall":
         return _run_lifecycle("recall", build_recall, args.prompt, args.cwd, args.session_id)
     if args.command == "session-context":

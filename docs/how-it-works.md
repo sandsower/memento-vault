@@ -55,8 +55,8 @@ vault-briefing.py (SessionStart hook)
     |       if maps have enough notes for this project: write ready immediately
     |       else: fall through to async vsearch
     +---> ASYNC: spawn background subprocess for QMD vsearch
-    |     writes results to /tmp/memento-deferred-briefing.json
-    |     picked up by vault-recall.py on the first prompt
+    |     writes results to a session/project-scoped deferred file with a short TTL
+    |     picked up by vault-recall.py only for the matching first prompt context
     |
     v
 User types a prompt

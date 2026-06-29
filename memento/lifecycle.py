@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -397,7 +398,59 @@ def _find_hook_script(name):
     return None
 
 
-def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
+def _deferred_scope(project_slug: str, session_id: str, cwd: str = "") -> dict:
+    return {
+        "project_slug": project_slug or "unknown",
+        "session_id": session_id or "unknown",
+        "cwd": str(Path(cwd).expanduser()) if cwd else "",
+    }
+
+
+def deferred_briefing_path(project_slug: str = "unknown", session_id: str = "unknown", cwd: str = "") -> str:
+    """Return the session/project-scoped deferred briefing file path."""
+    scope = _deferred_scope(project_slug, session_id, cwd)
+    raw = "\0".join([scope["project_slug"], scope["session_id"], scope["cwd"]])
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    base = Path(DEFERRED_BRIEFING_PATH)
+    return str(base.with_name(f"{base.stem}-{digest}{base.suffix}"))
+
+
+def _deferred_is_expired(data: dict, ttl_seconds: int = 60) -> bool:
+    timestamp = data.get("timestamp") or data.get("params", {}).get("timestamp")
+    try:
+        timestamp_float = float(timestamp)
+    except (TypeError, ValueError):
+        return True
+    return (time.time() - timestamp_float) > ttl_seconds
+
+
+def _deferred_scope_matches(data: dict, project_slug: str, session_id: str) -> bool:
+    scope = data.get("scope") or data.get("params", {}).get("scope") or {}
+    if not isinstance(scope, dict):
+        return False
+    return scope.get("project_slug") == (project_slug or "unknown") and scope.get("session_id") == (
+        session_id or "unknown"
+    )
+
+
+def _cleanup_legacy_deferred_briefing(scoped_path: str) -> None:
+    """Remove unscoped legacy deferred results instead of allowing cross-session consumption."""
+    legacy_path = Path(DEFERRED_BRIEFING_PATH)
+    if str(legacy_path) == scoped_path or not legacy_path.exists():
+        return
+    try:
+        with legacy_path.open() as f:
+            data = json.load(f)
+        if not data.get("scope") and not data.get("params", {}).get("scope"):
+            legacy_path.unlink()
+    except (json.JSONDecodeError, OSError):
+        try:
+            legacy_path.unlink()
+        except OSError:
+            pass
+
+
+def spawn_deferred_search(project_slug, git_branch, linked_notes, config, session_id="unknown"):
     """Spawn a background subprocess to run QMD search and write results."""
     max_notes = config.get("briefing_max_notes", 5)
     min_score = config.get("briefing_min_score", 0.3)
@@ -408,14 +461,20 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
         branch_words = git_branch.replace("-", " ").replace("/", " ")
         query_parts.append(branch_words)
 
+    cwd = config.get("_cwd", "")
+    scope = _deferred_scope(project_slug, session_id, cwd)
+    deferred_path = deferred_briefing_path(project_slug, session_id, cwd)
+
     # Write the search params for the background worker
     params = {
         "query": " ".join(query_parts),
         "max_notes": max_notes,
         "min_score": min_score,
         "linked_notes": linked_notes,
-        "cwd": config.get("_cwd", ""),
+        "cwd": cwd,
         "timestamp": time.time(),
+        "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
+        "scope": scope,
     }
 
     worker = _find_hook_script("vault-briefing.py")
@@ -429,12 +488,12 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
         return
 
     try:
-        with open(DEFERRED_BRIEFING_PATH, "w") as f:
-            json.dump({"status": "pending", "params": params}, f)
+        with open(deferred_path, "w") as f:
+            json.dump({"status": "pending", "params": params, "scope": scope, "timestamp": params["timestamp"]}, f)
 
         # Spawn background worker — the same script with --deferred flag
         _subprocess.Popen(
-            [sys.executable, str(worker), "--deferred"],
+            [sys.executable, str(worker), "--deferred", "--deferred-path", deferred_path],
             stdin=_subprocess.DEVNULL,
             stdout=_subprocess.DEVNULL,
             stderr=_subprocess.DEVNULL,
@@ -443,18 +502,23 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
     except OSError:
         # If spawn fails, clean up so recall doesn't wait for stale pending
         try:
-            os.unlink(DEFERRED_BRIEFING_PATH)
+            os.unlink(deferred_path)
         except OSError:
             pass
 
 
-def run_deferred_briefing_search():
-    """Background worker: run QMD search and write results to the deferred file."""
+def run_deferred_briefing_search(deferred_path: str | None = None):
+    """Background worker: run QMD search and write results to the scoped deferred file."""
+    path = deferred_path or DEFERRED_BRIEFING_PATH
     try:
-        with open(DEFERRED_BRIEFING_PATH) as f:
+        with open(path) as f:
             data = json.load(f)
 
-        if data.get("status") != "pending":
+        if data.get("status") != "pending" or _deferred_is_expired(data, DEFERRED_BRIEFING_TTL_SECONDS):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
             sys.exit(0)
 
         params = data["params"]
@@ -462,6 +526,7 @@ def run_deferred_briefing_search():
         max_notes = params["max_notes"]
         min_score = params["min_score"]
         linked_notes = params.get("linked_notes", [])
+        scope = params.get("scope") or data.get("scope") or _deferred_scope("unknown", "unknown", params.get("cwd", ""))
 
         import time as _time
 
@@ -497,12 +562,14 @@ def run_deferred_briefing_search():
                 note_lines.append(f"  - {oneliner}")
 
         final_notes = note_lines[:max_notes]
-        with open(DEFERRED_BRIEFING_PATH, "w") as f:
+        with open(path, "w") as f:
             json.dump(
                 {
                     "status": "ready",
                     "note_lines": final_notes,
                     "timestamp": time.time(),
+                    "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
+                    "scope": scope,
                 },
                 f,
             )
@@ -520,12 +587,12 @@ def run_deferred_briefing_search():
     except Exception:
         # Clean up on failure
         try:
-            os.unlink(DEFERRED_BRIEFING_PATH)
+            os.unlink(path)
         except OSError:
             pass
 
 
-def run_remote_briefing(cwd, config):
+def run_remote_briefing(cwd, config, session_id="unknown"):
     """Run briefing via the remote vault client. Returns content or None."""
     from memento.remote_client import status as remote_status, search as remote_search
 
@@ -554,8 +621,20 @@ def run_remote_briefing(cwd, config):
             title = result.get("title", "")
             note_lines.append(f"  - {title}")
 
-        with open(DEFERRED_BRIEFING_PATH, "w") as f:
-            json.dump({"status": "ready", "note_lines": note_lines, "timestamp": time.time(), "source": "remote"}, f)
+        scope = _deferred_scope(project_slug, session_id, cwd)
+        deferred_path = deferred_briefing_path(project_slug, session_id, cwd)
+        with open(deferred_path, "w") as f:
+            json.dump(
+                {
+                    "status": "ready",
+                    "note_lines": note_lines,
+                    "timestamp": time.time(),
+                    "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
+                    "source": "remote",
+                    "scope": scope,
+                },
+                f,
+            )
 
     return summary
 
@@ -577,9 +656,7 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
 
     if is_remote() and allow_deferred:
         try:
-            if os.path.exists(DEFERRED_BRIEFING_PATH):
-                os.unlink(DEFERRED_BRIEFING_PATH)
-            remote_content = run_remote_briefing(cwd, config)
+            remote_content = run_remote_briefing(cwd, config, session_id)
             if remote_content:
                 return LifecycleResult(True, remote_content, "briefing", metadata={**metadata, "remote": True})
         except Exception as exc:
@@ -626,13 +703,16 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
                 for note in map_notes[:max_notes]:
                     title = note.get("title", "")
                     note_lines.append(f"  - {title}")
-                with open(DEFERRED_BRIEFING_PATH, "w") as f:
+                scope = _deferred_scope(project_slug, session_id, cwd)
+                with open(deferred_briefing_path(project_slug, session_id, cwd), "w") as f:
                     json.dump(
                         {
                             "status": "ready",
                             "note_lines": note_lines,
                             "timestamp": time.time(),
+                            "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
                             "source": "project-maps",
+                            "scope": scope,
                         },
                         f,
                     )
@@ -650,7 +730,7 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
 
     if allow_deferred and has_qmd():
         config["_cwd"] = cwd
-        spawn_deferred_search(project_slug, git_branch, linked_notes, config)
+        spawn_deferred_search(project_slug, git_branch, linked_notes, config, session_id=session_id)
 
     return LifecycleResult(True, "\n".join(lines), "briefing", metadata=metadata)
 
@@ -1098,39 +1178,49 @@ def format_result(result):
     return line
 
 
-def consume_deferred_briefing():
-    """Check for deferred briefing from SessionStart and consume it.
+def consume_deferred_briefing(cwd: str = "", session_id: str = "unknown", project_slug: str | None = None):
+    """Check for this session/project's deferred briefing and consume it.
 
-    Returns formatted lines to prepend, or empty list.
-    If the background search is still pending, leaves the file intact
-    so the next prompt can pick it up. Only deletes on successful
-    consumption or if the file is stale (>60s).
+    Returns formatted lines to prepend, or empty list. Results are scoped by
+    project and session and expire after ``DEFERRED_BRIEFING_TTL_SECONDS``.
+    Pending files are left intact until they expire; ready files are deleted on
+    successful consumption or rejected when stale/corrupt.
     """
+    if project_slug is None:
+        git_branch = get_git_branch(cwd) if cwd else ""
+        project_slug, _ticket = detect_project(cwd, git_branch) if cwd else ("unknown", None)
+
+    path = deferred_briefing_path(project_slug or "unknown", session_id or "unknown", cwd)
+    _cleanup_legacy_deferred_briefing(path)
+
     try:
-        if not os.path.exists(DEFERRED_BRIEFING_PATH):
+        if not os.path.exists(path):
             return []
 
-        with open(DEFERRED_BRIEFING_PATH) as f:
+        with open(path) as f:
             data = json.load(f)
 
         status = data.get("status", "")
 
+        if _deferred_is_expired(data, DEFERRED_BRIEFING_TTL_SECONDS):
+            os.unlink(path)
+            return []
+
+        if not _deferred_scope_matches(data, project_slug or "unknown", session_id or "unknown"):
+            os.unlink(path)
+            return []
+
         if status == "pending":
-            # Background worker still running — check staleness
-            ts = data.get("params", {}).get("timestamp", 0)
-            if ts and (time.time() - ts) > 60:
-                # Stale pending file — worker probably crashed
-                os.unlink(DEFERRED_BRIEFING_PATH)
-            # Either way, nothing to inject yet
+            # Background worker still running; this session can pick it up on a later prompt.
             return []
 
         if status != "ready":
-            os.unlink(DEFERRED_BRIEFING_PATH)
+            os.unlink(path)
             return []
 
         # Got results — consume and clean up
         note_lines = data.get("note_lines", [])
-        os.unlink(DEFERRED_BRIEFING_PATH)
+        os.unlink(path)
 
         # Mark vsearch as warm for RRF hybrid search
         try:
@@ -1145,7 +1235,7 @@ def consume_deferred_briefing():
 
     except (json.JSONDecodeError, OSError, KeyError):
         try:
-            os.unlink(DEFERRED_BRIEFING_PATH)
+            os.unlink(path)
         except OSError:
             pass
         return []
@@ -2183,6 +2273,7 @@ def build_session_context(
 
 RECALL_DEDUP_PATH = os.path.join(RUNTIME_DIR, "recall-dedup.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
+DEFERRED_BRIEFING_TTL_SECONDS = 60
 DEEP_RECALL_PENDING_PATH = os.path.join(RUNTIME_DIR, "deep-recall-pending.json")
 
 CACHE_PATH = os.path.join(RUNTIME_DIR, "tool-context-cache.json")

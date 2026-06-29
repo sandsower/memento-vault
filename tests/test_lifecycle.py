@@ -1556,6 +1556,77 @@ class TestDeferredWorkerResolution:
 
         assert lifecycle_module._find_hook_script("vault-briefing.py") is None
 
+    def test_deferred_briefing_path_is_scoped_by_project_and_session(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        monkeypatch.setattr(lifecycle_module, "DEFERRED_BRIEFING_PATH", str(tmp_path / "deferred.json"))
+
+        first = lifecycle_module.deferred_briefing_path("api-service", "session-a", "/repo/api")
+        second = lifecycle_module.deferred_briefing_path("api-service", "session-b", "/repo/api")
+        third = lifecycle_module.deferred_briefing_path("web-app", "session-a", "/repo/web")
+
+        assert first != second
+        assert first != third
+        assert Path(first).parent == tmp_path
+        assert Path(first).name.startswith("deferred-")
+
+    def test_consume_deferred_briefing_ignores_legacy_global_file(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        legacy_path = tmp_path / "deferred.json"
+        monkeypatch.setattr(lifecycle_module, "DEFERRED_BRIEFING_PATH", str(legacy_path))
+        legacy_path.write_text(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "note_lines": ["  - stale Pi result"],
+                    "timestamp": time.time(),
+                }
+            )
+        )
+
+        assert lifecycle_module.consume_deferred_briefing("/repo/claude", "claude-session", "claude-project") == []
+        assert not legacy_path.exists()
+
+    def test_consume_deferred_briefing_requires_matching_scope_and_ttl(self, tmp_path, monkeypatch):
+        import memento.lifecycle as lifecycle_module
+
+        monkeypatch.setattr(lifecycle_module, "DEFERRED_BRIEFING_PATH", str(tmp_path / "deferred.json"))
+        scoped_path = Path(lifecycle_module.deferred_briefing_path("api-service", "session-a", "/repo/api"))
+        scoped_path.write_text(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "note_lines": ["  - API note"],
+                    "timestamp": time.time(),
+                    "scope": {"project_slug": "api-service", "session_id": "session-a", "cwd": "/repo/api"},
+                }
+            )
+        )
+
+        assert lifecycle_module.consume_deferred_briefing("/repo/web", "session-b", "web-app") == []
+        assert scoped_path.exists()
+        assert lifecycle_module.consume_deferred_briefing("/repo/api", "session-a", "api-service") == [
+            "[vault] Relevant notes:",
+            "  - API note",
+        ]
+        assert not scoped_path.exists()
+
+        expired_path = Path(lifecycle_module.deferred_briefing_path("api-service", "session-a", "/repo/api"))
+        expired_path.write_text(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "note_lines": ["  - expired note"],
+                    "timestamp": time.time() - lifecycle_module.DEFERRED_BRIEFING_TTL_SECONDS - 1,
+                    "scope": {"project_slug": "api-service", "session_id": "session-a", "cwd": "/repo/api"},
+                }
+            )
+        )
+
+        assert lifecycle_module.consume_deferred_briefing("/repo/api", "session-a", "api-service") == []
+        assert not expired_path.exists()
+
     def test_spawn_deferred_search_uses_installed_layout_worker(self, tmp_path, monkeypatch):
         import memento.lifecycle as lifecycle_module
 
@@ -1564,12 +1635,14 @@ class TestDeferredWorkerResolution:
         monkeypatch.setattr(lifecycle_module, "DEFERRED_BRIEFING_PATH", str(tmp_path / "deferred.json"))
 
         with patch("memento.lifecycle._subprocess.Popen") as mock_popen:
-            lifecycle_module.spawn_deferred_search("api-service", "main", [], {})
+            lifecycle_module.spawn_deferred_search("api-service", "main", [], {}, session_id="session-a")
 
         cmd = mock_popen.call_args[0][0]
+        deferred_path = Path(lifecycle_module.deferred_briefing_path("api-service", "session-a", ""))
         assert cmd[1] == str(worker)
+        assert cmd[-2:] == ["--deferred-path", str(deferred_path)]
         assert Path(cmd[1]).exists()
-        assert (tmp_path / "deferred.json").exists()
+        assert deferred_path.exists()
 
     def test_spawn_deferred_search_missing_worker_logs_and_skips(self, tmp_path, monkeypatch):
         import memento.lifecycle as lifecycle_module
@@ -1584,11 +1657,11 @@ class TestDeferredWorkerResolution:
             patch("memento.lifecycle._subprocess.Popen") as mock_popen,
             patch("memento.lifecycle.log_retrieval") as mock_log,
         ):
-            lifecycle_module.spawn_deferred_search("api-service", "main", [], {})
+            lifecycle_module.spawn_deferred_search("api-service", "main", [], {}, session_id="session-a")
 
         mock_popen.assert_not_called()
         # No stale pending file is left behind for recall to wait on.
-        assert not (tmp_path / "deferred.json").exists()
+        assert not Path(lifecycle_module.deferred_briefing_path("api-service", "session-a", "")).exists()
         mock_log.assert_called_once()
         assert mock_log.call_args[0] == ("briefing", "deferred-worker-missing")
 
