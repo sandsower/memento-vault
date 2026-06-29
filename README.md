@@ -204,7 +204,7 @@ cd memento-vault && git pull && ./install.sh
 The MCP server exposes read, lifecycle, write, and maintenance tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.
 
 <!-- memento-mcp-tools:start -->
-The MCP server currently registers **13 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
+The MCP server currently registers **14 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
 
 | Tool | Category | What it does | When to use it |
 |------|----------|--------------|----------------|
@@ -220,6 +220,7 @@ The MCP server currently registers **13 tools**. This table is generated from `m
 | `memento_store` | Write | Write a single knowledge note with managed frontmatter and project indexing. | Low-level write primitive for sync/automation or agents without skill support; interactive Claude/Codex sessions should prefer `/memento` or local hooks. |
 | `memento_daily_snapshot` | Write | Write a deterministic `notes/daily-<date>-<repo-slug>.md` snapshot with an append-only supersede chain. | Low-level structured daily-snapshot primitive for path-controlled integrations; do not use for ordinary notes, interactive memory capture, or session triage. |
 | `memento_capture` | Write | End-of-session triage from a transcript path or structured summary; writes fleeting session state and optionally an atomic note. | Low-level SessionEnd equivalent for agents without hook support; not a replacement for interactive `/memento` workflows. |
+| `memento_preserve` | Write | Archive a file or directory bundle under `archive/<slug>/` with a manifest, a lightweight index note, and optional project-linking. | Use for evidence packets, screenshots, handoff bundles, or other artifacts that should stay intact; copy by default, move only when explicitly requested. Do not use it for ordinary knowledge capture or atomic notes. |
 | `memento_reindex` | Maintenance | Rebuild the search index from all markdown files after out-of-band changes. | Use after bulk adds, git pull, Obsidian sync, or stale-index evidence; not as the default response to a broad/empty search miss. |
 <!-- memento-mcp-tools:end -->
 
@@ -368,7 +369,7 @@ Pattern notes start at certainty 3 (subject to temporal decay and defrag). Use `
   fleeting/       Daily logs, one line per session
   notes/          Atomic permanent notes (the good stuff)
   projects/       Project indexes linking notes and sessions
-  archive/        Stale notes moved here by /memento-defrag
+  archive/        Stale notes and preserved bundles moved here by /memento-defrag and /preserve
 ```
 
 ### Skills
@@ -378,6 +379,7 @@ Pattern notes start at certainty 3 (subject to temporal decay and defrag). Use `
 | `/memento` | Capture insights mid-session |
 | `/inception` | Find cross-session patterns, synthesize pattern notes (experimental) |
 | `/memento-defrag` | Archive low-value notes, keep the vault focused |
+| `/preserve` | Archive artifact bundles intact with manifests and project links |
 | `/start-fresh` | Capture + save pending work + clear context |
 | `/continue-work` | Recover context from local state and vault |
 

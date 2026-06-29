@@ -1,4 +1,4 @@
-"""MCP server for memento vault — exposes search, store, status, capture, and get operations.
+"""MCP server for memento vault — exposes search, store, status, capture, preserve, and get operations.
 
 Supports both stdio (local) and streamable-http (remote) transports.
 When running over HTTP, authentication is enforced via bearer tokens.
@@ -164,6 +164,7 @@ from memento.store import (
     write_daily_snapshot,
     write_note,
 )
+from memento.preserve import preserve_bundle
 from memento.utils import sanitize_secrets
 
 
@@ -1122,6 +1123,86 @@ def memento_capture(
             "fleeting": fleeting_result["fleeting"],
         }
 
+    finally:
+        release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_preserve(
+    path: str,
+    title: str | None = None,
+    slug: str | None = None,
+    project: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    move: bool = False,
+    include_manifest: bool = True,
+    link_project_index: bool = True,
+    cwd: str = "",
+    branch: str = "",
+    session_id: str = "",
+) -> dict:
+    """Archive a file or directory bundle under ``archive/<slug>/``.
+
+    Preserve artifact bundles intact instead of decomposing them into atomic
+    notes. copy by default; move only when explicitly requested. When running
+    over remote HTTP, preserve only paths rooted in the server cwd or vault —
+    arbitrary server-side file reads are rejected.
+
+    Args:
+        path: File or directory to preserve.
+        title: Optional human-readable title for the bundle.
+        slug: Optional archive slug.
+        project: Optional project slug or path for index linking.
+        description: Optional summary/provenance note.
+        tags: Optional tags to annotate the bundle index.
+        move: When true, move the source instead of copying it.
+        include_manifest: Write a manifest with hashes/provenance (default: True).
+        link_project_index: Update the relevant project index when a project can be detected.
+        cwd: Original cwd for provenance when available.
+        branch: Original branch for provenance when available.
+        session_id: Original session id for provenance when available.
+
+    Returns:
+        Dict with archive, manifest, and optional project-index paths.
+    """
+    vault = get_vault()
+    if not vault.exists():
+        return {"error": f"Vault not found at {vault}"}
+
+    if not acquire_vault_write_lock():
+        return {"error": "Could not acquire vault write lock"}
+
+    try:
+        result = preserve_bundle(
+            vault,
+            path,
+            title=title,
+            slug=slug,
+            project=project,
+            description=description,
+            tags=tags,
+            move=move,
+            include_manifest=include_manifest,
+            link_project_index=link_project_index,
+            cwd=cwd,
+            branch=branch,
+            session_id=session_id,
+            transport=_active_transport,
+        )
+        if "error" in result:
+            log_retrieval("mcp", "preserve_failed", path=path, error=result["error"])
+            return result
+
+        log_retrieval(
+            "mcp",
+            "preserve",
+            path=path,
+            archive_path=result.get("archive_path"),
+            file_count=result.get("file_count"),
+            moved=move,
+        )
+        return result
     finally:
         release_vault_write_lock()
 

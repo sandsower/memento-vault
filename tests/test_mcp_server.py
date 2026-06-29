@@ -27,6 +27,7 @@ from memento.mcp_server import (
     memento_daily_snapshot,
     memento_get,
     memento_list,
+    memento_preserve,
     memento_reindex,
     memento_search,
     memento_status,
@@ -393,6 +394,7 @@ class TestToolSelectionDescriptions:
         store_doc = memento_store.__doc__ or ""
         capture_doc = memento_capture.__doc__ or ""
         daily_snapshot_doc = memento_daily_snapshot.__doc__ or ""
+        preserve_doc = memento_preserve.__doc__ or ""
 
         assert "low-level primitive" in store_doc
         assert "/memento" in store_doc
@@ -402,6 +404,9 @@ class TestToolSelectionDescriptions:
         assert "low-level write primitive" in daily_snapshot_doc
         assert "deterministic path-controlled" in daily_snapshot_doc
         assert "ordinary notes" in daily_snapshot_doc
+        assert "copy by default" in preserve_doc
+        assert "archive/<slug>" in preserve_doc
+        assert "remote HTTP" in preserve_doc
 
     def test_status_and_maintenance_docstrings_are_not_recall_tools(self):
         status_doc = memento_status.__doc__ or ""
