@@ -204,11 +204,12 @@ cd memento-vault && git pull && ./install.sh
 The MCP server exposes read, lifecycle, write, and maintenance tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.
 
 <!-- memento-mcp-tools:start -->
-The MCP server currently registers **12 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
+The MCP server currently registers **13 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
 
 | Tool | Category | What it does | When to use it |
 |------|----------|--------------|----------------|
 | `memento_search` | Read | Search vault notes with BM25, optional semantic search, hybrid ranking, temporal decay, PageRank boost, and `concrete: auto\|true\|false` for exact identifiers and quoted phrases. | Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path. |
+| `memento_contradictions` | Read | Inspect a topic for disagreements, stale conclusions, supersession chains, and opposite-language hints. | Use when comparing competing notes about the same topic or when you need explicit superseded notes marked alongside their source paths and certainty/date context. |
 | `memento_briefing` | Lifecycle | Build a compact session-start briefing payload for host adapters. | Host-adapter primitive for automatic injection; not a general user-answering tool. |
 | `memento_recall` | Lifecycle | Build prompt-time recall context for host adapters. | Host-adapter primitive for automatic injection before an agent turn; not a general user-answering tool. |
 | `memento_tool_context` | Lifecycle | Build read-tool context for a concrete file path. | Host-adapter primitive for automatic read-tool injection; not for explicit recall/search requests. |
@@ -228,6 +229,7 @@ Common read paths:
 - Prior fixes: `memento_search({"query": "Where did we fix stale headless Claude MCP config?"})`.
 - Project history: `memento_search({"query": "memento-vault recent triage failures project history"})`.
 - Exact identifier lookup: `memento_search({"query": "MEMENTO_VAULT_PATH", "concrete": "auto"})`.
+- Disagreements/supersession: `memento_contradictions({"topic": "Redis cache"})`.
 - Reading full content: take a returned `path` such as `notes/cache-policy.md`, then call `memento_get({"path": "notes/cache-policy.md"})`.
 
 Run manually:

@@ -152,6 +152,7 @@ from memento.search import (
     qmd_search_with_extras,
     resolve_concrete_mode,
 )
+from memento.contradictions import inspect_contradictions
 from memento.store import (
     acquire_vault_write_lock,
     append_fleeting_session,
@@ -270,10 +271,11 @@ def _build_server() -> FastMCP:
             "Memento Vault is a persistent knowledge store for coding agents.\n\n"
             "General answering path: use memento_search when the user asks about "
             "past decisions, prior fixes, project history, session context, or exact "
-            "identifiers. Use memento_get after search when you need the full content "
-            "for a returned path, or directly when the user already supplied a note "
-            "path/name. Use memento_status for vault health and memento_list for "
-            "sync/inventory.\n\n"
+            "identifiers. Use memento_contradictions when the user wants to inspect "
+            "disagreements, stale conclusions, or supersession chains. Use memento_get "
+            "after search when you need the full content for a returned path, or directly "
+            "when the user already supplied a note path/name. Use memento_status for vault "
+            "health and memento_list for sync/inventory.\n\n"
             "Lifecycle tools (memento_briefing, memento_recall, "
             "memento_session_context, memento_tool_context) are host-adapter primitives for automatic context "
             "injection, not general user-answering tools.\n\n"
@@ -438,6 +440,47 @@ def memento_search(
 
     log_retrieval("mcp", "search", query=query, results=len(output))
     return output
+
+
+@mcp.tool()
+def memento_contradictions(topic: str, limit: int = 20, min_certainty: int = 2) -> dict:
+    """Inspect a topic for disagreements, stale conclusions, and supersession chains.
+
+    Use this when you want to compare competing notes about the same topic,
+    surface explicit superseded notes, or understand whether newer notes have
+    replaced older conclusions. Output includes source paths plus certainty/date
+    context for the inspected notes.
+    """
+    payload = inspect_contradictions(topic, limit=limit, min_certainty=min_certainty)
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        for entry in payload["results"]:
+            entry["title"] = _strip_injection(entry.get("title", ""))
+            entry["snippet"] = _strip_injection(entry.get("snippet", ""))
+            entry["status"] = _strip_injection(entry.get("status", ""))
+            entry["polarity"] = _strip_injection(entry.get("polarity", ""))
+            entry["path"] = _strip_injection(entry.get("path", ""))
+        for group in payload.get("groups", []):
+            group["theme"] = _strip_injection(group.get("theme", ""))
+            group["summary"] = _strip_injection(group.get("summary", ""))
+            group["note_paths"] = [_strip_injection(path) for path in group.get("note_paths", [])]
+        for item in payload.get("contradictions", []):
+            item["kind"] = _strip_injection(item.get("kind", ""))
+            item["paths"] = [_strip_injection(path) for path in item.get("paths", [])]
+            item["titles"] = [_strip_injection(title) for title in item.get("titles", [])]
+        for item in payload.get("supersession", []):
+            item["older_path"] = _strip_injection(item.get("older_path", ""))
+            item["newer_path"] = _strip_injection(item.get("newer_path", ""))
+            item["older_title"] = _strip_injection(item.get("older_title", ""))
+            item["newer_title"] = _strip_injection(item.get("newer_title", ""))
+        if isinstance(payload.get("summary"), str):
+            payload["summary"] = _strip_injection(payload["summary"])
+    log_retrieval(
+        "mcp",
+        "contradictions",
+        topic=topic,
+        results=len(payload.get("results", [])) if isinstance(payload, dict) else 0,
+    )
+    return payload
 
 
 @mcp.tool()

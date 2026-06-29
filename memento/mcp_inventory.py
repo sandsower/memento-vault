@@ -37,6 +37,12 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
         "Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path.",
     ),
     McpToolInventoryItem(
+        "memento_contradictions",
+        "Read",
+        "Inspect a topic for disagreements, stale conclusions, supersession chains, and opposite-language hints.",
+        "Use when comparing competing notes about the same topic or when you need explicit superseded notes marked alongside their source paths and certainty/date context.",
+    ),
+    McpToolInventoryItem(
         "memento_briefing",
         "Lifecycle",
         "Build a compact session-start briefing payload for host adapters.",
