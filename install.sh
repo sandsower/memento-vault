@@ -414,7 +414,7 @@ for mod in __init__.py config.py utils.py search.py search_backend.py graph.py s
     fi
 done
 
-for mod in __init__.py claude.py; do
+for mod in __init__.py claude.py opencode.py pi.py; do
     if [ -f "$SCRIPT_DIR/memento/adapters/$mod" ]; then
         if safe_copy "$SCRIPT_DIR/memento/adapters/$mod" "$MEMENTO_PKG_DIR/adapters/$mod" "memento/adapters/$mod"; then
             ((PKG_COPIED++)) || true
@@ -424,7 +424,7 @@ for mod in __init__.py claude.py; do
     fi
 done
 
-for critical in __init__.py config.py utils.py store.py search.py lifecycle.py pi_bridge.py adapters/__init__.py adapters/claude.py; do
+for critical in __init__.py config.py utils.py store.py search.py lifecycle.py pi_bridge.py adapters/__init__.py adapters/claude.py adapters/opencode.py adapters/pi.py; do
     if [ ! -f "$MEMENTO_PKG_DIR/$critical" ]; then
         error "Critical file missing: $MEMENTO_PKG_DIR/$critical"
         error "Hooks will not work. Rerun with --force or fix permissions."

@@ -12,6 +12,9 @@ from memento.adapters.claude import parse_transcript as _parse_claude
 from memento.adapters.opencode import looks_like_opencode_db
 from memento.adapters.opencode import parse_transcript as _parse_opencode
 from memento.adapters.opencode import render_transcript_text as _render_opencode
+from memento.adapters.pi import looks_like_pi_record
+from memento.adapters.pi import parse_transcript as _parse_pi
+from memento.adapters.pi import render_transcript_text as _render_pi
 
 _SNIFF_MAX_LINES = 20
 
@@ -21,12 +24,12 @@ def detect_agent(transcript_path):
 
     Detection order:
     1. MEMENTO_AGENT env var (explicit override)
-    2. Sniff the file: SQLite header → OpenCode; JSONL first records → Claude
+    2. Sniff the file: SQLite header → OpenCode; JSONL first records → Pi/Claude
 
-    Returns one of: "claude", "opencode", "codex", "cursor", "windsurf", "unknown"
+    Returns one of: "claude", "opencode", "pi", "codex", "cursor", "windsurf", "unknown"
     """
     env_agent = os.environ.get("MEMENTO_AGENT", "").lower().strip()
-    if env_agent in ("claude", "opencode", "codex", "cursor", "windsurf"):
+    if env_agent in ("claude", "opencode", "pi", "codex", "cursor", "windsurf"):
         return env_agent
 
     # OpenCode stores sessions in SQLite, so check the binary header first;
@@ -50,6 +53,8 @@ def detect_agent(transcript_path):
                     data = json.loads(stripped)
                 except json.JSONDecodeError:
                     continue
+                if looks_like_pi_record(data):
+                    return "pi"
                 if isinstance(data, dict) and data.get("type") in ("user", "assistant"):
                     return "claude"
 
@@ -79,6 +84,8 @@ def render_transcript_text(transcript_path, agent=None, session_id=None):
 
     if agent == "opencode":
         return _render_opencode(transcript_path, session_id=session_id)
+    if agent == "pi":
+        return _render_pi(transcript_path, session_id=session_id)
     return open(transcript_path).read()
 
 
@@ -147,6 +154,8 @@ def parse_transcript(transcript_path, agent=None, session_id=None):
         meta = _parse_claude(transcript_path)
     elif agent == "opencode":
         meta = _parse_opencode(transcript_path, session_id=session_id)
+    elif agent == "pi":
+        meta = _parse_pi(transcript_path)
     elif agent in ("codex", "cursor", "windsurf"):
         raise ValueError(
             f"Transcript parsing for {agent!r} is not yet implemented. "

@@ -754,7 +754,7 @@ def memento_capture(
         files_edited: List of files that were edited.
         session_id: Session identifier for traceability. Auto-generated if omitted.
         transcript_path: Path to a transcript file for full triage parsing.
-        agent: Which agent produced this session (claude, codex, cursor, windsurf).
+        agent: Which agent produced this session (claude, opencode, pi, codex, cursor, windsurf).
         fleeting_only: If true, only write a fleeting log entry and project index
             update — do not create a permanent atomic note. Used by remote hooks
             for non-substantial sessions to match local triage semantics.
@@ -792,9 +792,17 @@ def memento_capture(
             (Path.home() / ".codex").resolve(),
             (Path.home() / ".cursor").resolve(),
             (Path.home() / ".codeium").resolve(),
+            (Path.home() / ".pi" / "agent" / "sessions").resolve(),
+            (Path.home() / ".pi" / "agent" / "subagents").resolve(),
             (xdg_data_home / "opencode").resolve(),
             Path(tempfile.gettempdir()).resolve(),
         ]
+        pi_session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+        if pi_session_dir:
+            allowed_roots.append(Path(pi_session_dir).expanduser().resolve())
+        for raw_root in os.environ.get("MEMENTO_PI_TRANSCRIPT_ROOTS", "").split(os.pathsep):
+            if raw_root.strip():
+                allowed_roots.append(Path(raw_root.strip()).expanduser().resolve())
         if not any(candidate == root or root in candidate.parents for root in allowed_roots):
             return {"error": "transcript_path must be inside a known agent directory"}
 

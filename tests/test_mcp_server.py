@@ -962,6 +962,50 @@ class TestMementoCapture:
         assert result["project"] != "unknown"
 
     @pytest.mark.usefixtures("_use_vault_config")
+    def test_captures_pi_transcript_from_pi_session_dir(self, tmp_vault, tmp_path, monkeypatch):
+        pi_dir = tmp_path / "pi-sessions"
+        pi_dir.mkdir()
+        monkeypatch.setattr(mcp_server.tempfile, "gettempdir", lambda: str(tmp_path / "other-temp-root"))
+        transcript = pi_dir / "session.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "message",
+                    "cwd": "/home/vic/Projects/test",
+                    "gitBranch": "feature/pi",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "Capture the Pi fix"}]},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "message",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "private"},
+                            {"type": "text", "text": "Captured it."},
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(pi_dir))
+
+        result = memento_capture(
+            session_summary="",
+            transcript_path=str(transcript),
+            agent="pi",
+        )
+
+        assert "error" not in result
+        assert result["project"] != "unknown"
+        note = (tmp_vault / result["note_path"]).read_text()
+        assert "Capture the Pi fix" in note
+        assert "private" not in note
+
+    @pytest.mark.usefixtures("_use_vault_config")
     def test_nonexistent_transcript(self, tmp_vault):
         result = memento_capture(
             session_summary="",
