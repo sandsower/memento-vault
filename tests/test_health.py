@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -50,6 +51,121 @@ def test_health_json_outputs_report_and_default_allows_warnings(capsys):
     assert payload["status"] in {"pass", "warn"}
     assert "checks" in payload
     assert any(check["name"] == "vault" for check in payload["checks"])
+
+
+def test_health_deep_flag_runs_opt_in_probes(capsys):
+    deep_checks = [health.CheckResult("deep probe", "pass", "ok")]
+    with patch.object(health, "_check_deep_diagnostics", return_value=deep_checks) as mock_deep:
+        code = health.main(["--json", "--deep"])
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert mock_deep.called
+    assert any(check["name"] == "deep probe" for check in payload["checks"])
+
+
+def test_health_default_build_report_skips_deep_probes():
+    with patch.object(health, "_check_deep_diagnostics") as mock_deep:
+        report = health.build_report()
+
+    assert report.status in {"pass", "warn"}
+    mock_deep.assert_not_called()
+
+
+def test_deep_search_probe_uses_selected_backend(monkeypatch):
+    calls = []
+
+    class FakeBackend:
+        def search(self, query, collection, limit=5, semantic=False, timeout=10, min_score=0.0, concrete=False):
+            calls.append(
+                {
+                    "query": query,
+                    "collection": collection,
+                    "limit": limit,
+                    "semantic": semantic,
+                    "timeout": timeout,
+                    "min_score": min_score,
+                    "concrete": concrete,
+                }
+            )
+            return [{"path": "notes/probe.md", "title": "Probe", "score": 1.0, "snippet": "probe"}]
+
+    monkeypatch.setattr(health, "reset_backend", lambda: None)
+    monkeypatch.setattr(health, "get_backend", lambda: FakeBackend())
+
+    result = health._check_deep_search_probe(config={"qmd_collection": "memento"}, probe_timeout_seconds=7)
+
+    assert result.status == "pass"
+    assert result.details["timeout_seconds"] == 7
+    assert result.details["result_count"] == 1
+    assert calls == [
+        {
+            "query": "memento-vault health probe",
+            "collection": "memento",
+            "limit": 1,
+            "semantic": False,
+            "timeout": 7,
+            "min_score": 0.0,
+            "concrete": True,
+        }
+    ]
+
+
+def test_deep_mcp_probe_calls_tools(monkeypatch):
+    calls = []
+    import memento.mcp_server as mcp_server
+
+    monkeypatch.setattr(mcp_server, "memento_status", lambda: {"vault_exists": True, "qmd_available": True})
+    monkeypatch.setattr(
+        mcp_server,
+        "memento_search",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or [{"path": "notes/probe.md"}],
+    )
+
+    result = health._check_deep_mcp_probe(vault=Path("/tmp/vault"), probe_timeout_seconds=5)
+
+    assert result.status == "pass"
+    assert result.details["search_result_count"] == 1
+    assert calls == [
+        (("memento-vault health probe",), {"limit": 1, "semantic": False, "min_score": 0.0, "cwd": "/tmp/vault"})
+    ]
+
+
+def test_deep_pi_bridge_probe_uses_short_timeout(monkeypatch):
+    run_calls = []
+
+    def fake_run(*args, **kwargs):
+        run_calls.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"status": "ok"}), stderr="")
+
+    monkeypatch.setattr(health.subprocess, "run", fake_run)
+
+    result = health._check_deep_pi_bridge_probe(vault=Path("/tmp/vault"), probe_timeout_seconds=4)
+
+    assert result.status == "pass"
+    assert run_calls[0]["timeout"] == 4
+    assert run_calls[0]["cwd"] == str(health._repo_root())
+
+
+def test_deep_remote_probe_uses_short_timeout(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        health.remote_client, "status", lambda timeout=30: calls.append(("status", timeout)) or {"vault_exists": True}
+    )
+    monkeypatch.setattr(
+        health.remote_client,
+        "search_envelope",
+        lambda query, limit=5, semantic=False, min_score=0.0, cwd="", concrete="auto", timeout=30: (
+            calls.append(("search", query, timeout)) or {"results": []}
+        ),
+    )
+
+    result = health._check_deep_remote_probe(probe_timeout_seconds=3)
+
+    assert result.status == "pass"
+    assert calls == [("status", 3), ("search", "memento-vault health probe", 3)]
 
 
 def test_health_json_exposes_automation_memory_readiness(capsys):

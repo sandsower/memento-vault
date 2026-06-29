@@ -104,14 +104,14 @@ def _call_tool(tool_name: str, arguments: dict, timeout: int = 30) -> dict:
     return result
 
 
-def list_notes(include_hash: bool = True) -> list[dict] | None:
+def list_notes(include_hash: bool = True, timeout: int = 30) -> list[dict] | None:
     """List all notes on the remote vault with optional content hashes.
 
     Returns None on error (network failure, server error, malformed response).
     Callers must distinguish None (error) from [] (genuinely empty remote) —
     treating an error as an empty vault would cause bulk-push of duplicates.
     """
-    result = _call_tool("memento_list", {"include_hash": include_hash})
+    result = _call_tool("memento_list", {"include_hash": include_hash}, timeout=timeout)
     if isinstance(result, list):
         return result
     if isinstance(result, dict) and "error" in result:
@@ -129,6 +129,7 @@ def search_envelope(
     min_score: float = 0.0,
     cwd: str = "",
     concrete: object = "auto",
+    timeout: int = 30,
 ) -> dict:
     """Search the remote vault, preserving structured miss metadata when present."""
     result = _call_tool(
@@ -141,6 +142,7 @@ def search_envelope(
             "cwd": cwd,
             "concrete": concrete,
         },
+        timeout=timeout,
     )
     if isinstance(result, list):
         return {"results": result}
@@ -163,18 +165,19 @@ def search(
     min_score: float = 0.0,
     cwd: str = "",
     concrete: object = "auto",
+    timeout: int = 30,
 ) -> list[dict]:
     """Search the remote vault, returning only results for legacy callers."""
     envelope = search_envelope(
-        query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd, concrete=concrete
+        query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd, concrete=concrete, timeout=timeout
     )
     results = envelope.get("results")
     return results if isinstance(results, list) else []
 
 
-def get(path: str) -> dict | None:
+def get(path: str, timeout: int = 30) -> dict | None:
     """Get a specific note from the remote vault."""
-    result = _call_tool("memento_get", {"path": path})
+    result = _call_tool("memento_get", {"path": path}, timeout=timeout)
     if isinstance(result, dict) and "error" not in result:
         return result
     return None
@@ -191,6 +194,7 @@ def store(
     session_id: str | None = None,
     validity_context: str | None = None,
     supersedes: str | None = None,
+    timeout: int = 30,
 ) -> dict:
     """Store a note in the remote vault."""
     args = {"title": title, "body": body, "note_type": note_type}
@@ -208,7 +212,7 @@ def store(
         args["validity_context"] = validity_context
     if supersedes:
         args["supersedes"] = supersedes
-    return _call_tool("memento_store", args)
+    return _call_tool("memento_store", args, timeout=timeout)
 
 
 def capture(
@@ -219,6 +223,7 @@ def capture(
     session_id: str | None = None,
     agent: str = "unknown",
     fleeting_only: bool = False,
+    timeout: int = 30,
 ) -> dict:
     """Capture a session to the remote vault."""
     args = {"session_summary": session_summary, "cwd": cwd, "branch": branch, "agent": agent}
@@ -228,9 +233,9 @@ def capture(
         args["session_id"] = session_id
     if fleeting_only:
         args["fleeting_only"] = True
-    return _call_tool("memento_capture", args)
+    return _call_tool("memento_capture", args, timeout=timeout)
 
 
-def status() -> dict:
+def status(timeout: int = 30) -> dict:
     """Get status of the remote vault."""
-    return _call_tool("memento_status", {})
+    return _call_tool("memento_status", {}, timeout=timeout)

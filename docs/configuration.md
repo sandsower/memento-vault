@@ -83,7 +83,7 @@ memento-vault health
 memento-vault doctor   # alias
 ```
 
-Default checks are cheap and local: config parse, vault directory structure, git/auto-commit readiness, selected search backend availability, automation-memory readiness metadata, install manifest state, managed hook/package file drift, Claude hook registration, MCP CLI registration, MCP config shape, optional Pi bridge config shape, stale headless Claude MCP config detection, recent triage health, basic retrieval log health, lock files, and basic Inception state when enabled. Drift checks are report-only and suggest installer repair commands such as `./install.sh --reinstall` or `./install.sh --mcp`.
+Default checks are cheap and local: config parse, vault directory structure, git/auto-commit readiness, selected search backend availability, automation-memory readiness metadata, install manifest state, managed hook/package file drift, Claude hook registration, MCP CLI registration, MCP config shape, optional Pi bridge config shape, stale headless Claude MCP config detection, recent triage health, basic retrieval log health, lock files, and basic Inception state when enabled. Drift checks are report-only and suggest installer repair commands such as `./install.sh --reinstall` or `./install.sh --mcp`. Use `--deep` for opt-in bounded live probes against configured integrations.
 
 Options:
 
@@ -91,9 +91,10 @@ Options:
 memento-vault health --json     # structured report
 memento-vault health --verbose  # include sanitized details in human output
 memento-vault health --strict   # exit nonzero on warnings
+memento-vault health --deep     # opt-in live integration probes
 ```
 
-Exit codes: failures always exit 1; warnings exit 0 unless `--strict` is set. The command never repairs state or prints secrets.
+Exit codes: failures always exit 1; warnings exit 0 unless `--strict` is set. The command never repairs state or prints secrets. `--deep` stays read-only but may contact configured integrations with bounded timeouts.
 
 The JSON form includes an `automation_memory` readiness object with probe metadata for automated runners: search availability, recent recall/search failure rate, stale embedded-index hints, local sync-ledger divergence when a remote is configured, last successful automation-memory packet, and common failure reasons. It does not contact the remote vault by default.
 

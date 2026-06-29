@@ -8,12 +8,16 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from memento import remote_client
+from memento.search_backend import get_backend, reset_backend
 
 
 PASS = "pass"
@@ -23,6 +27,8 @@ _STATUSES = (PASS, WARN, FAIL)
 _EXPECTED_DIRS = ("notes", "fleeting", "projects", "archive")
 _CORE_DIRS = ("notes", "fleeting", "projects")
 _HEALTH_WINDOW_HOURS = 24
+_DEEP_PROBE_TIMEOUT_SECONDS = 5
+_DEEP_PROBE_QUERY = "memento-vault health probe"
 _STALE_LOCK_SECONDS = 600
 _RECENT_FAILURE_ACTION_MARKERS = ("failed", "failure", "error", "unexpected", "unavailable")
 _RETRIEVAL_SKIP_ACTIONS = {
@@ -153,8 +159,9 @@ class HealthReport:
         return payload
 
 
-def build_report() -> HealthReport:
+def build_report(*, deep: bool = False, probe_timeout_seconds: int = _DEEP_PROBE_TIMEOUT_SECONDS) -> HealthReport:
     """Run cheap, read-only health checks."""
+    probe_timeout_seconds = max(1, int(probe_timeout_seconds))
     checks: list[CheckResult] = []
     config_check, config = _check_config_parse()
     checks.append(config_check)
@@ -176,6 +183,8 @@ def build_report() -> HealthReport:
     checks.append(_check_retrieval_health(config=config, search_check=search_check))
     checks.append(_check_locks())
     checks.append(_check_inception(config))
+    if deep:
+        checks.extend(_check_deep_diagnostics(config=config, vault=vault, probe_timeout_seconds=probe_timeout_seconds))
     automation_memory = build_automation_memory_readiness(config=config, vault=vault, checks=checks)
     checks.append(
         CheckResult(
@@ -189,6 +198,190 @@ def build_report() -> HealthReport:
     summary = {status: sum(1 for check in checks if check.status == status) for status in _STATUSES}
     status = FAIL if summary[FAIL] else WARN if summary[WARN] else PASS
     return HealthReport(status=status, summary=summary, checks=checks, automation_memory=automation_memory)
+
+
+def _check_deep_diagnostics(*, config: dict[str, Any], vault: Path, probe_timeout_seconds: int) -> list[CheckResult]:
+    checks: list[CheckResult] = []
+    checks.append(_check_deep_search_probe(config=config, probe_timeout_seconds=probe_timeout_seconds))
+    checks.append(_check_deep_mcp_probe(vault=vault, probe_timeout_seconds=probe_timeout_seconds))
+    checks.append(_check_deep_pi_bridge_probe(vault=vault, probe_timeout_seconds=probe_timeout_seconds))
+    if remote_client.is_remote():
+        checks.append(_check_deep_remote_probe(probe_timeout_seconds=probe_timeout_seconds))
+    return checks
+
+
+def _check_deep_search_probe(*, config: dict[str, Any], probe_timeout_seconds: int) -> CheckResult:
+    reset_backend()
+    backend = get_backend()
+    collection = str(config.get("qmd_collection") or "memento")
+    start = time.monotonic()
+    try:
+        results = backend.search(
+            _DEEP_PROBE_QUERY,
+            collection,
+            limit=1,
+            timeout=probe_timeout_seconds,
+            min_score=0.0,
+            concrete=True,
+        )
+    except Exception as exc:
+        return CheckResult(
+            "deep search probe",
+            WARN,
+            f"selected search backend probe failed: {exc}",
+            {"timeout_seconds": probe_timeout_seconds, "error": str(exc)},
+        )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    return CheckResult(
+        "deep search probe",
+        PASS,
+        f"selected search backend answered probe query ({len(results)} result(s))",
+        {
+            "query": _DEEP_PROBE_QUERY,
+            "timeout_seconds": probe_timeout_seconds,
+            "latency_ms": latency_ms,
+            "backend": type(backend).__name__,
+            "collection": collection,
+            "result_count": len(results),
+            "first_result": _sanitize_obj(results[0]) if results else None,
+        },
+    )
+
+
+def _check_deep_mcp_probe(*, vault: Path, probe_timeout_seconds: int) -> CheckResult:
+    start = time.monotonic()
+    try:
+        from memento import mcp_server
+
+        status = mcp_server.memento_status()
+        search = mcp_server.memento_search(_DEEP_PROBE_QUERY, limit=1, semantic=False, min_score=0.0, cwd=str(vault))
+    except Exception as exc:
+        return CheckResult(
+            "deep mcp probe",
+            WARN,
+            f"local MCP tool probe failed: {exc}",
+            {"timeout_seconds": probe_timeout_seconds, "error": str(exc)},
+        )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    result_count = (
+        len(search) if isinstance(search, list) else len(search.get("results", [])) if isinstance(search, dict) else 0
+    )
+    return CheckResult(
+        "deep mcp probe",
+        PASS,
+        "local MCP tools responded to probe calls",
+        {
+            "timeout_seconds": probe_timeout_seconds,
+            "latency_ms": latency_ms,
+            "status": _sanitize_obj(status),
+            "search_result_count": result_count,
+            "search": _sanitize_obj(search),
+        },
+    )
+
+
+def _check_deep_pi_bridge_probe(*, vault: Path, probe_timeout_seconds: int) -> CheckResult:
+    env = os.environ.copy()
+    repo_root = str(_repo_root())
+    env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else repo_root
+    start = time.monotonic()
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "memento.pi_bridge", "status", "--cwd", str(vault)],
+            text=True,
+            capture_output=True,
+            timeout=probe_timeout_seconds,
+            cwd=repo_root,
+            env=env,
+            check=False,
+        )
+    except Exception as exc:
+        return CheckResult(
+            "deep pi bridge probe",
+            WARN,
+            f"Pi bridge status probe failed: {exc}",
+            {"timeout_seconds": probe_timeout_seconds, "error": str(exc)},
+        )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    stdout = _safe_text(completed.stdout.strip())
+    stderr = _safe_text(completed.stderr.strip())
+    if completed.returncode != 0:
+        return CheckResult(
+            "deep pi bridge probe",
+            WARN,
+            f"Pi bridge status probe exited {completed.returncode}",
+            {
+                "timeout_seconds": probe_timeout_seconds,
+                "latency_ms": latency_ms,
+                "returncode": completed.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+            },
+        )
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return CheckResult(
+            "deep pi bridge probe",
+            WARN,
+            f"Pi bridge status probe returned invalid JSON: {exc}",
+            {
+                "timeout_seconds": probe_timeout_seconds,
+                "latency_ms": latency_ms,
+                "stdout": stdout,
+                "stderr": stderr,
+            },
+        )
+    return CheckResult(
+        "deep pi bridge probe",
+        PASS,
+        "Pi bridge status probe responded",
+        {
+            "timeout_seconds": probe_timeout_seconds,
+            "latency_ms": latency_ms,
+            "status": _sanitize_obj(payload),
+            "stdout": stdout,
+            "stderr": stderr,
+        },
+    )
+
+
+def _check_deep_remote_probe(*, probe_timeout_seconds: int) -> CheckResult:
+    start = time.monotonic()
+    try:
+        status = remote_client.status(timeout=probe_timeout_seconds)
+        search = remote_client.search_envelope(_DEEP_PROBE_QUERY, limit=1, timeout=probe_timeout_seconds)
+    except Exception as exc:
+        return CheckResult(
+            "deep remote probe",
+            WARN,
+            f"remote vault probe failed: {exc}",
+            {"timeout_seconds": probe_timeout_seconds, "error": str(exc)},
+        )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    if isinstance(status, dict) and status.get("error"):
+        return CheckResult(
+            "deep remote probe",
+            WARN,
+            f"remote vault status probe failed: {status['error']}",
+            {
+                "timeout_seconds": probe_timeout_seconds,
+                "latency_ms": latency_ms,
+                "status": _sanitize_obj(status),
+                "search": _sanitize_obj(search),
+            },
+        )
+    return CheckResult(
+        "deep remote probe",
+        PASS,
+        "remote vault status and search probes responded",
+        {
+            "timeout_seconds": probe_timeout_seconds,
+            "latency_ms": latency_ms,
+            "status": _sanitize_obj(status),
+            "search": _sanitize_obj(search),
+        },
+    )
 
 
 def render_human(report: HealthReport, verbose: bool = False) -> str:
@@ -220,9 +413,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit structured JSON")
     parser.add_argument("--verbose", action="store_true", help="Include sanitized details in human output")
     parser.add_argument("--strict", action="store_true", help="Exit nonzero when warnings are present")
+    parser.add_argument("--deep", action="store_true", help="Run opt-in live integration probes")
     args = parser.parse_args(argv)
 
-    report = build_report()
+    report = build_report(deep=args.deep)
     if args.json:
         print(json.dumps(report.to_dict(verbose=True), indent=2, sort_keys=True))
     else:
