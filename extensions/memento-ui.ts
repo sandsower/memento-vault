@@ -101,7 +101,7 @@ export function renderMementoPanelLines(
 	if (state.message) body.push(state.message, "");
 	if (state.confirmProcess) body.push(`Process ${state.selectedCaptureIds?.length ?? 0} selected queued capture(s) now? y/N`, "");
 	if (state.confirmDiscard && state.discardCapture) {
-		body.push("Discard this queued capture? y/N", "");
+		body.push("Discard this queued capture? It will be archived, not deleted. y/N", "");
 		body.push(`ID: ${state.discardCapture.id}`, `Title: ${fitLine(state.discardCapture.title, 84)}`);
 		if (state.discardCapture.excerpt) body.push(`Excerpt: ${fitLine(state.discardCapture.excerpt, 78)}`);
 		body.push(

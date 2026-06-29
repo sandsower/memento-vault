@@ -805,6 +805,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 								requestRender();
 								void (async () => {
 									const payload = await runJson(pi, ctx, ["queue", "discard", "--id", discardId, "--apply"]);
+									latestStatus = await loadStatus(ctx);
 									latestQueue = await loadQueue(ctx, false, 10);
 									latestProcess = await loadProcessStatus(ctx);
 									syncCounts();

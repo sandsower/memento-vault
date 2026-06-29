@@ -774,122 +774,6 @@ def _queue_cleanup(
     return result
 
 
-def _queue_discard(
-    capture_id: str | list[str] = "",
-    project: str = "",
-    branch: str = "",
-    session_id: str = "",
-    limit: int = 0,
-    newest: bool = False,
-    dry_run: bool = False,
-    vault: Path | None = None,
-) -> dict[str, Any]:
-    """Archive selected queued captures instead of deleting them outright."""
-    queue_path = _queue_file(vault)
-    captures = _load_queue(vault)
-    requested_ids = _normalize_capture_ids(capture_id)
-    selected = _selected_queue_captures(captures, capture_id, project, branch, session_id, newest)
-    if limit and limit > 0 and not requested_ids:
-        selected = selected[:limit]
-    selected_ids = [str(capture.get("id")) for capture in selected if str(capture.get("id"))]
-    if not selected:
-        return {
-            "error": "no queued captures matched selection",
-            "reason": "no_selection",
-            "queue_path": str(queue_path),
-            "dry_run": dry_run,
-            "selected_capture_count": 0,
-            "discarded": 0,
-            "retained": len(captures),
-            "captures": [],
-        }
-    if requested_ids and set(selected_ids) != requested_ids:
-        missing = sorted(requested_ids.difference(selected_ids))
-        return {
-            "error": "selected queued capture(s) no longer available",
-            "reason": "missing_capture_ids",
-            "queue_path": str(queue_path),
-            "dry_run": dry_run,
-            "selected_capture_count": len(selected_ids),
-            "discarded": 0,
-            "retained": len(captures),
-            "missing_capture_ids": missing,
-            "captures": [{**capture, **_capture_review_metadata(capture)} for capture in selected],
-        }
-
-    preview_captures = [{**capture, **_capture_review_metadata(capture)} for capture in selected]
-    result: dict[str, Any] = {
-        "queue_path": str(queue_path),
-        "dry_run": dry_run,
-        "selected_capture_count": len(selected),
-        "discarded": len(selected),
-        "retained": len(captures) - len(selected),
-        "capture_ids": selected_ids,
-        "captures": preview_captures,
-    }
-    if dry_run:
-        return result
-
-    lock_path = _lock_file()
-    if lock_path.exists():
-        lock = _read_processing_lock(lock_path)
-        if _is_pid_alive(int(lock.get("pid", 0))):
-            result["blocked"] = f"processing run active (pid {lock.get('pid')}, run {lock.get('run_id')})"
-            result["dry_run"] = True
-            return result
-
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_path = queue_path.with_name(f"{queue_path.name}.bak-{stamp}-discard")
-    backup_path.write_text(queue_path.read_text(errors="replace") if queue_path.exists() else "")
-    archive_path = queue_path.with_name(f"pi-captures-discarded-{stamp}.jsonl")
-    discarded_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    with _queue_lock(vault):
-        current = _load_queue(vault)
-        current_selected = _selected_queue_captures(current, capture_id, project, branch, session_id, newest)
-        if limit and limit > 0 and not requested_ids:
-            current_selected = current_selected[:limit]
-        current_selected_ids = [str(capture.get("id")) for capture in current_selected if str(capture.get("id"))]
-        if requested_ids and set(current_selected_ids) != requested_ids:
-            missing = sorted(requested_ids.difference(current_selected_ids))
-            return {
-                "error": "selected queued capture(s) no longer available",
-                "reason": "missing_capture_ids",
-                "queue_path": str(queue_path),
-                "dry_run": True,
-                "selected_capture_count": len(current_selected_ids),
-                "discarded": 0,
-                "retained": len(current),
-                "missing_capture_ids": missing,
-                "captures": [{**capture, **_capture_review_metadata(capture)} for capture in current_selected],
-            }
-        if not current_selected:
-            return {
-                "error": "no queued captures matched selection",
-                "reason": "no_selection",
-                "queue_path": str(queue_path),
-                "dry_run": True,
-                "selected_capture_count": 0,
-                "discarded": 0,
-                "retained": len(current),
-                "captures": [],
-            }
-        with archive_path.open("a") as handle:
-            for capture in current_selected:
-                entry = dict(capture)
-                entry["discard"] = {
-                    "discarded_at": discarded_at,
-                    "reason": "manual-selection",
-                }
-                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        current_selected_id_set = set(current_selected_ids)
-        remaining = [capture for capture in current if str(capture.get("id")) not in current_selected_id_set]
-        _write_queue(remaining, vault)
-    result["backup_path"] = str(backup_path)
-    result["archive_path"] = str(archive_path)
-    result["retained"] = len(remaining)
-    return result
-
-
 def _capture_queue_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
     metadata = capture.get("metadata") or {}
     body = str(capture.get("body") or "")
@@ -1875,7 +1759,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.queue_command == "cleanup":
             return _run_json("queue", _queue_cleanup, args.apply, args.discard_classes, args.samples)
         if args.queue_command == "discard":
-            return _run_json("queue", _queue_discard, args.id, args.apply, args.reason, args.source)
+            return _run_json("queue", _queue_discard, args.id, args.apply)
     raise AssertionError(f"unhandled command: {args.command}")
 
 
