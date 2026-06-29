@@ -651,7 +651,7 @@ def _status(cwd: str = "") -> dict[str, Any]:
             "briefing": get_config().get("session_briefing", True),
             "prompt_recall": get_config().get("prompt_recall", True),
             "tool_context": get_config().get("tool_context", True),
-            "auto_capture": False,
+            "auto_capture": True,
             "capture_queue": True,
         },
     }

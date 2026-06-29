@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from memento import health
+from memento.config import reset_config
 
 
 def _make_vault(path: Path):
@@ -36,7 +37,9 @@ def isolate_health(monkeypatch, tmp_path):
     monkeypatch.setattr(health, "INCEPTION_STATE_PATH", str(tmp_path / "inception-state.json"))
     monkeypatch.setattr(health, "VAULT_WRITE_LOCK_PATH", str(tmp_path / "vault-write.lock"))
     monkeypatch.setattr(health, "INCEPTION_LOCK_PATH", str(tmp_path / "inception.lock"))
+    reset_config()
     yield
+    reset_config()
 
 
 def test_health_json_outputs_report_and_default_allows_warnings(capsys):
@@ -422,23 +425,26 @@ def test_failures_always_exit_nonzero():
     assert health.exit_code(report, strict=True) == 1
 
 
-def test_claude_hook_registration_warns_when_expected_hook_missing():
+def test_claude_hook_registration_warns_when_retrieval_hooks_missing():
     config_dir = health._config_dir()
     config_dir.mkdir(parents=True)
-    (config_dir / "manifest.json").write_text(
-        json.dumps({"version": "4.1.0", "options": {"experimental": True}, "files": {}})
-    )
+    (config_dir / "manifest.json").write_text(json.dumps({"version": "4.1.0", "options": {}, "files": {}}))
     settings = Path.home() / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True)
-    settings.write_text(json.dumps({"hooks": {"SessionEnd": []}}))
+    settings.write_text(
+        json.dumps(
+            {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "python3 /tmp/memento-triage.py"}]}]}}
+        )
+    )
 
     report = health.build_report()
     check = next(check for check in report.checks if check.name == "claude hooks")
 
     assert check.status == "warn"
     assert "./install.sh --reinstall" in check.message
-    assert "SessionEnd/memento-triage.py" in check.details["missing"]
     assert "SessionStart/vault-briefing.py" in check.details["missing"]
+    assert "UserPromptSubmit/vault-recall.py" in check.details["missing"]
+    assert "PreToolUse/vault-tool-context.py" in check.details["missing"]
 
 
 def test_mcp_remote_shape_valid_and_redacts_headers(capsys):

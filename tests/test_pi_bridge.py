@@ -101,6 +101,8 @@ def test_pi_bridge_status_outputs_json(capsys, tmp_path, monkeypatch):
     assert payload["project_slug"] == "repo"
     assert payload["qmd_available"] is False
     assert payload["queued_capture_count"] == 0
+    assert payload["lifecycle"]["auto_capture"] is True
+    assert payload["lifecycle"]["capture_queue"] is True
 
 
 def test_pi_bridge_status_surfaces_recent_bridge_failures(capsys, tmp_path, monkeypatch):

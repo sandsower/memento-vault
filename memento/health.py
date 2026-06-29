@@ -871,19 +871,14 @@ def _check_managed_files(manifest: dict[str, Any] | None) -> CheckResult:
 
 
 def _expected_claude_hooks(manifest: dict[str, Any] | None) -> list[tuple[str, str]]:
-    options = (
-        manifest.get("options") if isinstance(manifest, dict) and isinstance(manifest.get("options"), dict) else {}
-    )
-    expected = [("SessionEnd", "memento-triage.py")]
-    if options.get("experimental"):
-        expected.extend(
-            [
-                ("SessionStart", "vault-briefing.py"),
-                ("UserPromptSubmit", "vault-recall.py"),
-                ("PreToolUse", "vault-tool-context.py"),
-            ]
-        )
-    return expected
+    # Retrieval hooks are part of the default posture now; experimental install
+    # options only gate the extra add-ons elsewhere in the installer.
+    return [
+        ("SessionEnd", "memento-triage.py"),
+        ("SessionStart", "vault-briefing.py"),
+        ("UserPromptSubmit", "vault-recall.py"),
+        ("PreToolUse", "vault-tool-context.py"),
+    ]
 
 
 def _check_claude_hooks(manifest: dict[str, Any] | None) -> CheckResult:

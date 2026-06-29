@@ -15,6 +15,7 @@ import {
 	renderMementoStatusText,
 	type MementoPanelState,
 } from "./memento-ui.js";
+import { defaultConfig as bridgeDefaultConfig, loadConfig } from "./memento-config.js";
 import { addSessionPointerDigest, sanitizeEventDetails, summarizeMessages, summarizeSessionEntries } from "./transcript-sanitizer.js";
 
 interface LifecycleResult {
@@ -41,106 +42,11 @@ interface BridgeConfig {
 	maxToolContextPerSession: number;
 }
 
-const DEFAULT_PROCESS_QUEUE_MODEL = "claude-sonnet-4-20250514";
-
-const defaultConfig: BridgeConfig = {
-	enabled: true,
-	briefing: true,
-	promptRecall: true,
-	toolContext: false,
-	autoCapture: false,
-	captureQueue: true,
-	processQueue: true,
-	processQueueOnSessionClose: false,
-	processQueueMaxCaptures: 3,
-	processQueueModel: DEFAULT_PROCESS_QUEUE_MODEL,
-	maxInjectedChars: 4000,
-	maxToolContextPerSession: 5,
-};
+const defaultConfig: BridgeConfig = bridgeDefaultConfig as BridgeConfig;
 
 interface LoadedBridgeConfig {
 	config: BridgeConfig;
 	sources: string[];
-}
-
-function envBool(name: string): boolean | undefined {
-	const raw = process.env[name];
-	if (raw === undefined) return undefined;
-	return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
-}
-
-function envInt(name: string): number | undefined {
-	const raw = process.env[name];
-	if (raw === undefined) return undefined;
-	const parsed = Number.parseInt(raw, 10);
-	return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
-function readJson(path: string): unknown | undefined {
-	if (!existsSync(path)) return undefined;
-	return JSON.parse(readFileSync(path, "utf8"));
-}
-
-function bridgeConfigFrom(raw: unknown): Partial<BridgeConfig> {
-	const root = raw as Record<string, unknown> | undefined;
-	const memento = root?.memento as Record<string, unknown> | undefined;
-	const candidate = (memento?.piBridge ?? root?.piBridge ?? root) as Record<string, unknown> | undefined;
-	const partial: Partial<BridgeConfig> = {};
-	if (!candidate) return partial;
-
-	for (const key of ["enabled", "briefing", "promptRecall", "toolContext", "autoCapture", "captureQueue", "processQueue", "processQueueOnSessionClose"] as const) {
-		if (typeof candidate[key] === "boolean") partial[key] = candidate[key];
-	}
-	for (const key of ["maxInjectedChars", "maxToolContextPerSession", "processQueueMaxCaptures"] as const) {
-		if (typeof candidate[key] === "number" && Number.isFinite(candidate[key]) && candidate[key] >= 0) partial[key] = candidate[key];
-	}
-	if (typeof candidate.processQueueModel === "string" || candidate.processQueueModel === null) partial.processQueueModel = candidate.processQueueModel;
-	return partial;
-}
-
-function applyEnv(config: BridgeConfig): BridgeConfig {
-	return {
-		...config,
-		enabled: envBool("MEMENTO_PI_ENABLED") ?? config.enabled,
-		briefing: envBool("MEMENTO_PI_BRIEFING") ?? config.briefing,
-		promptRecall: envBool("MEMENTO_PI_PROMPT_RECALL") ?? config.promptRecall,
-		toolContext: envBool("MEMENTO_PI_TOOL_CONTEXT") ?? config.toolContext,
-		autoCapture: envBool("MEMENTO_PI_AUTO_CAPTURE") ?? config.autoCapture,
-		captureQueue: envBool("MEMENTO_PI_CAPTURE_QUEUE") ?? config.captureQueue,
-		processQueue: envBool("MEMENTO_PI_PROCESS_QUEUE") ?? config.processQueue,
-		processQueueOnSessionClose: envBool("MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE") ?? config.processQueueOnSessionClose,
-		processQueueMaxCaptures: envInt("MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES") ?? config.processQueueMaxCaptures,
-		processQueueModel: process.env.MEMENTO_PI_PROCESS_QUEUE_MODEL ?? config.processQueueModel,
-		maxInjectedChars: envInt("MEMENTO_PI_MAX_INJECTED_CHARS") ?? config.maxInjectedChars,
-		maxToolContextPerSession: envInt("MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION") ?? config.maxToolContextPerSession,
-	};
-}
-
-function loadConfig(cwd = process.cwd()): LoadedBridgeConfig {
-	let config = { ...defaultConfig };
-	const sources = ["defaults"];
-	const candidates = [
-		join(homedir(), ".config", "memento-vault", "pi-bridge.json"),
-		resolve(cwd, ".pi", "settings.json"),
-		resolve(cwd, "package.json"),
-	];
-
-	for (const path of candidates) {
-		try {
-			const raw = readJson(path);
-			if (!raw) continue;
-			const partial = bridgeConfigFrom(raw);
-			if (Object.keys(partial).length === 0) continue;
-			config = { ...config, ...partial };
-			sources.push(path);
-		} catch (error) {
-			sources.push(`${path}:error:${String(error)}`);
-		}
-	}
-
-	const envConfig = applyEnv(config);
-	if (JSON.stringify(envConfig) !== JSON.stringify(config)) sources.push("environment");
-	return { config: envConfig, sources };
 }
 
 function capText(text: string, maxChars: number): string {

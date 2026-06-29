@@ -58,16 +58,16 @@ Warnings exit 0 by default; failures exit 1. Use `--strict` if automation should
 
 ### Full install (hooks + retrieval + consolidation)
 
-The base install captures knowledge. To also inject knowledge back into active sessions and enable background consolidation:
+The base install captures knowledge and injects it back into active sessions. To also add background consolidation and the orra-init skill:
 
 ```bash
 ./install.sh --experimental
 ```
 
-This adds two modules:
+This adds extra modules:
 
-- **Tenet** -- three retrieval hooks that inject vault notes into active sessions (briefing, recall, tool context)
 - **Inception** -- background consolidation that clusters notes and synthesizes cross-session patterns
+- **orra-init** -- experimental helper skill for starting new agents/workflows
 
 Both require QMD. Inception also needs `pip install numpy hdbscan scikit-learn`. See [Tenet](#tenet) and [Inception](#inception) for details.
 
@@ -81,7 +81,7 @@ For agents that support MCP but not native hooks (Cursor, Windsurf, etc.):
 
 This installs the `memento/` package, writes generic MCP server config, and registers the server with Claude Code and Codex when those CLIs are installed. The server runs over stdio via `python -m memento`. The installer verifies the `mcp` Python package is available and installs it if needed. Claude Code gets Claude-specific skills and the concierge agent under `~/.claude`; Codex gets agent-agnostic skills under `~/.codex/skills`.
 
-You can combine flags: `./install.sh --experimental --mcp` gives you hooks + retrieval + MCP.
+You can combine flags: `./install.sh --experimental --mcp` gives you the base hooks/context + MCP, plus Inception/orra-init extras.
 
 ### Pi extension
 
@@ -99,7 +99,7 @@ For package installation from a checkout:
 pi install /path/to/memento-vault
 ```
 
-The pi bridge does not start a long-lived MCP child process. Automatic durable writes are not enabled by default. Candidate captures are queued in local state for review and can be processed into curated notes manually.
+The pi bridge does not start a long-lived MCP child process. Automatic durable writes are queued by default. Candidate captures land in local state for review and can be processed into curated notes manually.
 
 Useful pi commands/tools:
 
@@ -118,8 +118,8 @@ Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.js
       "enabled": true,
       "briefing": true,
       "promptRecall": true,
-      "toolContext": false,
-      "autoCapture": false,
+      "toolContext": true,
+      "autoCapture": true,
       "captureQueue": true,
       "processQueue": true,
       "processQueueOnSessionClose": false,
@@ -139,17 +139,17 @@ Environment variables override file config:
 | `MEMENTO_PI_ENABLED` | `true` | Enable/disable the extension lifecycle work. |
 | `MEMENTO_PI_BRIEFING` | `true` | First-turn project briefing. |
 | `MEMENTO_PI_PROMPT_RECALL` | `true` | Prompt recall before each agent turn. |
-| `MEMENTO_PI_TOOL_CONTEXT` | `false` | Read-tool context injection. |
+| `MEMENTO_PI_TOOL_CONTEXT` | `true` | Read-tool context injection. |
 | `MEMENTO_PI_MAX_INJECTED_CHARS` | `4000` | Per-injection character cap. |
 | `MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION` | `5` | Tool-context injection cap per pi session. |
-| `MEMENTO_PI_AUTO_CAPTURE` | `false` | Queue automatic capture candidates on `agent_end`, compaction, and shutdown lifecycle events. |
+| `MEMENTO_PI_AUTO_CAPTURE` | `true` | Queue automatic capture candidates on `agent_end`, compaction, and shutdown lifecycle events. |
 | `MEMENTO_PI_CAPTURE_QUEUE` | `true` | Queue automatic capture candidates instead of writing notes directly. |
 | `MEMENTO_PI_PROCESS_QUEUE` | `true` | Enable manual queued-capture processing. |
 | `MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE` | `false` | Reserved future automation route for processing a small batch on session close. |
 | `MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES` | `3` | Reserved future cap for session-close processing. |
 | `MEMENTO_PI_PROCESS_QUEUE_MODEL` | `claude-sonnet-4-20250514` | Model for processor sessions; set config/env explicitly to override or `null` in config to use pi's default. |
 
-When automatic capture is enabled, pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. Failed processing groups keep their queue entries and can be retried directly from the TUI without reconstructing filters or selections. The processor prompt receives deterministic existing-note deduplication context and instructs curators to store original project/cwd/branch/session metadata as note frontmatter via `memento_capture`, not as prose boilerplate. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
+When automatic capture is enabled (the default), pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. Failed processing groups keep their queue entries and can be retried directly from the TUI without reconstructing filters or selections. The processor prompt receives deterministic existing-note deduplication context and instructs curators to store original project/cwd/branch/session metadata as note frontmatter via `memento_capture`, not as prose boilerplate. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
 
 Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
 
@@ -183,10 +183,10 @@ See [Cloud deployment](#cloud-deployment) for details.
 
 ### Upgrading from v1.x
 
-The installer is version-aware. Modified hooks are preserved with `.new` copies for manual diffing. On subsequent upgrades, modified files are auto-merged via three-way merge (`git merge-file`).
+The installer is version-aware. Modified hooks are preserved with `.new` copies for manual diffing. On subsequent upgrades, modified files are auto-merged via three-way merge (`git merge-file`). Existing opt-outs in your Claude/Pi config continue to win; rerun `./install.sh` to pick up the default hook set after upgrading.
 
 ```bash
-cd memento-vault && git pull && ./install.sh --experimental
+cd memento-vault && git pull && ./install.sh
 ```
 
 ### Requirements
