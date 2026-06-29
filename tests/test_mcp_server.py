@@ -470,6 +470,26 @@ assert.match(pointer, /Session transcript: \/tmp\/pi-session\.jsonl/);
 assert.match(pointer, /Sanitized summary digest: sha256:[0-9a-f]{16}/);
 assert.match(pointer, /Sanitized lifecycle summary:/);
 """
+        try:
+            subprocess.run(
+                ["node", "--version"],
+                check=True,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pytest.skip("node is not available")
+        try:
+            subprocess.run(
+                ["node", "--experimental-strip-types", "-e", "1+1"],
+                check=True,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            pytest.skip("installed Node does not support --experimental-strip-types")
         subprocess.run(
             ["node", "--experimental-strip-types", "--input-type=module", "-e", script, str(helper)],
             check=True,

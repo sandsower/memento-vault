@@ -865,7 +865,7 @@ def _dedup_context_for_group(vault: Path, group: dict[str, Any], limit: int = 20
     ranked: list[tuple[int, int, str, dict[str, Any]]] = []
     for note_path in sorted(notes_dir.glob("*.md"), key=lambda path: path.name):
         try:
-            text = note_path.read_text(errors="replace")
+            text = note_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         title = _frontmatter_value(text, "title") or note_path.stem
