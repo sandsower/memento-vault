@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -225,6 +226,95 @@ def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     assert "origin: pi_bridge:manual" in note_text
     assert "certainty: 2" in note_text
     assert "project: /repo" in note_text
+
+
+def test_pi_bridge_capture_runs_commit_and_reindex_under_vault_lock(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    note_path = tmp_path / "notes" / "pi-bridge.md"
+    note_path.parent.mkdir(parents=True)
+
+    call_order: list[str] = []
+
+    def fake_acquire(*_args, **_kwargs):
+        call_order.append("lock")
+        return True
+
+    def fake_release(*_args, **_kwargs):
+        call_order.append("release")
+
+    def fake_write_note(*_args, **_kwargs):
+        call_order.append("write")
+        return note_path
+
+    def fake_sync(vault, commit_message, collection=None):
+        call_order.append("sync")
+        assert vault == tmp_path
+        assert commit_message.startswith("pi: capture ")
+        return {
+            "commit": {"ok": True, "attempted": True, "reason": "ok"},
+            "reindex": {"ok": True, "attempted": True, "reason": "ok"},
+        }
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+        patch("memento.pi_bridge.acquire_vault_write_lock", side_effect=fake_acquire),
+        patch("memento.pi_bridge.release_vault_write_lock", side_effect=fake_release),
+        patch("memento.pi_bridge.write_note", side_effect=fake_write_note),
+        patch("memento.pi_bridge._commit_and_reindex_locked", side_effect=fake_sync),
+    ):
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Vault sync capture",
+                "--body",
+                "Captured with Pi and synced immediately.",
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "s1",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["path"] == "notes/pi-bridge.md"
+    assert call_order == ["lock", "write", "sync", "release"]
+
+
+def test_pi_bridge_commit_and_reindex_helper_runs_commit_before_reindex(tmp_path):
+    tmp_path.joinpath(".git").mkdir()
+    call_order: list[tuple[str, object, object]] = []
+
+    class FakeBackend:
+        def reindex(self, collection, embed=True):
+            call_order.append(("reindex", collection, embed))
+            return True
+
+    def fake_run(cmd, cwd=None, capture_output=None, text=None, timeout=None, check=None):
+        if cmd[:4] == ["git", "-C", str(tmp_path), "add"]:
+            call_order.append(("git_add", tuple(cmd), cwd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:4] == ["git", "-C", str(tmp_path), "diff"]:
+            call_order.append(("git_diff", tuple(cmd), cwd))
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if cmd[:4] == ["git", "-C", str(tmp_path), "commit"]:
+            call_order.append(("git_commit", tuple(cmd), cwd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    with (
+        patch("memento.pi_bridge.get_config", return_value={"auto_commit": True, "qmd_collection": "memento"}),
+        patch("memento.pi_bridge.get_backend", return_value=FakeBackend()),
+        patch("memento.pi_bridge.subprocess.run", side_effect=fake_run),
+    ):
+        result = pi_bridge._commit_and_reindex_locked(tmp_path, "pi: capture helper")
+
+    assert result["commit"]["ok"] is True
+    assert result["reindex"]["ok"] is True
+    assert [item[0] for item in call_order] == ["git_add", "git_diff", "git_commit", "reindex"]
 
 
 def test_pi_bridge_capture_records_manual_session_state(capsys, tmp_path, monkeypatch):
@@ -1447,6 +1537,75 @@ def test_pi_bridge_process_finalize_dequeues_only_valid_results(capsys, tmp_path
     assert finalized["dequeued"] == 1
     remaining = [json.loads(line)["id"] for line in queue_file.read_text().splitlines()]
     assert remaining == ["q2"]
+
+
+def test_pi_bridge_process_finalize_runs_commit_and_reindex_after_dequeue(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "Useful",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
+        + "\n"
+    )
+    notes_dir = tmp_path / "notes"
+    notes_dir.mkdir()
+    (notes_dir / "useful.md").write_text("---\ntitle: Useful\n---\n")
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    run_id = started["run_id"]
+    run_dir = tmp_path / "state" / "processing" / run_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    group = manifest["groups"][0]
+    (run_dir / "results" / f"{group['group_id']}.json").write_text(
+        json.dumps(
+            {
+                "processed_capture_ids": ["q1"],
+                "status": "processed",
+                "created": [{"title": "Useful", "path": "notes/useful.md"}],
+            }
+        )
+    )
+
+    call_order: list[str] = []
+
+    def fake_acquire(*_args, **_kwargs):
+        call_order.append("lock")
+        return True
+
+    def fake_release(*_args, **_kwargs):
+        call_order.append("release")
+
+    def fake_sync(vault, commit_message, collection=None):
+        call_order.append("sync")
+        assert vault == tmp_path
+        assert commit_message.startswith("pi: process-finalize ")
+        return {
+            "commit": {"ok": True, "attempted": True, "reason": "ok"},
+            "reindex": {"ok": True, "attempted": True, "reason": "ok"},
+        }
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.acquire_vault_write_lock", side_effect=fake_acquire),
+        patch("memento.pi_bridge.release_vault_write_lock", side_effect=fake_release),
+        patch("memento.pi_bridge._commit_and_reindex_locked", side_effect=fake_sync),
+    ):
+        code = pi_bridge.main(["queue", "process-finalize", "--run-id", run_id])
+
+    assert code == 0
+    finalized = json.loads(capsys.readouterr().out)
+    assert finalized["dequeued"] == 1
+    assert call_order == ["lock", "sync", "release"]
 
 
 def test_pi_bridge_concurrent_append_during_finalize_preserves_new_capture(capsys, tmp_path, monkeypatch):

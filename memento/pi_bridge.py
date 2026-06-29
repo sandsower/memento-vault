@@ -26,6 +26,8 @@ from typing import Any, Generator, Optional
 
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context, strip_injection
+from memento.search_backend import get_backend
+from memento.store import acquire_vault_write_lock, release_vault_write_lock, write_note
 from memento.search import (
     enhance_results,
     filter_by_project,
@@ -38,7 +40,6 @@ from memento.search import (
 )
 from memento.remote_client import get as remote_get
 from memento.remote_client import is_remote, search_envelope as remote_search_envelope, status as remote_status
-from memento.store import write_note
 
 
 def _emit(payload: dict[str, Any]) -> int:
@@ -372,6 +373,121 @@ def _git_branch(cwd: str) -> str | None:
     return branch or None
 
 
+@contextlib.contextmanager
+def _vault_write_lock(timeout: float = 10.0):
+    acquired = acquire_vault_write_lock(timeout=timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            release_vault_write_lock()
+
+
+def _vault_commit_script() -> Path | None:
+    repo_script = Path(__file__).resolve().parents[1] / "hooks" / "vault-commit.sh"
+    if repo_script.exists():
+        return repo_script
+    home_script = Path.home() / ".claude" / "hooks" / "vault-commit.sh"
+    if home_script.exists():
+        return home_script
+    return None
+
+
+def _commit_and_reindex_locked(vault: Path, commit_message: str, collection: str | None = None) -> dict[str, Any]:
+    """Commit vault changes and reindex search after a confirmed Pi write.
+
+    The caller must hold the vault write lock before calling this helper.
+    """
+    config = get_config()
+    scheduled_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    payload: dict[str, Any] = {
+        "scheduled_at": scheduled_at,
+        "vault": str(vault),
+        "commit_message": commit_message,
+        "commit": {
+            "attempted": False,
+            "ok": False,
+            "reason": "auto_commit_disabled" if not config.get("auto_commit", True) else "not_run",
+        },
+        "reindex": {
+            "attempted": False,
+            "ok": False,
+            "reason": "not_run",
+        },
+    }
+
+    try:
+        configured_vault = Path(config.get("vault_path", str(vault))).expanduser().resolve()
+    except Exception:
+        configured_vault = vault
+    try:
+        vault_resolved = vault.resolve()
+    except Exception:
+        vault_resolved = vault
+    if configured_vault != vault_resolved:
+        payload["commit"]["reason"] = "vault_mismatch"
+        payload["reindex"]["reason"] = "vault_mismatch"
+        payload["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        return payload
+
+    if config.get("auto_commit", True) and (vault / ".git").exists():
+        payload["commit"]["attempted"] = True
+        try:
+            subprocess.run(
+                ["git", "-C", str(vault), "add", "-A"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            diff_check = subprocess.run(
+                ["git", "-C", str(vault), "diff", "--cached", "--quiet"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if diff_check.returncode == 0:
+                payload["commit"]["ok"] = True
+                payload["commit"]["reason"] = "no_changes"
+            else:
+                completed = subprocess.run(
+                    ["git", "-C", str(vault), "commit", "-m", commit_message],
+                    cwd=str(vault),
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+                payload["commit"]["ok"] = completed.returncode == 0
+                payload["commit"]["returncode"] = completed.returncode
+                if completed.returncode != 0:
+                    payload["commit"]["reason"] = "commit_failed"
+                    stderr = (completed.stderr or completed.stdout or "").strip()
+                    if stderr:
+                        payload["commit"]["stderr"] = stderr[:500]
+                else:
+                    payload["commit"]["reason"] = "ok"
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            payload["commit"]["reason"] = type(exc).__name__
+            payload["commit"]["error"] = str(exc)
+    else:
+        payload["commit"]["reason"] = "auto_commit_disabled" if not config.get("auto_commit", True) else "git_missing"
+
+    payload["reindex"]["attempted"] = True
+    target_collection = collection or config.get("qmd_collection", "memento")
+    try:
+        ok = get_backend().reindex(target_collection)
+        payload["reindex"]["ok"] = bool(ok)
+        payload["reindex"]["collection"] = target_collection
+        payload["reindex"]["reason"] = "ok" if ok else "backend_reindex_failed"
+    except Exception as exc:
+        payload["reindex"]["reason"] = type(exc).__name__
+        payload["reindex"]["error"] = str(exc)
+    payload["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return payload
+
+
 def _status(cwd: str = "") -> dict[str, Any]:
     vault = get_vault()
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
@@ -620,23 +736,27 @@ def _capture(
 
     clean_title = title.strip()
     clean_body = body.strip()
-    note_path = write_note(
-        vault,
-        clean_title,
-        clean_body,
-        clean_note_type,
-        merged_tags,
-        certainty=clean_certainty,
-        source="pi-capture",
-        origin=f"pi_bridge:{source_event or reason or 'manual'}",
-        project=cwd or None,
-        branch=branch,
-        session_id=session_id if session_id != "unknown" else None,
-    )
-    if reason == "manual" or source_event in {"manual", "tool"}:
-        _mark_manual_capture_state(
-            session_id, cwd, project_slug, branch, clean_title, clean_body, datetime.now(timezone.utc)
+    with _vault_write_lock() as acquired:
+        if not acquired:
+            return {"error": "vault write lock unavailable"}
+        note_path = write_note(
+            vault,
+            clean_title,
+            clean_body,
+            clean_note_type,
+            merged_tags,
+            certainty=clean_certainty,
+            source="pi-capture",
+            origin=f"pi_bridge:{source_event or reason or 'manual'}",
+            project=cwd or None,
+            branch=branch,
+            session_id=session_id if session_id != "unknown" else None,
         )
+        if reason == "manual" or source_event in {"manual", "tool"}:
+            _mark_manual_capture_state(
+                session_id, cwd, project_slug, branch, clean_title, clean_body, datetime.now(timezone.utc)
+            )
+        _commit_and_reindex_locked(vault, f"pi: capture {clean_title[:80]}")
     return {"path": str(note_path.relative_to(vault)), "title": clean_title, "queued": False}
 
 
@@ -1605,6 +1725,10 @@ def _queue_process_finalize(run_id: str) -> dict[str, Any]:
             manifest["finalized_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             manifest["dequeued_capture_ids"] = sorted(dequeue_ids)
             _atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
+            if dequeue_ids:
+                with _vault_write_lock() as acquired:
+                    if acquired:
+                        _commit_and_reindex_locked(vault, f"pi: process-finalize {run_id[:8]}")
     finally:
         _release_processing_lock(run_id)
     return {"run_id": run_id, "dequeued": len(dequeue_ids), "remaining": len(remaining), "groups": group_results}
