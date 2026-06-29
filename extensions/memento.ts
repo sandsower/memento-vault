@@ -276,8 +276,20 @@ function defaultSelectedCaptureIds(queue: Record<string, unknown> | undefined, p
 	return selected;
 }
 
+function processGroups(payload?: Record<string, unknown>): Record<string, unknown>[] {
+	return Array.isArray(payload?.groups) ? payload.groups as Record<string, unknown>[] : [];
+}
+
+function selectedProcessGroup(payload?: Record<string, unknown>, index = 0): Record<string, unknown> | undefined {
+	const groups = processGroups(payload);
+	if (groups.length === 0) return undefined;
+	const safeIndex = Math.min(Math.max(0, Math.floor(index)), groups.length - 1);
+	return groups[safeIndex];
+}
+
 function countGroups(payload?: Record<string, unknown>): number {
-	return Array.isArray(payload?.groups) ? payload.groups.length : 1;
+	const groups = processGroups(payload);
+	return groups.length > 0 ? groups.length : 1;
 }
 
 function processingMessage(payload?: Record<string, unknown>): string {
@@ -801,6 +813,35 @@ export default function mementoExtension(pi: ExtensionAPI) {
 						}
 						if (next.action?.type === "inspect-group") {
 							state = { ...state, message: "Showing artifact paths for selected group." };
+						}
+						if (next.action?.type === "retry-failed") {
+							const selectedGroup = selectedProcessGroup(latestProcess, state.selectedIndex);
+							if (!config.processQueue) {
+								state = { ...state, view: "process", message: "Queue processing is disabled." };
+							} else if (!selectedGroup || String(selectedGroup.status ?? "") !== "failed") {
+								state = { ...state, view: "process", message: "Select a failed group first." };
+							} else {
+								state = { ...state, view: "process", message: `Retrying ${String(selectedGroup.group_id ?? "failed group")}…` };
+								requestRender();
+								void (async () => {
+									const plan = await runJson(pi, ctx, ["queue", "process-retry", "--run-id", String(latestProcess?.run_id ?? ""), "--group-id", String(selectedGroup.group_id ?? "")]);
+									const retryIds = Array.isArray(plan.selected_capture_ids) ? plan.selected_capture_ids.map((captureId) => String(captureId)).filter(Boolean) : [];
+									if (plan.error || retryIds.length === 0) {
+										state = { ...state, message: plan.error ? `Retry failed: ${String(plan.error)}` : "No captures available to retry." };
+										requestRender();
+										return;
+									}
+									startPolling();
+									processPreview = await runProcessWorker(pi, ctx, processArgsFromCaptureIds(retryIds, config.processQueueMaxCaptures), config);
+									latestQueue = await loadQueue(ctx, false, 10);
+									latestProcess = await loadProcessStatus(ctx);
+									processPreview = latestProcess?.status === "idle" ? processPreview : latestProcess;
+									syncCounts();
+									await refreshAmbientWidget(ctx);
+									state = { ...state, selectedCaptureIds: defaultSelectedCaptureIds(latestQueue, String(latestStatus?.project_slug ?? "unknown"), config.processQueueMaxCaptures), message: processingMessage(processPreview) };
+									requestRender();
+								})();
+							}
 						}
 						if (next.action?.type === "discard") {
 							const target = state.discardCapture;
