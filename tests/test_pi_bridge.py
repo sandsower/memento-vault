@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1299,6 +1300,112 @@ def test_pi_bridge_process_finalize_dequeues_only_valid_results(capsys, tmp_path
     assert finalized["dequeued"] == 1
     remaining = [json.loads(line)["id"] for line in queue_file.read_text().splitlines()]
     assert remaining == ["q2"]
+
+
+def test_pi_bridge_concurrent_append_during_finalize_preserves_new_capture(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "Useful",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    run_id = started["run_id"]
+    run_dir = tmp_path / "state" / "processing" / run_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    group = manifest["groups"][0]
+    (run_dir / "results" / f"{group['group_id']}.json").write_text(
+        json.dumps(
+            {
+                "processed_capture_ids": ["q1"],
+                "status": "processed_no_notes",
+                "created": [],
+                "discard_reason": "noise",
+            }
+        )
+    )
+
+    write_started = threading.Event()
+    release_write = threading.Event()
+    write_paused = {"value": False}
+    original_write_queue_file = pi_bridge._write_queue_file
+    errors: list[BaseException] = []
+
+    def gated_write(captures, path):
+        if not write_paused["value"]:
+            write_paused["value"] = True
+            write_started.set()
+            if not release_write.wait(5):
+                raise AssertionError("finalize did not resume")
+        return original_write_queue_file(captures, path)
+
+    def run_finalize():
+        try:
+            with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+                rc = pi_bridge.main(["queue", "process-finalize", "--run-id", run_id])
+            if rc != 0:
+                raise AssertionError(f"process-finalize returned {rc}")
+        except BaseException as exc:  # pragma: no cover - surfaced through assertions below
+            errors.append(exc)
+
+    def run_append():
+        try:
+            with (
+                patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+                patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+                patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
+            ):
+                rc = pi_bridge.main(
+                    [
+                        "capture",
+                        "--title",
+                        "Concurrent append",
+                        "--body",
+                        "This should survive finalize.",
+                        "--cwd",
+                        "/repo",
+                        "--session-id",
+                        "s2",
+                        "--queue",
+                        "--reason",
+                        "agent_end",
+                        "--source-event",
+                        "agent_end",
+                    ]
+                )
+            if rc != 0:
+                raise AssertionError(f"capture returned {rc}")
+        except BaseException as exc:  # pragma: no cover - surfaced through assertions below
+            errors.append(exc)
+
+    with patch("memento.pi_bridge._write_queue_file", new=gated_write):
+        finalize_thread = threading.Thread(target=run_finalize, name="finalize-thread")
+        finalize_thread.start()
+        assert write_started.wait(5)
+        append_thread = threading.Thread(target=run_append, name="append-thread")
+        append_thread.start()
+        release_write.set()
+        finalize_thread.join(5)
+        append_thread.join(5)
+
+    assert not finalize_thread.is_alive()
+    assert not append_thread.is_alive()
+    assert not errors
+    remaining = [json.loads(line) for line in queue_file.read_text().splitlines() if line.strip()]
+    assert len(remaining) == 1
+    assert remaining[0]["title"] == "Concurrent append"
 
 
 def test_pi_bridge_briefing_outputs_error_payload_on_failure(capsys):
