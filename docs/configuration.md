@@ -277,6 +277,11 @@ rrf_k: 60              # RRF constant (higher = more weight to top ranks)
 pagerank_alpha: 0.85          # PageRank damping factor
 pagerank_boost_weight: 0.3    # score multiplier: score *= (1 + weight * pagerank)
 
+# Access-log boost (derived runtime log; no note mutation)
+access_log_enabled: true
+access_log_boost_weight: 0.12
+access_log_half_life_days: 30
+
 # Personalized PageRank expansion (replaces 1-hop wikilinks)
 ppr_enabled: true
 ppr_max_expanded: 5    # max notes added via PPR
@@ -328,6 +333,12 @@ These three toggles default to `true` in fresh installs.
 session_briefing: false
 prompt_recall: false
 tool_context: false
+```
+
+**Disable access-log boosts** (keep passive retrieval logging off or neutralized):
+
+```yaml
+access_log_enabled: false
 ```
 
 **No background agent** (fleeting notes only):

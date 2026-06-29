@@ -1,5 +1,7 @@
 """State, logging, note writing, and vault write coordination."""
 
+import hashlib
+import math
 import json
 import os
 import re
@@ -26,6 +28,8 @@ AUTOMATION_MEMORY_HEALTH_LOG_PATH = os.path.join(
     "memento-vault",
     "automation-memory-health.jsonl",
 )
+
+ACCESS_LOG_PATH = os.path.join(RUNTIME_DIR, "access-log.jsonl")
 
 INCEPTION_STATE_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
@@ -126,6 +130,177 @@ def log_automation_memory_health(action, **kwargs):
     }
     entry.update(safe_kwargs)
     _append_jsonl(AUTOMATION_MEMORY_HEALTH_LOG_PATH, entry, "_automation_memory_health_warned")
+
+
+_ACCESS_LOG_CACHE = {"signature": None, "stats": {}}
+
+
+def _should_track_access():
+    return get_config().get("access_log_enabled", True)
+
+
+def _access_log_query_summary(query):
+    if query is None:
+        return ""
+    try:
+        from memento.utils import sanitize_secrets
+
+        summary = sanitize_secrets(" ".join(str(query).split()))
+    except Exception:
+        summary = " ".join(str(query).split())
+    return summary[:160]
+
+
+def _access_log_query_hash(query_summary):
+    if not query_summary:
+        return ""
+    return hashlib.sha256(query_summary.encode("utf-8")).hexdigest()
+
+
+def _parse_access_log_ts(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def record_access(paths, *, hook="unknown", tool="unknown", query=None, session_id=None, result_count=None):
+    """Append derived access-log entries for successful retrievals.
+
+    The access log lives in runtime state, not the vault, so it can be rebuilt
+    or discarded without touching Markdown notes or git history.
+    """
+    if not _should_track_access():
+        return
+
+    if isinstance(paths, (str, Path)):
+        path_list = [paths]
+    else:
+        path_list = list(paths or [])
+
+    path_list = [str(path) for path in path_list if str(path).strip()]
+    if not path_list:
+        return
+
+    query_summary = _access_log_query_summary(query)
+    query_hash = _access_log_query_hash(query_summary)
+    entry_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    for rank, path in enumerate(path_list, start=1):
+        entry = {"ts": entry_ts, "path": path, "hook": hook, "tool": tool, "rank": rank}
+        if query_summary:
+            entry["query_summary"] = query_summary
+            entry["query_hash"] = query_hash
+        if session_id:
+            entry["session_id"] = session_id
+        if result_count is not None:
+            entry["result_count"] = result_count
+        _append_jsonl(ACCESS_LOG_PATH, entry, "_access_log_warned")
+
+
+def load_access_log_stats():
+    """Load aggregated access-log events keyed by note path."""
+    try:
+        stat = os.stat(ACCESS_LOG_PATH)
+    except OSError:
+        _ACCESS_LOG_CACHE["signature"] = None
+        _ACCESS_LOG_CACHE["stats"] = {}
+        return {}
+
+    signature = (stat.st_mtime_ns, stat.st_size)
+    if _ACCESS_LOG_CACHE.get("signature") == signature:
+        return _ACCESS_LOG_CACHE.get("stats", {})
+
+    stats = {}
+    try:
+        with open(ACCESS_LOG_PATH) as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                path = str(entry.get("path") or "").strip()
+                if not path:
+                    continue
+                ts = _parse_access_log_ts(entry.get("ts"))
+                if ts is None:
+                    continue
+                try:
+                    rank = max(1, int(entry.get("rank") or 1))
+                except (TypeError, ValueError):
+                    rank = 1
+                bucket = stats.setdefault(path, {"events": []})
+                bucket["events"].append({"ts": ts, "rank": rank})
+    except OSError:
+        stats = {}
+
+    _ACCESS_LOG_CACHE["signature"] = signature
+    _ACCESS_LOG_CACHE["stats"] = stats
+    return stats
+
+
+def apply_access_log_boost(results, config=None, now=None):
+    """Boost scores for notes that have been repeatedly and recently accessed."""
+    if config is None:
+        config = get_config()
+    if not config.get("access_log_enabled", True):
+        return results
+
+    try:
+        weight = float(config.get("access_log_boost_weight", 0.12))
+    except (TypeError, ValueError):
+        weight = 0.12
+    if weight <= 0 or not results:
+        return results
+
+    try:
+        half_life_days = float(config.get("access_log_half_life_days", 30))
+    except (TypeError, ValueError):
+        half_life_days = 30.0
+    if half_life_days < 0:
+        half_life_days = 0.0
+
+    current = now or datetime.now(timezone.utc)
+    stats = load_access_log_stats()
+    if not stats:
+        return results
+
+    for result in results:
+        path = str(result.get("path") or "")
+        events = stats.get(path, {}).get("events", [])
+        if not events:
+            continue
+
+        signal = 0.0
+        for event in events[-200:]:
+            event_ts = event.get("ts")
+            if not isinstance(event_ts, datetime):
+                continue
+            age_days = max((current - event_ts).total_seconds() / 86400.0, 0.0)
+            decay = 1.0 if half_life_days <= 0 else 0.5 ** (age_days / half_life_days)
+            rank = max(1, int(event.get("rank") or 1))
+            signal += decay / rank
+
+        if signal <= 0:
+            continue
+        boost = 1.0 + weight * math.log1p(signal)
+        result["score"] = round(float(result.get("score", 0.0)) * boost, 4)
+
+    results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+    return results
 
 
 def load_inception_state(state_path=None):

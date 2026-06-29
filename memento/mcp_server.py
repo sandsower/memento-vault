@@ -159,6 +159,7 @@ from memento.store import (
     append_project_session_line,
     log_retrieval,
     normalize_note_contract,
+    record_access,
     release_vault_write_lock,
     update_project_index,
     write_daily_snapshot,
@@ -439,6 +440,13 @@ def memento_search(
         output.append(entry)
 
     log_retrieval("mcp", "search", query=query, results=len(output))
+    record_access(
+        [entry["path"] for entry in output if entry.get("path")],
+        hook="mcp",
+        tool="search",
+        query=query,
+        result_count=len(output),
+    )
     return output
 
 
@@ -870,20 +878,24 @@ def memento_get(path: str) -> dict:
         if title_match:
             title = title_match.group(1).strip().strip('"').strip("'")
 
-        return {
+        result = {
             "path": path,
             "title": _strip_injection(title),
             "content": _strip_injection(content),
         }
+        record_access([result["path"]], hook="mcp", tool="get", query=path, result_count=1)
+        return result
 
     # Fall back to QMD get
     result = qmd_get(path)
     if result:
-        return {
+        result_payload = {
             "path": result.get("path", path),
             "title": _strip_injection(result.get("title", "")),
             "content": _strip_injection(result.get("content", "")),
         }
+        record_access([result_payload["path"]], hook="mcp", tool="get", query=path, result_count=1)
+        return result_payload
 
     # Fall back to remote vault if configured
     from memento.remote_client import is_remote, get as remote_get
@@ -891,11 +903,13 @@ def memento_get(path: str) -> dict:
     if is_remote():
         remote_result = remote_get(path)
         if remote_result:
-            return {
+            result_payload = {
                 "path": remote_result.get("path", path),
                 "title": _strip_injection(remote_result.get("title", "")),
                 "content": _strip_injection(remote_result.get("content", "")),
             }
+            record_access([result_payload["path"]], hook="mcp", tool="get", query=path, result_count=1)
+            return result_payload
 
     return {"error": f"Note not found: {path}"}
 

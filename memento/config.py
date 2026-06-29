@@ -87,6 +87,10 @@ DEFAULT_CONFIG = {
     # PageRank graph boost
     "pagerank_alpha": 0.85,
     "pagerank_boost_weight": 0.3,
+    # Access-log retrieval boost
+    "access_log_enabled": True,
+    "access_log_boost_weight": 0.12,
+    "access_log_half_life_days": 30,
     # Project retrieval maps
     "project_maps_enabled": True,
     # Concept index (Tenet)
