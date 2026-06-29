@@ -21,6 +21,7 @@ from memento.lifecycle import (
     is_broad_project_history_query,
     is_low_signal_recall_prompt,
     should_append_project_to_recall,
+    pi_bridge_health_warning,
     triage_health_warning,
 )
 
@@ -34,6 +35,12 @@ def isolate_pi_queue_state(monkeypatch, tmp_path):
     monkeypatch.setattr(health, "AUTOMATION_MEMORY_HEALTH_LOG_PATH", str(tmp_path / "automation-memory-health.jsonl"))
     monkeypatch.setattr(health, "RETRIEVAL_LOG_PATH", str(tmp_path / "retrieval.jsonl"))
     monkeypatch.setattr(health, "TRIAGE_HEALTH_LOG_PATH", str(tmp_path / "triage-health.jsonl"))
+    monkeypatch.setattr(
+        "memento.lifecycle.TRIAGE_WARN_STATE_PATH", str(tmp_path / "triage-warn-state.json"), raising=False
+    )
+    monkeypatch.setattr(
+        "memento.lifecycle.PI_BRIDGE_WARN_STATE_PATH", str(tmp_path / "pi-bridge-warn-state.json"), raising=False
+    )
 
 
 def test_lifecycle_result_to_dict_includes_required_fields():
@@ -107,6 +114,7 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
         patch("memento.lifecycle.get_vault", return_value=vault),
         patch("memento.lifecycle.has_qmd", return_value=True),
         patch("memento.lifecycle.triage_health_warning", return_value="[vault] WARN: triage failing"),
+        patch("memento.lifecycle.pi_bridge_health_warning", return_value="[vault] WARN: Pi bridge failing"),
     ):
         payload = build_session_context(
             cwd="/repo",
@@ -130,7 +138,8 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     assert payload["sections"]["queue"]["queue_path_source"] == "xdg_state_home"
     assert payload["sections"]["queue"]["legacy_queue_path"] == str(vault / "queue" / "pi-captures.jsonl")
     assert payload["sections"]["queue"]["legacy_queue_exists"] is False
-    assert payload["metadata"]["warnings"] == ["[vault] WARN: triage failing"]
+    assert payload["metadata"]["warnings"] == ["[vault] WARN: triage failing", "[vault] WARN: Pi bridge failing"]
+    assert "[vault] WARN: Pi bridge failing" in payload["content"]
     assert payload["metadata"]["expandable_paths"] == ["notes/cache.md"]
     assert payload["metadata"]["truncated"] is False
     mock_briefing.assert_called_once_with("/repo", "s1", allow_deferred=False)
@@ -1380,6 +1389,51 @@ def test_triage_health_warning_reads_always_on_health_log(tmp_path):
     assert warning is not None
     assert "triage failing 3/3" in warning
     assert str(health_log) in warning
+
+
+def test_pi_bridge_health_warning_reads_recent_bridge_failures(tmp_path):
+    health_log = tmp_path / "triage-health.jsonl"
+    health_log.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2999-01-01T00:00:00",
+                        "hook": "pi-bridge",
+                        "action": "briefing_failed",
+                        "operation": "briefing",
+                        "backend": "python3",
+                        "cwd": "/repo",
+                        "project": "repo",
+                        "session_id": "s1",
+                        "error": "python3: command not found",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2999-01-01T00:00:01",
+                        "hook": "pi-bridge",
+                        "action": "recall_failed",
+                        "operation": "recall",
+                        "backend": "python3",
+                        "cwd": "/repo",
+                        "project": "repo",
+                        "session_id": "s1",
+                        "error": "stdout parse failed",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    with patch("memento.lifecycle.TRIAGE_HEALTH_LOG_PATH", str(health_log)):
+        warning = pi_bridge_health_warning()
+
+    assert warning is not None
+    assert "Pi bridge failing 2 recent command(s)" in warning
+    assert "recall" in warning
+    assert "stdout parse failed" in warning
 
 
 def test_triage_health_warning_falls_back_to_legacy_retrieval_log(tmp_path):

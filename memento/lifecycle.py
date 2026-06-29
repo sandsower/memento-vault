@@ -33,7 +33,7 @@ from memento.search import (
     rrf_fuse,
 )
 from memento.store import RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, log_automation_memory_health, log_retrieval
-from memento.utils import read_hook_input
+from memento.utils import read_hook_input, sanitize_secrets
 
 TRIAGE_HEALTH_WINDOW_HOURS = 24
 TRIAGE_HEALTH_MIN_EVENTS = 3
@@ -192,6 +192,92 @@ def _mark_triage_warn_shown():
             json.dump({"date": datetime.now().strftime("%Y-%m-%d")}, f)
     except OSError:
         pass
+
+
+PI_BRIDGE_WARN_STATE_PATH = os.path.join(RUNTIME_DIR, "pi-bridge-warn-state.json")
+
+
+def _pi_bridge_warn_shown_today():
+    try:
+        with open(PI_BRIDGE_WARN_STATE_PATH) as f:
+            return json.load(f).get("date") == datetime.now().strftime("%Y-%m-%d")
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
+def _mark_pi_bridge_warn_shown():
+    try:
+        with open(PI_BRIDGE_WARN_STATE_PATH, "w") as f:
+            json.dump({"date": datetime.now().strftime("%Y-%m-%d")}, f)
+    except OSError:
+        pass
+
+
+def _health_error_excerpt(error: object, limit: int = 140) -> str:
+    text = sanitize_secrets(" ".join(str(error or "").split()))
+    text = _strip_injection(text)
+    return text[:limit]
+
+
+def _scan_pi_bridge_health_log(path: str, cutoff: datetime) -> tuple[str | None, int, dict[str, object] | None]:
+    if not os.path.exists(path):
+        return str(path), 0, None
+
+    count = 0
+    latest: dict[str, object] | None = None
+    latest_ts: datetime | None = None
+    with open(path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict) or rec.get("hook") != "pi-bridge":
+                continue
+            ts_raw = rec.get("ts")
+            if not ts_raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+            count += 1
+            if latest_ts is None or ts >= latest_ts:
+                latest_ts = ts
+                latest = rec
+    return str(path), count, latest
+
+
+def pi_bridge_health_warning(rate_limited=False):
+    """Return a one-line warning if recent Pi bridge commands are failing."""
+    try:
+        cutoff = datetime.now() - timedelta(hours=TRIAGE_HEALTH_WINDOW_HOURS)
+        log_path, failures, latest = _scan_pi_bridge_health_log(TRIAGE_HEALTH_LOG_PATH, cutoff)
+        if failures == 0:
+            return None
+        if rate_limited:
+            if _pi_bridge_warn_shown_today():
+                return None
+            _mark_pi_bridge_warn_shown()
+
+        warning = (
+            f"[vault] WARN: Pi bridge failing {failures} recent command(s) in last {TRIAGE_HEALTH_WINDOW_HOURS}h "
+            f"— check {log_path}"
+        )
+        if latest:
+            operation = str(latest.get("operation") or latest.get("action") or "unknown")
+            backend = str(latest.get("backend") or "unknown")
+            project = str(latest.get("project") or "unknown")
+            cwd = str(latest.get("cwd") or "unknown")
+            session_id = str(latest.get("session_id") or "unknown")
+            warning += f" — last: {operation} via {backend} · {project} · {cwd} · session {session_id}"
+            if latest.get("error"):
+                warning += f' — error: "{_health_error_excerpt(latest.get("error"))}"'
+        return warning
+    except Exception:
+        return None
 
 
 def triage_health_warning(rate_limited=False):
@@ -690,9 +776,12 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
         f"[vault] Project: {project_slug}{branch_str} | {len(recent_sessions)} sessions{last_date} | {note_count} notes"
     ]
 
-    warning = triage_health_warning(rate_limited=True)
-    if warning:
-        lines.append(warning)
+    for warning in (
+        triage_health_warning(rate_limited=True),
+        pi_bridge_health_warning(rate_limited=True),
+    ):
+        if warning:
+            lines.append(warning)
 
     if allow_deferred and config.get("project_maps_enabled", True) and has_qmd():
         try:
@@ -2172,9 +2261,12 @@ def build_session_context(
         vault = get_vault()
         notes_dir = vault / "notes"
         projects_dir = vault / "projects"
-        warning = triage_health_warning(rate_limited=True)
-        if warning:
-            warnings.append(warning)
+        for warning in (
+            triage_health_warning(rate_limited=True),
+            pi_bridge_health_warning(rate_limited=True),
+        ):
+            if warning:
+                warnings.append(warning)
         status = {
             "vault_exists": vault.exists(),
             "qmd_available": has_qmd(),

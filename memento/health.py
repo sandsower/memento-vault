@@ -171,6 +171,7 @@ def build_report() -> HealthReport:
     checks.extend(_check_mcp_config())
     checks.append(_check_mcp_registration())
     checks.append(_check_pi_bridge_config())
+    checks.append(_check_pi_bridge_health())
     checks.append(_check_triage_health())
     checks.append(_check_retrieval_health(config=config, search_check=search_check))
     checks.append(_check_locks())
@@ -308,7 +309,9 @@ def _parse_simple_yaml(path: Path) -> dict[str, Any]:
                 parsed = False
             elif value.isdigit():
                 parsed = int(value)
-            elif value.startswith("[") and value.endswith("]"):
+            elif value.startswith("["):
+                if not value.endswith("]"):
+                    raise ValueError(f"malformed list value in {path}: {value}")
                 inner = value[1:-1].strip()
                 parsed = [v.strip().strip('"').strip("'") for v in inner.split(",")] if inner else []
             elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
@@ -1150,6 +1153,61 @@ def _check_pi_bridge_config() -> CheckResult:
     return CheckResult(
         "pi bridge", PASS, "Pi bridge config shape looks valid", {"path": str(path), "configured_keys": configured}
     )
+
+
+def _check_pi_bridge_health() -> CheckResult:
+    path = Path(TRIAGE_HEALTH_LOG_PATH)
+    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    if not path.exists():
+        return CheckResult(
+            "pi bridge health",
+            PASS,
+            "no recent Pi bridge failures recorded",
+            {"log_path": str(path), "window_hours": _HEALTH_WINDOW_HOURS},
+        )
+
+    recent_failures: list[dict[str, Any]] = []
+    latest_failure: dict[str, Any] | None = None
+    for rec in _iter_recent_jsonl(path, cutoff):
+        if rec.get("hook") != "pi-bridge":
+            continue
+        failure = {
+            "ts": rec.get("ts"),
+            "action": rec.get("action"),
+            "operation": rec.get("operation") or rec.get("action"),
+            "backend": rec.get("backend"),
+            "config": rec.get("config"),
+            "cwd": rec.get("cwd"),
+            "project": rec.get("project"),
+            "session_id": rec.get("session_id"),
+            "error": rec.get("error"),
+            "error_type": rec.get("error_type"),
+            "reason": rec.get("reason"),
+        }
+        recent_failures.append(_sanitize_obj(failure))
+        latest_failure = failure
+
+    if not recent_failures:
+        return CheckResult(
+            "pi bridge health",
+            PASS,
+            "no recent Pi bridge failures recorded",
+            {"log_path": str(path), "window_hours": _HEALTH_WINDOW_HOURS},
+        )
+
+    last_error = _safe_text(str((latest_failure or {}).get("error") or ""))
+    message = f"Pi bridge failures {len(recent_failures)} in last {_HEALTH_WINDOW_HOURS}h"
+    if last_error:
+        message += f' — last error: "{last_error}"'
+    details: dict[str, Any] = {
+        "log_path": str(path),
+        "window_hours": _HEALTH_WINDOW_HOURS,
+        "events": len(recent_failures),
+        "failures": len(recent_failures),
+        "last_failure": _sanitize_obj(latest_failure or {}),
+        "recent_failures": recent_failures[:5],
+    }
+    return CheckResult("pi bridge health", WARN, message, details)
 
 
 def _has_stale_empty_mcp_config(path: Path) -> bool:

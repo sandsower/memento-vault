@@ -20,7 +20,7 @@ import threading
 import time
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generator, Optional
 
@@ -38,13 +38,67 @@ from memento.search import (
     qmd_search_with_extras,
     resolve_concrete_mode,
 )
+from memento import store as store_module
 from memento.remote_client import get as remote_get
 from memento.remote_client import is_remote, search_envelope as remote_search_envelope, status as remote_status
+from memento.store import log_triage_health
+from memento.utils import sanitize_secrets
 
 
 def _emit(payload: dict[str, Any]) -> int:
     print(json.dumps(payload, ensure_ascii=False))
     return 0
+
+
+def _bridge_config_summary() -> dict[str, Any]:
+    config = get_config()
+    return {
+        "enabled": bool(
+            config.get("session_briefing", True)
+            or config.get("prompt_recall", True)
+            or config.get("tool_context", True)
+        ),
+        "session_briefing": bool(config.get("session_briefing", True)),
+        "prompt_recall": bool(config.get("prompt_recall", True)),
+        "tool_context": bool(config.get("tool_context", True)),
+        "project_maps_enabled": bool(config.get("project_maps_enabled", True)),
+        "search_backend": config.get("search_backend", "auto"),
+    }
+
+
+def _bridge_project_slug(cwd: str) -> str:
+    if not cwd:
+        return "unknown"
+    try:
+        project_slug, _ticket = detect_project(cwd, None)
+        return project_slug or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _log_bridge_health(
+    operation: str, *, cwd: str = "", session_id: str = "unknown", error: object, **details: Any
+) -> None:
+    payload: dict[str, Any] = {
+        "operation": operation,
+        "backend": details.pop("backend", "python3"),
+        "config": details.pop("config", _bridge_config_summary()),
+        "cwd": cwd,
+        "project": details.pop("project", _bridge_project_slug(cwd)),
+        "session_id": session_id,
+        "error": str(error),
+        "error_type": type(error).__name__ if isinstance(error, BaseException) else "Error",
+    }
+    payload.update(details)
+    try:
+        log_triage_health(f"{operation}_failed", hook="pi-bridge", **payload)
+    except Exception:
+        pass
+
+
+def _emit_error(operation: str, error: Exception) -> int:
+    traceback.print_exc(file=sys.stderr)
+    return _emit(_error_payload(operation, error))
 
 
 def _error_payload(source: str, exc: Exception) -> dict[str, Any]:
@@ -61,11 +115,18 @@ def _error_payload(source: str, exc: Exception) -> dict[str, Any]:
     }
 
 
-def _run_lifecycle(source: str, fn, *args: Any) -> int:
+def _run_lifecycle(
+    source: str,
+    fn,
+    *args: Any,
+    health_metadata: dict[str, Any] | None = None,
+) -> int:
     try:
         return _emit(fn(*args).to_dict())
     except Exception as exc:  # pragma: no cover - traceback branch asserted by payload shape
         traceback.print_exc(file=sys.stderr)
+        metadata = dict(health_metadata or {})
+        _log_bridge_health(source, error=exc, **metadata)
         return _emit(_error_payload(source, exc))
 
 
@@ -489,6 +550,74 @@ def _commit_and_reindex_locked(vault: Path, commit_message: str, collection: str
     return payload
 
 
+def _iter_jsonl(path: Path):
+    try:
+        with path.open() as handle:
+            for line in handle:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict):
+                    yield rec
+    except OSError:
+        return
+
+
+def _bridge_health_status() -> dict[str, Any]:
+    log_path = Path(store_module.TRIAGE_HEALTH_LOG_PATH)
+    cutoff = datetime.now() - timedelta(hours=24)
+    failures: list[dict[str, Any]] = []
+    latest: dict[str, Any] | None = None
+    latest_ts: datetime | None = None
+    if log_path.exists():
+        for rec in _iter_jsonl(log_path):
+            if rec.get("hook") != "pi-bridge":
+                continue
+            ts_raw = rec.get("ts")
+            try:
+                ts = datetime.fromisoformat(str(ts_raw))
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+            failure = {
+                "ts": rec.get("ts"),
+                "operation": rec.get("operation") or rec.get("action"),
+                "backend": rec.get("backend"),
+                "cwd": rec.get("cwd"),
+                "project": rec.get("project"),
+                "session_id": rec.get("session_id"),
+                "error": sanitize_secrets(str(rec.get("error") or "")),
+                "error_type": rec.get("error_type"),
+                "reason": rec.get("reason"),
+            }
+            failures.append(failure)
+            if latest_ts is None or ts >= latest_ts:
+                latest_ts = ts
+                latest = rec
+    if not failures:
+        return {"status": "pass", "window_hours": 24, "recent_failure_count": 0, "log_path": str(log_path)}
+    latest_error = sanitize_secrets(str((latest or {}).get("error") or ""))
+    latest_error = strip_injection(" ".join(latest_error.split()))[:140]
+    return {
+        "status": "warn",
+        "window_hours": 24,
+        "recent_failure_count": len(failures),
+        "log_path": str(log_path),
+        "last_failure": {
+            "operation": (latest or {}).get("operation") or (latest or {}).get("action"),
+            "backend": (latest or {}).get("backend"),
+            "cwd": (latest or {}).get("cwd"),
+            "project": (latest or {}).get("project"),
+            "session_id": (latest or {}).get("session_id"),
+            "error": latest_error,
+            "error_type": (latest or {}).get("error_type"),
+        },
+        "recent_failures": failures[:5],
+    }
+
+
 def _status(cwd: str = "") -> dict[str, Any]:
     vault = get_vault()
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
@@ -517,6 +646,7 @@ def _status(cwd: str = "") -> dict[str, Any]:
         "queue_path": str(_queue_file(vault)),
         "legacy_queue_path": str(_legacy_queue_file(vault)),
         "legacy_queue_exists": _legacy_queue_file(vault).exists(),
+        "pi_bridge_health": _bridge_health_status(),
         "lifecycle": {
             "briefing": get_config().get("session_briefing", True),
             "prompt_recall": get_config().get("prompt_recall", True),
@@ -1785,11 +1915,22 @@ def _queue_process_finalize(run_id: str) -> dict[str, Any]:
     return {"run_id": run_id, "dequeued": len(dequeue_ids), "remaining": len(remaining), "groups": group_results}
 
 
-def _run_json(source: str, fn, *args: Any) -> int:
+def _run_json(
+    source: str,
+    fn,
+    *args: Any,
+    health_metadata: dict[str, Any] | None = None,
+) -> int:
     try:
-        return _emit(fn(*args))
+        payload = fn(*args)
+        if health_metadata and isinstance(payload, dict) and payload.get("error"):
+            metadata = dict(health_metadata or {})
+            _log_bridge_health(source, error=payload.get("error"), reason=payload.get("reason", "error"), **metadata)
+        return _emit(payload)
     except Exception as exc:  # pragma: no cover - defensive CLI boundary
         traceback.print_exc(file=sys.stderr)
+        metadata = dict(health_metadata or {})
+        _log_bridge_health(source, error=exc, **metadata)
         return _emit({"error": str(exc), "source": source, "reason": "error", "error_type": type(exc).__name__})
 
 
@@ -1917,9 +2058,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "briefing":
-        return _run_lifecycle("briefing", _build_pi_briefing, args.cwd, args.session_id)
+        return _run_lifecycle(
+            "briefing",
+            _build_pi_briefing,
+            args.cwd,
+            args.session_id,
+            health_metadata={"cwd": args.cwd, "session_id": args.session_id},
+        )
     if args.command == "recall":
-        return _run_lifecycle("recall", build_recall, args.prompt, args.cwd, args.session_id)
+        return _run_lifecycle(
+            "recall",
+            build_recall,
+            args.prompt,
+            args.cwd,
+            args.session_id,
+            health_metadata={"cwd": args.cwd, "session_id": args.session_id},
+        )
     if args.command == "session-context":
         return _run_json(
             "session-context",
@@ -1941,6 +2095,7 @@ def main(argv: list[str] | None = None) -> int:
             args.file_path,
             args.cwd,
             args.session_id,
+            health_metadata={"cwd": args.cwd, "session_id": args.session_id},
         )
     if args.command == "status":
         return _run_json("status", _status, args.cwd)
@@ -1963,6 +2118,7 @@ def main(argv: list[str] | None = None) -> int:
             args.tag,
             args.certainty,
             args.branch,
+            health_metadata={"cwd": args.cwd, "session_id": args.session_id},
         )
     if args.command == "queue":
         if args.queue_command == "list":

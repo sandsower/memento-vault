@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -152,22 +152,99 @@ function capText(text: string, maxChars: number): string {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "..");
+const bridgeHealthLogPath = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "memento-vault", "triage-health.jsonl");
+
+function sanitizeBridgeHealthText(value: unknown): string {
+	let text = String(value ?? "");
+	for (const [pattern, replacement] of [
+		[/sk-[A-Za-z0-9]{20,}/g, "[REDACTED_API_KEY]"],
+		[/ghp_[A-Za-z0-9]{36,}/g, "[REDACTED_GITHUB_TOKEN]"],
+		[/github_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_GITHUB_TOKEN]"],
+		[/Bearer\s+[A-Za-z0-9_\-.]{20,}/g, "Bearer [REDACTED_TOKEN]"],
+	] as const) {
+		text = text.replace(pattern, replacement);
+	}
+	return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+}
+
+function appendBridgeHealthRecord(entry: Record<string, unknown>): void {
+	try {
+		mkdirSync(dirname(bridgeHealthLogPath), { recursive: true });
+		appendFileSync(bridgeHealthLogPath, `${JSON.stringify(entry)}\n`);
+	} catch {
+		// best-effort telemetry only
+	}
+}
 
 async function runJson(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	args: string[],
+	health?: { operation: string; cwd?: string; sessionId?: string; project?: string; config?: BridgeConfig; configSources?: string[] },
 ): Promise<Record<string, unknown>> {
-	const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...args], {
-		cwd: repoRoot,
-		signal: ctx.signal,
-		timeout: 15_000,
-	});
-	if (result.code !== 0) return { error: "process-failed", code: result.code, stderr: result.stderr };
 	try {
-		return JSON.parse(result.stdout) as Record<string, unknown>;
+		const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...args], {
+			cwd: repoRoot,
+			signal: ctx.signal,
+			timeout: 15_000,
+		});
+		if (result.code !== 0) {
+			if (health) {
+				appendBridgeHealthRecord({
+					ts: new Date().toISOString(),
+					hook: "pi-bridge",
+					action: `${health.operation}_failed`,
+					operation: health.operation,
+					backend: "python3",
+					config: health.config,
+					config_sources: health.configSources,
+					cwd: health.cwd ?? "",
+					project: health.project ?? "unknown",
+					session_id: health.sessionId ?? "unknown",
+					code: result.code,
+					error: sanitizeBridgeHealthText(result.stderr || `exit code ${result.code}`),
+				});
+			}
+			return { error: "process-failed", code: result.code, stderr: result.stderr };
+		}
+		try {
+			return JSON.parse(result.stdout) as Record<string, unknown>;
+		} catch (error) {
+			if (health) {
+				appendBridgeHealthRecord({
+					ts: new Date().toISOString(),
+					hook: "pi-bridge",
+					action: `${health.operation}_failed`,
+					operation: health.operation,
+					backend: "python3",
+					config: health.config,
+					config_sources: health.configSources,
+					cwd: health.cwd ?? "",
+					project: health.project ?? "unknown",
+					session_id: health.sessionId ?? "unknown",
+					error: sanitizeBridgeHealthText(String(error)),
+					stdout: sanitizeBridgeHealthText(result.stdout),
+				});
+			}
+			return { error: "invalid-json", stdout: result.stdout, message: String(error) };
+		}
 	} catch (error) {
-		return { error: "invalid-json", stdout: result.stdout, message: String(error) };
+		if (health) {
+			appendBridgeHealthRecord({
+				ts: new Date().toISOString(),
+				hook: "pi-bridge",
+				action: `${health.operation}_failed`,
+				operation: health.operation,
+				backend: "python3",
+				config: health.config,
+				config_sources: health.configSources,
+				cwd: health.cwd ?? "",
+				project: health.project ?? "unknown",
+				session_id: health.sessionId ?? "unknown",
+				error: sanitizeBridgeHealthText(String(error)),
+			});
+		}
+		return { error: "process-failed", message: String(error) };
 	}
 }
 
@@ -176,34 +253,93 @@ async function runLifecycle(
 	ctx: ExtensionContext,
 	args: string[],
 	source: string,
+	health?: { cwd?: string; sessionId?: string; project?: string; config?: BridgeConfig; configSources?: string[] },
 ): Promise<LifecycleResult> {
-	const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...args], {
-		cwd: repoRoot,
-		signal: ctx.signal,
-		timeout: 15_000,
-	});
+	try {
+		const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...args], {
+			cwd: repoRoot,
+			signal: ctx.signal,
+			timeout: 15_000,
+		});
 
-	if (result.code !== 0) {
+		if (result.code !== 0) {
+			if (health) {
+				appendBridgeHealthRecord({
+					ts: new Date().toISOString(),
+					hook: "pi-bridge",
+					action: `${source}_failed`,
+					operation: source,
+					backend: "python3",
+					config: health.config,
+					config_sources: health.configSources,
+					cwd: health.cwd ?? "",
+					project: health.project ?? "unknown",
+					session_id: health.sessionId ?? "unknown",
+					code: result.code,
+					error: sanitizeBridgeHealthText(result.stderr || `exit code ${result.code}`),
+				});
+			}
+			return {
+				should_inject: false,
+				content: "",
+				source,
+				results: [],
+				reason: "process-failed",
+				metadata: { code: result.code, stderr: result.stderr },
+			};
+		}
+
+		try {
+			return JSON.parse(result.stdout) as LifecycleResult;
+		} catch (error) {
+			if (health) {
+				appendBridgeHealthRecord({
+					ts: new Date().toISOString(),
+					hook: "pi-bridge",
+					action: `${source}_failed`,
+					operation: source,
+					backend: "python3",
+					config: health.config,
+					config_sources: health.configSources,
+					cwd: health.cwd ?? "",
+					project: health.project ?? "unknown",
+					session_id: health.sessionId ?? "unknown",
+					error: sanitizeBridgeHealthText(String(error)),
+					stdout: sanitizeBridgeHealthText(result.stdout),
+				});
+			}
+			return {
+				should_inject: false,
+				content: "",
+				source,
+				results: [],
+				reason: "invalid-json",
+				metadata: { stdout: result.stdout, error: String(error) },
+			};
+		}
+	} catch (error) {
+		if (health) {
+			appendBridgeHealthRecord({
+				ts: new Date().toISOString(),
+				hook: "pi-bridge",
+				action: `${source}_failed`,
+				operation: source,
+				backend: "python3",
+				config: health.config,
+				config_sources: health.configSources,
+				cwd: health.cwd ?? "",
+				project: health.project ?? "unknown",
+				session_id: health.sessionId ?? "unknown",
+				error: sanitizeBridgeHealthText(String(error)),
+			});
+		}
 		return {
 			should_inject: false,
 			content: "",
 			source,
 			results: [],
 			reason: "process-failed",
-			metadata: { code: result.code, stderr: result.stderr },
-		};
-	}
-
-	try {
-		return JSON.parse(result.stdout) as LifecycleResult;
-	} catch (error) {
-		return {
-			should_inject: false,
-			content: "",
-			source,
-			results: [],
-			reason: "invalid-json",
-			metadata: { stdout: result.stdout, error: String(error) },
+			metadata: { error: String(error) },
 		};
 	}
 }
@@ -333,22 +469,27 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		}
 		const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
 		const queuedBody = addSessionPointerDigest(body, sessionFile);
-		const payload = await runJson(pi, ctx, [
-			"capture",
-			"--title",
-			title,
-			"--body",
-			queuedBody,
-			"--cwd",
-			ctx.cwd,
-			"--session-id",
-			sessionFile,
-			"--queue",
-			"--reason",
-			reason,
-			"--source-event",
-			sourceEvent,
-		]);
+		const payload = await runJson(
+			pi,
+			ctx,
+			[
+				"capture",
+				"--title",
+				title,
+				"--body",
+				queuedBody,
+				"--cwd",
+				ctx.cwd,
+				"--session-id",
+				sessionFile,
+				"--queue",
+				"--reason",
+				reason,
+				"--source-event",
+				sourceEvent,
+			],
+			{ operation: "capture", cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
+		);
 		lifecycleCaptureQueued = lifecycleCaptureQueued || Boolean(payload.queued);
 		lastLifecycleReason = payload.error
 			? `queue-error:${String(payload.error)}`
@@ -424,6 +565,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				ctx,
 				["briefing", "--cwd", ctx.cwd, "--session-id", sessionFile],
 				"briefing",
+				{ cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
 			);
 			lastLifecycleReason = briefing.reason ?? (briefing.should_inject ? "briefing-inject" : "briefing-skip");
 			if (briefing.should_inject && briefing.content) {
@@ -437,6 +579,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				ctx,
 				["recall", "--prompt", event.prompt, "--cwd", ctx.cwd, "--session-id", sessionFile],
 				"recall",
+				{ cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
 			);
 			lastLifecycleReason = recall.reason ?? (recall.should_inject ? "recall-inject" : "recall-skip");
 			if (recall.should_inject && recall.content) {
@@ -471,6 +614,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			ctx,
 			["tool-context", "--tool-name", "read", "--file-path", filePath, "--cwd", ctx.cwd, "--session-id", sessionFile],
 			"tool-context",
+			{ cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
 		);
 		lastLifecycleReason = toolContext.reason ?? (toolContext.should_inject ? "tool-context-inject" : "tool-context-skip");
 		if (!toolContext.should_inject || !toolContext.content) return;
@@ -639,7 +783,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			}
 			for (const tag of params.tags ?? []) if (tag.trim()) args.push("--tag", tag.trim());
 			if (params.queue) args.push("--queue", "--reason", "manual", "--source-event", "tool");
-			const payload = await runJson(pi, ctx, args);
+			const payload = await runJson(pi, ctx, args, { operation: "capture", cwd: params.cwd ?? ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources });
 			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
 		},
 	});

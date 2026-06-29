@@ -84,22 +84,26 @@ def _sanitize_health_error(error):
     return sanitized
 
 
-def log_triage_health(action, **kwargs):
-    """Append minimal always-on SessionEnd extraction health telemetry.
+def log_triage_health(action, hook="triage", **kwargs):
+    """Append minimal always-on health telemetry.
 
-    This is intentionally separate from retrieval diagnostics. It records only
-    operational metadata needed to detect silent triage failures, never
-    transcript text or generated note bodies.
+    Primary callers use this for SessionEnd extraction health, but the same
+    durable log also carries Pi bridge failure records (hook="pi-bridge") so
+    health surfaces can show bridge regressions even when the Python adapter is
+    unavailable.
     """
-    if "error" in kwargs:
-        kwargs = dict(kwargs)
-        kwargs["error"] = _sanitize_health_error(kwargs["error"])
+    safe_kwargs = dict(kwargs)
+    if "error" in safe_kwargs:
+        safe_kwargs["error"] = _sanitize_health_error(safe_kwargs["error"])
+    for key, value in list(safe_kwargs.items()):
+        if isinstance(value, str):
+            safe_kwargs[key] = _sanitize_health_error(value)
     entry = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "hook": "triage",
+        "hook": hook,
         "action": action,
     }
-    entry.update(kwargs)
+    entry.update(safe_kwargs)
     _append_jsonl(TRIAGE_HEALTH_LOG_PATH, entry, "_triage_health_warned")
 
 
