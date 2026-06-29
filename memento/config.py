@@ -1,5 +1,7 @@
 """Configuration loading, project detection, vault identity, and runtime paths."""
 
+from __future__ import annotations
+
 import json
 import os
 import re

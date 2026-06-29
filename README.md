@@ -191,7 +191,7 @@ cd memento-vault && git pull && ./install.sh --experimental
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.10+
 - Git
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (for hook-based setup)
 - [QMD](https://github.com/tobi/qmd) (optional, semantic search)

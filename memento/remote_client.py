@@ -8,6 +8,8 @@ The MCP streamable-http transport uses JSON-RPC over HTTP POST. This client
 speaks that protocol directly — no MCP client library needed.
 """
 
+from __future__ import annotations
+
 import json
 import os
 from urllib import request

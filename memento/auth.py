@@ -7,6 +7,8 @@ Designed to be extended with per-user tokens, JWT, or OAuth later.
 Integrates with MCP's TokenVerifier protocol for HTTP transport auth.
 """
 
+from __future__ import annotations
+
 import hmac
 import os
 from dataclasses import dataclass, field

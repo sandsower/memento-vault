@@ -4,6 +4,8 @@ Stubs for PR3 — will be used as return type annotations on MCP tools
 and as parameter types in store/search once the full typing pass lands.
 """
 
+from __future__ import annotations
+
 from typing import TypedDict
 
 

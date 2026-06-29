@@ -4,6 +4,8 @@ Supports both stdio (local) and streamable-http (remote) transports.
 When running over HTTP, authentication is enforced via bearer tokens.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re

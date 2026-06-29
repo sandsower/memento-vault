@@ -1,5 +1,7 @@
 """Shared LLM backend abstraction for hooks."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path

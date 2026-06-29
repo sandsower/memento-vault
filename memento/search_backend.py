@@ -5,6 +5,8 @@ wraps the QMD CLI subprocess calls. Other backends (e.g., Meilisearch,
 SQLite FTS, Tantivy) can be added by implementing the same interface.
 """
 
+from __future__ import annotations
+
 import json
 import re
 import shutil
