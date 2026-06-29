@@ -408,6 +408,89 @@ def test_automation_memory_reports_remote_sync_pending_retries(tmp_path, monkeyp
     assert remote["pending_kinds"] == ["capture"]
 
 
+def test_inception_health_warns_when_state_missing(monkeypatch):
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "warn"
+    assert report.details["state_present"] is False
+    assert "state file is missing" in report.message
+
+
+def test_inception_health_fails_on_missing_optional_dependencies(monkeypatch):
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: ["numpy", "hdbscan"])
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps({"last_run_iso": datetime.now().isoformat(timespec="seconds"), "last_run_note_count": 1, "runs": []})
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "fail"
+    assert report.details["missing_dependencies"] == ["numpy", "hdbscan"]
+    assert "missing optional dependencies" in report.message
+
+
+def test_inception_health_surfaces_recent_run_summary_and_error(monkeypatch):
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    token = "ghp_" + "a" * 36
+    long_error = f"boom {token} " + "x" * 650
+    now = datetime.now()
+    state = {
+        "last_run_iso": (now - timedelta(hours=2, minutes=5)).isoformat(timespec="seconds"),
+        "last_run_note_count": 7,
+        "runs": [
+            {
+                "iso": (now - timedelta(hours=3)).isoformat(timespec="seconds"),
+                "clusters_found": 1,
+                "notes_written": 0,
+                "dry_run": True,
+            },
+            {
+                "iso": (now - timedelta(hours=2, minutes=5)).isoformat(timespec="seconds"),
+                "clusters_found": 4,
+                "notes_written": 2,
+                "dry_run": False,
+                "error": long_error,
+            },
+        ],
+        "processed_notes": ["a", "b"],
+    }
+    Path(health.INCEPTION_STATE_PATH).write_text(json.dumps(state))
+
+    report = health._check_inception({"inception_enabled": True})
+    payload = json.dumps(report.details)
+
+    assert report.status == "pass"
+    assert report.details["state_valid"] is True
+    assert report.details["run_count"] == 2
+    assert report.details["processed_notes_count"] == 2
+    assert report.details["last_run_note_count"] == 7
+    assert len(report.details["recent_runs"]) == 2
+    assert report.details["last_error_truncated"] is True
+    assert "[REDACTED_GITHUB_TOKEN]" in report.details["last_error"]
+    assert token not in payload
+    assert "last ran" in report.message
+    assert "last run note count 7" in report.message
+
+
+def test_inception_health_reports_live_lock(monkeypatch):
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps({"last_run_iso": datetime.now().isoformat(timespec="seconds"), "last_run_note_count": 1, "runs": []})
+    )
+    lock = Path(health.INCEPTION_LOCK_PATH)
+    lock.write_text(str(os.getpid()))
+    stale = time.time() - 700
+    os.utime(lock, (stale, stale))
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "fail"
+    assert report.details["lock"]["status"] == "fail"
+    assert "long-running live pid" in report.details["lock"]["message"]
+
+
 def test_health_prefers_xdg_config_dir_when_file_exists(tmp_path):
     home_config = Path.home() / ".config" / "memento-vault"
     xdg_config = Path(os.environ["XDG_CONFIG_HOME"]) / "memento-vault"

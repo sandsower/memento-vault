@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import importlib.util
 import json
 import os
 import shutil
@@ -30,6 +31,8 @@ _HEALTH_WINDOW_HOURS = 24
 _DEEP_PROBE_TIMEOUT_SECONDS = 5
 _DEEP_PROBE_QUERY = "memento-vault health probe"
 _STALE_LOCK_SECONDS = 600
+_INCEPTION_RECENT_RUNS_LIMIT = 5
+_INCEPTION_ERROR_DETAIL_LIMIT = 500
 _RECENT_FAILURE_ACTION_MARKERS = ("failed", "failure", "error", "unexpected", "unavailable")
 _RETRIEVAL_SKIP_ACTIONS = {
     "broad-project-query",
@@ -1777,29 +1780,200 @@ def _pid_is_live(pid: int | None) -> bool:
         return exc.errno == errno.EPERM
 
 
+def _missing_inception_dependencies() -> list[str]:
+    return [pkg for pkg in ("numpy", "hdbscan", "sklearn") if importlib.util.find_spec(pkg) is None]
+
+
+def _safe_excerpt(value: Any, limit: int = _INCEPTION_ERROR_DETAIL_LIMIT) -> tuple[str, bool]:
+    text = _sanitize_secrets(" ".join(str(value or "").split()))
+    truncated = len(text) > limit
+    if truncated:
+        text = text[:limit] + "..."
+    return text, truncated
+
+
+def _format_duration(seconds: int) -> str:
+    remaining = max(0, int(seconds))
+    parts: list[str] = []
+    for suffix, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if remaining >= size:
+            value, remaining = divmod(remaining, size)
+            if value:
+                parts.append(f"{value}{suffix}")
+    if remaining or not parts:
+        parts.append(f"{remaining}s")
+    return " ".join(parts)
+
+
+def _summarize_inception_runs(runs: Any, limit: int = _INCEPTION_RECENT_RUNS_LIMIT) -> list[dict[str, Any]]:
+    if not isinstance(runs, list):
+        return []
+    summaries: list[dict[str, Any]] = []
+    for run in runs[-limit:]:
+        if not isinstance(run, dict):
+            summaries.append(_sanitize_obj(run))
+            continue
+        item: dict[str, Any] = {}
+        for key in ("iso", "clusters_found", "notes_written", "dry_run"):
+            if key in run:
+                item[key] = run[key]
+        for key in ("error", "last_error", "reason"):
+            if run.get(key):
+                excerpt, truncated = _safe_excerpt(run[key])
+                item["error"] = excerpt
+                item["error_truncated"] = truncated
+                break
+        summaries.append(_sanitize_obj(item))
+    return summaries
+
+
+def _extract_inception_error(state: dict[str, Any]) -> dict[str, Any] | None:
+    candidates: list[tuple[str, Any]] = []
+    for key in ("last_error", "error"):
+        value = state.get(key)
+        if value:
+            candidates.append((key, value))
+    for key in ("last_failure", "failure"):
+        value = state.get(key)
+        if isinstance(value, dict):
+            for subkey in ("error", "message", "reason"):
+                if value.get(subkey):
+                    candidates.append((f"{key}.{subkey}", value[subkey]))
+                    break
+        elif value:
+            candidates.append((key, value))
+    runs = state.get("runs")
+    if isinstance(runs, list):
+        for index, run in enumerate(reversed(runs), start=1):
+            if not isinstance(run, dict):
+                continue
+            for key in ("last_error", "error", "exception", "reason"):
+                value = run.get(key)
+                if value:
+                    candidates.append((f"runs[-{index}].{key}", value))
+                    break
+    for source, value in candidates:
+        excerpt, truncated = _safe_excerpt(value)
+        if excerpt:
+            return {"source": source, "error": excerpt, "truncated": truncated}
+    return None
+
+
+def _last_inception_run(state: dict[str, Any]) -> tuple[datetime | None, str | None, str | None]:
+    raw = state.get("last_run_iso")
+    dt = _parse_ts(raw)
+    if dt is not None:
+        return dt, str(raw), "last_run_iso"
+    runs = state.get("runs")
+    if isinstance(runs, list):
+        for index, run in enumerate(reversed(runs), start=1):
+            if not isinstance(run, dict):
+                continue
+            for key in ("iso", "ts", "last_run_iso"):
+                raw_run = run.get(key)
+                dt = _parse_ts(raw_run)
+                if dt is not None:
+                    return dt, dt.isoformat(timespec="seconds"), f"runs[-{index}].{key}"
+    return None, None, None
+
+
 def _check_inception(config: dict[str, Any]) -> CheckResult:
     if not config.get("inception_enabled", False):
         return CheckResult("inception", PASS, "inception disabled")
+
     state_path = Path(INCEPTION_STATE_PATH)
+    details: dict[str, Any] = {
+        "state_path": str(state_path),
+        "lock_path": str(INCEPTION_LOCK_PATH),
+        "state_present": state_path.exists(),
+    }
+    issue_messages: list[str] = []
+    summary_messages: list[str] = []
+    status = PASS
+
+    missing_dependencies = _missing_inception_dependencies()
+    if missing_dependencies:
+        details["missing_dependencies"] = missing_dependencies
+        issue_messages.append(f"missing optional dependencies: {', '.join(missing_dependencies)}")
+        status = FAIL
+
+    lock_details = _inspect_lock("inception", Path(INCEPTION_LOCK_PATH))
+    details["lock"] = _sanitize_obj(lock_details)
+    if lock_details["message"]:
+        issue_messages.append(lock_details["message"])
+    if lock_details["status"] == FAIL:
+        status = FAIL
+    elif lock_details["status"] == WARN and status == PASS:
+        status = WARN
+
     if not state_path.exists():
-        return CheckResult(
-            "inception", WARN, "inception enabled but state file is missing", {"state_path": str(state_path)}
+        issue_messages.append("state file is missing")
+        if status == PASS:
+            status = WARN
+        message = (
+            "; ".join(issue_messages)
+            if issue_messages
+            else f"inception enabled but state file is missing: {state_path}"
         )
+        return CheckResult("inception", status, message, details)
+
     try:
         state = json.loads(state_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        return CheckResult("inception", WARN, f"inception state is unreadable: {exc}", {"state_path": str(state_path)})
-    last_run = state.get("last_run_iso")
-    if not last_run:
-        return CheckResult(
-            "inception", WARN, "inception enabled but has no recorded run", {"state_path": str(state_path)}
-        )
-    return CheckResult(
-        "inception",
-        PASS,
-        f"inception last ran at {last_run}",
-        {"state_path": str(state_path), "last_run_note_count": state.get("last_run_note_count")},
+        details["state_error"] = _safe_text(str(exc))
+        issue_messages.append(f"state file is unreadable: {exc}")
+        if status == PASS:
+            status = WARN
+        message = "; ".join(issue_messages)
+        return CheckResult("inception", status, message, details)
+
+    if not isinstance(state, dict):
+        issue_messages.append("state file root must be an object")
+        if status == PASS:
+            status = WARN
+        message = "; ".join(issue_messages)
+        return CheckResult("inception", status, message, details)
+
+    details["state_valid"] = True
+    runs = state.get("runs") if isinstance(state.get("runs"), list) else []
+    details["run_count"] = len(runs)
+    details["processed_notes_count"] = (
+        len(state.get("processed_notes", [])) if isinstance(state.get("processed_notes"), list) else 0
     )
+    details["last_run_note_count"] = state.get("last_run_note_count")
+    details["recent_runs"] = _summarize_inception_runs(runs)
+
+    last_run_dt, last_run_iso, last_run_source = _last_inception_run(state)
+    if last_run_dt is None:
+        issue_messages.append("no recorded run yet")
+        if status == PASS:
+            status = WARN
+    else:
+        age_seconds = int(max(0, (datetime.now() - last_run_dt).total_seconds()))
+        details["last_run_iso"] = last_run_iso
+        details["last_run_source"] = last_run_source
+        details["last_run_age_seconds"] = age_seconds
+        details["last_run_age_human"] = _format_duration(age_seconds)
+        if state.get("last_run_iso") is None or last_run_source != "last_run_iso":
+            issue_messages.append("last_run_iso missing or invalid; using most recent run summary")
+            if status == PASS:
+                status = WARN
+        summary_messages.append(f"last ran {details['last_run_age_human']} ago")
+        summary_messages.append(f"{details['run_count']} recorded run(s)")
+        last_count = details["last_run_note_count"]
+        if last_count is not None:
+            summary_messages.append(f"last run note count {last_count}")
+
+    last_error = _extract_inception_error(state)
+    if last_error:
+        details["last_error"] = last_error["error"]
+        details["last_error_source"] = last_error["source"]
+        details["last_error_truncated"] = last_error["truncated"]
+        summary_messages.append(f'last error: "{last_error["error"]}"')
+
+    message_parts = issue_messages + summary_messages
+    message = "; ".join(message_parts) if message_parts else "inception enabled"
+    return CheckResult("inception", status, message, details)
 
 
 def _iter_jsonl(path: Path):
