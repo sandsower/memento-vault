@@ -244,6 +244,10 @@ function parseProcessCommandArgs(raw: string): string[] {
 	return trimmed.split(/\s+/g);
 }
 
+function isProcessorSession(): boolean {
+	return String(process.env.MEMENTO_PI_PROCESSOR ?? "").toLowerCase() === "true";
+}
+
 async function currentProjectSlug(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string> {
 	const payload = await runJson(pi, ctx, ["status", "--cwd", ctx.cwd]);
 	return String(payload.project_slug ?? "unknown");
@@ -309,6 +313,11 @@ export default function mementoExtension(pi: ExtensionAPI) {
 
 	async function queueLifecycleCapture(ctx: ExtensionContext, title: string, body: string, reason: string, sourceEvent: string) {
 		if (!config.enabled || !config.autoCapture || !config.captureQueue) return undefined;
+		if (isProcessorSession()) {
+			lastLifecycleReason = `${sourceEvent}-capture-skipped:processor_session`;
+			await refreshAmbientWidget(ctx);
+			return { skipped: true, reason: "processor_session", source_event: sourceEvent };
+		}
 		const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
 		const queuedBody = addSessionPointerDigest(body, sessionFile);
 		const payload = await runJson(pi, ctx, [
