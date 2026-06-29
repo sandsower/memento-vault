@@ -46,8 +46,10 @@ jobs:
           python-version: "3.12"
       - name: Install package and test deps
         run: python -m pip install -e ".[mcp]" pytest pyyaml numpy networkx scipy
+      - name: frontmatter-schema-drift
+        run: python scripts/check_frontmatter_schema.py
       - name: targeted-tests
-        run: python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py
+        run: python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py
       - name: retrieval-tests
         run: python -m pytest tests/test_tenet_*.py tests/test_multi_hop.py tests/test_deep_recall.py
       - name: mcp-server-tests
