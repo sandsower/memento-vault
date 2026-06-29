@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -59,6 +60,11 @@ RETRIEVAL_LOG_PATH = str(
 TRIAGE_HEALTH_LOG_PATH = str(
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memento-vault" / "triage-health.jsonl"
 )
+AUTOMATION_MEMORY_HEALTH_LOG_PATH = str(
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "memento-vault"
+    / "automation-memory-health.jsonl"
+)
 INCEPTION_STATE_PATH = str(
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memento-vault" / "inception-state.json"
 )
@@ -104,6 +110,7 @@ class HealthReport:
     status: str
     summary: dict[str, int]
     checks: list[CheckResult]
+    automation_memory: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self, verbose: bool = True) -> dict[str, Any]:
         checks = []
@@ -112,7 +119,10 @@ class HealthReport:
             if not verbose:
                 item.pop("details", None)
             checks.append(item)
-        return {"status": self.status, "summary": dict(self.summary), "checks": checks}
+        payload = {"status": self.status, "summary": dict(self.summary), "checks": checks}
+        if self.automation_memory:
+            payload["automation_memory"] = self.automation_memory
+        return payload
 
 
 def build_report() -> HealthReport:
@@ -124,7 +134,8 @@ def build_report() -> HealthReport:
     vault = Path(config.get("vault_path") or _DEFAULT_CONFIG["vault_path"]).expanduser()
     checks.append(_check_vault_dirs(vault))
     checks.append(_check_git(vault, config))
-    checks.append(_check_search_backend(vault, config))
+    search_check = _check_search_backend(vault, config)
+    checks.append(search_check)
     manifest_check, manifest = _check_install_manifest()
     checks.append(manifest_check)
     checks.append(_check_managed_files(manifest))
@@ -136,10 +147,19 @@ def build_report() -> HealthReport:
     checks.append(_check_retrieval_health())
     checks.append(_check_locks())
     checks.append(_check_inception(config))
+    automation_memory = build_automation_memory_readiness(config=config, vault=vault, checks=checks)
+    checks.append(
+        CheckResult(
+            "automation memory",
+            automation_memory["status"],
+            automation_memory["message"],
+            automation_memory["metadata"],
+        )
+    )
 
     summary = {status: sum(1 for check in checks if check.status == status) for status in _STATUSES}
     status = FAIL if summary[FAIL] else WARN if summary[WARN] else PASS
-    return HealthReport(status=status, summary=summary, checks=checks)
+    return HealthReport(status=status, summary=summary, checks=checks, automation_memory=automation_memory)
 
 
 def render_human(report: HealthReport, verbose: bool = False) -> str:
@@ -339,6 +359,272 @@ def _check_search_backend(vault: Path, config: dict[str, Any]) -> CheckResult:
             "search", WARN, "search_backend auto will fall back to grep; semantic search may be unavailable"
         )
     return CheckResult("search", FAIL, "search_backend auto found no usable local backend")
+
+
+def build_automation_memory_readiness(
+    *,
+    config: dict[str, Any] | None = None,
+    vault: Path | None = None,
+    checks: list[CheckResult] | None = None,
+    qmd_available: bool | None = None,
+) -> dict[str, Any]:
+    """Build cheap, read-only automation-memory readiness metadata.
+
+    The payload is designed for orchestration probes (for example Rondo): it is
+    secret-sanitized, never performs network I/O, and reports degraded memory as
+    explicit metadata rather than making optional memory fail closed by default.
+    """
+    if config is None:
+        _config_check, config = _check_config_parse()
+    vault = vault or Path(config.get("vault_path") or _DEFAULT_CONFIG["vault_path"]).expanduser()
+    checks = checks or []
+    search_check = next((check for check in checks if check.name == "search"), None) or _check_search_backend(
+        vault, config
+    )
+    search = _automation_search_metadata(vault, config, search_check, qmd_available=qmd_available)
+    recall = _automation_recall_metadata()
+    remote_sync = _automation_remote_sync_metadata(vault)
+    last_packet = _last_successful_automation_packet()
+    common_failure_reasons = _common_automation_failure_reasons(vault)
+
+    readiness = "ready"
+    status = PASS
+    blockers: list[str] = []
+    degradations: list[str] = []
+    if not vault.exists():
+        readiness = "unavailable"
+        status = FAIL
+        blockers.append("vault_missing")
+    if not search["available"]:
+        readiness = "unavailable"
+        status = FAIL
+        blockers.append("search_backend_unavailable")
+    elif search["status"] == WARN:
+        readiness = "degraded"
+        status = WARN
+        degradations.append("search_backend_degraded")
+    if search.get("stale_index", {}).get("stale"):
+        if status != FAIL:
+            status = WARN
+            readiness = "degraded"
+        degradations.append("stale_index")
+    if recall["events"] >= 3 and recall["failure_rate"] >= 0.5:
+        if status != FAIL:
+            status = WARN
+            readiness = "degraded"
+        degradations.append("recall_failure_rate")
+    if remote_sync.get("pending_retry_count", 0):
+        if status != FAIL:
+            status = WARN
+            readiness = "degraded"
+        degradations.append("remote_sync_pending_retries")
+
+    message = f"automation memory {readiness}"
+    if degradations:
+        message += f" ({', '.join(degradations)})"
+    if blockers:
+        message += f" ({', '.join(blockers)})"
+
+    metadata: dict[str, Any] = {
+        "schema_version": 1,
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
+        "window_hours": _HEALTH_WINDOW_HOURS,
+        "cheap_read_only": True,
+        "network_checked": False,
+        "readiness": readiness,
+        "fail_open_default": True,
+        "search": search,
+        "recall": recall,
+        "remote_sync": remote_sync,
+        "last_successful_packet": last_packet,
+        "common_failure_reasons": common_failure_reasons,
+        "probe": {
+            "name": "automation_memory",
+            "version": 1,
+            "readiness": readiness,
+            "required_by_default": False,
+        },
+    }
+    return {"ready": status != FAIL, "status": status, "message": message, "metadata": _sanitize_obj(metadata)}
+
+
+def _automation_search_metadata(
+    vault: Path, config: dict[str, Any], search_check: CheckResult, *, qmd_available: bool | None = None
+) -> dict[str, Any]:
+    choice = str(config.get("search_backend", "auto"))
+    available = search_check.status != FAIL
+    if qmd_available is not None:
+        if choice == "qmd":
+            available = bool(qmd_available)
+        elif choice == "auto" and qmd_available:
+            available = True
+    return {
+        "backend": choice,
+        "available": available,
+        "status": search_check.status,
+        "message": search_check.message,
+        "qmd_available": shutil.which("qmd") is not None if qmd_available is None else bool(qmd_available),
+        "stale_index": _embedded_index_staleness(vault, config),
+    }
+
+
+def _embedded_index_staleness(vault: Path, config: dict[str, Any]) -> dict[str, Any]:
+    db_path = vault / str(config.get("search_db_path", ".search/search.db"))
+    metadata: dict[str, Any] = {
+        "checked": True,
+        "backend": "embedded",
+        "db_path": str(db_path),
+        "stale": False,
+    }
+    if not vault.exists():
+        metadata.update({"checked": False, "reason": "vault_missing"})
+        return metadata
+    if not db_path.exists():
+        metadata.update({"checked": False, "reason": "embedded_index_missing"})
+        return metadata
+    newest_note_mtime = None
+    try:
+        for dirname in _CORE_DIRS:
+            root = vault / dirname
+            if not root.exists():
+                continue
+            for path in root.rglob("*.md"):
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                newest_note_mtime = mtime if newest_note_mtime is None else max(newest_note_mtime, mtime)
+        db_mtime = db_path.stat().st_mtime
+    except OSError as exc:
+        metadata.update({"checked": False, "reason": type(exc).__name__})
+        return metadata
+    if newest_note_mtime is None:
+        metadata.update({"reason": "no_notes"})
+        return metadata
+    lag_seconds = int(max(0, newest_note_mtime - db_mtime))
+    metadata.update(
+        {
+            "db_mtime": datetime.fromtimestamp(db_mtime).isoformat(timespec="seconds"),
+            "newest_note_mtime": datetime.fromtimestamp(newest_note_mtime).isoformat(timespec="seconds"),
+            "lag_seconds": lag_seconds,
+            "stale": lag_seconds > 60,
+        }
+    )
+    return metadata
+
+
+def _automation_recall_metadata() -> dict[str, Any]:
+    path = Path(RETRIEVAL_LOG_PATH)
+    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    total = failed = 0
+    last_error = None
+    for rec in _iter_recent_jsonl(path, cutoff):
+        hook = rec.get("hook")
+        if hook not in {"recall", "search"}:
+            continue
+        action = str(rec.get("action") or "")
+        if action in {"low-signal-prompt", "skipped-prompt", "deferred-ready"}:
+            continue
+        total += 1
+        if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
+            failed += 1
+            last_error = rec.get("error") or action
+    failure_rate = round(failed / total, 4) if total else 0.0
+    status = WARN if total >= 3 and failure_rate >= 0.5 else PASS
+    return {
+        "log_path": str(path),
+        "events": total,
+        "failures": failed,
+        "failure_rate": failure_rate,
+        "status": status,
+        "last_error": last_error,
+    }
+
+
+def _automation_remote_sync_metadata(vault: Path) -> dict[str, Any]:
+    remote_configured = bool(os.environ.get("MEMENTO_VAULT_URL"))
+    metadata: dict[str, Any] = {
+        "remote_configured": remote_configured,
+        "checked": remote_configured,
+        "check": "local_sync_ledger",
+        "network_checked": False,
+        "pending_retry_count": 0,
+    }
+    if not remote_configured:
+        metadata["reason"] = "remote_not_configured"
+        return metadata
+    ledger = vault / ".sync" / "ledger.jsonl"
+    metadata["ledger_path"] = str(ledger)
+    if not ledger.exists():
+        metadata["reason"] = "sync_ledger_missing"
+        return metadata
+    current: dict[tuple[str, str], dict[str, Any]] = {}
+    ok_count = error_count = 0
+    last_ok = last_error = None
+    for rec in _iter_jsonl(ledger):
+        kind = str(rec.get("kind") or "")
+        source = str(rec.get("source") or "")
+        if not kind or not source:
+            continue
+        status = rec.get("status")
+        if status == "ok":
+            ok_count += 1
+            last_ok = rec.get("ts") or last_ok
+        elif status == "error":
+            error_count += 1
+            last_error = rec.get("ts") or last_error
+        current[(kind, source)] = rec
+    pending = [rec for rec in current.values() if rec.get("status") == "error"]
+    metadata.update(
+        {
+            "ok_count": ok_count,
+            "error_count": error_count,
+            "pending_retry_count": len(pending),
+            "last_success_at": last_ok,
+            "last_error_at": last_error,
+            "pending_kinds": sorted({str(rec.get("kind")) for rec in pending}),
+        }
+    )
+    return metadata
+
+
+def _last_successful_automation_packet() -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    latest_ts: datetime | None = None
+    for rec in _iter_jsonl(Path(AUTOMATION_MEMORY_HEALTH_LOG_PATH)):
+        if rec.get("hook") != "automation-memory" or rec.get("action") != "packet_success":
+            continue
+        ts = _parse_ts(rec.get("ts"))
+        if ts is None:
+            continue
+        if latest_ts is None or ts >= latest_ts:
+            latest_ts = ts
+            latest = {
+                "ts": rec.get("ts"),
+                "source": rec.get("source"),
+                "should_inject": bool(rec.get("should_inject")),
+                "result_count": int(rec.get("result_count") or 0),
+                "warning_count": int(rec.get("warning_count") or 0),
+                "truncated": bool(rec.get("truncated")),
+            }
+    return latest
+
+
+def _common_automation_failure_reasons(vault: Path, limit: int = 5) -> list[dict[str, Any]]:
+    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    counts: Counter[str] = Counter()
+    for path in (Path(RETRIEVAL_LOG_PATH), Path(TRIAGE_HEALTH_LOG_PATH), vault / ".sync" / "ledger.jsonl"):
+        for rec in _iter_recent_jsonl(path, cutoff):
+            reason = None
+            if rec.get("status") == "error":
+                reason = rec.get("error") or "sync_error"
+            else:
+                action = str(rec.get("action") or "")
+                if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
+                    reason = rec.get("error") or rec.get("reason") or action
+            if reason:
+                counts[_safe_text(str(reason))] += 1
+    return [{"reason": reason, "count": count} for reason, count in counts.most_common(limit)]
 
 
 def _config_dir() -> Path:
@@ -1087,7 +1373,7 @@ def _check_inception(config: dict[str, Any]) -> CheckResult:
     )
 
 
-def _iter_recent_jsonl(path: Path, cutoff: datetime):
+def _iter_jsonl(path: Path):
     try:
         with path.open() as handle:
             for line in handle:
@@ -1095,12 +1381,18 @@ def _iter_recent_jsonl(path: Path, cutoff: datetime):
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                ts = _parse_ts(rec.get("ts"))
-                if ts is None or ts < cutoff:
-                    continue
-                yield rec
+                if isinstance(rec, dict):
+                    yield rec
     except OSError:
         return
+
+
+def _iter_recent_jsonl(path: Path, cutoff: datetime):
+    for rec in _iter_jsonl(path):
+        ts = _parse_ts(rec.get("ts"))
+        if ts is None or ts < cutoff:
+            continue
+        yield rec
 
 
 def _parse_ts(raw: Any) -> datetime | None:

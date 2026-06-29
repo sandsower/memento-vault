@@ -15,6 +15,7 @@ from pathlib import Path
 
 from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, slugify
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
+from memento.health import build_automation_memory_readiness
 from memento.llm import is_invalid_mcp_config_error, llm_complete
 from memento.search import (
     MISS_RECOVERY_HINTS,
@@ -30,7 +31,7 @@ from memento.search import (
     qmd_search_with_extras,
     rrf_fuse,
 )
-from memento.store import RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, log_retrieval
+from memento.store import RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, log_automation_memory_health, log_retrieval
 from memento.utils import read_hook_input
 
 TRIAGE_HEALTH_WINDOW_HOURS = 24
@@ -1999,6 +2000,18 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
     if len(json.dumps(payload)) <= packet_char_budget:
         return _finalize_session_context_payload(payload)
 
+    status_section = payload.get("sections", {}).get("status")
+    if isinstance(status_section, dict) and isinstance(status_section.get("automation_memory"), dict):
+        automation_memory = status_section["automation_memory"]
+        status_section["automation_memory"] = {
+            "ready": automation_memory.get("ready"),
+            "status": automation_memory.get("status"),
+            "readiness": automation_memory.get("readiness"),
+        }
+
+    if len(json.dumps(payload)) <= packet_char_budget:
+        return _finalize_session_context_payload(payload)
+
     expandable_paths = payload["metadata"].get("expandable_paths", [])
     while expandable_paths and len(json.dumps(payload)) > packet_char_budget:
         expandable_paths.pop()
@@ -2078,6 +2091,31 @@ def build_session_context(
             "note_count": len(list(notes_dir.glob("*.md"))) if notes_dir.exists() else 0,
             "project_count": len(list(projects_dir.glob("*.md"))) if projects_dir.exists() else 0,
         }
+        automation_memory = build_automation_memory_readiness(
+            config=get_config(),
+            vault=vault,
+            qmd_available=status["qmd_available"],
+        )
+        automation_metadata = automation_memory.get("metadata", {})
+        status["automation_memory"] = {
+            "ready": automation_memory.get("ready"),
+            "status": automation_memory.get("status"),
+            "message": automation_memory.get("message"),
+            "readiness": automation_metadata.get("readiness"),
+            "probe": automation_metadata.get("probe"),
+            "search": {
+                "available": automation_metadata.get("search", {}).get("available"),
+                "status": automation_metadata.get("search", {}).get("status"),
+            },
+            "recall": {
+                "events": automation_metadata.get("recall", {}).get("events"),
+                "failure_rate": automation_metadata.get("recall", {}).get("failure_rate"),
+            },
+            "remote_sync": {
+                "remote_configured": automation_metadata.get("remote_sync", {}).get("remote_configured"),
+                "pending_retry_count": automation_metadata.get("remote_sync", {}).get("pending_retry_count"),
+            },
+        }
         sections["status"] = status
         if warning and all(warning not in block for block in content_blocks):
             content_blocks.append(warning)
@@ -2132,6 +2170,14 @@ def build_session_context(
     payload = _fit_session_context_payload(payload, packet_char_budget)
     if recall_top_path and recall_content_marker and recall_content_marker in payload.get("content", ""):
         record_recall([recall_top_path], session_id)
+    log_automation_memory_health(
+        "packet_success",
+        source="session-context",
+        should_inject=bool(payload.get("should_inject")),
+        result_count=len(payload.get("results") or []),
+        warning_count=len(payload.get("metadata", {}).get("warnings", [])),
+        truncated=bool(payload.get("metadata", {}).get("truncated")),
+    )
     return payload
 
 

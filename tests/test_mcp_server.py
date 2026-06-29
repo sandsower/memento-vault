@@ -765,6 +765,8 @@ class TestMementoStatus:
         assert result["note_count"] == 6  # 7 sample notes minus 1 archived
         assert result["vault_path"] == str(tmp_vault)
         assert "config" in result
+        assert result["automation_memory"]["metadata"]["probe"]["name"] == "automation_memory"
+        assert result["automation_memory"]["metadata"]["network_checked"] is False
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_missing_vault(self, tmp_path, vault_config):
@@ -777,6 +779,7 @@ class TestMementoStatus:
             result = memento_status()
 
         assert result["vault_exists"] is False
+        assert result["automation_memory"]["status"] == "fail"
 
 
 # --- memento_get ---

@@ -17,6 +17,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
+from memento.health import build_automation_memory_readiness
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context
 from memento.search import (
     enhance_results,
@@ -628,6 +629,11 @@ def memento_status() -> dict:
     }
 
     if not vault_exists:
+        status["automation_memory"] = build_automation_memory_readiness(
+            config=config,
+            vault=vault,
+            qmd_available=status["qmd_available"],
+        )
         return status
 
     notes_dir = vault / "notes"
@@ -647,6 +653,11 @@ def memento_status() -> dict:
         "reranker_enabled": config.get("reranker_enabled", True),
         "inception_enabled": config.get("inception_enabled", False),
     }
+    status["automation_memory"] = build_automation_memory_readiness(
+        config=config,
+        vault=vault,
+        qmd_available=status["qmd_available"],
+    )
 
     log_retrieval("mcp", "status")
     return status

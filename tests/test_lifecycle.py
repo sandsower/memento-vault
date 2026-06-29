@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from memento import health, store
 from memento.config import DEFAULT_CONFIG
 from memento.lifecycle import (
     LifecycleResult,
@@ -26,9 +27,13 @@ from memento.lifecycle import (
 
 @pytest.fixture(autouse=True)
 def isolate_pi_queue_state(monkeypatch, tmp_path):
-    """Keep session-context queue status tests away from the user's real pi queue."""
+    """Keep session-context queue/status tests away from the user's real state."""
     monkeypatch.delenv("MEMENTO_PI_STATE_HOME", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(store, "AUTOMATION_MEMORY_HEALTH_LOG_PATH", str(tmp_path / "automation-memory-health.jsonl"))
+    monkeypatch.setattr(health, "AUTOMATION_MEMORY_HEALTH_LOG_PATH", str(tmp_path / "automation-memory-health.jsonl"))
+    monkeypatch.setattr(health, "RETRIEVAL_LOG_PATH", str(tmp_path / "retrieval.jsonl"))
+    monkeypatch.setattr(health, "TRIAGE_HEALTH_LOG_PATH", str(tmp_path / "triage-health.jsonl"))
 
 
 def test_lifecycle_result_to_dict_includes_required_fields():
@@ -116,6 +121,7 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     assert "Cache policy" in payload["content"]
     assert payload["sections"]["status"]["vault_exists"] is True
     assert payload["sections"]["status"]["qmd_available"] is True
+    assert payload["sections"]["status"]["automation_memory"]["probe"]["name"] == "automation_memory"
     assert payload["sections"]["queue"]["queued_capture_count"] == 1
     assert payload["sections"]["queue"]["count"] == 1
     assert payload["sections"]["queue"]["queued_capture_count_source"] == "current"
