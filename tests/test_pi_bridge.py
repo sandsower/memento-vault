@@ -7,6 +7,17 @@ from memento.lifecycle import LifecycleResult
 from memento import pi_bridge
 
 
+def test_pi_bridge_briefing_disables_deferred_search(capsys):
+    result = LifecycleResult(True, "[vault] Project: repo", "briefing")
+
+    with patch("memento.pi_bridge.build_briefing", return_value=result) as mock_build:
+        code = pi_bridge.main(["briefing", "--cwd", "/repo", "--session-id", "s1"])
+
+    assert code == 0
+    mock_build.assert_called_once_with("/repo", "s1", allow_deferred=False)
+    assert json.loads(capsys.readouterr().out) == result.to_dict()
+
+
 def test_pi_bridge_recall_outputs_lifecycle_json(capsys):
     result = LifecycleResult(True, "[vault] Related memories:", "recall", results=[{"path": "notes/a.md"}])
 
