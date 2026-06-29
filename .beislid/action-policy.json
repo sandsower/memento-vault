@@ -35,13 +35,14 @@
         "gate.install-exec-smoke": "allow"
       },
       "sandbox": {
-        "on_uncommitted_changes": "allow"
+        "on_uncommitted_changes": "allow",
+        "minimum": "none"
       }
     },
     "unattended-auto": {
       "rules": {
         "dependency-install": "allow",
-        "git-remote": "allow",
+        "git-remote": "deny",
         "workspace-write": "allow"
       },
       "actions": {
@@ -70,7 +71,8 @@
         "gate.install-exec-smoke": "allow"
       },
       "sandbox": {
-        "on_uncommitted_changes": "allow"
+        "on_uncommitted_changes": "allow",
+        "minimum": "non-default-branch"
       }
     }
   }
