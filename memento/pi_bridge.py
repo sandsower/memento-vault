@@ -617,6 +617,7 @@ def _bridge_health_status() -> dict[str, Any]:
         "recent_failures": failures[:5],
     }
 
+
 def _status(cwd: str = "") -> dict[str, Any]:
     vault = get_vault()
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
