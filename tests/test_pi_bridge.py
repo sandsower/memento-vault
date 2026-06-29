@@ -103,6 +103,57 @@ def test_pi_bridge_status_outputs_json(capsys, tmp_path, monkeypatch):
     assert payload["queued_capture_count"] == 0
 
 
+def test_pi_bridge_status_surfaces_recent_bridge_failures(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    Path(pi_bridge.store_module.TRIAGE_HEALTH_LOG_PATH).write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2999-01-01T00:00:00",
+                        "hook": "pi-bridge",
+                        "action": "briefing_failed",
+                        "operation": "briefing",
+                        "backend": "python3",
+                        "cwd": "/repo",
+                        "project": "repo",
+                        "session_id": "s1",
+                        "error": "python3: command not found",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2999-01-01T00:00:01",
+                        "hook": "pi-bridge",
+                        "action": "capture_failed",
+                        "operation": "capture",
+                        "backend": "python3",
+                        "cwd": "/repo",
+                        "project": "repo",
+                        "session_id": "s1",
+                        "error": "stdout parse failed",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge.has_qmd", return_value=False),
+        patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
+        patch("memento.pi_bridge.get_config", return_value={}),
+    ):
+        code = pi_bridge.main(["status", "--cwd", "/repo"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pi_bridge_health"]["status"] == "warn"
+    assert payload["pi_bridge_health"]["recent_failure_count"] == 2
+    assert payload["pi_bridge_health"]["last_failure"]["operation"] == "capture"
+
+
 def test_pi_bridge_search_reports_backend_unavailable_with_miss(capsys):
     with (
         patch("memento.pi_bridge.has_qmd", return_value=False),
@@ -1850,7 +1901,10 @@ def test_pi_bridge_concurrent_append_during_finalize_preserves_new_capture(capsy
 
 
 def test_pi_bridge_briefing_outputs_error_payload_on_failure(capsys):
-    with patch("memento.pi_bridge.build_briefing", side_effect=RuntimeError("boom")):
+    with (
+        patch("memento.pi_bridge.build_briefing", side_effect=RuntimeError("boom")),
+        patch("memento.pi_bridge.log_triage_health") as mock_health,
+    ):
         code = pi_bridge.main(["briefing", "--cwd", "/repo", "--session-id", "s1"])
 
     assert code == 0
@@ -1860,6 +1914,11 @@ def test_pi_bridge_briefing_outputs_error_payload_on_failure(capsys):
     assert payload["reason"] == "error"
     assert payload["metadata"]["error"] == "boom"
     assert payload["metadata"]["error_type"] == "RuntimeError"
+    assert mock_health.call_args.args[0] == "briefing_failed"
+    assert mock_health.call_args.kwargs["hook"] == "pi-bridge"
+    assert mock_health.call_args.kwargs["operation"] == "briefing"
+    assert mock_health.call_args.kwargs["cwd"] == "/repo"
+    assert mock_health.call_args.kwargs["session_id"] == "s1"
 
 
 def _seed_cleanup_queue(tmp_path):

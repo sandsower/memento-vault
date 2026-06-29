@@ -129,14 +129,18 @@ export function renderMementoStatusText(status?: Record<string, unknown>, queue?
 	const processStatus = String(process?.status ?? "");
 	const queueCount = numberValue(queue?.count ?? status?.queued_capture_count);
 	if (processStatus === "running") return `🧠 processing ${numberValue(process?.completed_group_count)}/${numberValue(process?.group_count)} · ${queueCount}q · /memento`;
+	const piBridge = recordValue(status?.piBridge);
+	const bridgeHealth = recordValue(status?.pi_bridge_health) ?? recordValue(piBridge?.health);
+	const bridgeCount = numberValue(bridgeHealth?.recent_failure_count ?? bridgeHealth?.failures ?? bridgeHealth?.events);
+	const bridgeSuffix = bridgeHealth?.status === "warn" ? ` · bridge ${bridgeCount || "!"}` : "";
 	if (["failed", "interrupted"].includes(processStatus)) {
 		const failedCount = numberValue(process?.failed_group_count ?? process?.retryable_group_count);
-		return `🧠 processing ${processStatus}${failedCount > 0 ? ` · ${failedCount} failed` : ""} · ${queueCount}q · /memento`;
+		return `🧠 processing ${processStatus}${failedCount > 0 ? ` · ${failedCount} failed` : ""} · ${queueCount}q${bridgeSuffix} · /memento`;
 	}
 	const vault = status?.vault_exists === false ? "!" : "✓";
 	const notes = numberValue(status?.note_count);
-	if (queueCount > 0 || options.pinned) return `🧠 ${queueCount}q · ${vault} · ${notes}n · /memento`;
-	return `🧠 ${vault} · /memento`;
+	if (queueCount > 0 || options.pinned || bridgeHealth?.status === "warn") return `🧠 ${queueCount}q · ${vault} · ${notes}n${bridgeSuffix} · /memento`;
+	return `🧠 ${vault}${bridgeSuffix} · /memento`;
 }
 
 export function renderMementoWidgetLines(status?: Record<string, unknown>, queue?: Record<string, unknown>, width = 100): string[] | undefined {
@@ -155,6 +159,7 @@ export function formatStatusLines(status?: Record<string, unknown>, options: { i
 	const piBridge = recordValue(status.piBridge);
 	const lifecycle = recordValue(status.lifecycle);
 	const bridgeConfig = recordValue(piBridge?.config);
+	const bridgeHealth = recordValue(status.pi_bridge_health) ?? recordValue(piBridge?.health);
 	const lines = [
 		`Status: ${status.vault_exists === false ? "! vault missing" : "✓ reachable"} · qmd ${boolMark(status.qmd_available)} · remote ${status.remote_configured ? boolMark(status.remote_available) : "off"}`,
 		`Vault: ${shortPath(String(status.vault_path ?? "unknown"), 80)}`,
@@ -162,11 +167,24 @@ export function formatStatusLines(status?: Record<string, unknown>, options: { i
 		`Notes: ${numberValue(status.note_count)} · Projects: ${numberValue(status.project_count)} · Queue: ${numberValue(status.queued_capture_count)}`,
 		`Lifecycle: briefing ${boolMark(lifecycle?.briefing)} · recall ${boolMark(lifecycle?.prompt_recall)} · tool context ${boolMark(lifecycle?.tool_context)} · capture queue ${boolMark(lifecycle?.capture_queue)}`,
 	];
+	if (bridgeHealth?.status === "warn") {
+		const count = numberValue(bridgeHealth?.recent_failure_count ?? bridgeHealth?.failures ?? bridgeHealth?.events);
+		const lastFailure = recordValue(bridgeHealth?.last_failure);
+		const lastError = String(lastFailure?.error ?? "");
+		lines.push(`Pi bridge: ${count || 1} recent failure${count === 1 ? "" : "s"}${lastError ? ` · last: ${fitLine(lastError, 72)}` : ""}`);
+	}
 	if (options.includeDetails) {
 		lines.push(
 			`Config: enabled ${boolMark(bridgeConfig?.enabled)} · auto capture ${boolMark(bridgeConfig?.autoCapture)} · process queue ${boolMark(bridgeConfig?.processQueue)}`,
 			`Last lifecycle: ${String(piBridge?.lastLifecycleReason ?? "unknown")}`,
 		);
+		if (bridgeHealth) {
+			const lastFailure = recordValue(bridgeHealth.last_failure);
+			lines.push(
+				`Pi bridge health: ${String(bridgeHealth.status ?? "unknown")} · recent ${numberValue(bridgeHealth.recent_failure_count ?? bridgeHealth.failures ?? bridgeHealth.events)}`,
+				`Pi bridge last failure: ${String(lastFailure?.operation ?? lastFailure?.action ?? "unknown")} · ${String(lastFailure?.backend ?? "unknown")} · ${String(lastFailure?.project ?? "unknown")} · ${String(lastFailure?.session_id ?? "unknown")}`,
+			);
+		}
 	}
 	return lines;
 }
