@@ -82,6 +82,10 @@ briefing_min_score: 0.3
 # Inject relevant vault notes before each prompt is processed
 prompt_recall: true
 
+# Concrete/literal mode for paths, UUIDs, env vars, and quoted phrases.
+# Set to auto to enable only when the prompt looks literal; true forces it.
+recall_concrete_mode: auto
+
 # Minimum QMD relevance score for recall results (0.0-1.0)
 recall_min_score: 0.4
 

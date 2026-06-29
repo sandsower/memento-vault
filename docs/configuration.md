@@ -172,11 +172,17 @@ Requires QMD. Falls back to project index notes if QMD is unavailable.
 
 ### Prompt recall
 
-On every prompt, `vault-recall` runs a semantic search and injects matching vault notes. This is Tenet's just-in-time retrieval mechanism.
+On every prompt, `vault-recall` runs a search and injects matching vault notes. It is semantic by default, with an opt-in literal path for identifier-shaped prompts. This is Tenet's just-in-time retrieval mechanism.
 
 ```yaml
 # Disable prompt recall
 prompt_recall: false
+
+# Opt-in concrete/literal mode for path-like prompts.
+# "auto" enables literal search only for prompts that look like paths,
+# UUIDs, env vars, or quoted phrases; true forces literal search for every prompt.
+# Default false preserves the existing conceptual recall behavior.
+recall_concrete_mode: auto
 
 # Tighter relevance threshold (fewer, more relevant results)
 recall_min_score: 0.6
@@ -187,6 +193,8 @@ recall_max_notes: 5
 # Custom skip patterns (prompts matching these are never searched)
 recall_skip_patterns: ["^(yes|no|ok)$", "^git\\s", "^npm\\s"]
 ```
+
+Keep this opt-in. Concrete mode is safer for exact identifiers and paths, but it bypasses the semantic/graph/rerank layers, so forced `true` can miss conceptual context.
 
 Deduplication is automatic -- if the top result matches the last injection, it skips until 3 prompts have passed. Requires QMD.
 

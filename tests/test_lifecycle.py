@@ -462,6 +462,7 @@ def test_low_signal_recall_prompt_gate_allows_domain_bearing_prompts(prompt):
 def test_project_slug_append_requires_signal():
     assert should_append_project_to_recall("go for the extensions cleanup") is False
     assert should_append_project_to_recall("how should pi lifecycle capture queue flushing work") is True
+    assert should_append_project_to_recall("src/a.py", concrete=True) is False
 
 
 @pytest.mark.parametrize(
@@ -600,6 +601,68 @@ def test_run_recall_lines_specific_project_prompt_searches(
     mock_search.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("prompt", "search_result"),
+    [
+        (
+            "src/a.py",
+            {"path": "notes/src-a.md", "title": "src/a.py", "score": 0.99},
+        ),
+        (
+            "MEMENTO_VAULT_PATH",
+            {"path": "notes/env.md", "title": "MEMENTO_VAULT_PATH", "score": 0.98},
+        ),
+        (
+            "550e8400-e29b-41d4-a716-446655440000",
+            {"path": "notes/uuid.md", "title": "550e8400-e29b-41d4-a716-446655440000", "score": 0.97},
+        ),
+        (
+            'find "blue comet protocol"',
+            {"path": "notes/phrase.md", "title": "blue comet protocol", "score": 0.96},
+        ),
+    ],
+)
+@patch("memento.remote_client.is_remote", return_value=False)
+@patch("memento.lifecycle.recently_injected_paths", return_value=set())
+@patch("memento.lifecycle.enhance_results", side_effect=lambda results, *args, **kwargs: results)
+@patch("memento.lifecycle.qmd_search_with_extras")
+@patch("memento.lifecycle.has_qmd", return_value=True)
+@patch("memento.lifecycle.get_vault")
+@patch(
+    "memento.lifecycle.get_config",
+    return_value={
+        "prompt_recall": True,
+        "recall_concrete_mode": "auto",
+        "recall_diagnostics": True,
+        "recall_diagnostics_include_candidates": False,
+        "recall_min_score": 0.4,
+        "recall_max_notes": 3,
+        "recall_high_confidence": 0.55,
+        "concept_index_enabled": False,
+        "rrf_enabled": False,
+        "multi_hop_enabled": False,
+        "reranker_enabled": False,
+    },
+)
+def test_run_recall_lines_opt_in_concrete_mode_uses_literal_search(
+    _config, mock_vault, _has_qmd, mock_search, _enhance, _recent, _is_remote, prompt, search_result, tmp_path
+):
+    (tmp_path / "notes").mkdir()
+    mock_vault.return_value = tmp_path
+    mock_search.return_value = [search_result]
+
+    lines, top_path, results, reason = _run_recall_lines(prompt, str(tmp_path), "s1")
+
+    assert reason is None
+    assert top_path == search_result["path"]
+    assert results == [search_result]
+    assert lines == ["[vault] Related memories:", f"  - {search_result['title']}"]
+    assert mock_search.call_count == 1
+    assert mock_search.call_args.args[0] == prompt
+    assert mock_search.call_args.kwargs["concrete"] is True
+    assert mock_search.call_args.kwargs["semantic"] is False
+
+
 @patch("memento.remote_client.is_remote", return_value=True)
 @patch("memento.remote_client.search")
 @patch("memento.lifecycle.qmd_search_with_extras")
@@ -645,6 +708,37 @@ def test_run_recall_lines_remote_specific_project_prompt_injects_match(
     assert lines == ["[vault] Related memories:", "  - Fundid email"]
     mock_remote_search.assert_called_once()
     assert mock_remote_search.call_args.kwargs["concrete"] is False
+    mock_has_qmd.assert_not_called()
+
+
+@patch("memento.remote_client.is_remote", return_value=True)
+@patch("memento.lifecycle.recently_injected_paths", return_value=set())
+@patch("memento.remote_client.search_envelope")
+@patch("memento.lifecycle.has_qmd")
+@patch(
+    "memento.lifecycle.get_config",
+    return_value={
+        "prompt_recall": True,
+        "recall_concrete_mode": "auto",
+        "recall_diagnostics": True,
+        "recall_diagnostics_include_candidates": False,
+        "recall_min_score": 0.4,
+        "recall_max_notes": 3,
+    },
+)
+def test_run_recall_lines_remote_concrete_mode_uses_literal_search(
+    _config, mock_has_qmd, mock_remote_search, _is_duplicate, _is_remote
+):
+    mock_remote_search.return_value = {"results": [{"path": "notes/src-a.md", "title": "src/a.py", "score": 0.99}]}
+
+    lines, top_path, results, reason = _run_recall_lines("src/a.py", "/repo", "s1")
+
+    assert reason is None
+    assert top_path == "notes/src-a.md"
+    assert results == [{"path": "notes/src-a.md", "title": "src/a.py", "score": 0.99}]
+    assert lines == ["[vault] Related memories:", "  - src/a.py"]
+    mock_remote_search.assert_called_once()
+    assert mock_remote_search.call_args.kwargs["concrete"] is True
     mock_has_qmd.assert_not_called()
 
 

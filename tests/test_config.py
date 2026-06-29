@@ -82,6 +82,9 @@ class TestLoadConfig:
         assert DEFAULT_CONFIG["recall_diagnostics_include_candidates"] is False
         assert DEFAULT_CONFIG["recall_diagnostics_max_candidates"] == 10
 
+    def test_recall_concrete_mode_defaults_disabled(self):
+        assert DEFAULT_CONFIG["recall_concrete_mode"] is False
+
     def test_tool_context_defaults_are_tightly_gated_and_diagnostic(self):
         assert DEFAULT_CONFIG["tool_context_min_score"] == 0.75
         assert DEFAULT_CONFIG["tool_context_diagnostics"] is True
