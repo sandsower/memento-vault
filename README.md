@@ -515,7 +515,10 @@ LLM backend is configurable:
 ```yaml
 llm_backend: claude        # claude, codex, gemini, anthropic-api, openai-compat
 llm_model: sonnet          # model name for the chosen backend
+claude_bare_headless: false # opt into Claude Code --bare for detached workers
 ```
+
+`claude_bare_headless: true` is the hardened mode for headless Claude workers. It skips hook/plugin/skill discovery and requires API-key or `apiKeyHelper` auth.
 
 ## Configuration
 

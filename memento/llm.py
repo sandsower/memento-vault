@@ -179,7 +179,7 @@ def _resolve_cli_binary(binary):
     return binary
 
 
-def _claude_complete(prompt, model=None, timeout=30):
+def _claude_complete(prompt, model=None, timeout=30, bare=False):
     # Pass the prompt over stdin instead of argv. Large transcripts (>~2MB)
     # overflow ARG_MAX and raise OSError("Argument list too long"); stdin has
     # no such ceiling.
@@ -189,19 +189,22 @@ def _claude_complete(prompt, model=None, timeout=30):
     # Disable built-in tools and inherited MCP servers, with a denylist as
     # defense-in-depth for Claude Code versions that still expose tools in
     # --print mode despite a tighter tool configuration.
-    cmd = [
-        _resolve_cli_binary("claude"),
-        "--print",
-        "--tools",
-        "",
-        "--strict-mcp-config",
-        "--mcp-config",
-        CLAUDE_EMPTY_MCP_CONFIG,
-        "--permission-mode",
-        "default",
-        "--disallowedTools",
-        CLAUDE_HEADLESS_DISALLOWED_TOOLS,
-    ]
+    cmd = [_resolve_cli_binary("claude"), "--print"]
+    if bare:
+        cmd.append("--bare")
+    cmd.extend(
+        [
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            CLAUDE_EMPTY_MCP_CONFIG,
+            "--permission-mode",
+            "default",
+            "--disallowedTools",
+            CLAUDE_HEADLESS_DISALLOWED_TOOLS,
+        ]
+    )
     if model:
         cmd.extend(["--model", model])
     return _run_cli(cmd, stdin_input=prompt, timeout=timeout)
@@ -308,7 +311,12 @@ def llm_complete(prompt, config=None, timeout=None):
 
     started = time.time()
     if backend == "claude":
-        result = _claude_complete(prompt, model, timeout=effective_timeout)
+        result = _claude_complete(
+            prompt,
+            model,
+            timeout=effective_timeout,
+            bare=bool(resolved.get("claude_bare_headless")),
+        )
     elif backend == "codex":
         result = _codex_complete(prompt, model, timeout=effective_timeout)
     elif backend == "gemini":
