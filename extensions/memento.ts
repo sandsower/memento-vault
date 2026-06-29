@@ -16,6 +16,7 @@ import {
 	type MementoPanelState,
 } from "./memento-ui.js";
 import { defaultConfig as bridgeDefaultConfig, loadConfig } from "./memento-config.js";
+import { decorateStatusDetails } from "./memento-status.js";
 import { addSessionPointerDigest, sanitizeEventDetails, summarizeMessages, summarizeSessionEntries } from "./transcript-sanitizer.js";
 
 interface LifecycleResult {
@@ -407,7 +408,13 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	}
 
 	function statusDetails(payload: Record<string, unknown>) {
-		return { ...payload, piBridge: { config, configSources: loadedConfig.sources, toolContextCount, lifecycleCaptureQueued, lastLifecycleReason } };
+		return decorateStatusDetails(payload, {
+			config,
+			configSources: loadedConfig.sources,
+			toolContextCount,
+			lifecycleCaptureQueued,
+			lastLifecycleReason,
+		});
 	}
 
 	async function loadStatus(ctx: ExtensionContext) {
