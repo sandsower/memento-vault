@@ -785,6 +785,99 @@ def _queue_cleanup(
     return result
 
 
+def _capture_queue_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
+    metadata = capture.get("metadata") or {}
+    body = str(capture.get("body") or "")
+    size_bytes = len(body.encode("utf-8"))
+    return {
+        "id": capture.get("id"),
+        "title": capture.get("title"),
+        "created_at": capture.get("created_at"),
+        "reason": capture.get("reason"),
+        "source_event": capture.get("source_event"),
+        "project": metadata.get("project"),
+        "branch": metadata.get("branch"),
+        "session_id": metadata.get("session_id"),
+        "body_excerpt": _body_excerpt(body),
+        "body_char_count": len(body),
+        "body_size_bytes": size_bytes,
+        "body_kb": round(size_bytes / 1024, 1),
+    }
+
+
+def _queue_discard(
+    capture_id: str | list[str] | tuple[str, ...],
+    apply: bool = False,
+    reason: str = "manual_discard",
+    source: str = "queue-discard",
+    vault: Path | None = None,
+) -> dict[str, Any]:
+    if isinstance(capture_id, (list, tuple)):
+        capture_ids = [str(item).strip() for item in capture_id if str(item).strip()]
+    else:
+        raw_capture_id = str(capture_id).strip()
+        capture_ids = [raw_capture_id] if raw_capture_id else []
+    if not capture_ids:
+        return {"error": "at least one capture id is required", "reason": "missing_capture_ids"}
+
+    queue_path = _queue_file(vault)
+    captures = _load_queue(vault)
+    capture_id_set = set(capture_ids)
+    found = [capture for capture in captures if str(capture.get("id")) in capture_id_set]
+    found_ids = {str(capture.get("id")) for capture in found}
+    missing_ids = [capture_id for capture_id in capture_ids if capture_id not in found_ids]
+    result: dict[str, Any] = {
+        "queue_path": str(queue_path),
+        "dry_run": not apply,
+        "discarded": len(found),
+        "remaining": len(captures) - len(found),
+        "captures": [_capture_queue_snapshot(capture) for capture in found],
+        "reason": reason,
+        "source": source,
+    }
+    if missing_ids:
+        result["error"] = "capture ids not found"
+        result["missing_ids"] = missing_ids
+        return result
+    if not apply:
+        return result
+
+    lock_path = _lock_file()
+    if lock_path.exists():
+        lock = _read_processing_lock(lock_path)
+        if _is_pid_alive(int(lock.get("pid", 0))):
+            result["blocked"] = f"processing run active (pid {lock.get('pid')}, run {lock.get('run_id')})"
+            result["dry_run"] = True
+            return result
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = queue_path.with_name(f"{queue_path.name}.bak-{stamp}-discard")
+    backup_path.write_text(queue_path.read_text(errors="replace") if queue_path.exists() else "")
+    archive_path = queue_path.with_name(f"pi-captures-discarded-{stamp}.jsonl")
+    discarded_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    with _queue_lock(vault):
+        current = _load_queue(vault)
+        current_ids = {str(capture.get("id")) for capture in current}
+        if not capture_id_set.issubset(current_ids):
+            result["error"] = "capture ids not found"
+            result["missing_ids"] = sorted(capture_id_set.difference(current_ids))
+            return result
+        current_map = {str(capture.get("id")): capture for capture in current}
+        retained = [capture for capture in current if str(capture.get("id")) not in capture_id_set]
+        with archive_path.open("a") as handle:
+            for capture_id in capture_ids:
+                capture = current_map[capture_id]
+                entry = dict(capture)
+                entry["discard"] = {"discarded_at": discarded_at, "reason": reason, "source": source}
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        _write_queue(retained, vault)
+    result["backup_path"] = str(backup_path)
+    result["archive_path"] = str(archive_path)
+    result["retained"] = len(retained)
+    result["remaining"] = len(retained)
+    return result
+
+
 def _safe_segment(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-._")
     return cleaned[:120] or uuid.uuid4().hex
@@ -899,6 +992,31 @@ def _selected_captures(
         if session_id and metadata.get("session_id") != session_id:
             continue
         if metadata.get("memento_processor") is True:
+            continue
+        selected.append(capture)
+    selected.sort(key=_capture_created_at, reverse=newest)
+    return selected
+
+
+def _selected_queue_captures(
+    captures: list[dict[str, Any]],
+    capture_id: str | list[str] | tuple[str, ...] = "",
+    project: str = "",
+    branch: str = "",
+    session_id: str = "",
+    newest: bool = False,
+) -> list[dict[str, Any]]:
+    selected = []
+    capture_ids = _normalize_capture_ids(capture_id)
+    for capture in captures:
+        metadata = capture.get("metadata") or {}
+        if capture_ids and str(capture.get("id")) not in capture_ids:
+            continue
+        if project and metadata.get("project") != project:
+            continue
+        if branch and metadata.get("branch") != branch:
+            continue
+        if session_id and metadata.get("session_id") != session_id:
             continue
         selected.append(capture)
     selected.sort(key=_capture_created_at, reverse=newest)
@@ -1598,6 +1716,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Class to discard (repeatable; default: raw_dump, invalid). Manual captures are never discarded.",
     )
     cleanup.add_argument("--samples", type=int, default=3, help="Sample entries shown per class")
+    discard = queue_sub.add_parser("discard", help="Archive queued capture(s) without processing")
+    discard.add_argument("--id", action="append", default=[], help="Queued capture id to discard")
+    discard.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rewrite the queue, archiving the discarded capture(s); without this flag nothing is written",
+    )
+    discard.add_argument("--reason", default="manual_discard")
+    discard.add_argument("--source", default="queue-discard")
 
     return parser
 
@@ -1675,6 +1802,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_json("queue", _queue_process_finalize, args.run_id)
         if args.queue_command == "cleanup":
             return _run_json("queue", _queue_cleanup, args.apply, args.discard_classes, args.samples)
+        if args.queue_command == "discard":
+            return _run_json("queue", _queue_discard, args.id, args.apply)
     raise AssertionError(f"unhandled command: {args.command}")
 
 

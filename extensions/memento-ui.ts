@@ -2,15 +2,26 @@ import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi
 
 export type MementoPanelView = "actions" | "status" | "queue" | "process";
 
+export type MementoQueuedCaptureSummary = {
+	id: string;
+	title: string;
+	excerpt: string;
+	project: string;
+	branch: string;
+	size: string;
+};
+
 export type MementoPanelState = {
 	view: MementoPanelView;
 	selectedIndex: number;
 	message?: string;
 	confirmProcess?: boolean;
+	confirmDiscard?: boolean;
 	queueItemCount?: number;
 	processItemCount?: number;
 	selectedCaptureIds?: string[];
 	inspectIndex?: number;
+	discardCapture?: MementoQueuedCaptureSummary;
 };
 
 export type MementoPanelAction =
@@ -20,15 +31,18 @@ export type MementoPanelAction =
 	| { type: "toggle-widget" }
 	| { type: "show"; view: MementoPanelView }
 	| { type: "toggle-capture" }
+	| { type: "request-discard" }
 	| { type: "inspect-group" }
 	| { type: "dry-run" }
-	| { type: "process" };
+	| { type: "process" }
+	| { type: "discard" };
 
 const ACTIONS = [
 	{ label: "Capture current session", action: { type: "capture-current" } as MementoPanelAction },
 	{ label: "Review queued captures", action: { type: "show", view: "queue" } as MementoPanelAction },
 	{ label: "Preview queued processing", action: { type: "dry-run" } as MementoPanelAction },
 	{ label: "Process queued captures", action: { type: "process" } as MementoPanelAction },
+	{ label: "Discard highlighted queued capture", action: { type: "request-discard" } as MementoPanelAction },
 	{ label: "Status / diagnostics", action: { type: "show", view: "status" } as MementoPanelAction },
 	{ label: "Toggle footer details", action: { type: "toggle-widget" } as MementoPanelAction },
 ];
@@ -46,6 +60,11 @@ export function reduceMementoPanelState(
 		if (key === "n" || key === "escape" || key === "q") return { state: { ...state, confirmProcess: false, selectedIndex } };
 		return { state: { ...state, selectedIndex } };
 	}
+	if (state.confirmDiscard) {
+		if (key === "y") return { state: { ...state, confirmDiscard: false, selectedIndex }, action: { type: "discard" } };
+		if (key === "n" || key === "escape" || key === "q") return { state: { ...state, confirmDiscard: false, selectedIndex, discardCapture: undefined } };
+		return { state: { ...state, selectedIndex } };
+	}
 
 	if (key === "down" || key === "j") return { state: { ...state, selectedIndex: Math.min(maxIndex, selectedIndex + 1) } };
 	if (key === "up" || key === "k") return { state: { ...state, selectedIndex: Math.max(0, selectedIndex - 1) } };
@@ -60,6 +79,7 @@ export function reduceMementoPanelState(
 	if (key === "c") return { state: { ...state, selectedIndex }, action: { type: "capture-current" } };
 	if (key === "w") return { state: { ...state, selectedIndex }, action: { type: "toggle-widget" } };
 	if (key === " " && state.view === "queue") return { state: { ...state, selectedIndex }, action: { type: "toggle-capture" } };
+	if (key === "x" && state.view === "queue") return { state: { ...state, selectedIndex }, action: { type: "request-discard" } };
 	if (key === "i" && state.view === "process") return { state: { ...state, inspectIndex: selectedIndex }, action: { type: "inspect-group" } };
 	if (key === "d") return { state: { ...state, view: "process", selectedIndex: 0, inspectIndex: undefined }, action: { type: "dry-run" } };
 	if (key === "p") return { state: { ...state, view: "process", selectedIndex: 0, inspectIndex: undefined, confirmProcess: true } };
@@ -80,11 +100,21 @@ export function renderMementoPanelLines(
 	const body = [summaryLine(data.status, data.queue, data.process), ""];
 	if (state.message) body.push(state.message, "");
 	if (state.confirmProcess) body.push(`Process ${state.selectedCaptureIds?.length ?? 0} selected queued capture(s) now? y/N`, "");
+	if (state.confirmDiscard && state.discardCapture) {
+		body.push("Discard this queued capture? It will be archived, not deleted. y/N", "");
+		body.push(`ID: ${state.discardCapture.id}`, `Title: ${fitLine(state.discardCapture.title, 84)}`);
+		if (state.discardCapture.excerpt) body.push(`Excerpt: ${fitLine(state.discardCapture.excerpt, 78)}`);
+		body.push(
+			`Project: ${state.discardCapture.project}${state.discardCapture.branch ? `/${state.discardCapture.branch}` : ""}`,
+			`Size: ${state.discardCapture.size}`,
+			"",
+		);
+	}
 	if (state.view === "actions") body.push(...renderActions(state.selectedIndex, data.widgetEnabled));
 	else if (state.view === "status") body.push(...formatStatusLines(data.status, { includeDetails: true }));
 	else if (state.view === "queue") body.push(...formatQueueLines(data.queue, { limit: 10, selectedIds: state.selectedCaptureIds, cursorIndex: state.selectedIndex }));
 	else body.push(...formatProcessLines(data.process, { cursorIndex: state.selectedIndex, inspectIndex: state.inspectIndex }));
-	body.push("", "↑↓/j/k move · space select · i inspect · d dry-run · p process · r refresh · q back");
+	body.push("", "↑↓/j/k move · space select · x discard · i inspect · d dry-run · p process · r refresh · q back");
 	return frameLines("Memento Vault", body, Math.max(1, width));
 }
 
@@ -205,6 +235,24 @@ function renderActions(selectedIndex: number, widgetEnabled: boolean): string[] 
 		lines.push(`${cursor} ${item.label}${suffix}`);
 	}
 	return lines;
+}
+
+export function queueCaptureSummary(queue?: Record<string, unknown>, index = 0): MementoQueuedCaptureSummary | undefined {
+	const captures = Array.isArray(queue?.captures) ? queue.captures as Record<string, unknown>[] : [];
+	if (captures.length === 0) return undefined;
+	const safeIndex = Math.min(Math.max(0, Math.floor(index)), captures.length - 1);
+	const capture = captures[safeIndex];
+	const metadata = recordValue(capture.metadata);
+	const id = String(capture.id ?? "");
+	if (!id) return undefined;
+	return {
+		id,
+		title: String(capture.title ?? "Untitled capture"),
+		excerpt: String(capture.body_excerpt ?? ""),
+		project: String(metadata?.project ?? metadata?.project_slug ?? "unknown"),
+		branch: String(metadata?.branch ?? ""),
+		size: formatSize(capture.body_size_bytes ?? capture.body_char_count),
+	};
 }
 
 function summaryLine(status?: Record<string, unknown>, queue?: Record<string, unknown>, process?: Record<string, unknown>): string {
