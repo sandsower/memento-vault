@@ -112,7 +112,7 @@ Worktree notes are always repo-scoped by filename prefix (`projects/worktrees/<r
 
 ### Dependencies
 
-- `memento-vault` MCP server registered in Claude Code (`memento_status`, `memento_get`, `memento_store`, `memento_search`, `memento_daily_snapshot` tools available). `memento_daily_snapshot` was added after `memento_store` and is not present in older memento-vault releases — check with `memento_status` or probe the tool list before depending on it.
+- `memento-vault` MCP server registered in Claude Code. For the canonical tool inventory, run `memento-vault tools --markdown` from the installed checkout or probe the MCP tool list; do not maintain a hand-copied tool list here. `memento_daily_snapshot` was added after `memento_store` and is not present in older memento-vault releases — probe it before depending on it.
 - Memento's `fleeting/`, `projects/`, `notes/` collections (memento defaults)
 - No changes to orra code required. Routing lives in this directive file.
 

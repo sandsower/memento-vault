@@ -7,6 +7,8 @@
 #   memento-vault uninstall
 #   memento-vault update          # git pull + reinstall
 #   memento-vault warmup          # warm optional local dependencies quietly
+#   memento-vault tools --markdown # print generated MCP tool inventory
+#   memento-vault tools --check    # check tool inventory against MCP registrations
 #   memento-vault health          # run read-only vault diagnostics
 #   memento-vault doctor          # alias for health
 #   memento-vault version
@@ -43,6 +45,7 @@ usage() {
     echo "  uninstall   Remove memento-vault from Claude Code"
     echo "  update      Pull latest version and reinstall"
     echo "  warmup      Warm optional local dependencies quietly (defaults to QMD)"
+    echo "  tools       Print or check the generated MCP tool inventory"
     echo "  health      Run read-only vault diagnostics"
     echo "  doctor      Alias for health"
     echo "  version     Show installed version"
@@ -99,6 +102,10 @@ case "$cmd" in
 
         nohup "$qmd_path" vsearch "warmup" -c "${MEMENTO_QMD_COLLECTION:-memento}" -n 1 </dev/null >/dev/null 2>&1 &
         exit 0
+        ;;
+    tools)
+        export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+        exec python3 -m memento.mcp_inventory "$@"
         ;;
     health|doctor)
         export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"

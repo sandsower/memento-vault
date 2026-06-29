@@ -10,6 +10,13 @@ import pytest
 
 from memento import mcp_server
 from memento.config import DEFAULT_CONFIG
+from memento.mcp_inventory import (
+    END_MARKER,
+    START_MARKER,
+    inventory_tool_names,
+    registered_tool_names,
+    render_mcp_tool_markdown,
+)
 from memento.search import MISS_RECOVERY_HINTS, build_search_miss
 from memento.mcp_server import (
     _bind_host,
@@ -317,6 +324,28 @@ class TestMementoSearch:
             result = memento_search("MEMENTO_VAULT_PATH", concrete=False)
 
         assert result["miss"]["reason"] == "no_exact_match"
+
+
+# --- MCP tool inventory docs drift ---
+
+
+class TestMcpToolInventoryDocs:
+    def test_inventory_covers_registered_mcp_tools(self):
+        assert set(inventory_tool_names()) == set(registered_tool_names())
+
+    def test_readme_mcp_tool_inventory_is_generated_from_source_of_truth(self):
+        readme = (Path(__file__).parents[1] / "README.md").read_text()
+        start = readme.index(START_MARKER)
+        end = readme.index(END_MARKER) + len(END_MARKER)
+
+        assert readme[start:end] == render_mcp_tool_markdown()
+
+    def test_non_readme_docs_do_not_maintain_hand_copied_mcp_tool_inventory(self):
+        docs_root = Path(__file__).parents[1] / "skills" / "orra-init" / "templates"
+        bridge = (docs_root / "vault-bridge.md").read_text()
+
+        assert "do not maintain a hand-copied tool list here" in bridge
+        assert "memento_status`, `memento_get`, `memento_store`" not in bridge
 
 
 # --- tool selection descriptions ---
