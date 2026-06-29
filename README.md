@@ -534,6 +534,7 @@ auto_commit: true
 # Tenet retrieval hooks
 session_briefing: true
 prompt_recall: true
+recall_concrete_mode: auto   # literal/path/UUID prompts only; true forces all prompts
 tool_context: true
 # When retrieval_log/MEMENTO_DEBUG is enabled, log tool-context decisions.
 tool_context_diagnostics: true
