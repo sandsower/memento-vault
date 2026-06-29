@@ -52,7 +52,7 @@ memento-vault doctor        # alias for health
 memento-vault health --json # structured output for automation
 ```
 
-Warnings exit 0 by default; failures exit 1. Use `--strict` if automation should fail on warnings too. The command is read-only: it reports suggested repairs such as `./install.sh --reinstall`, but does not modify vault/config files.
+Warnings exit 0 by default; failures exit 1. Use `--strict` if automation should fail on warnings too. The command is read-only: it reports suggested repairs such as `./install.sh --reinstall`, but does not modify vault/config files. JSON output includes `automation_memory` readiness metadata for runner probes without contacting remote services by default.
 
 `--force` is reserved for recovery from broken installed files. It overwrites memento-managed files and requires confirmation, or `MEMENTO_FORCE=1` in non-interactive environments.
 

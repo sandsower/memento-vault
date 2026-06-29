@@ -21,6 +21,12 @@ TRIAGE_HEALTH_LOG_PATH = os.path.join(
     "triage-health.jsonl",
 )
 
+AUTOMATION_MEMORY_HEALTH_LOG_PATH = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
+    "memento-vault",
+    "automation-memory-health.jsonl",
+)
+
 INCEPTION_STATE_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
     "memento-vault",
@@ -95,6 +101,27 @@ def log_triage_health(action, **kwargs):
     }
     entry.update(kwargs)
     _append_jsonl(TRIAGE_HEALTH_LOG_PATH, entry, "_triage_health_warned")
+
+
+def log_automation_memory_health(action, **kwargs):
+    """Append minimal always-on automation memory readiness telemetry.
+
+    This is operational health data, not a run ledger: no cwd, prompt text,
+    note content, session transcript, or run evidence is recorded.
+    """
+    safe_kwargs = dict(kwargs)
+    if "error" in safe_kwargs:
+        safe_kwargs["error"] = _sanitize_health_error(safe_kwargs["error"])
+    for key, value in list(safe_kwargs.items()):
+        if isinstance(value, str):
+            safe_kwargs[key] = _sanitize_health_error(value)
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "hook": "automation-memory",
+        "action": action,
+    }
+    entry.update(safe_kwargs)
+    _append_jsonl(AUTOMATION_MEMORY_HEALTH_LOG_PATH, entry, "_automation_memory_health_warned")
 
 
 def load_inception_state(state_path=None):

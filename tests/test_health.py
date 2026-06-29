@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -32,6 +32,7 @@ def isolate_health(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMENTO_SEARCH_BACKEND", "grep")
     monkeypatch.setattr(health, "TRIAGE_HEALTH_LOG_PATH", str(tmp_path / "triage-health.jsonl"))
     monkeypatch.setattr(health, "RETRIEVAL_LOG_PATH", str(tmp_path / "retrieval.jsonl"))
+    monkeypatch.setattr(health, "AUTOMATION_MEMORY_HEALTH_LOG_PATH", str(tmp_path / "automation-memory-health.jsonl"))
     monkeypatch.setattr(health, "INCEPTION_STATE_PATH", str(tmp_path / "inception-state.json"))
     monkeypatch.setattr(health, "VAULT_WRITE_LOCK_PATH", str(tmp_path / "vault-write.lock"))
     monkeypatch.setattr(health, "INCEPTION_LOCK_PATH", str(tmp_path / "inception.lock"))
@@ -46,6 +47,133 @@ def test_health_json_outputs_report_and_default_allows_warnings(capsys):
     assert payload["status"] in {"pass", "warn"}
     assert "checks" in payload
     assert any(check["name"] == "vault" for check in payload["checks"])
+
+
+def test_health_json_exposes_automation_memory_readiness(capsys):
+    Path(health.AUTOMATION_MEMORY_HEALTH_LOG_PATH).write_text(
+        json.dumps(
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "hook": "automation-memory",
+                "action": "packet_success",
+                "source": "session-context",
+                "should_inject": True,
+                "result_count": 2,
+            }
+        )
+        + "\n"
+    )
+
+    code = health.main(["--json"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    automation = payload["automation_memory"]
+    assert automation["metadata"]["cheap_read_only"] is True
+    assert automation["metadata"]["network_checked"] is False
+    assert automation["metadata"]["search"]["available"] is True
+    assert automation["metadata"]["last_successful_packet"]["source"] == "session-context"
+    assert automation["metadata"]["probe"]["name"] == "automation_memory"
+
+
+def test_automation_memory_reports_recall_failure_rate_and_reasons():
+    token = "sk-" + "a" * 24
+    Path(health.RETRIEVAL_LOG_PATH).write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": datetime.now().isoformat(timespec="seconds"), "hook": "recall", "action": "search"}),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "recall",
+                        "action": "backend_unavailable",
+                        "error": f"auth failed {token}",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "search",
+                        "action": "unexpected_error",
+                        "error": "qmd timeout",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    readiness = health.build_automation_memory_readiness()
+
+    assert readiness["status"] == "warn"
+    recall = readiness["metadata"]["recall"]
+    assert recall["events"] == 3
+    assert recall["failures"] == 2
+    assert recall["failure_rate"] == 0.6667
+    assert token not in json.dumps(readiness)
+    reasons = readiness["metadata"]["common_failure_reasons"]
+    assert any(reason["reason"] == "auth failed [REDACTED_API_KEY]" for reason in reasons)
+
+
+def test_automation_memory_reports_stale_embedded_index(tmp_path):
+    vault = _make_vault(tmp_path / "stale-vault")
+    db = vault / ".search" / "search.db"
+    db.parent.mkdir()
+    db.write_text("index")
+    note = vault / "notes" / "newer.md"
+    note.write_text("newer")
+    old = (datetime.now() - timedelta(hours=2)).timestamp()
+    now = datetime.now().timestamp()
+    os.utime(db, (old, old))
+    os.utime(note, (now, now))
+
+    readiness = health.build_automation_memory_readiness(
+        config={"vault_path": str(vault), "search_backend": "embedded", "search_db_path": ".search/search.db"},
+        vault=vault,
+    )
+
+    assert readiness["status"] == "warn"
+    stale = readiness["metadata"]["search"]["stale_index"]
+    assert stale["stale"] is True
+    assert stale["lag_seconds"] > 60
+
+
+def test_automation_memory_reports_remote_sync_pending_retries(tmp_path, monkeypatch):
+    vault = _make_vault(tmp_path / "remote-vault")
+    monkeypatch.setenv("MEMENTO_VAULT_URL", "https://vault.example.com/mcp")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    ledger.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {"ts": datetime.now().isoformat(timespec="seconds"), "kind": "note", "source": "a", "status": "ok"}
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "kind": "capture",
+                        "source": "session:s1",
+                        "status": "error",
+                        "error": "remote unavailable",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    readiness = health.build_automation_memory_readiness(
+        config={"vault_path": str(vault), "search_backend": "grep", "search_db_path": ".search/search.db"},
+        vault=vault,
+    )
+
+    assert readiness["status"] == "warn"
+    remote = readiness["metadata"]["remote_sync"]
+    assert remote["remote_configured"] is True
+    assert remote["network_checked"] is False
+    assert remote["pending_retry_count"] == 1
+    assert remote["pending_kinds"] == ["capture"]
 
 
 def test_health_prefers_xdg_config_dir_when_file_exists(tmp_path):
