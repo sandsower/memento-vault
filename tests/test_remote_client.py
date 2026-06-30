@@ -3,7 +3,17 @@
 import json
 from unittest.mock import patch, MagicMock
 
-from memento.remote_client import is_remote, list_notes, search, search_envelope, get, store, capture, status
+from memento.remote_client import (
+    is_remote,
+    list_notes,
+    search,
+    search_envelope,
+    get,
+    store,
+    smart_store,
+    capture,
+    status,
+)
 
 
 class TestIsRemote:
@@ -159,6 +169,19 @@ class TestCallTool:
 
         result = store("Test Note", "Body content", tags=["test"])
         assert result["path"] == "notes/test-note.md"
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_smart_store(self, mock_urlopen, mock_url):
+        smart_result = {"decision": "candidate_update", "created": False, "path": "notes/test-note.md"}
+        mock_urlopen.return_value = self._mock_response(smart_result)
+
+        result = smart_store("Test Note", "Body content", tags=["test"])
+        assert result["decision"] == "candidate_update"
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        assert body["params"]["name"] == "memento_store_smart"
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")

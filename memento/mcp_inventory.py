@@ -91,6 +91,12 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
         "Low-level write primitive for sync/automation or agents without skill support; interactive Claude/Codex sessions should prefer `/memento` or local hooks.",
     ),
     McpToolInventoryItem(
+        "memento_store_smart",
+        "Write",
+        "Search for close matches before writing, and return duplicate/update/supersede suggestions.",
+        "Use when you want a write decision with candidate paths/reasons before creating a note; it avoids obvious duplicates by default.",
+    ),
+    McpToolInventoryItem(
         "memento_daily_snapshot",
         "Write",
         "Write a deterministic `notes/daily-<date>-<repo-slug>.md` snapshot with an append-only supersede chain.",
