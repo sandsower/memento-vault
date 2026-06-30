@@ -12,6 +12,7 @@ from memento.remote_client import (
     get,
     store,
     smart_store,
+    capture_run_lesson,
     synthesize_failures,
     capture,
     status,
@@ -217,6 +218,22 @@ class TestCallTool:
         req = mock_urlopen.call_args[0][0]
         body = json.loads(req.data)
         assert body["params"]["name"] == "memento_store_smart"
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_capture_run_lesson(self, mock_urlopen, mock_url):
+        capture_result = {"queued": True, "id": "arl-1"}
+        mock_urlopen.return_value = self._mock_response(capture_result)
+
+        candidate = {"external_system": "rondo", "run_id": "run-1", "title": "Lesson", "evidence_summary": "Summary"}
+        result = capture_run_lesson(candidate, approve_write=True)
+        assert result["queued"] is True
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        assert body["params"]["name"] == "memento_capture_run_lesson"
+        assert body["params"]["arguments"]["candidate"] == candidate
+        assert body["params"]["arguments"]["approve_write"] is True
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")

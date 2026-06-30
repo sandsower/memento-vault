@@ -169,6 +169,10 @@ from memento.store import (
 )
 from memento.smart_store import write_smart_store_note
 from memento.batch_synthesis import synthesize_failure_batch
+from memento.automated_run_lessons import (
+    capture_automated_run_lesson,
+    lesson_candidate_from_batch_candidate,
+)
 from memento.preserve import preserve_bundle
 from memento.utils import sanitize_secrets
 
@@ -1286,6 +1290,22 @@ def memento_capture(
 
 
 @mcp.tool()
+def memento_capture_run_lesson(candidate: dict, approve_write: bool = False) -> dict:
+    """Queue or explicitly write a typed automated-run lesson candidate.
+
+    This is the automation-safe post-run lesson contract. Candidates must be
+    compact, sanitized summaries with provenance fields (external system, run
+    id, artifact refs, repo/project/branch/ticket/slice, outcome, lesson type,
+    evidence summary, certainty, validity context, and related refs). Raw logs,
+    transcripts, run ledgers, proofs, stdout/stderr, and patch blobs are
+    rejected. By default the candidate is queued for review outside the vault;
+    pass approve_write=True only when the caller explicitly approved writing a
+    curated lesson note.
+    """
+    return capture_automated_run_lesson(candidate, approve_write=approve_write)
+
+
+@mcp.tool()
 def memento_synthesize_failures(
     run_summaries: list[dict] | dict,
     approve_writes: bool = False,
@@ -1316,31 +1336,21 @@ def memento_synthesize_failures(
     if not vault.exists():
         return {**result, "error": f"Vault not found at {vault}", "reason": "vault_missing"}
 
-    if not acquire_vault_write_lock():
-        return {
-            **result,
-            "error": "Could not acquire vault write lock (another write in progress)",
-            "reason": "lock_timeout",
-        }
-
     write_results = []
-    try:
-        for candidate in result.get("candidate_lessons", []):
-            write_results.append(
-                write_smart_store_note(
-                    title=str(candidate.get("title") or "").strip(),
-                    body=str(candidate.get("body") or "").strip(),
-                    note_type=str(candidate.get("note_type") or "discovery"),
-                    tags=list(candidate.get("tags") or []),
-                    certainty=int(candidate.get("certainty") or 2),
-                    project=project or None,
-                    branch=branch or None,
-                    session_id=session_id or None,
-                    origin="mcp_batch_failure_synthesis",
-                )
-            )
-    finally:
-        release_vault_write_lock()
+    for candidate in result.get("candidate_lessons", []):
+        lesson_candidate = lesson_candidate_from_batch_candidate(
+            candidate,
+            project=project,
+            branch=branch,
+            session_id=session_id,
+        )
+        lesson_result = capture_automated_run_lesson(lesson_candidate, approve_write=True)
+        if "write_result" in lesson_result:
+            write_result = dict(lesson_result["write_result"])
+            write_result.setdefault("created", lesson_result.get("created", False))
+            write_results.append(write_result)
+        else:
+            write_results.append(lesson_result)
 
     return {
         **result,
