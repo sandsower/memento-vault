@@ -211,6 +211,30 @@ class TestParseTranscript:
         meta = parse_transcript(_write_transcript(tmp_path, entries))
         assert meta["last_outcome"] == "The fix was simple."
 
+    def test_tool_heavy_claude_round_trips_do_not_inflate_substantiality(self, tmp_path):
+        entries = [_user_msg("Debug this failing test")]
+        for idx in range(5):
+            entries.append(_assistant_msg([_read_block(f"/src/file_{idx}.py")]))
+            entries.append(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": f"toolu_{idx}", "content": f"result {idx}"},
+                        ]
+                    },
+                }
+            )
+        entries.append(_assistant_msg([_text_block("The failing test is caused by stale state.")]))
+
+        meta = parse_transcript(_write_transcript(tmp_path, entries))
+
+        assert meta["exchange_count"] == 1
+        assert meta["user_messages"] == 1
+        assert len(meta["files_read"]) == 5
+        with patch("memento_triage.get_config", return_value=_DEFAULT_CONFIG):
+            assert is_substantial(meta) is False
+
 
 # --- is_substantial ---
 

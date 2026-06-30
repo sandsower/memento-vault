@@ -249,6 +249,78 @@ class TestClaudeAdapter:
         assert meta["exchange_count"] == 0
         assert meta["files_edited"] == []
 
+    def test_tool_result_round_trips_do_not_count_as_user_exchanges(self, tmp_path):
+        transcript = tmp_path / "tool-heavy.jsonl"
+        lines = [
+            json.dumps(
+                {
+                    "type": "user",
+                    "cwd": "/repo/memento",
+                    "gitBranch": "mem-56",
+                    "message": {"content": "Investigate the failing test"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "I'll inspect the failure."},
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "input": {"file_path": "/repo/memento/tests/test_a.py"},
+                            },
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "first result"},
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "name": "Read", "input": {"file_path": "/repo/memento/memento/a.py"}},
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "toolu_2", "content": "second result"},
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "Found the root cause."}]},
+                }
+            ),
+        ]
+        transcript.write_text("\n".join(lines))
+
+        meta = parse_claude(str(transcript))
+
+        assert meta["exchange_count"] == 1
+        assert meta["user_messages"] == 1
+        assert meta["first_prompt"] == "Investigate the failing test"
+        assert meta["files_read"] == ["/repo/memento/memento/a.py", "/repo/memento/tests/test_a.py"]
+
 
 # --- OpenCode adapter ---
 

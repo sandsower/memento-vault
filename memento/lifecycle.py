@@ -1063,15 +1063,6 @@ def _explicit_project_slugs(prompt: str, results: list[dict]) -> set[str]:
 
     slugs.update(_prompt_project_slugs(prompt))
 
-    for match in re.finditer(r"\b[A-Z][A-Za-z0-9]*(?:[- ][A-Z][A-Za-z0-9]*)*\b", prompt):
-        value = match.group(0)
-        # Acronyms like MCP are domains/tools, not reliable project names.
-        if value.isupper() and len(value) > 1:
-            continue
-        slug = slugify(value)
-        if slug and slug not in PROJECT_ENTITY_STOPWORDS:
-            slugs.add(slug)
-
     return slugs
 
 
