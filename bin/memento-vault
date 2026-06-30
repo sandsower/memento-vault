@@ -48,6 +48,7 @@ usage() {
     echo "  tools       Print or check the generated MCP tool inventory"
     echo "  health      Run read-only vault diagnostics"
     echo "  doctor      Alias for health"
+    echo "  retrieval-report  Generate a local retrieval debug report/dashboard"
     echo "  version     Show installed version"
     echo ""
     echo "Install options:"
@@ -110,6 +111,10 @@ case "$cmd" in
     health|doctor)
         export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
         exec python3 -m memento.health "$@"
+        ;;
+    retrieval-report|retrieval-dashboard)
+        export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+        exec python3 -m memento.retrieval_dashboard "$@"
         ;;
     version|-v|--version)
         cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown"

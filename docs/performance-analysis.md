@@ -204,7 +204,7 @@ For ongoing monitoring:
 retrieval_log: true
 ```
 
-Logs go to `~/.config/memento-vault/retrieval.jsonl`. Analyze with `python tools/analyze-retrieval.py --since 7`.
+Logs go to `~/.config/memento-vault/retrieval.jsonl`. Analyze with `memento-vault retrieval-report --since 7` (or `python tools/analyze-retrieval.py --since 7`).
 
 ## References
 
