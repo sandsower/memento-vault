@@ -2479,6 +2479,56 @@ def _read_json_file(path: Path) -> dict[str, Any]:
         return {}
 
 
+PROCESS_LOG_TAIL_CHARS = 2400
+PROCESS_LOG_TAIL_LINES = 12
+
+
+def _process_log_tail(path_value: Any) -> dict[str, Any]:
+    if not path_value:
+        return {}
+    path = Path(str(path_value))
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"log_error": "log file unavailable"}
+    if not path.is_file():
+        return {"log_error": "log file unavailable"}
+    try:
+        read_size = min(stat.st_size, PROCESS_LOG_TAIL_CHARS * 4)
+        with path.open("rb") as handle:
+            if stat.st_size > read_size:
+                handle.seek(-read_size, os.SEEK_END)
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError as exc:
+        return {"log_error": f"log read failed: {exc}"}
+    tail = text[-PROCESS_LOG_TAIL_CHARS:]
+    lines = tail.splitlines()
+    line_truncated = len(lines) > PROCESS_LOG_TAIL_LINES
+    if line_truncated:
+        lines = lines[-PROCESS_LOG_TAIL_LINES:]
+    log_tail = sanitize_secrets("\n".join(lines).strip())
+    payload: dict[str, Any] = {}
+    if log_tail:
+        payload["log_tail"] = log_tail
+    if stat.st_size > read_size or len(tail) < len(text) or line_truncated:
+        payload["log_tail_truncated"] = True
+    return payload
+
+
+def _attach_process_log_tails(payload: dict[str, Any]) -> dict[str, Any]:
+    groups = payload.get("groups") if isinstance(payload.get("groups"), list) else []
+    current_group_id = str(payload.get("current_group_id") or "")
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        status = str(group.get("status") or "")
+        if status in {"running", "failed"} or (
+            current_group_id and str(group.get("group_id") or "") == current_group_id
+        ):
+            group.update(_process_log_tail(group.get("log_markdown")))
+    return payload
+
+
 def _group_status_from_result(group: dict[str, Any]) -> dict[str, Any]:
     result_path = Path(str(group.get("result_json") or ""))
     result = _read_json_file(result_path) if result_path.exists() else {}
@@ -2558,6 +2608,7 @@ def _queue_process_status(run_id: str = "") -> dict[str, Any]:
             payload["status"] = "running"
         elif payload.get("status") == "running":
             payload["status"] = "interrupted"
+        _attach_process_log_tails(payload)
         return _summarize_process_status(payload, lock_active)
     manifest_path = run_dir / "manifest.json"
     manifest = _read_json_file(manifest_path)
@@ -2587,6 +2638,7 @@ def _queue_process_status(run_id: str = "") -> dict[str, Any]:
         "groups": groups,
         "dequeued_capture_ids": manifest.get("dequeued_capture_ids", []),
     }
+    _attach_process_log_tails(payload)
     return _summarize_process_status(payload, lock_active)
 
 

@@ -263,6 +263,8 @@ export function formatProcessLines(payload?: Record<string, unknown>, options: {
 		if (group.session_id) lines.push(`     session: ${shortPath(String(group.session_id), 84)}`);
 		if (group.discard_reason) lines.push(`     no notes: ${fitLine(String(group.discard_reason), 80)}`);
 		if (group.error || group.reason) lines.push(`     ${fitLine(String(group.error ?? group.reason), 80)}`);
+		if (group.log_error) lines.push(`     log: ${fitLine(String(group.log_error), 76)}`);
+		if (groupStatus === "running" && group.log_tail) lines.push(...formatLogTail(String(group.log_tail), { limit: 3, indent: "     " }));
 		if (group.status === "failed" && group.log_markdown) lines.push(`     log: ${shortPath(String(group.log_markdown), 78)}`);
 	}
 	const retryable = numberValue(payload.retryable_group_count ?? groups.filter((group) => String(group.status ?? "") === "failed").length);
@@ -273,9 +275,21 @@ export function formatProcessLines(payload?: Record<string, unknown>, options: {
 		for (const key of ["input_markdown", "result_json", "log_markdown"] as const) {
 			if (inspected[key]) lines.push(`  ${key}: ${shortPath(String(inspected[key]), 86)}`);
 		}
+		if (inspected.log_error) lines.push(`  log: ${fitLine(String(inspected.log_error), 82)}`);
+		if (inspected.log_tail) {
+			lines.push("", `Live log tail${inspected.log_tail_truncated ? " (truncated)" : ""}:`);
+			lines.push(...formatLogTail(String(inspected.log_tail), { limit: 8, indent: "  " }));
+		}
 	}
 	if (payload.remaining !== undefined) lines.push(`Remaining queue: ${numberValue(payload.remaining)}`);
 	return lines;
+}
+
+function formatLogTail(text: string, options: { limit: number; indent: string }): string[] {
+	const rawLines = text.split(/\r?\n/g).filter((line) => line.trim().length > 0);
+	const tail = rawLines.slice(-Math.max(1, options.limit));
+	if (tail.length === 0) return [];
+	return tail.map((line) => `${options.indent}${fitLine(`│ ${line}`, 86 - options.indent.length)}`);
 }
 
 function renderActions(selectedIndex: number, widgetEnabled: boolean): string[] {

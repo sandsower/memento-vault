@@ -2000,6 +2000,50 @@ def test_pi_bridge_process_status_reads_progress_file(capsys, tmp_path, monkeypa
     assert payload["current_group_id"] == "g2"
 
 
+def test_pi_bridge_process_status_attaches_bounded_log_tail(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    run_dir = tmp_path / "state" / "processing" / "run1"
+    run_dir.mkdir(parents=True)
+    log_path = run_dir / "g1.md"
+    log_path.write_text("\n".join(f"line {index}" for index in range(30)))
+    missing_log_path = run_dir / "missing.md"
+    (run_dir / "progress.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run1",
+                "status": "running",
+                "selected_capture_count": 2,
+                "group_count": 2,
+                "current_group_id": "g1",
+                "groups": [
+                    {"group_id": "g1", "status": "running", "capture_ids": ["q1"], "log_markdown": str(log_path)},
+                    {
+                        "group_id": "g2",
+                        "status": "failed",
+                        "capture_ids": ["q2"],
+                        "log_markdown": str(missing_log_path),
+                    },
+                ],
+            }
+        )
+    )
+    (tmp_path / "state" / "processing.lock").write_text(
+        json.dumps({"run_id": "run1", "pid": 123, "created_time": 9999999999})
+    )
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge._is_pid_alive", return_value=True),
+    ):
+        code = pi_bridge.main(["queue", "process-status"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "line 29" in payload["groups"][0]["log_tail"]
+    assert "line 0" not in payload["groups"][0]["log_tail"]
+    assert payload["groups"][0]["log_tail_truncated"] is True
+    assert payload["groups"][1]["log_error"] == "log file unavailable"
+
+
 def test_pi_bridge_process_status_marks_stale_progress_interrupted(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     run_dir = tmp_path / "state" / "processing" / "run1"

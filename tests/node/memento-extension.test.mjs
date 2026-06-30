@@ -13,6 +13,7 @@ const repoRoot = resolve(__dirname, '..', '..');
 const configModuleUrl = pathToFileURL(join(repoRoot, 'extensions', 'memento-config.js')).href;
 const workerModuleUrl = pathToFileURL(join(repoRoot, 'extensions', 'memento-process-worker.mjs')).href;
 const extensionPath = join(repoRoot, 'extensions', 'memento.ts');
+const uiPath = join(repoRoot, 'extensions', 'memento-ui.ts');
 const workerPath = join(repoRoot, 'extensions', 'memento-process-worker.mjs');
 
 async function withCleanPiBridgeEnv(fn) {
@@ -103,6 +104,12 @@ test('memento TypeScript extension wires lifecycle events, tools, queue behavior
   assert.match(source, /join\(__dirname, "memento-process-worker\.mjs"\)/);
   assert.match(source, /pi\.exec\("node", \[worker, \.\.\.workerArgs\]/);
   assert.match(source, /processQueueModel \? \["--processor-model", config\.processQueueModel/);
+
+  const uiSource = await readFile(uiPath, 'utf8');
+  assert.match(uiSource, /groupStatus === "running" && group\.log_tail/, 'running groups should render a live log tail');
+  assert.match(uiSource, /inspected\.log_tail/, 'inspected groups should render a larger log tail');
+  assert.match(uiSource, /group\.log_error/, 'groups should render missing or unavailable log errors');
+  assert.match(uiSource, /function formatLogTail/, 'log-tail formatting should stay factored and bounded');
 });
 
 test('curator result parser accepts sentinel-wrapped JSON and classifies malformed output', async () => {
@@ -119,13 +126,7 @@ test('curator result parser accepts sentinel-wrapped JSON and classifies malform
   assert.match(parseCuratorResult('group-1', `${RESULT_START}{"group_id":"group-1","processed_capture_ids":[],"status":"bogus"}${RESULT_END}`).error, /valid status/);
 });
 
-test('process worker can run deterministic fake-curator flow through process-start and process-finalize', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'memento-worker-test-'));
-  const fakeBin = join(root, 'bin');
-  const runBase = join(root, 'runs');
-  await mkdir(fakeBin, { recursive: true });
-  await mkdir(runBase, { recursive: true });
-
+async function writeFakeBridge(root, runBase) {
   const fakeBridge = join(root, 'fake-bridge.mjs');
   await writeFile(fakeBridge, `
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -170,6 +171,17 @@ if (args.includes('process-start')) {
   process.exitCode = 2;
 }
 `);
+  return fakeBridge;
+}
+
+test('process worker can run deterministic fake-curator flow through process-start and process-finalize', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'memento-worker-test-'));
+  const fakeBin = join(root, 'bin');
+  const runBase = join(root, 'runs');
+  await mkdir(fakeBin, { recursive: true });
+  await mkdir(runBase, { recursive: true });
+
+  const fakeBridge = await writeFakeBridge(root, runBase);
   const fakePython = join(fakeBin, 'python3');
   await writeFile(fakePython, `#!/usr/bin/env bash\nexec node ${JSON.stringify(fakeBridge)} "$@"\n`);
   await chmod(fakePython, 0o755);
@@ -195,4 +207,38 @@ if (args.includes('process-start')) {
   assert.equal(progress.status, 'finalized');
   assert.equal(progress.groups[0].status, 'processed_no_notes');
   assert.ok(existsSync(join(runBase, 'run-1', 'group-1-log.md')));
+});
+
+test('process worker streams real curator stdout and stderr into the group log', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'memento-worker-stream-test-'));
+  const fakeBin = join(root, 'bin');
+  const runBase = join(root, 'runs');
+  await mkdir(fakeBin, { recursive: true });
+  await mkdir(runBase, { recursive: true });
+
+  const fakeBridge = await writeFakeBridge(root, runBase);
+  const fakePython = join(fakeBin, 'python3');
+  await writeFile(fakePython, `#!/usr/bin/env bash\nexec node ${JSON.stringify(fakeBridge)} "$@"\n`);
+  await chmod(fakePython, 0o755);
+  const fakePi = join(fakeBin, 'pi');
+  await writeFile(fakePi, `#!/usr/bin/env bash\necho "curator stdout before result"\necho "curator stderr line" >&2\ncat <<'JSON'\n<<<MEMENTO_PROCESS_RESULT_START>>>\n{"group_id":"group-1","processed_capture_ids":["cap-1"],"status":"processed","created":[{"title":"Note","path":"notes/note.md"}],"skipped_duplicates":[]}\n<<<MEMENTO_PROCESS_RESULT_END>>>\nJSON\n`);
+  await chmod(fakePi, 0o755);
+
+  const result = spawnSync('node', [workerPath, '--id', 'cap-1'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, MEMENTO_TEST_RUN_BASE: runBase },
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.dequeued, 1);
+
+  const resultJson = JSON.parse(await readFile(join(runBase, 'run-1', 'group-1-result.json'), 'utf8'));
+  assert.equal(resultJson.status, 'processed');
+  assert.deepEqual(resultJson.created, [{ title: 'Note', path: 'notes/note.md' }]);
+  const log = await readFile(join(runBase, 'run-1', 'group-1-log.md'), 'utf8');
+  assert.match(log, /Streaming stdout\/stderr/);
+  assert.match(log, /\[stdout\] curator stdout before result/);
+  assert.match(log, /\[stderr\] curator stderr line/);
 });

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createWriteStream, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -99,6 +99,65 @@ function mementoSkillFallback() {
   return `Capture durable session knowledge as atomic Memento Vault notes. Use the deterministic deduplication context first and read candidate notes with memento_get before creating overlapping memories. Use memento_capture for each durable idea with note_type, tags, and certainty (1-5). Notes should cover one decision, discovery, pattern, bugfix, or tool insight. Sanitize secrets. Skip raw transcript fragments, command chatter, session-path boilerplate, and non-durable details. Zero notes is acceptable when there is no reusable future context.`;
 }
 
+function appendBounded(buffer, chunk, maxBytes) {
+  const next = `${buffer}${chunk}`;
+  if (Buffer.byteLength(next, 'utf8') <= maxBytes) return next;
+  let start = Math.max(0, next.length - maxBytes);
+  let sliced = next.slice(start);
+  while (Buffer.byteLength(sliced, 'utf8') > maxBytes && start < next.length) {
+    start += 1;
+    sliced = next.slice(start);
+  }
+  return sliced;
+}
+
+function writeLiveLogHeader(stream, group) {
+  stream.write(`# Curator output\n\n`);
+  stream.write(`Streaming stdout/stderr while the curator runs. The Pi TUI shows a bounded tail from this file.\n\n`);
+  stream.write(`Group: ${group.group_id}\n\n`);
+  stream.write(`## live stream\n\n`);
+}
+
+async function runCuratorProcess(args, curatorCwd, group) {
+  const env = {
+    ...process.env,
+    MEMENTO_PI_AUTO_CAPTURE: 'false',
+    MEMENTO_PI_CAPTURE_QUEUE: 'false',
+    MEMENTO_PI_PROCESSOR: 'true',
+  };
+  const child = spawn('pi', args, { cwd: curatorCwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const logStream = createWriteStream(group.log_markdown, { flags: 'w', encoding: 'utf8' });
+  writeLiveLogHeader(logStream, group);
+  const maxBuffer = 50 * 1024 * 1024;
+  let stdout = '';
+  let stderr = '';
+  let outputTruncated = false;
+  const appendChunk = (label, raw) => {
+    const chunk = String(raw ?? '');
+    if (!chunk) return;
+    logStream.write(`${nowIso()} [${label}] ${chunk}`);
+    const before = label === 'stdout' ? stdout : stderr;
+    const after = appendBounded(before, chunk, maxBuffer);
+    if (Buffer.byteLength(before + chunk, 'utf8') > maxBuffer) outputTruncated = true;
+    if (label === 'stdout') stdout = after;
+    else stderr = after;
+  };
+  child.stdout?.on('data', (chunk) => appendChunk('stdout', chunk));
+  child.stderr?.on('data', (chunk) => appendChunk('stderr', chunk));
+  const result = await new Promise((resolveResult) => {
+    let spawnError;
+    child.on('error', (error) => {
+      spawnError = error;
+      appendChunk('error', String(error?.message ?? error));
+    });
+    child.on('close', (code, signal) => resolveResult({ status: code, signal, error: spawnError }));
+  });
+  logStream.write(`\n## process exit\n\nstatus: ${result.status ?? 'unknown'}${result.signal ? ` · signal: ${result.signal}` : ''}\n`);
+  if (outputTruncated) logStream.write('\nOutput exceeded the in-memory parser buffer; only the latest 50 MiB was retained for result parsing.\n');
+  await new Promise((resolveStream) => logStream.end(resolveStream));
+  return { ...result, stdout, stderr, outputTruncated };
+}
+
 async function realCurator(group) {
   const input = readFileSync(group.input_markdown, 'utf8');
   const curatorCwd = group.cwd || repoRoot;
@@ -117,19 +176,8 @@ async function realCurator(group) {
   const model = process.env.MEMENTO_PI_PROCESS_QUEUE_MODEL || group.processor_model;
   if (model) args.push('--model', model);
   args.push(`@${promptPath}`);
-  const result = spawnSync('pi', args, {
-    cwd: curatorCwd,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      MEMENTO_PI_AUTO_CAPTURE: 'false',
-      MEMENTO_PI_CAPTURE_QUEUE: 'false',
-      MEMENTO_PI_PROCESSOR: 'true',
-    },
-    maxBuffer: 50 * 1024 * 1024,
-  });
+  const result = await runCuratorProcess(args, curatorCwd, group);
   rmSync(promptPath, { force: true });
-  writeFileSync(group.log_markdown, `# Curator output\n\n## stdout\n\n${result.stdout}\n\n## stderr\n\n${result.stderr}\n`);
   const parsedResult = parseCuratorResult(group.group_id, result.stdout);
   const failureRecord = {
     group_id: group.group_id,
@@ -140,6 +188,14 @@ async function realCurator(group) {
     result_state: parsedResult.state,
     ...(parsedResult.protocol ? { result_protocol: parsedResult.protocol } : {}),
   };
+  if (result.error) {
+    writeResultFile(group.result_json, {
+      ...failureRecord,
+      error: `pi curator failed to start: ${String(result.error?.message ?? result.error)}`,
+      result_state: 'spawn_error',
+    });
+    return;
+  }
   if (result.status !== 0) {
     writeResultFile(group.result_json, {
       ...failureRecord,
