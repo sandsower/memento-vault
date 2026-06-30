@@ -21,8 +21,8 @@ A runner that needs to record what happened during a run (gate results, proofs, 
 | Pre-run context packet | `memento_session_context` (preferred); `memento_briefing`, `memento_recall`, `memento_tool_context` as host primitives | read | fail-open: `should_inject: false` / empty packet |
 | Explicit search | `memento_search` | read | fail-open: miss envelope with structured reason |
 | Explicit get | `memento_get` | read | fail-open: `{"error": ...}` dict, never an exception |
-| Post-run lesson capture | `memento_capture` (session summary), `memento_store` (single atomic lesson) | write | error dict; runner proceeds, surfaces the failure |
-| Batch synthesis | `memento_synthesize_failures` dry-run reports; optional approved lesson writes; per-run `memento_capture` + Inception consolidation remains supported | write | schema error for raw dumps; write errors are surfaced and runner proceeds |
+| Post-run lesson capture | `memento_capture_run_lesson` (typed automated-run lesson candidate), `memento_capture` (session summary), `memento_store` (single atomic lesson) | write | queue result or error dict; runner proceeds, surfaces the failure |
+| Batch synthesis | `memento_synthesize_failures` dry-run reports; optional approved typed lesson writes; per-run `memento_capture` + Inception consolidation remains supported | write | schema error for raw dumps; write errors are surfaced and runner proceeds |
 | Availability check | `memento_status`, `memento-vault health` | read | safe partial dict; never raises, never prints secrets |
 
 ## Provider operations
@@ -82,7 +82,33 @@ Search results and packets expose note paths (`notes/<slug>.md`). A runner MAY r
 
 ### Post-run lesson capture
 
-After a run, a runner SHOULD capture what was learned — as a sanitized summary, not a transcript:
+After a run, a runner SHOULD capture what was learned — as a typed sanitized lesson candidate, not a transcript or run ledger.
+
+#### Typed automated-run lesson candidate schema
+
+`memento_capture_run_lesson` accepts a single `automated_run_lesson_candidate/v1` object. Required fields are `external_system`, `run_id`, `title`, and `evidence_summary`. The full normalized shape is:
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `external_system` | yes | Runner/orchestrator producing the lesson (for example `rondo` or `beislid`) |
+| `run_id` | yes | External run identifier for provenance; stored as the note `session_id` when a write is approved |
+| `artifact_refs` | no | References/URLs/IDs for external artifacts; references only, not artifact bodies |
+| `repo`, `project`, `branch`, `ticket`, `slice` | no | Source context for the run/work slice |
+| `outcome` | no | One of `success`, `failure`, `blocked`, `partial`, `canceled`, or `unknown` |
+| `lesson_type` | no | One of `memory`, `process`, `agent`, `harness`, `environment`, `requirement`, `quality`, `architecture`, or `tooling` |
+| `title` | yes | Curated note title |
+| `body` | no | Curated lesson body; defaults to `evidence_summary` |
+| `note_type` | no | Managed frontmatter note type (`discovery` default; also `pattern`, `decision`, `bugfix`, `tool`, `architecture`) |
+| `evidence_summary` | yes | Compact sanitized evidence summary, not raw output |
+| `certainty` | no | Integer 1–5 (`2` default) |
+| `validity_context` | no | Conditions under which the lesson remains true |
+| `related_refs` | no | External issue/PR/note refs related to the lesson |
+
+By default, `approve_write` is false and the normalized candidate is queued for review outside the vault in local runtime state. A curated note is written only when `approve_write: true` is passed. Approved writes use managed frontmatter (`source: mcp`, `origin: automated_run_lesson:<external_system>`, `project`, `branch`, `session_id`) and include an `## Automated run provenance` body section with the external system, run id, artifact refs, source context, outcome, lesson type, evidence summary, and related refs.
+
+The schema rejects raw run stores, ledgers, event streams, transcripts, proof/evidence dumps, stdout/stderr/log fields, oversized multiline strings, and patch/diff blobs. Secret-shaped strings are redacted defense-in-depth, but callers MUST still sanitize before calling.
+
+For older integrations, `memento_capture` remains available for session-summary style capture:
 
 ```json
 memento_capture({

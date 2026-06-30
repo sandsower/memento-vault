@@ -23,6 +23,7 @@ from memento.mcp_server import (
     _bind_host,
     _strip_injection,
     memento_capture,
+    memento_capture_run_lesson,
     memento_contradictions,
     memento_daily_snapshot,
     memento_get,
@@ -811,7 +812,94 @@ class TestContradictionInspectionTool:
         mock_inspect.assert_called_once_with("redis cache", limit=7, min_certainty=3)
 
 
-# --- memento_synthesize_failures ---
+# --- memento_capture_run_lesson / memento_synthesize_failures ---
+
+
+class TestMementoCaptureRunLesson:
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_queues_typed_lesson_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("memento.automated_run_lessons.RUNTIME_DIR", str(tmp_path / "runtime"))
+
+        result = memento_capture_run_lesson(
+            {
+                "external_system": "rondo",
+                "run_id": "run-123",
+                "artifact_refs": ["rondo://runs/run-123/proof-summary"],
+                "repo": "sandsower/memento-vault",
+                "project": "/repo/memento-vault",
+                "branch": "vic/mem-7",
+                "ticket": "MEM-7",
+                "slice": "lesson-capture",
+                "outcome": "failure",
+                "lesson_type": "harness",
+                "title": "Harness retries need stable artifact refs",
+                "evidence_summary": "The retry summary was useful only after it included a stable artifact reference.",
+                "certainty": 3,
+                "validity_context": "Rondo artifact references remain stable.",
+                "related_refs": ["GH-95"],
+            }
+        )
+
+        assert result["queued"] is True
+        queue_path = Path(result["queue_path"])
+        record = json.loads(queue_path.read_text().splitlines()[0])
+        candidate = record["candidate"]
+        assert candidate["schema"] == "automated_run_lesson_candidate/v1"
+        assert candidate["run_id"] == "run-123"
+        assert candidate["artifact_refs"] == ["rondo://runs/run-123/proof-summary"]
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_approved_write_creates_provenance_note(self, tmp_vault):
+        result = memento_capture_run_lesson(
+            {
+                "external_system": "beislid",
+                "run_id": "run-456",
+                "artifact_refs": ["https://rondo.example/runs/run-456/summary"],
+                "project": "/repo/memento-vault",
+                "branch": "vic/mem-7",
+                "ticket": "MEM-7",
+                "outcome": "blocked",
+                "lesson_type": "process",
+                "title": "Work contracts should name proof surfaces",
+                "evidence_summary": "A blocked run became actionable only after the proof surface was named.",
+                "certainty": 3,
+            },
+            approve_write=True,
+        )
+
+        assert result["queued"] is False
+        assert result["created"] is True
+        content = (tmp_vault / result["path"]).read_text()
+        assert "source: mcp" in content
+        assert "origin: automated_run_lesson:beislid" in content
+        assert "session_id: run-456" in content
+        assert "## Automated run provenance" in content
+        assert "- External system: beislid" in content
+        assert "- Run ID: `run-456`" in content
+        assert "https://rondo.example/runs/run-456/summary" in content
+
+    def test_rejects_raw_logs_and_patch_blobs(self):
+        raw_log = memento_capture_run_lesson(
+            {
+                "external_system": "rondo",
+                "run_id": "run-raw",
+                "title": "Bad raw log",
+                "evidence_summary": "summary",
+                "log": "full stdout dump",
+            }
+        )
+        patch_blob = memento_capture_run_lesson(
+            {
+                "external_system": "rondo",
+                "run_id": "run-diff",
+                "title": "Bad diff",
+                "evidence_summary": "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+new",
+            }
+        )
+
+        assert raw_log["reason"] == "invalid_automated_run_lesson"
+        assert raw_log["path"] == "candidate.log"
+        assert patch_blob["reason"] == "invalid_automated_run_lesson"
 
 
 class TestMementoSynthesizeFailures:
@@ -851,9 +939,10 @@ class TestMementoSynthesizeFailures:
         note_path = tmp_vault / result["write_results"][0]["path"]
         content = note_path.read_text()
         assert "type: discovery" in content
-        assert "origin: mcp_batch_failure_synthesis" in content
-        assert 'tags: ["automation", "batch-failure", "memory", "memory_not_retrieved"]' in content
+        assert "origin: automated_run_lesson:memento_synthesize_failures" in content
+        assert 'tags: ["automation", "automated-run", "memory", "failure"]' in content
         assert "session_id: batch-1" in content
+        assert "## Automated run provenance" in content
 
 
 # --- memento_store ---

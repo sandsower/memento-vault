@@ -314,6 +314,19 @@ def smart_store(
     return _call_tool("memento_store_smart", args, timeout=timeout)
 
 
+def capture_run_lesson(
+    candidate: dict,
+    approve_write: bool = False,
+    timeout: int = 30,
+) -> dict:
+    """Queue or explicitly write a typed automated-run lesson candidate."""
+    return _call_tool(
+        "memento_capture_run_lesson",
+        {"candidate": candidate, "approve_write": approve_write},
+        timeout=timeout,
+    )
+
+
 def synthesize_failures(
     run_summaries: list[dict] | dict,
     approve_writes: bool = False,
