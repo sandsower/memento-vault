@@ -843,7 +843,7 @@ def test_recent_pi_bridge_success_records_do_not_warn():
             [
                 json.dumps(
                     {
-                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "ts": datetime.now().isoformat(timespec="seconds") + "Z",
                         "hook": "pi-bridge",
                         "action": "triage_spawned",
                     }
