@@ -11,6 +11,7 @@ tracker:
   active_states:
     - Todo
     - In Progress
+    - In Review
   terminal_states:
     - Done
     - Closed
@@ -25,7 +26,8 @@ hooks:
   after_create: |
     git clone --depth 1 git@github.com:sandsower/memento-vault.git .
     python3 -m venv .venv
-    .venv/bin/pip install --quiet -e '.[mcp]' pytest ruff
+    .venv/bin/python -m pip install --quiet --upgrade pip setuptools wheel
+    .venv/bin/python -m pip install --quiet -e '.[mcp]' pytest ruff
   timeout_ms: 300000
 gates:
   - name: ruff-check
@@ -50,6 +52,33 @@ pi:
   command: pi
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
+model_routing:
+  defaults:
+    tier: standard
+    mode: prefer
+  tiers:
+    light:
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-chat
+    standard:
+      # Subscription tier has been upgraded; prefer Codex for primary workflow
+      # execution and retain OpenRouter only as fallback capacity.
+      - adapter: pi
+        model: openai-codex/gpt-5.4-mini
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-v4-pro
+    heavy:
+      - adapter: pi
+        model: openai-codex/gpt-5.5
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-v4-pro
+      - adapter: pi
+        model: openrouter/z-ai/glm-5.2
+    frontier:
+      - adapter: pi
+        model: openai-codex/gpt-5.5
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-v4-pro
 action_policy:
   command: beislid
   run_mode: unattended-auto
@@ -89,3 +118,14 @@ Instructions:
 6. Out-of-scope discoveries become new Linear issues in the same project,
    linked `related`, never scope expansion.
 7. Final message reports completed actions and blockers only.
+
+## In Review babysit loop
+
+When the ticket status is `In Review`, do not start new feature work. Treat the run as a review/babysit loop:
+
+1. Find the linked/open PR for the issue branch; if none exists, move the ticket back to `In Progress`, update the workpad with the missing review artifact, and stop.
+2. Read top-level PR comments, inline review comments, reviews, CI/check status, mergeability, and branch freshness.
+3. Treat every actionable human/bot comment as blocking until it is fixed and replied to, or an explicit justified pushback is posted.
+4. Run the configured workflow gates before every babysit-owned push or merge boundary.
+5. Only leave the ticket in `In Review` when the PR is reviewable, checks are green or legitimately pending human review, and unresolved actionable feedback is recorded in the workpad. If changes are required, move the ticket to `In Progress` and execute the fixes end-to-end.
+6. Never merge automatically from this prompt-level fallback unless the workflow has native release-loop support and action policy permits it.
