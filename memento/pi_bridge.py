@@ -2027,13 +2027,22 @@ def _transcript_context_lines(transcript_info: dict[str, Any]) -> list[str]:
     reason = str(transcript_info.get("reason") or ("included" if included else "unknown"))
     lines = ["", "## Transcript context"]
     if included:
-        if transcript_info.get("partial") or reason == "over_size_cap":
+        if reason == "over_size_cap":
             lines.extend(
                 [
                     "- Mode: partial cleaned transcript from an oversize source.",
                     f"- Raw size: {transcript_info.get('size_bytes', 'unknown')} bytes; cleaned excerpt: {transcript_info.get('cleaned_char_count', 'unknown')} chars capped at {transcript_info.get('cleaned_cap_chars', 'unknown')} chars.",
                     "- Quality limit: transcript evidence is capped; prefer durable facts corroborated by queued captures, file context, or deduplication context.",
                     "- Curator instruction: if the capped transcript and queued captures do not provide enough context for a high-quality note, return processed_no_notes with a discard_reason explaining the oversize partial transcript.",
+                ]
+            )
+        elif transcript_info.get("partial"):
+            lines.extend(
+                [
+                    "- Mode: partial cleaned transcript capped during transcript cleaning.",
+                    f"- Raw size: {transcript_info.get('size_bytes', 'unknown')} bytes; cleaned excerpt: {transcript_info.get('cleaned_char_count', 'unknown')} chars capped at {transcript_info.get('cleaned_cap_chars', 'unknown')} chars.",
+                    "- Quality limit: transcript evidence is capped; prefer durable facts corroborated by queued captures, file context, or deduplication context.",
+                    "- Curator instruction: if the capped transcript and queued captures do not provide enough context for a high-quality note, return processed_no_notes with a discard_reason explaining the partial transcript.",
                 ]
             )
         else:
@@ -2152,6 +2161,9 @@ def _transcript_context_for_group(
 
     transcript_path = Path(str(group["session_id"])).expanduser()
     base_info: dict[str, Any] = {"path": str(transcript_path), "included": False}
+    if not _transcript_path_allowed(transcript_path):
+        return {**base_info, "reason": "outside_allowed_roots"}, ""
+
     if not transcript_path.exists():
         return {**base_info, "reason": "missing"}, ""
 
@@ -2160,9 +2172,6 @@ def _transcript_context_for_group(
     except OSError as exc:
         return {**base_info, "reason": "unreadable", "error": str(exc)}, ""
     base_info["size_bytes"] = size
-
-    if not _transcript_path_allowed(transcript_path):
-        return {**base_info, "reason": "outside_allowed_roots"}, ""
 
     try:
         transcript_markdown = _clean_transcript(transcript_path, total_cap=cleaned_cap_chars)
@@ -2203,7 +2212,7 @@ def _transcript_status_counts(groups: list[dict[str, Any]]) -> dict[str, Any]:
             partial += 1
         if reason == "over_size_cap":
             oversize += 1
-        if reason in {"missing", "no_session_id", "empty_cleaned_transcript", "unreadable"}:
+        if reason in {"missing", "no_session_id", "empty_cleaned_transcript", "unreadable", "outside_allowed_roots"}:
             missing += 1
     return {
         "transcript_included_group_count": included,
@@ -2281,6 +2290,8 @@ def _clean_transcript(path: Path, per_tool_cap: int = 3000, total_cap: int = 200
                 entry = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(entry, dict):
+                continue
             entry_type = entry.get("type")
             timestamp = entry.get("timestamp") or ""
             rendered: list[str] = []
@@ -2301,11 +2312,20 @@ def _clean_transcript(path: Path, per_tool_cap: int = 3000, total_cap: int = 200
             block = "\n".join(rendered).strip()
             if not block:
                 continue
+            if total_cap > 0:
+                remaining = total_cap - total
+                if remaining <= 0:
+                    lines.append("\n[transcript truncated by memento processor]")
+                    break
+                if len(block) > remaining:
+                    trimmed = block[:remaining].rstrip()
+                    if trimmed:
+                        lines.append(trimmed)
+                    lines.append("\n[transcript truncated by memento processor]")
+                    total = total_cap
+                    break
             lines.append(block)
             total += len(block)
-            if total > total_cap:
-                lines.append("\n[transcript truncated by memento processor]")
-                break
     return "\n\n".join(lines)
 
 

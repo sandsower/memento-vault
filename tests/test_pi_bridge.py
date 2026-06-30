@@ -1590,7 +1590,9 @@ def test_pi_bridge_process_start_includes_oversize_cleaned_transcript_with_quali
 
 def test_pi_bridge_process_start_marks_missing_transcript_fallbacks(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
-    missing_file = tmp_path / "sessions" / "missing.jsonl"
+    transcript_root = tmp_path / "sessions"
+    monkeypatch.setenv("MEMENTO_PI_TRANSCRIPT_ROOTS", str(transcript_root))
+    missing_file = transcript_root / "missing.jsonl"
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
     queue_file.parent.mkdir(parents=True)
     queue_file.write_text(
@@ -1885,6 +1887,8 @@ def test_pi_bridge_process_start_skips_transcript_outside_allowed_roots(capsys, 
     run_dir = tmp_path / "state" / "processing" / started["run_id"]
     manifest = json.loads((run_dir / "manifest.json").read_text())
     group = manifest["groups"][0]
+    assert started["missing_transcript_group_count"] == 1
+    assert started["transcript_fallback_group_count"] == 1
     assert group["transcript"]["included"] is False
     assert group["transcript"]["reason"] == "outside_allowed_roots"
     packet = (run_dir / "inputs" / f"{group['group_id']}.md").read_text()
@@ -2242,6 +2246,43 @@ def test_pi_bridge_clean_transcript_drops_thinking_and_caps_tool_results(tmp_pat
     assert "secret reasoning" not in cleaned
     assert "thinkingSignature" not in cleaned
     assert "encrypted_content" not in cleaned
+
+
+def test_pi_bridge_clean_transcript_skips_non_object_json_lines(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        json.dumps(["not", "an", "object"])
+        + "\n"
+        + json.dumps(
+            {
+                "type": "message",
+                "message": {"role": "user", "content": [{"type": "text", "text": "usable content"}]},
+            }
+        )
+        + "\n"
+    )
+
+    cleaned = pi_bridge._clean_transcript(session_file)
+    assert "usable content" in cleaned
+
+
+def test_pi_bridge_clean_transcript_caps_before_appending_current_block(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "message",
+                "message": {"role": "user", "content": [{"type": "text", "text": "x" * 100}]},
+            }
+        )
+        + "\n"
+    )
+
+    cleaned = pi_bridge._clean_transcript(session_file, total_cap=40)
+    body, marker = cleaned.split("[transcript truncated by memento processor]")
+    assert marker == ""
+    assert len(body.rstrip()) <= 40
+    assert "x" * 100 not in cleaned
 
 
 def test_pi_bridge_process_finalize_rejects_created_note_paths_outside_vault(capsys, tmp_path, monkeypatch):
