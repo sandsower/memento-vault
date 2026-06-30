@@ -270,6 +270,15 @@ function processArgsFromParams(params: Record<string, unknown>): string[] {
 	return args;
 }
 
+function searchArgsFromParams(params: Record<string, unknown>, cwd: string): string[] {
+	const args = ["search", "--query", String(params.query ?? ""), "--cwd", cwd, "--concrete", String(params.concrete ?? "auto")];
+	if (typeof params.limit === "number" && Number.isFinite(params.limit) && params.limit > 0) args.push("--limit", String(Math.floor(params.limit)));
+	if (typeof params.detail_level === "string" && ["brief", "summary", "full"].includes(params.detail_level)) args.push("--detail-level", params.detail_level);
+	if (params.include_content) args.push("--include-content");
+	if (typeof params.token_budget === "number" && Number.isFinite(params.token_budget)) args.push("--token-budget", String(Math.floor(params.token_budget)));
+	return args;
+}
+
 function withProcessLimit(args: string[], maxCaptures: number): string[] {
 	const capped = Math.max(1, Math.floor(maxCaptures));
 	const next = [...args];
@@ -749,7 +758,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "memento_search",
 		label: "Memento Search",
-		description: "Search memento vault notes before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Use memento_get after search when you need full content for a returned path; do not use search to read a known note path.",
+		description: "Search memento vault notes before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Use memento_get after search when you need full content for a returned path, or request detail_level=full/include_content when you need inline content; do not use search to read a known note path.",
 		parameters: Type.Object({
 			query: Type.String({ description: "Natural-language question or exact identifier to search for" }),
 			limit: Type.Optional(Type.Number({ description: "Maximum results, default 5" })),
@@ -758,19 +767,16 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				Type.Literal("true"),
 				Type.Literal("false"),
 			], { description: "Literal search mode: auto, true, or false. Keep auto for identifier-like queries such as file names, function names, config keys, or error strings." })),
+			detail_level: Type.Optional(Type.Union([
+				Type.Literal("brief"),
+				Type.Literal("summary"),
+				Type.Literal("full"),
+			], { description: "Response shape: brief, summary, or full. Summary is the default compact snippet view." })),
+			include_content: Type.Optional(Type.Boolean({ description: "Include note content alongside the selected detail level." })),
+			token_budget: Type.Optional(Type.Integer({ description: "Approximate token budget for returned content, default 2000" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const payload = await runJson(pi, ctx, [
-				"search",
-				"--query",
-				params.query,
-				"--limit",
-				String(params.limit ?? 5),
-				"--cwd",
-				ctx.cwd,
-				"--concrete",
-				params.concrete ?? "auto",
-			]);
+			const payload = await runJson(pi, ctx, searchArgsFromParams(params as Record<string, unknown>, ctx.cwd));
 			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
 		},
 	});

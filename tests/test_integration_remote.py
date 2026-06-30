@@ -118,7 +118,7 @@ class TestRemoteIntegration:
     def test_search_returns_content(self):
         from memento.remote_client import search
 
-        results = search("xylophone")
+        results = search("xylophone", include_content=True)
         assert len(results) >= 1
         # Verify content field is present (option A — inline content)
         assert any(r.get("content") for r in results)
