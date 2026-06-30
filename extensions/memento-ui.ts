@@ -6,6 +6,7 @@ export type MementoQueuedCaptureSummary = {
 	id: string;
 	title: string;
 	excerpt: string;
+	generatedSummary?: string;
 	project: string;
 	branch: string;
 	size: string;
@@ -105,6 +106,7 @@ export function renderMementoPanelLines(
 	if (state.confirmDiscard && state.discardCapture) {
 		body.push("Discard this queued capture? It will be archived, not deleted. y/N", "");
 		body.push(`ID: ${state.discardCapture.id}`, `Title: ${fitLine(state.discardCapture.title, 84)}`);
+		if (state.discardCapture.generatedSummary) body.push(`Summary: ${fitLine(state.discardCapture.generatedSummary, 78)}`);
 		if (state.discardCapture.excerpt) body.push(`Excerpt: ${fitLine(state.discardCapture.excerpt, 78)}`);
 		body.push(
 			`Project: ${state.discardCapture.project}${state.discardCapture.branch ? `/${state.discardCapture.branch}` : ""}`,
@@ -215,6 +217,8 @@ export function formatQueueLines(queue?: Record<string, unknown>, options: { lim
 		lines.push(`${cursor} ${check} ${compactId(id)} · ${size} · ${String(capture.reason ?? capture.source_event ?? "capture")} · ${created}`);
 		lines.push(`    ${fitLine(String(capture.title ?? "Untitled capture"), 88)}`);
 		lines.push(`    ${fitLine(`${project}${branch ? `/${branch}` : ""}${session ? ` · session: ${shortPath(session, 42)}` : ""}`, 88)}`);
+		const generatedSummary = generatedSummaryText(capture);
+		if (generatedSummary) lines.push(`    Summary: ${fitLine(generatedSummary, 79)}`);
 		const excerpt = String(capture.body_excerpt ?? "");
 		if (excerpt) lines.push(`    ${fitLine(excerpt, 88)}`);
 		const lifecycle = recordValue(capture.lifecycle);
@@ -314,10 +318,17 @@ export function queueCaptureSummary(queue?: Record<string, unknown>, index = 0):
 		id,
 		title: String(capture.title ?? "Untitled capture"),
 		excerpt: String(capture.body_excerpt ?? ""),
+		generatedSummary: generatedSummaryText(capture),
 		project: String(metadata?.project ?? metadata?.project_slug ?? "unknown"),
 		branch: String(metadata?.branch ?? ""),
 		size: formatSize(capture.body_size_bytes ?? capture.body_char_count),
 	};
+}
+
+function generatedSummaryText(capture: Record<string, unknown>): string {
+	const generated = recordValue(capture.generated_summary);
+	if (!generated || generated.status !== "ok") return "";
+	return String(generated.text ?? "").trim();
 }
 
 function summaryLine(status?: Record<string, unknown>, queue?: Record<string, unknown>, process?: Record<string, unknown>): string {

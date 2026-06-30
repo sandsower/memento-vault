@@ -27,6 +27,7 @@ async function withCleanPiBridgeEnv(fn) {
     'MEMENTO_PI_CAPTURE_QUEUE',
     'MEMENTO_PI_PROCESS_QUEUE',
     'MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE',
+    'MEMENTO_PI_QUEUE_SUMMARIES',
     'MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES',
     'MEMENTO_PI_PROCESS_QUEUE_MODEL',
     'MEMENTO_PI_MAX_INJECTED_CHARS',
@@ -60,6 +61,7 @@ test('memento-config layers defaults, home config, project config, package confi
 
     process.env.HOME = home;
     process.env.MEMENTO_PI_TOOL_CONTEXT = 'true';
+    process.env.MEMENTO_PI_QUEUE_SUMMARIES = 'true';
     process.env.MEMENTO_PI_MAX_INJECTED_CHARS = '1234';
     const { loadConfig } = await import(`${configModuleUrl}?case=config-layering-${Date.now()}`);
     const payload = loadConfig(project);
@@ -69,6 +71,7 @@ test('memento-config layers defaults, home config, project config, package confi
     assert.equal(payload.config.toolContext, true);
     assert.equal(payload.config.autoCapture, true);
     assert.equal(payload.config.processQueueOnSessionClose, true);
+    assert.equal(payload.config.queueSummaries, true);
     assert.equal(payload.config.processQueueMaxCaptures, 9);
     assert.equal(payload.config.processQueueModel, null);
     assert.equal(payload.config.maxInjectedChars, 1234);
@@ -101,6 +104,9 @@ test('memento TypeScript extension wires lifecycle events, tools, queue behavior
   assert.match(source, /memento_process requires explicit selection/);
   assert.match(source, /withProcessLimit\(processArgsFromParams/);
   assert.match(source, /config\.processQueueMaxCaptures/);
+  assert.match(source, /config\.queueSummaries/);
+  assert.match(source, /--include-generated-summaries/);
+  assert.match(source, /includeGeneratedSummaries/);
   assert.match(source, /join\(__dirname, "memento-process-worker\.mjs"\)/);
   assert.match(source, /pi\.exec\("node", \[worker, \.\.\.workerArgs\]/);
   assert.match(source, /processQueueModel \? \["--processor-model", config\.processQueueModel/);

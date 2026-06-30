@@ -13,6 +13,7 @@ export const defaultConfig = {
 	captureQueue: false,
 	processQueue: true,
 	processQueueOnSessionClose: false,
+	queueSummaries: false,
 	processQueueMaxCaptures: 3,
 	processQueueModel: DEFAULT_PROCESS_QUEUE_MODEL,
 	maxInjectedChars: 4000,
@@ -44,7 +45,7 @@ function bridgeConfigFrom(raw) {
 	const partial = {};
 	if (!candidate || typeof candidate !== "object") return partial;
 
-	for (const key of ["enabled", "briefing", "promptRecall", "toolContext", "autoCapture", "captureQueue", "processQueue", "processQueueOnSessionClose"]) {
+	for (const key of ["enabled", "briefing", "promptRecall", "toolContext", "autoCapture", "captureQueue", "processQueue", "processQueueOnSessionClose", "queueSummaries"]) {
 		if (typeof candidate[key] === "boolean") partial[key] = candidate[key];
 	}
 	for (const key of ["maxInjectedChars", "maxToolContextPerSession", "processQueueMaxCaptures"]) {
@@ -65,6 +66,7 @@ function applyEnv(config) {
 		captureQueue: envBool("MEMENTO_PI_CAPTURE_QUEUE") ?? config.captureQueue,
 		processQueue: envBool("MEMENTO_PI_PROCESS_QUEUE") ?? config.processQueue,
 		processQueueOnSessionClose: envBool("MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE") ?? config.processQueueOnSessionClose,
+		queueSummaries: envBool("MEMENTO_PI_QUEUE_SUMMARIES") ?? config.queueSummaries,
 		processQueueMaxCaptures: envInt("MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES") ?? config.processQueueMaxCaptures,
 		processQueueModel: process.env.MEMENTO_PI_PROCESS_QUEUE_MODEL ?? config.processQueueModel,
 		maxInjectedChars: envInt("MEMENTO_PI_MAX_INJECTED_CHARS") ?? config.maxInjectedChars,

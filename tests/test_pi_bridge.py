@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from memento.lifecycle import LifecycleResult
+from memento.llm import LLMResult
 from memento import pi_bridge
 
 
@@ -1386,6 +1387,183 @@ def test_pi_bridge_queue_list_includes_review_metadata_without_body(capsys, tmp_
     assert capture["body_size_bytes"] == len(body.encode("utf-8"))
     assert capture["body_kb"] > 0
     assert capture["body_excerpt"].startswith("First important sentence. Second line")
+
+
+def test_pi_bridge_queue_list_can_generate_and_cache_summaries(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "title": "Queued note",
+                "body": "We decided the queue needs cached generated summaries for review cards.",
+                "metadata": {"project": "repo", "branch": "b", "session_id": "s1"},
+            }
+        )
+        + "\n"
+    )
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch(
+            "memento.llm.llm_complete",
+            return_value=LLMResult("Queue review cards should use cached generated summaries.", ok=True),
+        ) as mock_llm,
+    ):
+        code = pi_bridge.main(["queue", "list", "--include-generated-summaries"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    capture = payload["captures"][0]
+    assert "body" not in capture
+    assert capture["generated_summary"]["status"] == "ok"
+    assert capture["generated_summary"]["text"] == "Queue review cards should use cached generated summaries."
+    assert capture["generated_summary"]["cached"] is False
+    assert payload["generated_summaries"]["error_count"] == 0
+    assert mock_llm.call_count == 1
+
+    cache_file = tmp_path / "state" / "queue" / "pi-capture-summaries.json"
+    assert cache_file.exists()
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.llm.llm_complete", side_effect=AssertionError("summary should come from cache")),
+    ):
+        code = pi_bridge.main(["queue", "list", "--include-generated-summaries"])
+    assert code == 0
+    cached_payload = json.loads(capsys.readouterr().out)
+    assert cached_payload["captures"][0]["generated_summary"]["cached"] is True
+    assert cached_payload["captures"][0]["generated_summary"]["text"] == capture["generated_summary"]["text"]
+
+
+def test_pi_bridge_queue_summary_retry_after_transient_error(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps({"id": "q1", "title": "Queued note", "body": "Summarize this", "metadata": {"project": "repo"}})
+        + "\n"
+    )
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch(
+            "memento.llm.llm_complete",
+            side_effect=[LLMResult("", ok=False, error="temporary outage"), LLMResult("Recovered summary.", ok=True)],
+        ) as mock_llm,
+    ):
+        assert pi_bridge.main(["queue", "list", "--include-generated-summaries"]) == 0
+        first = json.loads(capsys.readouterr().out)
+        assert first["captures"][0]["generated_summary"]["status"] == "error"
+
+        assert pi_bridge.main(["queue", "list", "--include-generated-summaries"]) == 0
+        second = json.loads(capsys.readouterr().out)
+
+    assert second["captures"][0]["generated_summary"]["status"] == "ok"
+    assert second["captures"][0]["generated_summary"]["text"] == "Recovered summary."
+    assert mock_llm.call_count == 2
+
+
+def test_pi_bridge_queue_summary_sanitizes_prompt_context_and_cached_text(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    api_key = "sk-abcdefghijklmnopqrstuvwxyz"
+    github_token = "ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ"
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": f"Queued note {api_key}",
+                "reason": f"Bearer {api_key}",
+                "source_event": "tool",
+                "body": f"Body contains {api_key}",
+                "metadata": {"project": "repo", "branch": f"feature/{github_token}"},
+            }
+        )
+        + "\n"
+    )
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.llm.llm_complete", return_value=LLMResult(f"Summary repeated {api_key}", ok=True)) as mock_llm,
+    ):
+        assert pi_bridge.main(["queue", "list", "--include-generated-summaries"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    prompt = mock_llm.call_args.args[0]
+    assert api_key not in prompt
+    assert github_token not in prompt
+    assert "[REDACTED_API_KEY]" in prompt
+    assert "[REDACTED_GITHUB_TOKEN]" in prompt
+    assert payload["captures"][0]["generated_summary"]["text"] == "Summary repeated [REDACTED_API_KEY]"
+
+
+def test_pi_bridge_queue_summary_sanitizes_cached_text(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    api_key = "sk-abcdefghijklmnopqrstuvwxyz"
+    capture = {
+        "id": "q1",
+        "title": "Queued note",
+        "body": "Summarize this",
+        "metadata": {"project": "repo"},
+    }
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(json.dumps(capture) + "\n")
+    digest = pi_bridge._capture_summary_digest(capture)
+    cache_file = tmp_path / "state" / "queue" / "pi-capture-summaries.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "captures": {
+                    "q1": {
+                        "status": "ok",
+                        "text": f"Cached summary leaked {api_key}",
+                        "digest": digest,
+                    }
+                },
+            }
+        )
+    )
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.llm.llm_complete", side_effect=AssertionError("summary should come from cache")),
+    ):
+        assert pi_bridge.main(["queue", "list", "--include-generated-summaries"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["captures"][0]["generated_summary"]["text"] == "Cached summary leaked [REDACTED_API_KEY]"
+    assert api_key not in cache_file.read_text()
+
+
+def test_pi_bridge_queue_summary_cache_invalidates_when_capture_changes(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps({"id": "q1", "title": "Queued note", "body": "Original body", "metadata": {"project": "repo"}})
+        + "\n"
+    )
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.llm.llm_complete", return_value=LLMResult("Original summary.", ok=True)),
+    ):
+        assert pi_bridge.main(["queue", "list", "--include-generated-summaries"]) == 0
+    capsys.readouterr()
+
+    queue_file.write_text(
+        json.dumps({"id": "q1", "title": "Queued note", "body": "Changed body", "metadata": {"project": "repo"}}) + "\n"
+    )
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.llm.llm_complete", return_value=LLMResult("Changed summary.", ok=True)) as mock_llm,
+    ):
+        assert pi_bridge.main(["queue", "list", "--include-generated-summaries"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["captures"][0]["generated_summary"]["text"] == "Changed summary."
+    assert mock_llm.call_count == 1
 
 
 def test_pi_bridge_process_start_repeated_ids_selects_exact_captures(capsys, tmp_path, monkeypatch):

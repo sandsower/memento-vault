@@ -38,6 +38,7 @@ interface BridgeConfig {
 	captureQueue: boolean;
 	processQueue: boolean;
 	processQueueOnSessionClose: boolean;
+	queueSummaries: boolean;
 	processQueueMaxCaptures: number;
 	processQueueModel?: string | null;
 	maxInjectedChars: number;
@@ -633,8 +634,15 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		return latestStatus;
 	}
 
-	async function loadQueue(ctx: ExtensionContext, includeBody = false, limit = 20) {
-		latestQueue = await runJson(pi, ctx, ["queue", "list", "--limit", String(limit), ...(includeBody ? ["--include-body"] : [])]);
+	async function loadQueue(ctx: ExtensionContext, includeBody = false, limit = 20, includeGeneratedSummaries = config.queueSummaries) {
+		latestQueue = await runJson(pi, ctx, [
+			"queue",
+			"list",
+			"--limit",
+			String(limit),
+			...(includeBody ? ["--include-body"] : []),
+			...(includeGeneratedSummaries ? ["--include-generated-summaries"] : []),
+		]);
 		return latestQueue;
 	}
 
@@ -981,9 +989,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			limit: Type.Optional(Type.Number({ description: "Maximum queued captures to list, default 20" })),
 			includeBody: Type.Optional(Type.Boolean({ description: "Include queued capture bodies" })),
+			includeGeneratedSummaries: Type.Optional(Type.Boolean({ description: "Generate/cache concise model summaries for visible queued captures" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const payload = await loadQueue(ctx, Boolean(params.includeBody), params.limit ?? 20);
+			const payload = await loadQueue(ctx, Boolean(params.includeBody), params.limit ?? 20, params.includeGeneratedSummaries ?? config.queueSummaries);
 			await refreshAmbientWidget(ctx);
 			return { content: [textPart(formatQueueLines(payload).join("\n"))], details: payload };
 		},
@@ -1260,7 +1269,8 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		description: "Show queued memento pi capture candidates",
 		handler: async (args, ctx) => {
 			const includeBody = args.includes("--include-body");
-			const payload = await loadQueue(ctx, includeBody, 20);
+			const includeGeneratedSummaries = config.queueSummaries || args.includes("--include-generated-summaries");
+			const payload = await loadQueue(ctx, includeBody, 20, includeGeneratedSummaries);
 			await refreshAmbientWidget(ctx);
 			ctx.ui.setWidget("memento-queue", formatQueueLines(payload, { limit: 10 }), { placement: "aboveEditor" });
 		},
