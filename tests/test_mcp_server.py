@@ -28,6 +28,7 @@ from memento.mcp_server import (
     memento_get,
     memento_list,
     memento_preserve,
+    memento_query,
     memento_reindex,
     memento_search,
     memento_status,
@@ -372,6 +373,136 @@ class TestMementoSearch:
         assert result["metadata"]["expandable_paths"] == ["notes/long.md"]
 
 
+# --- memento_query ---
+
+
+class TestMementoQuery:
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_filters_by_project_type_tag_certainty_and_branch(self, tmp_vault):
+        note = tmp_vault / "notes" / "filtered.md"
+        note.write_text(
+            "---\n"
+            "title: Filtered note\n"
+            "type: decision\n"
+            "tags: [api, cache]\n"
+            "source: mcp\n"
+            "certainty: 4\n"
+            "project: /repo/api\n"
+            "branch: feat/query\n"
+            "date: 2026-06-10T09:30\n"
+            "session_id: sess-1\n"
+            "---\n\nBody should not be returned.\n"
+        )
+        (tmp_vault / "notes" / "other.md").write_text(
+            "---\ntitle: Other\ntype: discovery\ntags: [api]\ncertainty: 2\nproject: /repo/api\n---\n"
+        )
+
+        with patch("memento.mcp_server.log_retrieval"):
+            result = memento_query(
+                project="/repo/api",
+                note_type="decision",
+                tag="cache",
+                certainty_min=3,
+                branch="feat/query",
+            )
+
+        assert result["metadata"]["matched_notes"] == 1
+        assert result["results"] == [
+            {
+                "path": "notes/filtered.md",
+                "title": "Filtered note",
+                "type": "decision",
+                "tags": ["api", "cache"],
+                "source": "mcp",
+                "certainty": 4,
+                "date": "2026-06-10T09:30",
+                "project": "/repo/api",
+                "branch": "feat/query",
+                "session_id": "sess-1",
+            }
+        ]
+        assert "Body should not be returned" not in json.dumps(result)
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_aggregates_counts_by_tag_source_and_month(self, tmp_vault):
+        (tmp_vault / "notes" / "one.md").write_text(
+            "---\ntitle: One\ntype: discovery\ntags: [api, cache]\nsource: mcp\ndate: 2026-06-10T09:30\n---\n"
+        )
+        (tmp_vault / "notes" / "two.md").write_text(
+            "---\ntitle: Two\ntype: bugfix\ntags: [api]\nsource: session\ndate: 2026-06-20T09:30\n---\n"
+        )
+        (tmp_vault / "notes" / "three.md").write_text(
+            "---\ntitle: Three\ntype: decision\ntags: [cache]\nsource: mcp\ndate: 2026-05-01T09:30\n---\n"
+        )
+
+        with patch("memento.mcp_server.log_retrieval"):
+            by_tag = memento_query(aggregate_by="tag")
+            by_source = memento_query(aggregate_by="source")
+            by_month = memento_query(aggregate_by="month")
+
+        assert by_tag["aggregations"] == [
+            {"value": "api", "count": 2},
+            {"value": "cache", "count": 2},
+        ]
+        assert by_source["aggregations"] == [{"value": "mcp", "count": 2}, {"value": "session", "count": 1}]
+        assert by_month["aggregations"] == [{"value": "2026-06", "count": 2}, {"value": "2026-05", "count": 1}]
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_filters_by_date_range(self, tmp_vault):
+        (tmp_vault / "notes" / "old.md").write_text(
+            "---\ntitle: Old\ntype: discovery\ntags: [api]\ndate: 2026-05-31T23:59\n---\n"
+        )
+        (tmp_vault / "notes" / "inside.md").write_text(
+            "---\ntitle: Inside\ntype: discovery\ntags: [api]\ndate: 2026-06-15T12:00\n---\n"
+        )
+        (tmp_vault / "notes" / "new.md").write_text(
+            "---\ntitle: New\ntype: discovery\ntags: [api]\ndate: 2026-07-01T00:00\n---\n"
+        )
+
+        with patch("memento.mcp_server.log_retrieval"):
+            result = memento_query(date_start="2026-06-01", date_end="2026-06-30")
+
+        assert [entry["path"] for entry in result["results"]] == ["notes/inside.md"]
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_rejects_invalid_typed_parameters(self, tmp_vault):
+        with patch("memento.mcp_server.log_retrieval"):
+            bad_aggregate = memento_query(aggregate_by="sql")
+            bad_certainty = memento_query(certainty_min=5, certainty_max=2)
+            bad_date = memento_query(date_start="last week")
+
+        assert "aggregate_by" in bad_aggregate["error"]
+        assert bad_aggregate["metadata"]["valid"] is False
+        assert "certainty_min" in bad_certainty["error"]
+        assert "date_start" in bad_date["error"]
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_lists_recent_sessions_for_project(self, tmp_vault):
+        (tmp_vault / "notes" / "session-a-old.md").write_text(
+            "---\ntitle: A old\ntype: discovery\ntags: [api]\nproject: /repo/api\nbranch: main\n"
+            "date: 2026-06-01T10:00\nsession_id: sess-a\n---\n"
+        )
+        (tmp_vault / "notes" / "session-a-new.md").write_text(
+            "---\ntitle: A new\ntype: discovery\ntags: [api]\nproject: /repo/api\nbranch: feat/a\n"
+            "date: 2026-06-03T10:00\nsession_id: sess-a\n---\n"
+        )
+        (tmp_vault / "notes" / "session-b.md").write_text(
+            "---\ntitle: B\ntype: discovery\ntags: [api]\nproject: /repo/api\nbranch: feat/b\n"
+            "date: 2026-06-05T10:00\nsession_id: sess-b\n---\n"
+        )
+        (tmp_vault / "notes" / "other-project.md").write_text(
+            "---\ntitle: Other\ntype: discovery\ntags: [api]\nproject: /repo/other\n"
+            "date: 2026-06-06T10:00\nsession_id: sess-c\n---\n"
+        )
+
+        with patch("memento.mcp_server.log_retrieval"):
+            result = memento_query(recent_sessions_project="/repo/api")
+
+        assert [entry["session_id"] for entry in result["recent_sessions"]] == ["sess-b", "sess-a"]
+        assert result["recent_sessions"][1]["note_count"] == 2
+        assert result["recent_sessions"][1]["branches"] == ["feat/a", "main"]
+
+
 # --- MCP tool inventory docs drift ---
 
 
@@ -406,6 +537,14 @@ class TestToolSelectionDescriptions:
         assert "exact identifier" in doc
         assert "Do not use this to read a known note path/name" in doc
         assert "call memento_get" in doc
+
+    def test_query_docstring_differentiates_structured_queries_from_search(self):
+        doc = memento_query.__doc__ or ""
+
+        assert "typed metadata filters and aggregations" in doc
+        assert "without retrieving full note bodies" in doc
+        assert "not a semantic" in doc
+        assert "use memento_search" in doc
 
     def test_get_docstring_guides_search_then_get(self):
         doc = memento_get.__doc__ or ""

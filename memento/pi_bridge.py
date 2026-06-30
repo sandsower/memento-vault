@@ -40,6 +40,7 @@ from memento.search import (
     shape_search_results,
 )
 from memento.contradictions import inspect_contradictions
+from memento.query import query_notes
 from memento import store as store_module
 from memento.remote_client import get as remote_get
 from memento.remote_client import is_remote, search_envelope as remote_search_envelope, status as remote_status
@@ -901,6 +902,39 @@ def _search(
         token_budget=token_budget,
     )
     return shaped
+
+
+def _query(
+    project: str,
+    note_type: str,
+    tag: str,
+    source: str,
+    certainty_min: int | None,
+    certainty_max: int | None,
+    date_start: str,
+    date_end: str,
+    branch: str,
+    session_id: str,
+    aggregate_by: str,
+    recent_sessions_project: str,
+    limit: int,
+) -> dict[str, Any]:
+    return query_notes(
+        get_vault(),
+        project=project,
+        note_type=note_type,
+        tag=tag,
+        source=source,
+        certainty_min=certainty_min,
+        certainty_max=certainty_max,
+        date_start=date_start,
+        date_end=date_end,
+        branch=branch,
+        session_id=session_id,
+        aggregate_by=aggregate_by,
+        recent_sessions_project=recent_sessions_project,
+        limit=limit,
+    )
 
 
 def _contradictions(topic: str, limit: int, min_certainty: int = 2) -> dict[str, Any]:
@@ -2281,6 +2315,21 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--include-content", action="store_true")
     search.add_argument("--token-budget", type=int, default=2000)
 
+    query = sub.add_parser("query", help="Run typed metadata filters and aggregations")
+    query.add_argument("--project", default="")
+    query.add_argument("--note-type", default="")
+    query.add_argument("--tag", default="")
+    query.add_argument("--source", default="")
+    query.add_argument("--certainty-min", type=int, default=None)
+    query.add_argument("--certainty-max", type=int, default=None)
+    query.add_argument("--date-start", default="")
+    query.add_argument("--date-end", default="")
+    query.add_argument("--branch", default="")
+    query.add_argument("--session-id", default="")
+    query.add_argument("--aggregate-by", default="")
+    query.add_argument("--recent-sessions-project", default="")
+    query.add_argument("--limit", type=int, default=20)
+
     contradictions = sub.add_parser("contradictions", help="Inspect contradictory or superseded notes")
     contradictions.add_argument("--topic", default="")
     contradictions.add_argument("--limit", type=int, default=20)
@@ -2424,6 +2473,24 @@ def main(argv: list[str] | None = None) -> int:
             args.detail_level,
             args.include_content,
             args.token_budget,
+        )
+    if args.command == "query":
+        return _run_json(
+            "query",
+            _query,
+            args.project,
+            args.note_type,
+            args.tag,
+            args.source,
+            args.certainty_min,
+            args.certainty_max,
+            args.date_start,
+            args.date_end,
+            args.branch,
+            args.session_id,
+            args.aggregate_by,
+            args.recent_sessions_project,
+            args.limit,
         )
     if args.command == "contradictions":
         return _run_json("contradictions", _contradictions, args.topic, args.limit, args.min_certainty)

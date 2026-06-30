@@ -193,6 +193,42 @@ def search(
     return results if isinstance(results, list) else []
 
 
+def query(
+    project: str = "",
+    note_type: str = "",
+    tag: str = "",
+    source: str = "",
+    certainty_min: int | None = None,
+    certainty_max: int | None = None,
+    date_start: str = "",
+    date_end: str = "",
+    branch: str = "",
+    session_id: str = "",
+    aggregate_by: str = "",
+    recent_sessions_project: str = "",
+    limit: int = 20,
+    timeout: int = 30,
+) -> dict:
+    """Run a typed metadata query against the remote vault."""
+    args = {
+        "project": project,
+        "note_type": note_type,
+        "tag": tag,
+        "source": source,
+        "certainty_min": certainty_min,
+        "certainty_max": certainty_max,
+        "date_start": date_start,
+        "date_end": date_end,
+        "branch": branch,
+        "session_id": session_id,
+        "aggregate_by": aggregate_by,
+        "recent_sessions_project": recent_sessions_project,
+        "limit": limit,
+    }
+    result = _call_tool("memento_query", args, timeout=timeout)
+    return result if isinstance(result, dict) else {"results": []}
+
+
 def contradictions(topic: str, limit: int = 20, min_certainty: int = 2, timeout: int = 30) -> dict:
     """Inspect remote notes for disagreement and supersession candidates."""
     result = _call_tool(
