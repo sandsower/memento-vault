@@ -47,10 +47,12 @@ memento-vault install --reinstall
 Check local vault/install health at any time:
 
 ```bash
-memento-vault health         # concise read-only diagnostics
-memento-vault doctor         # alias for health
-memento-vault health --json  # structured output for automation
-memento-vault health --deep  # opt-in live integration probes
+memento-vault health               # concise read-only diagnostics
+memento-vault doctor               # alias for health
+memento-vault retrieval-report      # local retrieval debug dashboard/report
+memento-vault health --json        # structured output for automation
+memento-vault health --deep        # opt-in live integration probes
+memento-vault retrieval-report --html --output /tmp/retrieval.html
 ```
 
 Warnings exit 0 by default; failures exit 1. Use `--strict` if automation should fail on warnings too. The command is read-only: it reports suggested repairs such as `./install.sh --reinstall`, but does not modify vault/config files. JSON output includes `automation_memory` readiness metadata for runner probes without contacting remote services by default. Add `--deep` to run bounded live probes against configured integrations.
@@ -320,7 +322,7 @@ Past knowledge flows back into active sessions via three hooks:
 - **Prompt recall** (UserPromptSubmit): searches each prompt against the vault and surfaces matching notes before Claude processes it. Adaptive pipeline: fast BM25 path for confident matches, deep path (PRF, RRF, multi-hop wikilink-following, cross-encoder reranking) for low-confidence queries.
 - **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. It uses cwd-relative path keywords, directory-level BM25 caching, rate limiting, a higher relevance threshold, and a positive project-match gate because file-read context is unsolicited.
 
-All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, agent/bridge files, and vendor directories. Enable `retrieval_log: true` or `MEMENTO_DEBUG=1` and run `tools/analyze-retrieval.py` to audit tool-context skip reasons, injection rate, injected paths, and latency.
+All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, agent/bridge files, and vendor directories. Enable `retrieval_log: true` or `MEMENTO_DEBUG=1` and run `memento-vault retrieval-report` (or `tools/analyze-retrieval.py`) to audit tool-context skip reasons, injection rate, injected paths, latency, and recent candidate snapshots.
 
 ### Performance
 
