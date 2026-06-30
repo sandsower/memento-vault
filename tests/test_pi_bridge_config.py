@@ -43,7 +43,7 @@ def test_pi_bridge_defaults_enable_briefing_recall_tool_context_and_capture(tmp_
     assert config["promptRecall"] is True
     assert config["toolContext"] is True
     assert config["autoCapture"] is True
-    assert config["captureQueue"] is True
+    assert config["captureQueue"] is False
     assert config["processQueue"] is True
 
 

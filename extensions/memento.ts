@@ -18,7 +18,7 @@ import {
 } from "./memento-ui.js";
 import { defaultConfig as bridgeDefaultConfig, loadConfig } from "./memento-config.js";
 import { decorateStatusDetails } from "./memento-status.js";
-import { addSessionPointerDigest, sanitizeEventDetails, summarizeMessages, summarizeSessionEntries } from "./transcript-sanitizer.js";
+import { addSessionPointerDigest } from "./transcript-sanitizer.js";
 
 interface LifecycleResult {
 	should_inject: boolean;
@@ -372,6 +372,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	let toolContextCount = 0;
 	let lastLifecycleReason = "startup";
 	let lifecycleCaptureQueued = false;
+	let lifecycleTriageStarted = false;
 	let footerDetailsPinned = false;
 	let latestStatus: Record<string, unknown> | undefined;
 	let latestQueue: Record<string, unknown> | undefined;
@@ -548,6 +549,47 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		return payload;
 	}
 
+	async function runLifecycleTriage(ctx: ExtensionContext, reason: string, sourceEvent: string) {
+		if (!config.enabled || !config.autoCapture) return undefined;
+		if (lifecycleTriageStarted) {
+			lastLifecycleReason = `${sourceEvent}-triage-skipped:already-started`;
+			await refreshAmbientWidget(ctx);
+			return { skipped: true, reason: "already-started", source_event: sourceEvent };
+		}
+		if (isProcessorSession()) {
+			lastLifecycleReason = `${sourceEvent}-triage-skipped:processor_session`;
+			await refreshAmbientWidget(ctx);
+			return { skipped: true, reason: "processor_session", source_event: sourceEvent };
+		}
+		const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
+		const payload = await runJson(
+			pi,
+			ctx,
+			[
+				"triage",
+				"--transcript-path",
+				sessionFile,
+				"--cwd",
+				ctx.cwd,
+				"--session-id",
+				sessionFile,
+				"--reason",
+				reason,
+				"--source-event",
+				sourceEvent,
+			],
+			{ operation: "triage", cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
+		);
+		lifecycleTriageStarted = lifecycleTriageStarted || Boolean(payload.queued) || Boolean(payload.detached);
+		lastLifecycleReason = payload.error
+			? `triage-error:${String(payload.error)}`
+			: payload.skipped
+				? `${sourceEvent}-triage-skipped:${String(payload.reason ?? "unspecified")}`
+				: `${sourceEvent}-triage-started`;
+		await refreshAmbientWidget(ctx);
+		return payload;
+	}
+
 	function statusDetails(payload: Record<string, unknown>) {
 		return decorateStatusDetails(payload, {
 			config,
@@ -596,6 +638,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		briefingInjected = false;
 		toolContextCount = 0;
 		lifecycleCaptureQueued = false;
+		lifecycleTriageStarted = false;
 		lastLifecycleReason = config.enabled ? "ready" : "disabled";
 		ctx.ui.setStatus("memento", config.enabled ? "🧠 …" : "🧠 off");
 		if (ctx.hasUI) ctx.ui.setWidget("memento", undefined);
@@ -679,26 +722,26 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		};
 	});
 
-	pi.on("agent_end", async (event, ctx) => {
-		const body = summarizeMessages((event as { messages?: unknown }).messages);
-		await queueLifecycleCapture(ctx, "Pi session candidate capture", body, "agent_end", "agent_end", event);
+	pi.on("agent_end", async (_event, ctx) => {
+		if (!config.enabled || !config.autoCapture) return;
+		lastLifecycleReason = "agent_end-triage-deferred";
+		await refreshAmbientWidget(ctx);
 	});
 
 	pi.on("session_before_compact", async (_event, ctx) => {
-		const body = summarizeSessionEntries(ctx.sessionManager.getEntries(), "is about to compact the current session");
-		await queueLifecycleCapture(ctx, "Pi pre-compaction candidate capture", body, "session_before_compact", "session_before_compact", _event);
+		await runLifecycleTriage(ctx, "session_before_compact", "session_before_compact");
 	});
 
-	pi.on("session_compact", async (event, ctx) => {
-		const body = `Pi compacted the current session.\n\nEvent details:\n${sanitizeEventDetails(event, 2000)}`;
-		await queueLifecycleCapture(ctx, "Pi compaction candidate capture", body, "session_compact", "session_compact", event);
+	pi.on("session_compact", async (_event, ctx) => {
+		if (!config.enabled || !config.autoCapture) return;
+		lastLifecycleReason = lifecycleTriageStarted ? "session_compact-after-triage" : "session_compact-triage-deferred";
+		await refreshAmbientWidget(ctx);
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
-		if (!lifecycleCaptureQueued) {
+		if (!lifecycleTriageStarted) {
 			const reason = String((event as { reason?: unknown }).reason ?? "shutdown");
-			const body = summarizeSessionEntries(ctx.sessionManager.getEntries(), `session is shutting down (${reason})`);
-			await queueLifecycleCapture(ctx, "Pi shutdown candidate capture", body, `session_shutdown:${reason}`, "session_shutdown", event);
+			await runLifecycleTriage(ctx, `session_shutdown:${reason}`, "session_shutdown");
 		}
 		ctx.ui.setStatus("memento", "🧠 stopped");
 		if (ctx.hasUI) ctx.ui.setWidget("memento", undefined);

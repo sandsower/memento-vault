@@ -102,7 +102,7 @@ def test_pi_bridge_status_outputs_json(capsys, tmp_path, monkeypatch):
     assert payload["qmd_available"] is False
     assert payload["queued_capture_count"] == 0
     assert payload["lifecycle"]["auto_capture"] is True
-    assert payload["lifecycle"]["capture_queue"] is True
+    assert payload["lifecycle"]["capture_queue"] is False
 
 
 def test_pi_bridge_status_surfaces_recent_bridge_failures(capsys, tmp_path, monkeypatch):
@@ -462,6 +462,132 @@ def test_pi_bridge_session_state_write_failure_is_nonfatal(capsys, tmp_path, mon
         pi_bridge._write_capture_session_state("s1", "/repo", {"session_id": "s1"})
 
     assert "could not write pi capture session state" in capsys.readouterr().err
+
+
+def test_pi_bridge_triage_spawns_sessionend_hook_for_pi_transcript(capsys, tmp_path, monkeypatch):
+    state_home = tmp_path / "state"
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    transcript = sessions / "pi-session.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session", "id": "pi-s1", "cwd": "/repo", "gitBranch": "feature/pi"}),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {"role": "user", "content": [{"type": "text", "text": "Fix the bug"}]},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "Fixed it."}]},
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(state_home))
+    monkeypatch.setenv("MEMENTO_PI_TRANSCRIPT_ROOTS", str(sessions))
+
+    popen_calls = []
+
+    class FakeProcess:
+        pid = 4242
+
+    def fake_popen(args, stdin, stdout, stderr, cwd, env, start_new_session):
+        popen_calls.append(
+            {
+                "args": args,
+                "stdin": stdin.read().decode(),
+                "stdout": stdout,
+                "stderr": stderr,
+                "cwd": cwd,
+                "env": env,
+                "start_new_session": start_new_session,
+            }
+        )
+        return FakeProcess()
+
+    with patch("memento.pi_bridge.subprocess.Popen", side_effect=fake_popen):
+        code = pi_bridge.main(
+            [
+                "triage",
+                "--transcript-path",
+                str(transcript),
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "pi-s1",
+                "--reason",
+                "session_shutdown:quit",
+                "--source-event",
+                "session_shutdown",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queued"] is False
+    assert payload["started"] is True
+    assert payload["detached"] is True
+    assert payload["pid"] == 4242
+    assert payload["transcript_path"] == str(transcript.resolve())
+    assert popen_calls and popen_calls[0]["env"]["MEMENTO_AGENT"] == "pi"
+    assert popen_calls[0]["start_new_session"] is True
+    hook_payload = json.loads(popen_calls[0]["stdin"])
+    assert hook_payload == {"session_id": "pi-s1", "transcript_path": str(transcript.resolve()), "cwd": "/repo"}
+    assert "memento-triage.py" in popen_calls[0]["args"][-1]
+    assert not (state_home / "queue" / "pi-captures.jsonl").exists()
+
+    audit_entries = [
+        json.loads(line) for line in (state_home / "audit" / "pi-lifecycle-audit.jsonl").read_text().splitlines()
+    ]
+    assert audit_entries[-1]["decision"] == "triage_spawned"
+    assert audit_entries[-1]["source_event"] == "session_shutdown"
+
+    health_entries = [
+        json.loads(line) for line in Path(pi_bridge.store_module.TRIAGE_HEALTH_LOG_PATH).read_text().splitlines()
+    ]
+    assert health_entries[-1]["hook"] == "pi-bridge"
+    assert health_entries[-1]["action"] == "triage_spawned"
+    assert health_entries[-1]["session_id"] == "pi-s1"
+
+
+def test_pi_bridge_triage_missing_transcript_logs_health(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+
+    code = pi_bridge.main(
+        [
+            "triage",
+            "--transcript-path",
+            "unknown",
+            "--cwd",
+            "/repo",
+            "--session-id",
+            "pi-s1",
+            "--source-event",
+            "session_shutdown",
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "queued": False,
+        "skipped": True,
+        "reason": "missing_transcript",
+        "source_event": "session_shutdown",
+        "session_id": "pi-s1",
+    }
+    health_entries = [
+        json.loads(line) for line in Path(pi_bridge.store_module.TRIAGE_HEALTH_LOG_PATH).read_text().splitlines()
+    ]
+    assert health_entries[-1]["hook"] == "pi-bridge"
+    assert health_entries[-1]["action"] == "triage_missing_transcript"
+    assert health_entries[-1]["session_id"] == "pi-s1"
 
 
 def test_pi_bridge_lifecycle_after_manual_capture_skips_low_signal_body(capsys, tmp_path, monkeypatch):

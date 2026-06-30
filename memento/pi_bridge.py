@@ -349,6 +349,23 @@ def _write_capture_session_state(session_id: str, cwd: str, state: dict[str, Any
         print(f"[memento] warning: could not write pi capture session state: {exc}", file=sys.stderr)
 
 
+def _triage_payload_dir() -> Path:
+    return _state_root() / "triage" / "payloads"
+
+
+def _triage_hook_script() -> Path:
+    return Path(__file__).resolve().parents[1] / "hooks" / "memento-triage.py"
+
+
+def _write_triage_payload(payload: dict[str, Any]) -> Path:
+    payload_dir = _triage_payload_dir()
+    payload_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    payload_path = payload_dir / f"pi-triage-{stamp}-{uuid.uuid4().hex[:8]}.json"
+    _atomic_write_text(payload_path, json.dumps(payload, ensure_ascii=False) + "\n")
+    return payload_path
+
+
 def _capture_audit_file(vault: Path | None = None) -> Path:
     return _state_root() / "audit" / "pi-lifecycle-audit.jsonl"
 
@@ -668,6 +685,7 @@ def _bridge_health_status() -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
     latest: dict[str, Any] | None = None
     latest_ts: datetime | None = None
+    failure_actions = {"triage_missing_transcript", "triage_disallowed_transcript"}
     if log_path.exists():
         for rec in _iter_jsonl(log_path):
             if rec.get("hook") != "pi-bridge":
@@ -678,6 +696,9 @@ def _bridge_health_status() -> dict[str, Any]:
             except ValueError:
                 continue
             if ts < cutoff:
+                continue
+            action = str(rec.get("action") or "")
+            if not (action.endswith("_failed") or action in failure_actions):
                 continue
             failure = {
                 "ts": rec.get("ts"),
@@ -768,7 +789,7 @@ def _status(cwd: str = "") -> dict[str, Any]:
             "prompt_recall": get_config().get("prompt_recall", True),
             "tool_context": get_config().get("tool_context", True),
             "auto_capture": True,
-            "capture_queue": True,
+            "capture_queue": False,
         },
     }
 
@@ -1134,6 +1155,228 @@ def _capture(
             )
         _commit_and_reindex_locked(vault, f"pi: capture {clean_title[:80]}")
     return {"path": str(note_path.relative_to(vault)), "title": clean_title, "queued": False}
+
+
+def _triage(
+    transcript_path: str,
+    cwd: str = "",
+    session_id: str = "",
+    reason: str = "session_shutdown",
+    source_event: str = "session_shutdown",
+    detached: bool = True,
+) -> dict[str, Any]:
+    """Start SessionEnd-style triage for a persisted Pi transcript.
+
+    The TypeScript extension calls this command at session boundaries. The
+    bridge validates that the path is a local Pi transcript, then invokes the
+    existing Claude SessionEnd triage hook with ``MEMENTO_AGENT=pi`` so both
+    agents share substantiality scoring, fleeting/project writes, structured
+    note extraction, health logging, auto-commit, reindex, and Inception hooks.
+    """
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    raw_path = str(transcript_path or "").strip()
+    effective_session_id = str(session_id or "").strip() or raw_path or "unknown"
+    metadata = {
+        "operation": "triage",
+        "backend": "python3",
+        "cwd": cwd,
+        "project": _bridge_project_slug(cwd),
+        "session_id": effective_session_id,
+        "source_event": source_event,
+        "reason": reason,
+    }
+    if not raw_path or raw_path == "unknown":
+        log_triage_health("triage_missing_transcript", hook="pi-bridge", error="missing transcript path", **metadata)
+        return {
+            "queued": False,
+            "skipped": True,
+            "reason": "missing_transcript",
+            "source_event": source_event,
+            "session_id": effective_session_id,
+        }
+
+    path = Path(raw_path).expanduser()
+    try:
+        resolved = path.resolve()
+    except (OSError, ValueError) as exc:
+        log_triage_health(
+            "triage_disallowed_transcript", hook="pi-bridge", error=exc, transcript_path=raw_path, **metadata
+        )
+        return {"queued": False, "skipped": True, "reason": "invalid_transcript_path", "error": str(exc)}
+
+    if not resolved.exists():
+        log_triage_health(
+            "triage_missing_transcript",
+            hook="pi-bridge",
+            error="transcript file not found",
+            transcript_path=str(resolved),
+            **metadata,
+        )
+        return {
+            "queued": False,
+            "skipped": True,
+            "reason": "missing_transcript",
+            "source_event": source_event,
+            "session_id": effective_session_id,
+            "transcript_path": str(resolved),
+        }
+    if not _transcript_path_allowed(resolved):
+        log_triage_health(
+            "triage_disallowed_transcript",
+            hook="pi-bridge",
+            error="transcript_path outside allowed Pi roots",
+            transcript_path=str(resolved),
+            **metadata,
+        )
+        return {
+            "queued": False,
+            "skipped": True,
+            "reason": "transcript_path_not_allowed",
+            "source_event": source_event,
+            "session_id": effective_session_id,
+            "transcript_path": str(resolved),
+        }
+
+    state = _load_capture_session_state(effective_session_id, cwd)
+    if state.get("pi_triage_transcript_path") == str(resolved) and state.get("pi_triage_started_at"):
+        log_triage_health(
+            "triage_duplicate_skipped",
+            hook="pi-bridge",
+            transcript_path=str(resolved),
+            started_at=state.get("pi_triage_started_at"),
+            **metadata,
+        )
+        return {
+            "queued": False,
+            "skipped": True,
+            "reason": "already_started",
+            "source_event": source_event,
+            "session_id": effective_session_id,
+            "transcript_path": str(resolved),
+        }
+
+    hook_script = _triage_hook_script()
+    if not hook_script.exists():
+        log_triage_health(
+            "triage_spawn_failed",
+            hook="pi-bridge",
+            error="memento-triage.py not found",
+            transcript_path=str(resolved),
+            **metadata,
+        )
+        return {"queued": False, "error": f"triage hook not found: {hook_script}"}
+
+    payload = {"session_id": effective_session_id, "transcript_path": str(resolved), "cwd": cwd}
+    env = os.environ.copy()
+    env["MEMENTO_AGENT"] = "pi"
+    env.setdefault("MEMENTO_PI_TRANSCRIPT_ROOTS", os.environ.get("MEMENTO_PI_TRANSCRIPT_ROOTS", ""))
+
+    try:
+        if detached:
+            payload_path = _write_triage_payload(payload)
+            stdin_handle = payload_path.open("rb")
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, str(hook_script)],
+                    stdin=stdin_handle,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    cwd=str(hook_script.parent.parent),
+                    env=env,
+                    start_new_session=True,
+                )
+            finally:
+                stdin_handle.close()
+            state.update(
+                {
+                    "session_id": effective_session_id,
+                    "cwd": cwd,
+                    "pi_triage_started_at": now,
+                    "pi_triage_transcript_path": str(resolved),
+                    "pi_triage_payload_path": str(payload_path),
+                    "pi_triage_pid": process.pid,
+                    "pi_triage_source_event": source_event,
+                    "pi_triage_reason": reason,
+                    "last_lifecycle_decision": "pi_triage_spawned",
+                }
+            )
+            _write_capture_session_state(effective_session_id, cwd, state)
+            _append_capture_audit(
+                {
+                    "ts": now,
+                    "decision": "triage_spawned",
+                    "queued": False,
+                    "skipped": False,
+                    "session_id": effective_session_id,
+                    "cwd": cwd,
+                    "source_event": source_event,
+                    "reason": reason,
+                    "transcript_path": str(resolved),
+                    "payload_path": str(payload_path),
+                    "pid": process.pid,
+                }
+            )
+            log_triage_health(
+                "triage_spawned",
+                hook="pi-bridge",
+                transcript_path=str(resolved),
+                payload_path=str(payload_path),
+                pid=process.pid,
+                **metadata,
+            )
+            return {
+                "queued": False,
+                "started": True,
+                "detached": True,
+                "pid": process.pid,
+                "session_id": effective_session_id,
+                "source_event": source_event,
+                "reason": reason,
+                "transcript_path": str(resolved),
+                "payload_path": str(payload_path),
+            }
+
+        completed = subprocess.run(
+            [sys.executable, str(hook_script)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            cwd=str(hook_script.parent.parent),
+            env=env,
+            timeout=60,
+            check=False,
+        )
+    except Exception as exc:
+        log_triage_health("triage_spawn_failed", hook="pi-bridge", error=exc, transcript_path=str(resolved), **metadata)
+        return {"queued": False, "error": str(exc), "reason": "spawn_failed"}
+
+    state.update(
+        {
+            "session_id": effective_session_id,
+            "cwd": cwd,
+            "pi_triage_started_at": now,
+            "pi_triage_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "pi_triage_transcript_path": str(resolved),
+            "pi_triage_source_event": source_event,
+            "pi_triage_reason": reason,
+            "pi_triage_returncode": completed.returncode,
+            "last_lifecycle_decision": "pi_triage_completed" if completed.returncode == 0 else "pi_triage_failed",
+        }
+    )
+    _write_capture_session_state(effective_session_id, cwd, state)
+    action = "triage_completed" if completed.returncode == 0 else "triage_failed"
+    log_triage_health(
+        action, hook="pi-bridge", transcript_path=str(resolved), returncode=completed.returncode, **metadata
+    )
+    return {
+        "queued": False,
+        "detached": False,
+        "returncode": completed.returncode,
+        "session_id": effective_session_id,
+        "source_event": source_event,
+        "reason": reason,
+        "transcript_path": str(resolved),
+    }
 
 
 def _body_excerpt(body: str, max_chars: int = 180) -> str:
@@ -2307,6 +2550,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON object with richer Pi lifecycle context and audit metadata",
     )
 
+    triage = sub.add_parser("triage", help="Run Pi SessionEnd-style triage from a persisted session JSONL")
+    triage.add_argument("--transcript-path", required=True)
+    triage.add_argument("--cwd", default="")
+    triage.add_argument("--session-id", default="")
+    triage.add_argument("--reason", default="session_shutdown")
+    triage.add_argument("--source-event", default="session_shutdown")
+    triage.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run the triage hook synchronously; intended for tests and diagnostics",
+    )
+
     queue = sub.add_parser("queue", help="Inspect or process queued pi captures")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
     queue_list = queue_sub.add_parser("list", help="List queued captures")
@@ -2446,6 +2701,18 @@ def main(argv: list[str] | None = None) -> int:
             args.branch,
             args.lifecycle_metadata,
             health_metadata={"cwd": args.cwd, "session_id": args.session_id},
+        )
+    if args.command == "triage":
+        return _run_json(
+            "triage",
+            _triage,
+            args.transcript_path,
+            args.cwd,
+            args.session_id,
+            args.reason,
+            args.source_event,
+            not args.foreground,
+            health_metadata={"cwd": args.cwd, "session_id": args.session_id or args.transcript_path},
         )
     if args.command == "queue":
         if args.queue_command == "list":
