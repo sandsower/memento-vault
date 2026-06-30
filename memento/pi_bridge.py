@@ -1546,6 +1546,141 @@ def _capture_review_metadata(capture: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _summary_cache_file() -> Path:
+    return _state_root() / "queue" / "pi-capture-summaries.json"
+
+
+def _read_summary_cache() -> dict[str, Any]:
+    path = _summary_cache_file()
+    if not path.exists():
+        return {"version": 1, "captures": {}}
+    try:
+        payload = json.loads(path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "captures": {}}
+    if not isinstance(payload, dict):
+        return {"version": 1, "captures": {}}
+    captures = payload.get("captures")
+    if not isinstance(captures, dict):
+        captures = {}
+    return {"version": 1, "captures": captures}
+
+
+def _write_summary_cache(cache: dict[str, Any]) -> None:
+    _atomic_write_text(_summary_cache_file(), json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def _capture_summary_digest(capture: dict[str, Any]) -> str:
+    metadata = capture.get("metadata") if isinstance(capture.get("metadata"), dict) else {}
+    payload = {
+        "title": str(capture.get("title") or ""),
+        "body": str(capture.get("body") or ""),
+        "reason": str(capture.get("reason") or ""),
+        "source_event": str(capture.get("source_event") or ""),
+        "metadata": metadata,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _summary_cache_key(capture: dict[str, Any], digest: str) -> str:
+    capture_id = str(capture.get("id") or "").strip()
+    return capture_id or digest
+
+
+def _summary_prompt_value(value: Any) -> str:
+    return sanitize_secrets(str(value or ""))
+
+
+def _summary_prompt(capture: dict[str, Any]) -> str:
+    metadata = capture.get("metadata") if isinstance(capture.get("metadata"), dict) else {}
+    lifecycle = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {}
+    body = sanitize_secrets(str(capture.get("body") or ""))
+    if len(body) > 4000:
+        body = body[:4000].rstrip() + "\n[truncated]"
+    context = {
+        "title": _summary_prompt_value(capture.get("title")),
+        "reason": _summary_prompt_value(capture.get("reason")),
+        "source_event": _summary_prompt_value(capture.get("source_event")),
+        "project": _summary_prompt_value(metadata.get("project") or metadata.get("project_slug")),
+        "branch": _summary_prompt_value(metadata.get("branch")),
+        "turn_count": lifecycle.get("turn_count"),
+        "tool_call_count": lifecycle.get("tool_call_count"),
+        "file_edit_count": lifecycle.get("file_edit_count"),
+    }
+    return (
+        "Summarize this queued Memento capture candidate for a human deciding whether to process it. "
+        "Return one concise plain-text sentence, at most 35 words. State the durable memory signal if one is present; "
+        "if it looks low-value, say so briefly. Do not use Markdown, bullets, labels, or quote secrets.\n\n"
+        f"Context JSON:\n{json.dumps(context, ensure_ascii=False, sort_keys=True)}\n\n"
+        f"Capture body:\n{body}"
+    )
+
+
+def _clean_generated_summary(text: str) -> str:
+    summary = sanitize_secrets(re.sub(r"\s+", " ", text).strip())
+    summary = re.sub(r"^[-*•\d.)\s]+", "", summary).strip()
+    summary = summary.strip('`"')
+    if len(summary) > 280:
+        summary = summary[:279].rstrip() + "…"
+    return summary
+
+
+def _capture_generated_summary(capture: dict[str, Any], cache: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    digest = _capture_summary_digest(capture)
+    key = _summary_cache_key(capture, digest)
+    records = cache.setdefault("captures", {})
+    cached = records.get(key) if isinstance(records, dict) else None
+    if isinstance(cached, dict) and cached.get("digest") == digest and cached.get("text"):
+        cleaned_text = _clean_generated_summary(str(cached.get("text") or ""))
+        record = {**cached, "text": cleaned_text}
+        changed = cleaned_text != cached.get("text")
+        if changed:
+            records[key] = record
+        return {**record, "cached": True}, changed
+
+    from memento.llm import llm_complete
+
+    result = llm_complete(_summary_prompt(capture), timeout=10)
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    if not result.ok:
+        return {
+            "status": "error",
+            "error": str(result.error or "summary generation failed")[:500],
+            "digest": digest,
+            "generated_at": generated_at,
+            "backend": result.backend,
+            "model": result.model,
+            "cached": False,
+        }, False
+
+    summary = _clean_generated_summary(result.text)
+    if not summary:
+        return {
+            "status": "error",
+            "error": "summary generation returned empty text",
+            "digest": digest,
+            "generated_at": generated_at,
+            "backend": result.backend,
+            "model": result.model,
+            "cached": False,
+        }, False
+
+    record = {
+        "status": "ok",
+        "text": summary,
+        "digest": digest,
+        "generated_at": generated_at,
+        "backend": result.backend,
+        "model": result.model,
+        "prompt_bytes": result.prompt_bytes,
+        "output_bytes": result.output_bytes,
+        "duration_ms": result.duration_ms,
+    }
+    records[key] = record
+    return {**record, "cached": False}, True
+
+
 def _capture_lifecycle_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
     metadata = capture.get("metadata") or {}
     lifecycle = metadata.get("lifecycle") if isinstance(metadata, dict) else {}
@@ -1569,15 +1704,36 @@ def _capture_lifecycle_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _queue_list(limit: int = 20, include_body: bool = False) -> dict[str, Any]:
+def _queue_list(
+    limit: int = 20, include_body: bool = False, include_generated_summaries: bool = False
+) -> dict[str, Any]:
     captures = _load_queue()
     visible = []
+    cache = _read_summary_cache() if include_generated_summaries else None
+    cache_changed = False
+    summary_errors = 0
     for capture in captures[-max(1, int(limit)) :]:
         item = {**capture, **_capture_review_metadata(capture)}
+        if include_generated_summaries and cache is not None:
+            summary, changed = _capture_generated_summary(capture, cache)
+            item["generated_summary"] = summary
+            cache_changed = cache_changed or changed
+            if summary.get("status") == "error":
+                summary_errors += 1
         if not include_body:
             item.pop("body", None)
         visible.append(item)
-    return {"count": len(captures), "captures": visible, "queue_path": str(_queue_file())}
+    if cache_changed and cache is not None:
+        _write_summary_cache(cache)
+    payload: dict[str, Any] = {"count": len(captures), "captures": visible, "queue_path": str(_queue_file())}
+    if include_generated_summaries:
+        payload["generated_summaries"] = {
+            "enabled": True,
+            "cache_path": str(_summary_cache_file()),
+            "visible_count": len(visible),
+            "error_count": summary_errors,
+        }
+    return payload
 
 
 _THINKING_DUMP_SIGNAL = '"type":"thinking"'
@@ -2863,6 +3019,11 @@ def build_parser() -> argparse.ArgumentParser:
     queue_list = queue_sub.add_parser("list", help="List queued captures")
     queue_list.add_argument("--limit", type=int, default=20)
     queue_list.add_argument("--include-body", action="store_true")
+    queue_list.add_argument(
+        "--include-generated-summaries",
+        action="store_true",
+        help="Opt in to model-generated queued-capture summaries backed by a local content-digest cache",
+    )
     process_start = queue_sub.add_parser("process-start", help="Create a processing run for selected captures")
     process_start.add_argument("--id", action="append", default=[])
     process_start.add_argument("--project", default="")
@@ -3044,7 +3205,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "queue":
         if args.queue_command == "list":
-            return _run_json("queue", _queue_list, args.limit, args.include_body)
+            return _run_json("queue", _queue_list, args.limit, args.include_body, args.include_generated_summaries)
         if args.queue_command == "process-start":
             return _run_json(
                 "queue",
