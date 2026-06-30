@@ -1530,6 +1530,25 @@ def test_pi_bridge_health_warning_reads_recent_bridge_failures(tmp_path):
     assert "stdout parse failed" in warning
 
 
+def test_pi_bridge_health_warning_ignores_success_records(tmp_path):
+    health_log = tmp_path / "triage-health.jsonl"
+    health_log.write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": "2999-01-01T00:00:00", "hook": "pi-bridge", "action": "triage_spawned"}),
+                json.dumps({"ts": "2999-01-01T00:00:01", "hook": "pi-bridge", "action": "pi_decision"}),
+                json.dumps({"ts": "2999-01-01T00:00:02", "hook": "pi-bridge", "action": "pi_structured_notes_written"}),
+            ]
+        )
+        + "\n"
+    )
+
+    with patch("memento.lifecycle.TRIAGE_HEALTH_LOG_PATH", str(health_log)):
+        warning = pi_bridge_health_warning()
+
+    assert warning is None
+
+
 def test_triage_health_warning_falls_back_to_legacy_retrieval_log(tmp_path):
     health_log = tmp_path / "missing-triage-health.jsonl"
     retrieval_log = tmp_path / "retrieval.jsonl"

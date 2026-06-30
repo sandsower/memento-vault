@@ -10,7 +10,7 @@ export const defaultConfig = {
 	promptRecall: true,
 	toolContext: true,
 	autoCapture: true,
-	captureQueue: true,
+	captureQueue: false,
 	processQueue: true,
 	processQueueOnSessionClose: false,
 	processQueueMaxCaptures: 3,

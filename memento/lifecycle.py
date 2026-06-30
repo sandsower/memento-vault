@@ -226,6 +226,21 @@ def _health_error_excerpt(error: object, limit: int = 140) -> str:
     return text[:limit]
 
 
+_PI_BRIDGE_FAILURE_ACTIONS = {
+    "triage_missing_transcript",
+    "triage_disallowed_transcript",
+    "pi_missing_transcript",
+    "pi_structured_notes_parse_empty",
+    "pi_structured_notes_transcript_unreadable",
+    "pi_structured_notes_lock_timeout",
+}
+
+
+def _is_pi_bridge_failure_record(rec: dict[str, object]) -> bool:
+    action = str(rec.get("action") or "")
+    return action.endswith("_failed") or action in _PI_BRIDGE_FAILURE_ACTIONS
+
+
 def _scan_pi_bridge_health_log(path: str, cutoff: datetime) -> tuple[str | None, int, dict[str, object] | None]:
     if not os.path.exists(path):
         return str(path), 0, None
@@ -248,7 +263,7 @@ def _scan_pi_bridge_health_log(path: str, cutoff: datetime) -> tuple[str | None,
                 ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
             except ValueError:
                 continue
-            if ts < cutoff:
+            if ts < cutoff or not _is_pi_bridge_failure_record(rec):
                 continue
             count += 1
             if latest_ts is None or ts >= latest_ts:

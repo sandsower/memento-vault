@@ -104,7 +104,7 @@ For package installation from a checkout:
 pi install /path/to/memento-vault
 ```
 
-The pi bridge does not start a long-lived MCP child process. Automatic durable writes are queued by default. Candidate captures land in local state for review and can be processed into curated notes manually.
+The pi bridge does not start a long-lived MCP child process. Automatic capture runs detached SessionEnd-style triage by default; explicit/manual captures can still be queued in local state for review and processed into curated notes manually.
 
 Useful pi commands/tools:
 
@@ -125,7 +125,7 @@ Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.js
       "promptRecall": true,
       "toolContext": true,
       "autoCapture": true,
-      "captureQueue": true,
+      "captureQueue": false,
       "processQueue": true,
       "processQueueOnSessionClose": false,
       "processQueueMaxCaptures": 3,
@@ -147,14 +147,16 @@ Environment variables override file config:
 | `MEMENTO_PI_TOOL_CONTEXT` | `true` | Read-tool context injection. |
 | `MEMENTO_PI_MAX_INJECTED_CHARS` | `4000` | Per-injection character cap. |
 | `MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION` | `5` | Tool-context injection cap per pi session. |
-| `MEMENTO_PI_AUTO_CAPTURE` | `true` | Queue automatic capture candidates on `agent_end`, compaction, and shutdown lifecycle events. |
-| `MEMENTO_PI_CAPTURE_QUEUE` | `true` | Queue automatic capture candidates instead of writing notes directly. |
+| `MEMENTO_PI_AUTO_CAPTURE` | `true` | Run SessionEnd-style triage from the persisted Pi transcript on compaction/shutdown lifecycle events. |
+| `MEMENTO_PI_CAPTURE_QUEUE` | `false` | Legacy/manual queue mode flag. Automatic capture does not append to the queue by default; use `memento_capture(queue: true)` or `/memento-process` for explicit queue review. |
 | `MEMENTO_PI_PROCESS_QUEUE` | `true` | Enable manual queued-capture processing. |
 | `MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE` | `false` | Reserved future automation route for processing a small batch on session close. |
 | `MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES` | `3` | Reserved future cap for session-close processing. |
 | `MEMENTO_PI_PROCESS_QUEUE_MODEL` | `claude-sonnet-4-20250514` | Model for processor sessions; set config/env explicitly to override or `null` in config to use pi's default. |
 
-When automatic capture is enabled (the default), pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. Failed processing groups keep their queue entries and can be retried directly from the TUI without reconstructing filters or selections. The processor prompt receives deterministic existing-note deduplication context and instructs curators to store original project/cwd/branch/session metadata as note frontmatter via `memento_capture`, not as prose boilerplate. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
+When automatic capture is enabled (the default), Pi no longer grows the review queue. On `session_before_compact` or `session_shutdown`, the extension asks `python3 -m memento.pi_bridge triage` to validate `ctx.sessionManager.getSessionFile()` and spawn the same detached `hooks/memento-triage.py` pipeline used by Claude Code with `MEMENTO_AGENT=pi`. Meaningful sessions get the normal triage outputs: a fleeting session line, a project session update, and structured atomic notes only when the shared substantial/new-insight gates pass. Health records are written to the triage-health log for missing transcripts, disallowed paths, spawn failures, parse/LLM failures from the shared hook, and successful Pi triage spawn.
+
+Manual queue review remains available for explicit captures (`memento_capture` with `queue: true`, `/memento-queue`, and `/memento-process`). Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. Failed processing groups keep their queue entries and can be retried directly from the TUI without reconstructing filters or selections. The processor prompt receives deterministic existing-note deduplication context and instructs curators to store original project/cwd/branch/session metadata as note frontmatter via `memento_capture`, not as prose boilerplate.
 
 Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
 
