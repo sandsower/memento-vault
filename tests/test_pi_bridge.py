@@ -719,6 +719,56 @@ def test_pi_bridge_triage_skips_confirmed_completed_duplicate(capsys, tmp_path, 
     mock_run.assert_not_called()
 
 
+def test_pi_bridge_triage_retries_active_state_when_transcript_changed(capsys, tmp_path, monkeypatch):
+    state_home = tmp_path / "state"
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    transcript = sessions / "pi-session.jsonl"
+    transcript.write_text(json.dumps({"type": "session", "id": "pi-s1", "cwd": "/repo"}) + "\n")
+    old_stat = transcript.stat()
+    transcript.write_text(
+        json.dumps({"type": "session", "id": "pi-s1", "cwd": "/repo"})
+        + "\n"
+        + json.dumps({"type": "message", "message": {"role": "user", "content": "after compaction"}})
+        + "\n"
+    )
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(state_home))
+    monkeypatch.setenv("MEMENTO_PI_TRANSCRIPT_ROOTS", str(sessions))
+    pi_bridge._write_capture_session_state(
+        "pi-s1",
+        "/repo",
+        {
+            "pi_triage_status": "active",
+            "pi_triage_started_at": "2999-01-01T00:00:00+00:00",
+            "pi_triage_active_until": "2999-01-01T00:10:00+00:00",
+            "pi_triage_transcript_path": str(transcript.resolve()),
+            "pi_triage_transcript_size_bytes": old_stat.st_size,
+            "pi_triage_transcript_mtime_ns": old_stat.st_mtime_ns,
+        },
+    )
+
+    class FakeProcess:
+        pid = 4245
+
+    with patch("memento.pi_bridge.subprocess.Popen", return_value=FakeProcess()) as mock_popen:
+        code = pi_bridge.main(
+            [
+                "triage",
+                "--transcript-path",
+                str(transcript),
+                "--cwd",
+                "/repo",
+                "--session-id",
+                "pi-s1",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["started"] is True
+    mock_popen.assert_called_once()
+
+
 def test_pi_bridge_triage_retries_stale_active_state(capsys, tmp_path, monkeypatch):
     state_home = tmp_path / "state"
     sessions = tmp_path / "sessions"

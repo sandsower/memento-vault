@@ -413,6 +413,19 @@ def _triage_active_until(started_at: str) -> str:
     return (started + timedelta(seconds=_TRIAGE_ACTIVE_TTL_SECONDS)).replace(microsecond=0).isoformat()
 
 
+def _triage_transcript_fingerprint(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {"size_bytes": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+
+def _same_triage_transcript_version(state: dict[str, Any], path: Path, fingerprint: dict[str, int]) -> bool:
+    return (
+        state.get("pi_triage_transcript_path") == str(path)
+        and state.get("pi_triage_transcript_size_bytes") == fingerprint["size_bytes"]
+        and state.get("pi_triage_transcript_mtime_ns") == fingerprint["mtime_ns"]
+    )
+
+
 def _triage_state_status(state: dict[str, Any]) -> str:
     status = str(state.get("pi_triage_status") or "").strip().lower()
     if status:
@@ -1308,9 +1321,10 @@ def _triage(
             "transcript_path": str(resolved),
         }
 
+    fingerprint = _triage_transcript_fingerprint(resolved)
     state = _load_capture_session_state(effective_session_id, cwd)
     state_status = _triage_state_status(state)
-    same_transcript = state.get("pi_triage_transcript_path") == str(resolved)
+    same_transcript = _same_triage_transcript_version(state, resolved, fingerprint)
     if same_transcript and (
         _triage_state_active(state) or (state_status == "completed" and state.get("pi_triage_returncode") == 0)
     ):
@@ -1383,6 +1397,8 @@ def _triage(
                     "pi_triage_active_until": _triage_active_until(now),
                     "pi_triage_completed_at": None,
                     "pi_triage_transcript_path": str(resolved),
+                    "pi_triage_transcript_size_bytes": fingerprint["size_bytes"],
+                    "pi_triage_transcript_mtime_ns": fingerprint["mtime_ns"],
                     "pi_triage_payload_path": str(payload_path),
                     "pi_triage_pid": process.pid,
                     "pi_triage_source_event": source_event,
@@ -1449,6 +1465,8 @@ def _triage(
             "pi_triage_active_until": None,
             "pi_triage_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "pi_triage_transcript_path": str(resolved),
+            "pi_triage_transcript_size_bytes": fingerprint["size_bytes"],
+            "pi_triage_transcript_mtime_ns": fingerprint["mtime_ns"],
             "pi_triage_source_event": source_event,
             "pi_triage_reason": reason,
             "pi_triage_returncode": completed.returncode,
