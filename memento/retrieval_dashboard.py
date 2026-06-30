@@ -1,8 +1,9 @@
 """Retrieval debug dashboard/report generation.
 
 Turns retrieval.jsonl telemetry into a lightweight local report that explains
-why recall/tool-context/briefing/inception decisions were made, while keeping
-raw transcripts and note bodies out of view unless explicitly requested.
+why recall/tool-context/briefing/inception decisions were made and surfaces
+sanitized behavior recommendations, while keeping raw transcripts and note
+bodies out of view unless explicitly requested.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -18,13 +20,14 @@ from pathlib import Path
 from typing import Any
 
 from memento.config import get_vault
-from memento.store import RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, load_access_log_stats
+from memento.store import ACCESS_LOG_PATH, RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, load_access_log_stats
 from memento.utils import sanitize_secrets
 
 DEFAULT_EVENT_LIMIT = 25
 DEFAULT_NOTE_LIMIT = 10
 DEFAULT_RETRIEVAL_LOG = Path(RETRIEVAL_LOG_PATH)
 DEFAULT_TRIAGE_HEALTH_LOG = Path(TRIAGE_HEALTH_LOG_PATH)
+DEFAULT_ACCESS_LOG = Path(ACCESS_LOG_PATH)
 
 _TRIAGE_HEALTH_SUCCESS = {"structured_notes_written"}
 _TRIAGE_HEALTH_FAILURE = {
@@ -38,6 +41,61 @@ _TRIAGE_HEALTH_FAILURE = {
     "structured_notes_payload_unreadable",
     "structured_notes_transcript_unreadable",
 }
+
+_RETRIEVAL_REASON_ALIASES = {
+    "broad-project-query": "query_too_broad",
+    "filtered-empty": "no_exact_match",
+    "low-signal-prompt": "query_too_broad",
+    "no-results": "no_exact_match",
+    "project-mismatch-filtered-empty": "project_filter_removed_all",
+    "skipped-prompt": "query_too_broad",
+}
+
+_CONCRETE_PATTERNS = (
+    re.compile(r"(?:[A-Za-z]:)?[\\/][^\s]+"),
+    re.compile(r"\b[\w.-]+\.(?:py|md|yaml|yml|json|toml|ts|js|go|rs|rb|sh|cfg|ini|txt)\b", re.IGNORECASE),
+    re.compile(r"\b[A-Z]{2,}-\d+\b"),
+)
+
+_PROJECT_HISTORY_MARKERS = (
+    "project history",
+    "what happened",
+    "what changed",
+    "catch me up",
+    "timeline",
+    "recap",
+    "status update",
+    "summarize",
+    "give me context",
+    "why did",
+    "how did",
+    "current state",
+    "roadmap",
+)
+
+_MISS_REASONS = {
+    "no_concrete_match",
+    "no_exact_match",
+    "project_filter_removed_all",
+    "query_too_broad",
+    "threshold_too_high",
+}
+
+_TOOL_CONTEXT_MISS_REASONS = {
+    "duplicate",
+    "ignored",
+    "no-results",
+    "no_results",
+    "no_exact_match",
+    "skipped",
+}
+
+_DEEP_PIPELINE_MARKERS = {"prf", "ce", "rerank", "multi_hop", "deep"}
+
+_RECOMMENDATION_MIN_COUNT = 3
+_RECOMMENDATION_MIN_SHARE = 0.3
+_RECOMMENDATION_LATENCY_MS = 250
+_SEARCH_GET_FOLLOWUP_WINDOW_SECONDS = 15 * 60
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -117,6 +175,10 @@ def load_triage_health_entries(
     log_path: str | Path | None = None, since_days: int | None = None
 ) -> list[dict[str, Any]]:
     return _load_jsonl(Path(log_path or DEFAULT_TRIAGE_HEALTH_LOG), since_days=since_days)
+
+
+def load_access_entries(log_path: str | Path | None = None, since_days: int | None = None) -> list[dict[str, Any]]:
+    return _load_jsonl(Path(log_path or DEFAULT_ACCESS_LOG), since_days=since_days)
 
 
 def _query_digest(entry: dict[str, Any]) -> str | None:
@@ -501,12 +563,280 @@ def _triage_health_section(entries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _entry_text(entry: dict[str, Any]) -> str:
+    for key in ("query", "prompt", "topic", "body"):
+        value = entry.get(key)
+        if isinstance(value, str):
+            text = " ".join(value.split())
+            if text:
+                return text
+    return ""
+
+
+def _normalize_retrieval_reason(reason: Any) -> str:
+    text = str(reason or "").strip()
+    return _RETRIEVAL_REASON_ALIASES.get(text, text)
+
+
+def _entry_reason(entry: dict[str, Any]) -> str:
+    action = str(entry.get("action") or "")
+    reason = str(entry.get("reason") or "")
+    if action == "search_miss" and reason:
+        return _normalize_retrieval_reason(reason)
+    return _normalize_retrieval_reason(reason or action)
+
+
+def _is_concrete_query(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern.search(text) for pattern in _CONCRETE_PATTERNS) or any(
+        marker in lowered
+        for marker in (
+            "config",
+            "configuration",
+            "schema",
+            "manifest",
+            "memento.yml",
+            "pyproject.toml",
+            "workflow.md",
+            "readme.md",
+            "package.json",
+        )
+    )
+
+
+def _is_project_history_query(text: str) -> bool:
+    lowered = text.lower()
+    return not _is_concrete_query(text) and any(marker in lowered for marker in _PROJECT_HISTORY_MARKERS)
+
+
+def _is_miss_like(entry: dict[str, Any]) -> bool:
+    hook = str(entry.get("hook") or "")
+    action = str(entry.get("action") or "")
+    reason = _entry_reason(entry)
+    if hook in {"recall", "search", "mcp"}:
+        if action in {"search_miss", "no-results", "no_results"}:
+            return True
+        return reason in _MISS_REASONS
+    if hook == "tool-context":
+        decision = str(entry.get("decision") or reason or action)
+        return decision in _TOOL_CONTEXT_MISS_REASONS or reason in _TOOL_CONTEXT_MISS_REASONS
+    return False
+
+
+def _is_deep_pipeline(entry: dict[str, Any]) -> bool:
+    pipeline = str(entry.get("pipeline") or "")
+    if pipeline:
+        parts = {part.strip().lower() for part in pipeline.split("+") if part.strip()}
+        if parts & _DEEP_PIPELINE_MARKERS:
+            return True
+        if len(parts) > 1:
+            return True
+    return bool(entry.get("multi_hop_added")) or bool(entry.get("deep_recall_spawned"))
+
+
+def _search_get_followups(access_entries: list[dict[str, Any]]) -> dict[str, Any]:
+    searches: list[tuple[datetime, str, str]] = []
+    gets: list[tuple[datetime, str]] = []
+
+    for entry in access_entries:
+        path = str(entry.get("path") or "").strip()
+        ts = _parse_ts(entry.get("ts"))
+        if not path or ts is None:
+            continue
+        tool = str(entry.get("tool") or "")
+        hook = str(entry.get("hook") or "")
+        if tool == "get":
+            gets.append((ts, path))
+        elif tool == "search" or (not tool and hook == "mcp" and entry.get("result_count") is not None):
+            search_key = str(entry.get("query_hash") or entry.get("query_summary") or ts.isoformat())
+            searches.append((ts, path, search_key))
+
+    if not searches or not gets:
+        return {
+            "followups": 0,
+            "searches": len({key for _, _, key in searches}),
+            "top_path": "unknown",
+            "top_path_followups": 0,
+        }
+
+    searches_by_path: dict[str, list[tuple[datetime, str]]] = {}
+    for ts, path, search_key in sorted(searches):
+        searches_by_path.setdefault(path, []).append((ts, search_key))
+
+    matched_search_keys: set[str] = set()
+    path_counts: Counter[str] = Counter()
+    for get_ts, path in sorted(gets):
+        for search_ts, search_key in reversed(searches_by_path.get(path, [])):
+            delta = (get_ts - search_ts).total_seconds()
+            if 0 <= delta <= _SEARCH_GET_FOLLOWUP_WINDOW_SECONDS:
+                matched_search_keys.add(search_key)
+                path_counts[sanitize_secrets(path)] += 1
+                break
+            if delta > _SEARCH_GET_FOLLOWUP_WINDOW_SECONDS:
+                break
+
+    top_path, top_path_count = ("unknown", 0)
+    if path_counts:
+        top_path, top_path_count = path_counts.most_common(1)[0]
+    return {
+        "followups": sum(path_counts.values()),
+        "searches": len({key for _, _, key in searches}),
+        "matched_searches": len(matched_search_keys),
+        "top_path": top_path,
+        "top_path_followups": top_path_count,
+    }
+
+
+def _recommendation(title: str, summary: str, *, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+    rec = {"title": title, "summary": summary}
+    if evidence:
+        rec["evidence"] = evidence
+    return rec
+
+
+def _retrieval_recommendations(
+    entries: list[dict[str, Any]], access_entries: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    recommendations: list[dict[str, Any]] = []
+    miss_entries = [entry for entry in entries if _is_miss_like(entry)]
+    query_entries = [entry for entry in entries if _entry_text(entry)]
+
+    def add_recommendation(
+        title: str,
+        summary: str,
+        *,
+        evidence: dict[str, Any],
+        count: int,
+        total: int,
+    ) -> None:
+        share = count / total if total else 0.0
+        if count < _RECOMMENDATION_MIN_COUNT or share < _RECOMMENDATION_MIN_SHARE:
+            return
+        recommendations.append(_recommendation(title, summary, evidence=evidence))
+
+    concrete_misses = [entry for entry in miss_entries if _is_concrete_query(_entry_text(entry))]
+    add_recommendation(
+        "Enable or tune concrete search",
+        (
+            f"{len(concrete_misses)} of {len(miss_entries)} misses ({_pct(len(concrete_misses), len(miss_entries))}) "
+            "contain paths, file names, or config identifiers; a concrete-search path should handle them better."
+        ),
+        evidence={"concrete_misses": len(concrete_misses), "misses": len(miss_entries)},
+        count=len(concrete_misses),
+        total=len(miss_entries),
+    )
+
+    history_misses = [entry for entry in miss_entries if _is_project_history_query(_entry_text(entry))]
+    add_recommendation(
+        "Add a project-history/query tool",
+        (
+            f"{len(history_misses)} broad project-history prompts were skipped or missed ({_pct(len(history_misses), len(miss_entries))} of misses); "
+            "a purpose-built history/query tool would be a better default than generic retrieval."
+        ),
+        evidence={"history_misses": len(history_misses), "misses": len(miss_entries)},
+        count=len(history_misses),
+        total=len(miss_entries),
+    )
+
+    threshold_misses = [
+        entry for entry in miss_entries if _entry_reason(entry) in {"threshold_too_high", "project_filter_removed_all"}
+    ]
+    project_counts = Counter(
+        sanitize_secrets(str(entry.get("project") or entry.get("topic") or entry.get("dir_key") or "unknown"))
+        for entry in threshold_misses
+    )
+    top_project, top_project_count = ("unknown", 0)
+    if project_counts:
+        top_project, top_project_count = project_counts.most_common(1)[0]
+    add_recommendation(
+        "Lower the recall threshold or improve note tags",
+        (
+            f"{len(threshold_misses)} threshold/project-filter misses concentrate on {top_project!r}; "
+            "either the cutoff is too strict for this project area or the notes need stronger tags/metadata."
+        ),
+        evidence={
+            "threshold_misses": len(threshold_misses),
+            "top_project": top_project,
+            "top_project_misses": top_project_count,
+        },
+        count=top_project_count,
+        total=len(threshold_misses),
+    )
+
+    tool_context_misses = [
+        entry for entry in entries if str(entry.get("hook") or "") == "tool-context" and _is_miss_like(entry)
+    ]
+    area_counts = Counter(
+        sanitize_secrets(
+            str(entry.get("dir_key") or entry.get("file_path") or entry.get("path") or entry.get("source") or "unknown")
+        )
+        for entry in tool_context_misses
+    )
+    top_area, top_area_count = ("unknown", 0)
+    if area_counts:
+        top_area, top_area_count = area_counts.most_common(1)[0]
+    add_recommendation(
+        "Add a code-area tool or project map",
+        (
+            f"tool-context missed the same area {top_area_count} times ({top_area!r}); recurring code-area lookups may deserve a purpose-built tool instead of generic injection."
+        ),
+        evidence={
+            "tool_context_misses": len(tool_context_misses),
+            "top_area": top_area,
+            "top_area_misses": top_area_count,
+        },
+        count=top_area_count,
+        total=len(tool_context_misses),
+    )
+
+    followups = _search_get_followups(access_entries or [])
+    followup_count = int(followups.get("followups") or 0)
+    search_count = int(followups.get("searches") or 0)
+    followup_share = followup_count / search_count if search_count else 0.0
+    if followup_count >= _RECOMMENDATION_MIN_COUNT and followup_share >= _RECOMMENDATION_MIN_SHARE:
+        recommendations.append(
+            _recommendation(
+                "Return fuller search results or tune detail_level",
+                (
+                    f"{followup_count} recent memento_get calls followed memento_search results within 15 minutes; "
+                    f"{followups.get('top_path')!r} was the most common follow-up. Consider returning fuller content by default for repeated targets."
+                ),
+                evidence=followups,
+            )
+        )
+
+    deep_entries = [entry for entry in entries if _is_deep_pipeline(entry)]
+    latencies = [_safe_int(entry.get("latency_ms")) for entry in entries if entry.get("latency_ms") is not None]
+    avg_latency = round(_avg(latencies), 1) if latencies else 0.0
+    deep_share = len(deep_entries) / len(query_entries) if query_entries else 0.0
+    if (avg_latency >= _RECOMMENDATION_LATENCY_MS or deep_share >= _RECOMMENDATION_MIN_SHARE) and len(
+        query_entries
+    ) >= _RECOMMENDATION_MIN_COUNT:
+        recommendations.append(
+            _recommendation(
+                "Prefer a purpose-built tool for common deep-retrieval prompts",
+                (
+                    f"average retrieval latency is {avg_latency}ms and {len(deep_entries)} of {len(query_entries)} logged prompts use multi-stage/deep retrieval; "
+                    "a specialized tool would reduce repeated search→rerank→follow-up work."
+                ),
+                evidence={
+                    "avg_latency_ms": avg_latency,
+                    "deep_entries": len(deep_entries),
+                    "queries": len(query_entries),
+                },
+            )
+        )
+
+    return recommendations
+
+
 def build_report(
     entries: list[dict[str, Any]],
     *,
     include_sensitive: bool = False,
     vault_path: str | Path | None = None,
     access_stats: dict[str, Any] | None = None,
+    access_entries: list[dict[str, Any]] | None = None,
     triage_health_entries: list[dict[str, Any]] | None = None,
     event_limit: int = DEFAULT_EVENT_LIMIT,
     note_limit: int = DEFAULT_NOTE_LIMIT,
@@ -534,6 +864,7 @@ def build_report(
         },
         "recall": _recall_section(entries),
         "tool_context": tool_context,
+        "recommendations": _retrieval_recommendations(entries, access_entries=access_entries),
         "briefing": _briefing_section(entries),
         "inception": _inception_section(entries),
         "recent_events": [_summarize_entry(entry, include_sensitive=include_sensitive) for entry in recent_entries],
@@ -595,6 +926,15 @@ def render_text_report(report: dict[str, Any]) -> str:
         lines.append("  Top injected paths:")
         for path, count in tool_context["injected_paths"].items():
             lines.append(f"    {path}: {count}")
+    lines.append("")
+
+    recommendations = report.get("recommendations", [])
+    lines += ["--- Recommendations ---"]
+    if not recommendations:
+        lines.append("  No strong retrieval-pattern recommendations yet.")
+    else:
+        for rec in recommendations:
+            lines.append(f"  • {rec['title']}: {rec['summary']}")
     lines.append("")
 
     briefing = report["briefing"]
@@ -687,6 +1027,12 @@ def _html_table(headers: list[str], rows: list[list[Any]], empty: str = "No rows
     return "".join(parts)
 
 
+def _html_bullets(items: list[str], empty: str = "No strong recommendations yet") -> str:
+    if not items:
+        return f'<p class="empty">{escape(empty)}</p>'
+    return "<ul>" + "".join(f"<li>{escape(item)}</li>" for item in items) + "</ul>"
+
+
 def _section(title: str, body: str, subtitle: str | None = None) -> str:
     subtitle_html = f'<p class="subtitle">{escape(subtitle)}</p>' if subtitle else ""
     return f'<section class="card"><h2>{escape(title)}</h2>{subtitle_html}{body}</section>'
@@ -698,6 +1044,7 @@ def render_html_report(report: dict[str, Any]) -> str:
     triage = report["triage"]
     recall = report["recall"]
     tool_context = report["tool_context"]
+    recommendations = report.get("recommendations", [])
     briefing = report["briefing"]
     triage_health = report["triage_health"]
     inception = report["inception"]
@@ -813,6 +1160,9 @@ def render_html_report(report: dict[str, Any]) -> str:
                     ["Path", "Title", "Score", "Decision"], candidate_rows, empty="No candidate snapshots logged"
                 ),
             ),
+            _section(
+                "Recommendations", _html_bullets([f"{rec['title']}: {rec['summary']}" for rec in recommendations])
+            ),
             _section("Triage health", triage_health_body),
             _section(
                 "Top notes",
@@ -908,16 +1258,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--include-sensitive", action="store_true", help="Include sanitized query/body previews")
     parser.add_argument("--retrieval-log", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--triage-health-log", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--access-log", type=str, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     retrieval_log = Path(args.retrieval_log) if args.retrieval_log else DEFAULT_RETRIEVAL_LOG
     triage_health_log = Path(args.triage_health_log) if args.triage_health_log else DEFAULT_TRIAGE_HEALTH_LOG
+    access_log = Path(args.access_log) if args.access_log else DEFAULT_ACCESS_LOG
     entries = load_retrieval_entries(retrieval_log, since_days=args.since)
     triage_health_entries = load_triage_health_entries(triage_health_log, since_days=args.since)
+    access_entries = load_access_entries(access_log, since_days=args.since)
     report = build_report(
         entries,
         include_sensitive=args.include_sensitive,
         triage_health_entries=triage_health_entries,
+        access_entries=access_entries,
         event_limit=max(1, args.limit),
         note_limit=max(1, args.note_limit),
     )

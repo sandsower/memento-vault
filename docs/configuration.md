@@ -234,7 +234,7 @@ tool_context_diagnostics_include_candidates: false
 tool_context_diagnostics_max_candidates: 10
 ```
 
-Use `memento-vault retrieval-report --since 7` (or `python tools/analyze-retrieval.py --since 7`) to summarize tool-context call volume, skip reasons, injection rate, injected paths, latency, cache/search split, and top notes from retrieval logs.
+Use `memento-vault retrieval-report --since 7` (or `python tools/analyze-retrieval.py --since 7`) to summarize tool-context call volume, skip reasons, injection rate, injected paths, latency, cache/search split, top notes, and behavior recommendations from retrieval logs.
 
 ### Multi-hop retrieval (wikilink-following)
 

@@ -83,6 +83,175 @@ def _sample_entries() -> list[dict[str, object]]:
     ]
 
 
+def _recommendation_entries() -> list[dict[str, object]]:
+    return [
+        {"ts": "2026-06-29T10:01:00Z", "hook": "recall", "action": "no-results", "query": "memento.yml"},
+        {
+            "ts": "2026-06-29T10:01:01Z",
+            "hook": "mcp",
+            "action": "search_miss",
+            "reason": "no-results",
+            "query": "hooks/vault-tool-context.py",
+        },
+        {
+            "ts": "2026-06-29T10:01:02Z",
+            "hook": "search",
+            "action": "project_match_required",
+            "reason": "project-mismatch-filtered-empty",
+            "query": "pyproject.toml and workflow.md",
+            "project": "alpha",
+        },
+        {
+            "ts": "2026-06-29T10:01:03Z",
+            "hook": "recall",
+            "action": "threshold_too_high",
+            "query": "README.md",
+            "project": "alpha",
+        },
+        {
+            "ts": "2026-06-29T10:01:04Z",
+            "hook": "recall",
+            "action": "project-mismatch-filtered-empty",
+            "query": "docs/frontmatter-schema.md",
+            "project": "alpha",
+        },
+        {
+            "ts": "2026-06-29T10:01:05Z",
+            "hook": "recall",
+            "action": "no-results",
+            "query": "what happened in project history for release planning",
+        },
+        {
+            "ts": "2026-06-29T10:01:06Z",
+            "hook": "recall",
+            "action": "no-results",
+            "query": "catch me up on project history",
+        },
+        {
+            "ts": "2026-06-29T10:01:07Z",
+            "hook": "recall",
+            "action": "no-results",
+            "query": "what changed and why",
+        },
+        {
+            "ts": "2026-06-29T10:01:08Z",
+            "hook": "recall",
+            "action": "no-results",
+            "query": "summarize the project history",
+        },
+        {
+            "ts": "2026-06-29T10:01:09Z",
+            "hook": "tool-context",
+            "action": "decision",
+            "decision": "no-results",
+            "dir_key": "memento/search",
+            "file_path": "memento/search.py",
+        },
+        {
+            "ts": "2026-06-29T10:01:09Z",
+            "hook": "tool-context",
+            "action": "decision",
+            "decision": "no-results",
+            "dir_key": "memento/search",
+            "file_path": "memento/search.py",
+        },
+        {
+            "ts": "2026-06-29T10:01:10Z",
+            "hook": "tool-context",
+            "action": "decision",
+            "decision": "no-results",
+            "dir_key": "memento/search",
+            "file_path": "memento/search.py",
+        },
+        {
+            "ts": "2026-06-29T10:01:11Z",
+            "hook": "recall",
+            "action": "inject",
+            "query": "deep prompt one",
+            "latency_ms": 310,
+            "pipeline": "bm25+prf+ce",
+        },
+        {
+            "ts": "2026-06-29T10:01:12Z",
+            "hook": "recall",
+            "action": "inject",
+            "query": "deep prompt two",
+            "latency_ms": 280,
+            "pipeline": "bm25+prf+ce",
+        },
+        {
+            "ts": "2026-06-29T10:01:13Z",
+            "hook": "recall",
+            "action": "inject",
+            "query": "deep prompt three",
+            "latency_ms": 295,
+            "pipeline": "bm25+prf+ce",
+        },
+    ]
+
+
+def _access_followup_entries() -> list[dict[str, object]]:
+    return [
+        {
+            "ts": "2026-06-29T10:02:00Z",
+            "path": "notes/detail-defaults.md",
+            "hook": "mcp",
+            "tool": "search",
+            "rank": 1,
+            "query_hash": "q1",
+            "query_summary": "how should detail_level work for secret ghp_abcdefghijklmnopqrstuvwxyz0123456789AB",
+            "result_count": 1,
+        },
+        {
+            "ts": "2026-06-29T10:02:20Z",
+            "path": "notes/detail-defaults.md",
+            "hook": "mcp",
+            "tool": "get",
+            "rank": 1,
+            "query_summary": "notes/detail-defaults.md",
+            "result_count": 1,
+        },
+        {
+            "ts": "2026-06-29T10:03:00Z",
+            "path": "notes/detail-defaults.md",
+            "hook": "mcp",
+            "tool": "search",
+            "rank": 1,
+            "query_hash": "q2",
+            "query_summary": "need full content for retrieval dashboard",
+            "result_count": 1,
+        },
+        {
+            "ts": "2026-06-29T10:03:30Z",
+            "path": "notes/detail-defaults.md",
+            "hook": "mcp",
+            "tool": "get",
+            "rank": 1,
+            "query_summary": "notes/detail-defaults.md",
+            "result_count": 1,
+        },
+        {
+            "ts": "2026-06-29T10:04:00Z",
+            "path": "notes/other.md",
+            "hook": "mcp",
+            "tool": "search",
+            "rank": 1,
+            "query_hash": "q3",
+            "query_summary": "show other note body",
+            "result_count": 1,
+        },
+        {
+            "ts": "2026-06-29T10:04:30Z",
+            "path": "notes/other.md",
+            "hook": "mcp",
+            "tool": "get",
+            "rank": 1,
+            "query_summary": "notes/other.md",
+            "result_count": 1,
+        },
+    ]
+
+
 def test_build_report_redacts_queries_and_enriches_notes(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -144,6 +313,36 @@ def test_build_report_redacts_queries_and_enriches_notes(tmp_path):
     assert "ghp_supersecret" not in sensitive_text
 
 
+def test_build_report_adds_behavior_recommendations_without_leaking_queries(tmp_path):
+    report = retrieval_dashboard.build_report(
+        _recommendation_entries(),
+        vault_path=tmp_path,
+        access_entries=_access_followup_entries(),
+        include_sensitive=False,
+        event_limit=20,
+        note_limit=5,
+    )
+
+    text = retrieval_dashboard.render_text_report(report)
+    html = retrieval_dashboard.render_html_report(report)
+    titles = {rec["title"] for rec in report["recommendations"]}
+
+    assert len(report["recommendations"]) >= 4
+    assert "Enable or tune concrete search" in titles
+    assert "Add a project-history/query tool" in titles
+    assert "Lower the recall threshold or improve note tags" in titles
+    assert "Add a code-area tool or project map" in titles
+    assert "Return fuller search results or tune detail_level" in titles
+    assert "Prefer a purpose-built tool for common deep-retrieval prompts" in titles
+    assert "memento.yml" not in text
+    assert "project history" not in text
+    assert "pyproject.toml" not in html
+    assert "detail_level work" not in text
+    assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB" not in html
+    assert "Recommendations" in text
+    assert "Recommendations" in html
+
+
 def test_main_writes_html_dashboard(tmp_path, capsys, monkeypatch):
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -151,7 +350,9 @@ def test_main_writes_html_dashboard(tmp_path, capsys, monkeypatch):
 
     retrieval_log = tmp_path / "retrieval.jsonl"
     triage_health_log = tmp_path / "triage-health.jsonl"
+    access_log = tmp_path / "access-log.jsonl"
     retrieval_log.write_text("\n".join(json.dumps(entry) for entry in _sample_entries()) + "\n", encoding="utf-8")
+    access_log.write_text("", encoding="utf-8")
     triage_health_log.write_text(
         json.dumps(
             {"ts": "2026-06-29T09:59:30Z", "hook": "triage", "action": "structured_notes_llm_failed", "error": "boom"}
@@ -174,6 +375,8 @@ def test_main_writes_html_dashboard(tmp_path, capsys, monkeypatch):
             str(retrieval_log),
             "--triage-health-log",
             str(triage_health_log),
+            "--access-log",
+            str(access_log),
             "--since",
             "30",
             "--html",
