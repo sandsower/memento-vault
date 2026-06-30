@@ -221,7 +221,7 @@ Imports default to safe conflict errors on existing divergent files. Use `--conf
 The MCP server exposes read, lifecycle, write, and maintenance tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.
 
 <!-- memento-mcp-tools:start -->
-The MCP server currently registers **18 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
+The MCP server currently registers **19 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
 
 | Tool | Category | What it does | When to use it |
 |------|----------|--------------|----------------|

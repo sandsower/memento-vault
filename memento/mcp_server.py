@@ -778,6 +778,32 @@ def memento_store(
         release_vault_write_lock()
 
 
+def _project_slug_from_note(path: Path) -> str | None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    parts = raw.split("---", 2)
+    if len(parts) < 3:
+        return None
+    project_match = re.search(r"^project:\s*(.+)$", parts[1], re.MULTILINE)
+    if not project_match:
+        return None
+    project = project_match.group(1).strip().strip("\"'")
+    return slugify(Path(project).name) or None
+
+
+def _remove_project_index_note(vault: Path, project_slug: str, note_name: str) -> None:
+    project_file = vault / "projects" / f"{project_slug}.md"
+    if not project_file.exists():
+        return
+    note_line = f"- [[{note_name}]]"
+    lines = project_file.read_text(encoding="utf-8").splitlines()
+    filtered = [line for line in lines if line.strip() != note_line]
+    if filtered != lines:
+        project_file.write_text("\n".join(filtered).rstrip() + "\n", encoding="utf-8")
+
+
 @mcp.tool()
 def memento_replace_note(
     path: str,
@@ -815,6 +841,10 @@ def memento_replace_note(
         return {"error": "Could not acquire vault write lock (another write in progress)"}
 
     try:
+        target_path = (vault / path.strip()).resolve()
+        previous_project_slug = None
+        if target_path != vault and vault in target_path.parents:
+            previous_project_slug = _project_slug_from_note(target_path)
         target = replace_note_at_path(
             vault,
             path.strip(),
@@ -841,6 +871,8 @@ def memento_replace_note(
     try:
         rel_path = str(target.relative_to(vault))
         project_slug = slugify(Path(project).name) if project else None
+        if previous_project_slug and previous_project_slug != project_slug:
+            _remove_project_index_note(vault, previous_project_slug, target.stem)
         if project_slug:
             summary = f"MCP replace: {title.strip()[:80]}"
             update_project_index(vault, project_slug, target.stem, summary)

@@ -1293,6 +1293,53 @@ class TestMementoReplaceNote:
         assert not (tmp_vault / "notes" / "replace-me-2.md").exists()
 
     @pytest.mark.usefixtures("_use_vault_config")
+    def test_replace_reconciles_project_index_when_project_changes(self, tmp_vault):
+        first = memento_store(
+            title="Move Project",
+            body="Old body.",
+            tags=["sync"],
+            certainty=2,
+            project="/work/old-project",
+        )
+
+        result = memento_replace_note(
+            path=first["path"],
+            title="Move Project",
+            body="New body.",
+            tags=["sync"],
+            certainty=4,
+            project="/work/new-project",
+        )
+
+        assert "error" not in result
+        old_index = (tmp_vault / "projects" / "old-project.md").read_text()
+        new_index = (tmp_vault / "projects" / "new-project.md").read_text()
+        assert "- [[move-project]]" not in old_index
+        assert "- [[move-project]]" in new_index
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_replace_removes_old_project_index_when_project_cleared(self, tmp_vault):
+        first = memento_store(
+            title="Clear Project",
+            body="Old body.",
+            tags=["sync"],
+            certainty=2,
+            project="/work/old-project",
+        )
+
+        result = memento_replace_note(
+            path=first["path"],
+            title="Clear Project",
+            body="New body.",
+            tags=["sync"],
+            certainty=4,
+        )
+
+        assert "error" not in result
+        old_index = (tmp_vault / "projects" / "old-project.md").read_text()
+        assert "- [[clear-project]]" not in old_index
+
+    @pytest.mark.usefixtures("_use_vault_config")
     def test_missing_path_returns_error(self, tmp_vault):
         result = memento_replace_note(path="notes/missing.md", title="Missing", body="Body")
         assert "error" in result

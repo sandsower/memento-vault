@@ -140,6 +140,47 @@ class TestRemoteSyncDryRun:
         assert entries[-1]["status"] == "error"
         assert entries[-1]["source"] == "notes/new-note.md"
 
+    def test_direct_sync_remote_fetch_failure_exits_nonzero_without_store(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+        note_path = vault / "notes" / "new-note.md"
+        _write_note(note_path, title="New Note")
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch.object(mod, "get", side_effect=RuntimeError("network down")),
+            patch.object(mod, "store") as store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", str(note_path)]),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                mod.main()
+
+        assert exc_info.value.code != 0
+        store.assert_not_called()
+        err = capsys.readouterr().err
+        assert "remote fetch failed" in err
+        assert "Sync failed for 1 note" in err
+
+    def test_missing_resolve_conflicts_value_exits_nonzero(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+        note_path = vault / "notes" / "new-note.md"
+        _write_note(note_path, title="New Note")
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch.object(mod, "store") as store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", str(note_path), "--resolve-conflicts"]),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                mod.main()
+
+        assert exc_info.value.code != 0
+        store.assert_not_called()
+        assert "Missing value for --resolve-conflicts" in capsys.readouterr().err
+
     def test_direct_sync_conflict_can_be_resolved_by_local_overwrite(self, tmp_path, capsys):
         mod = _load_remote_sync_module()
         vault = tmp_path / "vault"
@@ -606,11 +647,17 @@ class TestCatchUp:
         remote_inventory = [
             {"path": "notes/diverged.md", "title": "Diverged", "hash": "remote_old_hash"},
         ]
+        remote_content = note.read_text().replace("Local edited body.", "Remote old body.")
 
         with (
             patch.object(mod, "is_remote", return_value=True),
             patch.object(mod, "get_vault", return_value=vault),
             patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(
+                mod,
+                "get",
+                return_value={"path": "notes/diverged.md", "content": remote_content},
+            ),
             patch.object(mod, "replace_note", return_value={"path": "notes/diverged.md"}) as replace_note,
             patch.object(mod, "store") as mock_store,
             patch.object(
@@ -642,6 +689,14 @@ class TestCatchUp:
             patch.object(mod, "is_remote", return_value=True),
             patch.object(mod, "get_vault", return_value=vault),
             patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(
+                mod,
+                "get",
+                side_effect=lambda path: {
+                    "path": path,
+                    "content": (vault / path).read_text().replace("Local edited body.", "Remote old body."),
+                },
+            ),
             patch.object(mod, "replace_note", return_value={"path": "notes/one.md"}) as replace_note,
             patch.object(mod, "store") as mock_store,
             patch.object(
@@ -657,6 +712,46 @@ class TestCatchUp:
         output = capsys.readouterr().out
         assert "resolved 1" in output
         assert "conflicts 1" in output
+
+    def test_failed_conflict_resolution_attempt_consumes_batch_budget(self, tmp_path, capsys):
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        for name in ["one", "two", "three"]:
+            body = "Local edited body." if name != "three" else "New body."
+            _write_note(vault / "notes" / f"{name}.md", title=name.title(), body=body)
+        remote_inventory = [
+            {"path": "notes/one.md", "title": "One", "hash": "remote_old_hash_1"},
+            {"path": "notes/two.md", "title": "Two", "hash": "remote_old_hash_2"},
+        ]
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=remote_inventory),
+            patch.object(
+                mod,
+                "get",
+                side_effect=lambda path: {
+                    "path": path,
+                    "content": (vault / path).read_text().replace("Local edited body.", "Remote old body."),
+                },
+            ),
+            patch.object(mod, "replace_note", return_value={"error": "replace failed"}) as replace_note,
+            patch.object(mod, "store") as mock_store,
+            patch.object(
+                sys,
+                "argv",
+                ["memento-remote-sync.py", "--catch-up", "--batch", "1", "--resolve-conflicts=local"],
+            ),
+        ):
+            mod.main()
+
+        replace_note.assert_called_once()
+        mock_store.assert_not_called()
+        output = capsys.readouterr().out
+        assert "resolved 0" in output
+        assert "conflicts 2" in output
 
     def test_catch_up_missing_ledger_checks_duplicate_remote_titles_before_pushing(self, tmp_path, capsys):
         mod = _load_remote_sync_module()

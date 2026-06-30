@@ -111,12 +111,19 @@ def _payload_hash(note: dict) -> str:
     return sync_ledger.content_hash(_sync_payload(note))
 
 
-def _safe_get_remote(path: str) -> dict | None:
+_FETCH_FAILED = object()
+
+
+def _safe_get_remote(path: str) -> dict | None | object:
     try:
         return get(path)
     except Exception as exc:
         print(f"  Warning: could not fetch remote note {path}: {exc}", file=sys.stderr)
-        return None
+        return _FETCH_FAILED
+
+
+def _remote_fetch_failed(remote: object) -> bool:
+    return remote is _FETCH_FAILED
 
 
 def _remote_note_payload_hash(remote: dict) -> str | None:
@@ -141,6 +148,8 @@ def _dry_run_note(note: dict, resolve_conflicts: str = "") -> str:
     """Return the dry-run disposition for a note without writing remotely."""
     remote_path = _remote_note_path(note)
     remote = _safe_get_remote(remote_path)
+    if _remote_fetch_failed(remote):
+        return "fetch-error"
     if not remote:
         return "create"
 
@@ -311,6 +320,8 @@ def catch_up(vault, dry_run=False, batch=0, resolve_conflicts=""):
                         continue
                     candidate_paths.append(candidate_path)
                     remote_full = _safe_get_remote(candidate_path)
+                    if _remote_fetch_failed(remote_full):
+                        continue
                     if remote_full and _same_remote_payload(remote_full, note):
                         matched_path = candidate_path
                         break
@@ -353,6 +364,8 @@ def catch_up(vault, dry_run=False, batch=0, resolve_conflicts=""):
                     continue
                 candidate_paths.append(remote_path)
                 remote_full = _safe_get_remote(remote_path)
+                if _remote_fetch_failed(remote_full):
+                    continue
                 if remote_full and _same_remote_payload(remote_full, note):
                     matched_path = remote_path
                     break
@@ -368,6 +381,7 @@ def catch_up(vault, dry_run=False, batch=0, resolve_conflicts=""):
         to_push.append(f)
 
     resolved = 0
+    resolution_attempts = 0
     if resolve_conflicts == "local":
         remaining_conflicts = []
         resolution_batch = conflicts if batch <= 0 else conflicts[:batch]
@@ -379,6 +393,7 @@ def catch_up(vault, dry_run=False, batch=0, resolve_conflicts=""):
                 continue
             source = str(f.relative_to(vault))
             chash = _payload_hash(note)
+            resolution_attempts += 1
             if _replace_remote_note(vault, source, remote_path, note, chash, dry_run=dry_run):
                 resolved += 1
             else:
@@ -389,7 +404,7 @@ def catch_up(vault, dry_run=False, batch=0, resolve_conflicts=""):
         print(f"  Conflict (remote differs, skipped): {f.name} -> {remote_path}")
 
     if batch > 0:
-        remaining_batch = max(batch - resolved, 0) if resolve_conflicts == "local" else batch
+        remaining_batch = max(batch - resolution_attempts, 0) if resolve_conflicts == "local" else batch
         to_push = to_push[:remaining_batch]
 
     pushed = 0
@@ -467,7 +482,8 @@ def main():
             resolve_conflicts = args[idx + 1]
             args = args[:idx] + args[idx + 2 :]
         else:
-            args = args[:idx]
+            print("Missing value for --resolve-conflicts. Use --resolve-conflicts local.", file=sys.stderr)
+            sys.exit(1)
     else:
         for arg in list(args):
             if arg.startswith("--resolve-conflicts="):
@@ -550,6 +566,9 @@ def main():
                 print(f"  Would conflict (remote exists, different content): {note['title']}")
             elif disposition == "resolve":
                 print(f"  Would resolve (local overwrites remote): {note['title']}")
+            elif disposition == "fetch-error":
+                print(f"  Would fail (remote fetch failed): {note['title']}", file=sys.stderr)
+                failures += 1
             else:
                 print(f"  Would create: {note['title']}")
             continue
@@ -567,9 +586,17 @@ def main():
             if ledger_entry and ledger_entry.get("remote_path"):
                 remote_path = ledger_entry["remote_path"]
         remote = _safe_get_remote(remote_path)
+        if _remote_fetch_failed(remote):
+            print(f"  Error (remote fetch failed): {note['title']} -> {remote_path}", file=sys.stderr)
+            failures += 1
+            continue
         if not remote and remote_path != _remote_note_path(note):
             remote_path = _remote_note_path(note)
             remote = _safe_get_remote(remote_path)
+        if _remote_fetch_failed(remote):
+            print(f"  Error (remote fetch failed): {note['title']} -> {remote_path}", file=sys.stderr)
+            failures += 1
+            continue
         if remote:
             if _same_remote_payload(remote, note):
                 if vault:
