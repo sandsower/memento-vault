@@ -102,7 +102,7 @@ For package installation from a checkout:
 pi install /path/to/memento-vault
 ```
 
-The pi bridge does not start a long-lived MCP child process. Automatic durable writes are queued by default. Candidate captures land in local state for review and can be processed into curated notes manually.
+The pi bridge does not start a long-lived MCP child process. Automatic capture runs detached SessionEnd-style triage by default; explicit/manual captures can still be queued in local state for review and processed into curated notes manually.
 
 Useful pi commands/tools:
 

@@ -837,6 +837,39 @@ def test_recent_pi_bridge_failures_warn():
     assert "stdout parse failed" in check.details["last_failure"]["error"]
 
 
+def test_recent_pi_bridge_success_records_do_not_warn():
+    Path(health.TRIAGE_HEALTH_LOG_PATH).write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "pi-bridge",
+                        "action": "triage_spawned",
+                    }
+                ),
+                json.dumps(
+                    {"ts": datetime.now().isoformat(timespec="seconds"), "hook": "pi-bridge", "action": "pi_decision"}
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "hook": "pi-bridge",
+                        "action": "pi_structured_notes_written",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "pi bridge health")
+
+    assert check.status == "pass"
+    assert "no recent Pi bridge failures" in check.message
+
+
 def test_stale_headless_mcp_config_static_check_warns(tmp_path):
     stale = Path.home() / ".claude" / "hooks" / "memento" / "llm.py"
     stale.parent.mkdir(parents=True)

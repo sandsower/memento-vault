@@ -591,7 +591,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	}
 
 	function statusDetails(payload: Record<string, unknown>) {
-		return decorateStatusDetails(payload, {
+		const lifecycle = payload.lifecycle && typeof payload.lifecycle === "object" ? { ...(payload.lifecycle as Record<string, unknown>) } : {};
+		lifecycle.auto_capture = config.autoCapture;
+		lifecycle.capture_queue = config.captureQueue;
+		return decorateStatusDetails({ ...payload, lifecycle }, {
 			config,
 			configSources: loadedConfig.sources,
 			toolContextCount,
@@ -734,7 +737,12 @@ export default function mementoExtension(pi: ExtensionAPI) {
 
 	pi.on("session_compact", async (_event, ctx) => {
 		if (!config.enabled || !config.autoCapture) return;
-		lastLifecycleReason = lifecycleTriageStarted ? "session_compact-after-triage" : "session_compact-triage-deferred";
+		if (lifecycleTriageStarted) {
+			lastLifecycleReason = "session_compact-after-triage";
+			lifecycleTriageStarted = false;
+		} else {
+			lastLifecycleReason = "session_compact-triage-deferred";
+		}
 		await refreshAmbientWidget(ctx);
 	});
 

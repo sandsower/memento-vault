@@ -52,6 +52,23 @@ def _emit(payload: dict[str, Any]) -> int:
     return 0
 
 
+def _env_bool(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _pi_capture_queue_enabled() -> bool:
+    env_value = _env_bool("MEMENTO_PI_CAPTURE_QUEUE")
+    return env_value if env_value is not None else False
+
+
 def _bridge_config_summary() -> dict[str, Any]:
     config = get_config()
     return {
@@ -366,6 +383,9 @@ def _write_triage_payload(payload: dict[str, Any]) -> Path:
     return payload_path
 
 
+_TRIAGE_ACTIVE_TTL_SECONDS = 10 * 60
+
+
 def _safe_hook_session_id(session_id: str, transcript_path: str) -> str:
     """Return a session id safe to pass to the shared hook, or empty to let the adapter decide."""
     candidate = str(session_id or "").strip()
@@ -374,6 +394,40 @@ def _safe_hook_session_id(session_id: str, transcript_path: str) -> str:
     if Path(candidate).is_absolute() or "/" in candidate or "\\" in candidate or candidate in {".", ".."}:
         return ""
     return candidate
+
+
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _triage_active_until(started_at: str) -> str:
+    started = _parse_utc_timestamp(started_at) or datetime.now(timezone.utc)
+    return (started + timedelta(seconds=_TRIAGE_ACTIVE_TTL_SECONDS)).replace(microsecond=0).isoformat()
+
+
+def _triage_state_status(state: dict[str, Any]) -> str:
+    status = str(state.get("pi_triage_status") or "").strip().lower()
+    if status:
+        return status
+    return "active" if state.get("pi_triage_started_at") and not state.get("pi_triage_completed_at") else ""
+
+
+def _triage_state_active(state: dict[str, Any], now: datetime | None = None) -> bool:
+    if _triage_state_status(state) != "active":
+        return False
+    now = now or datetime.now(timezone.utc)
+    active_until = _parse_utc_timestamp(state.get("pi_triage_active_until"))
+    if active_until is None and state.get("pi_triage_started_at"):
+        active_until = _parse_utc_timestamp(_triage_active_until(str(state["pi_triage_started_at"])))
+    return bool(active_until and now <= active_until)
 
 
 def _capture_audit_file(vault: Path | None = None) -> Path:
@@ -806,7 +860,7 @@ def _status(cwd: str = "") -> dict[str, Any]:
             "prompt_recall": get_config().get("prompt_recall", True),
             "tool_context": get_config().get("tool_context", True),
             "auto_capture": True,
-            "capture_queue": False,
+            "capture_queue": _pi_capture_queue_enabled(),
         },
     }
 
@@ -1255,18 +1309,25 @@ def _triage(
         }
 
     state = _load_capture_session_state(effective_session_id, cwd)
-    if state.get("pi_triage_transcript_path") == str(resolved) and state.get("pi_triage_started_at"):
+    state_status = _triage_state_status(state)
+    same_transcript = state.get("pi_triage_transcript_path") == str(resolved)
+    if same_transcript and (
+        _triage_state_active(state) or (state_status == "completed" and state.get("pi_triage_returncode") == 0)
+    ):
+        reason_code = "already_completed" if state_status == "completed" else "already_started"
         log_triage_health(
             "triage_duplicate_skipped",
             hook="pi-bridge",
             transcript_path=str(resolved),
             started_at=state.get("pi_triage_started_at"),
+            status=state_status,
+            duplicate_reason=reason_code,
             **metadata,
         )
         return {
             "queued": False,
             "skipped": True,
-            "reason": "already_started",
+            "reason": reason_code,
             "source_event": source_event,
             "session_id": effective_session_id,
             "transcript_path": str(resolved),
@@ -1317,7 +1378,10 @@ def _triage(
                 {
                     "session_id": effective_session_id,
                     "cwd": cwd,
+                    "pi_triage_status": "active",
                     "pi_triage_started_at": now,
+                    "pi_triage_active_until": _triage_active_until(now),
+                    "pi_triage_completed_at": None,
                     "pi_triage_transcript_path": str(resolved),
                     "pi_triage_payload_path": str(payload_path),
                     "pi_triage_pid": process.pid,
@@ -1380,7 +1444,9 @@ def _triage(
         {
             "session_id": effective_session_id,
             "cwd": cwd,
+            "pi_triage_status": "completed" if completed.returncode == 0 else "failed",
             "pi_triage_started_at": now,
+            "pi_triage_active_until": None,
             "pi_triage_completed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "pi_triage_transcript_path": str(resolved),
             "pi_triage_source_event": source_event,

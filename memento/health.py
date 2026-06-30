@@ -1347,6 +1347,21 @@ def _check_pi_bridge_config() -> CheckResult:
     )
 
 
+_PI_BRIDGE_FAILURE_ACTIONS = {
+    "triage_missing_transcript",
+    "triage_disallowed_transcript",
+    "pi_missing_transcript",
+    "pi_structured_notes_parse_empty",
+    "pi_structured_notes_transcript_unreadable",
+    "pi_structured_notes_lock_timeout",
+}
+
+
+def _is_pi_bridge_failure_record(rec: dict[str, Any]) -> bool:
+    action = str(rec.get("action") or "")
+    return action.endswith("_failed") or action in _PI_BRIDGE_FAILURE_ACTIONS
+
+
 def _check_pi_bridge_health() -> CheckResult:
     path = Path(TRIAGE_HEALTH_LOG_PATH)
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
@@ -1361,7 +1376,7 @@ def _check_pi_bridge_health() -> CheckResult:
     recent_failures: list[dict[str, Any]] = []
     latest_failure: dict[str, Any] | None = None
     for rec in _iter_recent_jsonl(path, cutoff):
-        if rec.get("hook") != "pi-bridge":
+        if rec.get("hook") != "pi-bridge" or not _is_pi_bridge_failure_record(rec):
             continue
         failure = {
             "ts": rec.get("ts"),
