@@ -98,6 +98,26 @@ class TestRemoteSyncDryRun:
         store.assert_not_called()
         assert "Would conflict (remote exists, different content): Same title" in capsys.readouterr().out
 
+    def test_direct_sync_skips_locally_tombstoned_note_path(self, tmp_path, capsys):
+        from memento.archive import record_tombstone
+
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+        note_path = vault / "notes" / "deleted-note.md"
+        _write_note(note_path, title="Deleted Note")
+        record_tombstone(vault, "notes/deleted-note.md", content_hash=_file_hash(note_path))
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch.object(mod, "store") as store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", str(note_path)]),
+        ):
+            mod.main()
+
+        store.assert_not_called()
+        assert "Skip (tombstoned): notes/deleted-note.md" in capsys.readouterr().out
+
 
 class TestCatchUp:
     def test_catch_up_pushes_missing_notes(self, tmp_path, capsys):
@@ -149,6 +169,28 @@ class TestCatchUp:
             mod.main()
 
         mock_store.assert_not_called()
+
+    def test_catch_up_skips_locally_tombstoned_note_path(self, tmp_path, capsys):
+        from memento.archive import record_tombstone
+
+        mod = _load_remote_sync_module()
+        vault = tmp_path / "vault"
+
+        note_a = vault / "notes" / "deleted-note.md"
+        _write_note(note_a, title="Deleted Note")
+        record_tombstone(vault, "notes/deleted-note.md", content_hash=_file_hash(note_a))
+
+        with (
+            patch.object(mod, "is_remote", return_value=True),
+            patch.object(mod, "get_vault", return_value=vault),
+            patch("memento.remote_client.list_notes", return_value=[]),
+            patch.object(mod, "store") as mock_store,
+            patch.object(sys, "argv", ["memento-remote-sync.py", "--catch-up"]),
+        ):
+            mod.main()
+
+        mock_store.assert_not_called()
+        assert "tombstoned 1" in capsys.readouterr().out
 
     def test_catch_up_treats_hash_mismatch_as_conflict(self, tmp_path, capsys):
         """Hash mismatches are conflicts, not pushable changes.

@@ -201,6 +201,17 @@ cd memento-vault && git pull && ./install.sh
 - [Obsidian](https://obsidian.md) (optional, browsing)
 - `mcp` Python package (for MCP setup, installed automatically by `--mcp`)
 
+## Portable vault archives
+
+Use portable archives when moving a vault between machines or safely merging vault state without relying on a raw filesystem copy. Archives keep Markdown as the canonical source of truth and include vault identity, `notes/`, `fleeting/`, `projects/`, `archive/`, sync ledger state, and tombstones; derived search indexes and embeddings are excluded.
+
+```bash
+memento-vault archive export --vault ~/memento ./memento-portable.zip
+memento-vault archive import --vault ~/memento-restored ./memento-portable.zip
+```
+
+Imports default to safe conflict errors on existing divergent files. Use `--conflict skip` to keep local files or `--conflict overwrite` when intentionally replacing them. Tombstones are merged during import so deleted notes do not reappear during later archive imports or remote sync catch-up.
+
 ## MCP server
 
 The MCP server exposes read, lifecycle, write, and maintenance tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.

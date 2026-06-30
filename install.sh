@@ -403,7 +403,7 @@ mkdir -p "$MEMENTO_PKG_DIR/adapters"
 PKG_COPIED=0
 PKG_SKIPPED=0
 
-for mod in __init__.py config.py utils.py search.py search_backend.py graph.py store.py llm.py types.py lifecycle.py mcp_server.py pi_bridge.py __main__.py auth.py remote_client.py embedded_search.py embedding.py indexer.py sync_ledger.py; do
+for mod in __init__.py config.py utils.py search.py search_backend.py graph.py store.py llm.py types.py lifecycle.py mcp_server.py pi_bridge.py __main__.py auth.py remote_client.py embedded_search.py embedding.py indexer.py sync_ledger.py archive.py; do
     if [ -f "$SCRIPT_DIR/memento/$mod" ]; then
         if safe_copy "$SCRIPT_DIR/memento/$mod" "$MEMENTO_PKG_DIR/$mod" "memento/$mod"; then
             ((PKG_COPIED++)) || true
@@ -423,7 +423,7 @@ for mod in __init__.py claude.py opencode.py pi.py; do
     fi
 done
 
-for critical in __init__.py config.py utils.py store.py search.py lifecycle.py pi_bridge.py adapters/__init__.py adapters/claude.py adapters/opencode.py adapters/pi.py; do
+for critical in __init__.py config.py utils.py store.py search.py lifecycle.py pi_bridge.py archive.py adapters/__init__.py adapters/claude.py adapters/opencode.py adapters/pi.py; do
     if [ ! -f "$MEMENTO_PKG_DIR/$critical" ]; then
         error "Critical file missing: $MEMENTO_PKG_DIR/$critical"
         error "Hooks will not work. Rerun with --force or fix permissions."
