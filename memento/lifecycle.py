@@ -18,6 +18,7 @@ from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, s
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
 from memento.health import build_automation_memory_readiness
 from memento.llm import is_invalid_mcp_config_error, llm_complete
+from memento.retrieval_policy import PromptRecallRequest, PromptRecallRuntime
 from memento.search import (
     MISS_RECOVERY_HINTS,
     build_search_miss,
@@ -1832,366 +1833,37 @@ def run_remote_recall(prompt, cwd, config, session_id="unknown", concrete: bool 
     return lines, top_path, injected_results, None, project_decisions
 
 
+def _run_recall_lines_pipeline(prompt: str, cwd: str = "", session_id: str = "unknown", host_id: str | None = None):
+    """Backward-compatible alias for the retrieval policy runtime."""
+    return _run_recall_lines(prompt, cwd=cwd, session_id=session_id, host_id=host_id)
+
+
 def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown", host_id: str | None = None):
-    """Run the recall search. Returns (lines, top_path, results, reason)."""
-    config = get_config()
-    host_id = runtime_host_id(host_id)
-    project_slug = "unknown"
-    if cwd:
-        try:
-            project_slug, _ = detect_project(cwd, None)
-        except Exception:
-            project_slug = "unknown"
+    """Run prompt recall through the retrieval policy runtime seam."""
+    from memento.remote_client import is_remote, search_envelope as remote_search_envelope
 
-    concrete_mode = config.get("recall_concrete_mode", False)
-    concrete_enabled, concrete_auto_selected = resolve_recall_concrete_mode(prompt or "", config)
-
-    log_recall_diagnostic(
-        config,
-        "start",
-        prompt_len=len(prompt or ""),
-        cwd=cwd,
-        session_id=session_id,
-        project_slug=project_slug,
-        signal_terms=recall_signal_terms(prompt or ""),
-        low_signal=is_low_signal_recall_prompt(prompt or ""),
-        concrete_mode=concrete_mode,
-        concrete_enabled=concrete_enabled,
-        concrete_auto_selected=concrete_auto_selected,
+    runtime = PromptRecallRuntime(
+        config_loader=get_config,
+        vault_loader=get_vault,
+        has_backend=has_qmd,
+        remote_available=is_remote,
+        remote_search_envelope=remote_search_envelope,
+        detect_project=lambda current_cwd: detect_project(current_cwd, None),
+        qmd_search=qmd_search_with_extras,
+        enhance_results=enhance_results,
+        recently_injected_paths=recently_injected_paths,
+        bump_prompts_since=bump_prompts_since,
+        concept_lookup=lookup_concepts,
+        prf_expand=prf_expand_query,
+        semantic_warm=is_vsearch_warm,
+        fuse_results=rrf_fuse,
+        multi_hop=multi_hop_search,
+        deep_recall_pending_exists=lambda: os.path.exists(DEEP_RECALL_PENDING_PATH),
+        spawn_deep_recall=spawn_deep_recall,
+        log_retrieval=log_retrieval,
     )
-
-    if not config.get("prompt_recall", True):
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="disabled")
-        return [], None, [], "disabled"
-    if not prompt:
-        log_recall_diagnostic(config, "decision", decision="skipped", reason="empty-prompt")
-        return [], None, [], "empty-prompt"
-    # Each recall invocation is one user prompt: age this session's dedup
-    # entries exactly once, regardless of which branch we take below.
-    bump_prompts_since(session_id, cwd=cwd, project_slug=project_slug, host_id=host_id)
-    if should_skip_recall(prompt, config, concrete=concrete_enabled):
-        if not concrete_enabled and config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
-            reason = "low-signal-prompt"
-        elif (
-            not concrete_enabled
-            and config.get("recall_skip_broad_project_queries", True)
-            and is_broad_project_history_query(prompt)
-        ):
-            reason = "broad-project-query"
-        else:
-            reason = "skipped-prompt"
-        log_retrieval("recall", reason, query=prompt, cwd=cwd, session_id=session_id)
-        log_recall_diagnostic(
-            config,
-            "skip",
-            reason=reason,
-            normalized_prompt=re.sub(r"\s+", " ", prompt).strip(),
-            broad_project_query=is_broad_project_history_query(prompt),
-            concrete_enabled=concrete_enabled,
-            concrete_auto_selected=concrete_auto_selected,
-        )
-        log_recall_diagnostic(config, "decision", decision="skipped", reason=reason)
-        return [], None, [], reason
-
-    # Try remote vault first (has cross-device data), fall through to local
-    from memento.remote_client import is_remote
-
-    fallback_remote_reason = None
-    if is_remote() and prompt:
-        try:
-            lines, top_path, remote_results, remote_reason, project_decisions = run_remote_recall(
-                prompt, cwd, config, session_id=session_id, concrete=concrete_enabled
-            )
-            if project_decisions and config.get("recall_diagnostics_include_candidates", False):
-                log_recall_diagnostic(
-                    config,
-                    "candidates",
-                    stage="remote-project-filter",
-                    candidates=project_decisions,
-                    query=prompt,
-                )
-            if lines:
-                log_recall_diagnostic(config, "decision", decision="injected", source="remote", top_path=top_path)
-                return lines, top_path, remote_results, None
-            if remote_reason in ("duplicate", "project-mismatch-filtered-empty"):
-                log_recall_diagnostic(config, "decision", decision="skipped", source="remote", reason=remote_reason)
-                return [], None, [], remote_reason
-            if remote_reason and remote_reason != "no-results":
-                fallback_remote_reason = remote_reason
-        except Exception as exc:
-            print(f"[memento] remote vault unreachable, using local only ({exc})", file=sys.stderr)
-
-    vault = get_vault()
-    if not vault.exists() or not (vault / "notes").exists():
-        reason = (
-            fallback_remote_reason
-            if isinstance(fallback_remote_reason, StructuredMissReason)
-            else normalize_miss_reason(fallback_remote_reason or "empty_vault", prompt)
-        )
-        log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
-        return [], None, [], reason
-
-    if not has_qmd():
-        reason = (
-            fallback_remote_reason
-            if isinstance(fallback_remote_reason, StructuredMissReason)
-            else normalize_miss_reason(fallback_remote_reason or "backend_unavailable", prompt)
-        )
-        log_recall_diagnostic(config, "decision", decision="skipped", reason=str(reason))
-        return [], None, [], reason
-
-    # BM25 search against the prompt, augmented with project context
-    min_score = config.get("recall_min_score", 0.4)
-    max_notes = config.get("recall_max_notes", 3)
-
-    # Bias toward current project by appending project slug to query
-    query = prompt
-    appended_project = False
-    if cwd and should_append_project_to_recall(prompt, concrete=concrete_enabled):
-        if project_slug and project_slug != "unknown":
-            query = f"{prompt} {project_slug.replace('-', ' ')}"
-            appended_project = True
-    log_recall_diagnostic(
-        config,
-        "query",
-        original_prompt=prompt,
-        final_query=query,
-        appended_project=appended_project,
-        project_slug=project_slug,
-    )
-
-    t0 = time.time()
-
-    # Adaptive pipeline: BM25 first, decide depth based on confidence.
-    #
-    # Fast path (BM25 score >= threshold): BM25 + enhance_results only.
-    #   This is the v1.1.0 path. ~800ms.
-    #
-    # Deep path (BM25 score < threshold): PRF expand + RRF fuse + CE rerank.
-    #   PRF reuses initial results (no extra QMD call for term extraction).
-    #   PRF expanded query runs one additional BM25 call.
-    #   RRF adds one vsearch call (only when warm).
-    #   CE reranks the fused results.
-    #
-    # The threshold is intentionally low (0.55) because BM25 scores for
-    # natural language prompts against vault notes typically range 0.4-0.8.
-    # At 0.55+, BM25 has found a reasonable match and the extra stages
-    # add latency without much quality gain.
-
-    high_conf = config.get("recall_high_confidence", 0.55)
-    search_limit = max_notes + 4
-
-    results = qmd_search_with_extras(
-        query,
-        limit=search_limit,
-        semantic=False,
-        timeout=5,
-        min_score=min_score,
-        concrete=concrete_enabled,
-    )
-    top_score = results[0]["score"] if results else 0
-    pipeline_depth = "bm25"
-    log_recall_candidates(config, results, "bm25", query=query)
-    if concrete_enabled:
-        pipeline_depth = "concrete"
-
-    if not concrete_enabled and top_score < high_conf and results:
-        # Low confidence — try harder with PRF + RRF
-
-        # PRF: expand query using terms from the results we already have (zero extra QMD calls)
-        expanded_query = prf_expand_query(query, config=config, initial_results=results)
-        if expanded_query != query:
-            prf_results = qmd_search_with_extras(
-                expanded_query,
-                limit=search_limit,
-                semantic=False,
-                timeout=5,
-                min_score=min_score,
-            )
-            if prf_results:
-                existing = {r["path"] for r in results}
-                for r in prf_results:
-                    if r["path"] not in existing:
-                        results.append(r)
-                        existing.add(r["path"])
-                results.sort(key=lambda r: r["score"], reverse=True)
-                pipeline_depth = "prf"
-                log_recall_candidates(config, results, "prf", query=expanded_query)
-
-        # RRF: fuse with vsearch when warm
-        if config.get("rrf_enabled", True) and is_vsearch_warm():
-            vec_results = qmd_search_with_extras(
-                query,
-                limit=search_limit,
-                semantic=True,
-                timeout=5,
-                min_score=min_score,
-            )
-            if vec_results:
-                results = rrf_fuse([results, vec_results], k=config.get("rrf_k", 60))
-                pipeline_depth = "rrf"
-                log_recall_candidates(config, results, "rrf", query=query)
-
-    latency_ms = int((time.time() - t0) * 1000)
-    results_before = len(results)
-    project_decisions = []
-    project_filter_applied = False
-    multi_hop_gate = False
-    multi_hop_added = 0
-    deep_recall_spawned = False
-
-    if not concrete_enabled:
-        # Concept index supplement (always, O(1) lookup)
-        if config.get("concept_index_enabled", True):
-            try:
-                concept_hits = lookup_concepts(prompt)
-                if concept_hits:
-                    existing_paths = {r.get("path", "") for r in results}
-                    for hit in concept_hits:
-                        if hit["path"] not in existing_paths:
-                            hit["score"] = max(hit.get("score", 0), config.get("concept_index_score", 0.5))
-                            results.append(hit)
-                            existing_paths.add(hit["path"])
-                    log_recall_candidates(config, results, "concept-index", query=query)
-            except Exception:
-                pass
-
-        # Multi-hop retrieval: follow wikilinks from top results
-        multi_hop_gate = top_score < high_conf and config.get("multi_hop_enabled", False)
-        if multi_hop_gate and results:
-            try:
-                pre_hop_count = len(results)
-                results = multi_hop_search(prompt, results, config=config)
-                multi_hop_added = len(results) - pre_hop_count
-                pipeline_depth += "+hop"
-                log_recall_candidates(config, results, "multi-hop", query=query)
-            except Exception:
-                pass
-
-        # Deep recall: spawn background codex for complex prompts
-        # Gate: low confidence AND feature enabled
-        if (
-            top_score < high_conf
-            and config.get("deep_recall_enabled", False)
-            and results
-            and not os.path.exists(DEEP_RECALL_PENDING_PATH)
-        ):
-            try:
-                spawn_deep_recall(prompt, results, config)
-                deep_recall_spawned = True
-                pipeline_depth += "+deep"
-            except Exception:
-                pass
-
-    if not results:
-        if min_score > 0:
-            threshold_probe = qmd_search_with_extras(
-                query,
-                limit=1,
-                semantic=False,
-                timeout=5,
-                min_score=0.0,
-            )
-            if threshold_probe:
-                log_retrieval(
-                    "recall",
-                    "threshold_too_high",
-                    query=query,
-                    min_score=min_score,
-                    latency_ms=latency_ms,
-                    pipeline=pipeline_depth,
-                )
-                log_recall_diagnostic(
-                    config,
-                    "decision",
-                    decision="skipped",
-                    reason="threshold_too_high",
-                    min_score=min_score,
-                    latency_ms=latency_ms,
-                )
-                return [], None, [], "threshold_too_high"
-        miss_reason = (
-            fallback_remote_reason
-            if isinstance(fallback_remote_reason, StructuredMissReason)
-            else normalize_miss_reason(fallback_remote_reason or "no-results", prompt)
-        )
-        log_retrieval("recall", str(miss_reason), query=query, latency_ms=latency_ms, pipeline=pipeline_depth)
-        log_recall_diagnostic(config, "decision", decision="skipped", reason=str(miss_reason), latency_ms=latency_ms)
-        return [], None, [], miss_reason
-
-    if not concrete_enabled:
-        results = enhance_results(results, config, cwd=cwd)
-        log_recall_candidates(config, results, "enhanced", query=query)
-
-        results, project_decisions = filter_recall_results_by_explicit_project(prompt, results)
-        project_filter_applied = bool(project_decisions)
-        if project_decisions and config.get("recall_diagnostics_include_candidates", False):
-            log_recall_diagnostic(
-                config, "candidates", stage="project-filter", candidates=project_decisions, query=query
-            )
-
-        # CE reranking (only on deep path)
-        if top_score < high_conf and config.get("reranker_enabled", True) and len(results) > 1:
-            try:
-                from tenet_reranker import rerank
-
-                results = rerank(prompt, results, config)
-                pipeline_depth += "+ce"
-                log_recall_candidates(config, results, "reranked", query=query)
-            except Exception:
-                pass
-
-    if not results:
-        reason = "project-mismatch-filtered-empty" if project_filter_applied else "filtered-empty"
-        log_retrieval("recall", reason, query=query, results_before=results_before, latency_ms=latency_ms)
-        log_recall_diagnostic(config, "decision", decision="skipped", reason=reason, latency_ms=latency_ms)
-        return [], None, [], reason
-
-    recent = recently_injected_paths(session_id, cwd=cwd, project_slug=project_slug, host_id=host_id)
-    if recent:
-        fresh = [r for r in results if r.get("path", "") not in recent]
-        if not fresh:
-            log_retrieval("recall", "dedup-skip", query=query)
-            log_recall_diagnostic(
-                config, "decision", decision="skipped", reason="duplicate", top_path=results[0].get("path", "")
-            )
-            return [], None, [], "duplicate"
-        results = fresh
-    top_path = results[0].get("path", "")
-
-    lines = ["[vault] Related memories:"]
-    injected = []
-    for result in results[:max_notes]:
-        lines.append(format_result(result))
-        injected.append(result.get("title", ""))
-
-    injected_text = "\n".join(lines)
-    log_retrieval(
-        "recall",
-        "inject",
-        query=query,
-        latency_ms=latency_ms,
-        results_before=results_before,
-        results_after=len(results),
-        injected_titles=injected,
-        injected_chars=len(injected_text),
-        pipeline=pipeline_depth,
-        multi_hop_gate=multi_hop_gate,
-        multi_hop_added=multi_hop_added,
-        deep_recall_spawned=deep_recall_spawned,
-    )
-    log_recall_diagnostic(
-        config,
-        "decision",
-        decision="injected",
-        injected_titles=injected,
-        injected_chars=len(injected_text),
-        latency_ms=latency_ms,
-        top_path=top_path,
-        pipeline=pipeline_depth,
-    )
-
-    return lines, top_path, results[:max_notes], None
+    decision = runtime.run(PromptRecallRequest(prompt=prompt, cwd=cwd, session_id=session_id, host_id=host_id))
+    return decision.lines, decision.top_path, decision.results, decision.reason
 
 
 def run_recall():

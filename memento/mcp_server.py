@@ -142,17 +142,8 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for stripped test env
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
 from memento.health import build_automation_memory_readiness
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context
-from memento.search import (
-    enhance_results,
-    filter_by_project,
-    has_qmd,
-    miss_envelope,
-    normalize_miss_reason,
-    qmd_get,
-    qmd_search_with_extras,
-    resolve_concrete_mode,
-    shape_search_results,
-)
+from memento.search import enhance_results, filter_by_project, has_qmd, qmd_get, qmd_search_with_extras
+from memento.retrieval_policy import ExplicitSearchRequest, ExplicitSearchRuntime
 from memento.query import query_notes
 from memento.contradictions import inspect_contradictions
 from memento.store import (
@@ -379,99 +370,28 @@ def memento_search(
     Returns:
         Search envelope with results and metadata. Misses include structured miss metadata.
     """
-    if not query or not query.strip():
-        metadata = shape_search_results(
-            [], vault=get_vault(), detail_level=detail_level, include_content=include_content, token_budget=token_budget
-        )["metadata"]
-        miss = miss_envelope("query_too_broad", details={"query": query}, metadata=metadata)
-        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
-        return miss
-
-    # Clamp limit to prevent DoS via unbounded scans
-    try:
-        limit = max(1, min(int(limit), 50))
-    except (TypeError, ValueError):
-        limit = 5
-
-    vault = get_vault()
-    search_metadata = shape_search_results(
-        [], vault=vault, detail_level=detail_level, include_content=include_content, token_budget=token_budget
-    )["metadata"]
-    if not vault.exists() or not any((vault / d).exists() for d in ("notes", "fleeting", "projects")):
-        miss = miss_envelope("empty_vault", details={"vault": str(vault)}, metadata=search_metadata)
-        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
-        return miss
-
-    if not has_qmd():
-        miss = miss_envelope("backend_unavailable", metadata=search_metadata)
-        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
-        return miss
-
-    concrete_enabled, _auto_selected = resolve_concrete_mode(concrete, query)
-    concrete_auto_mode = concrete is None or (isinstance(concrete, str) and concrete.strip().lower() in ("", "auto"))
-    conceptual_miss_reason = normalize_miss_reason("no-results", query) if concrete_auto_mode else "no_exact_match"
-    raw_results = qmd_search_with_extras(
-        query,
-        limit=limit + 3,
-        semantic=False if concrete_enabled else semantic,
-        timeout=10,
-        min_score=min_score,
-        concrete=concrete_enabled,
+    runtime = ExplicitSearchRuntime(
+        vault_loader=get_vault,
+        has_backend=has_qmd,
+        qmd_search=qmd_search_with_extras,
+        enhance_results=enhance_results,
+        filter_by_project=filter_by_project,
+        log_retrieval=log_retrieval,
+        record_access=record_access,
     )
-    results = raw_results
-
-    if results:
-        if concrete_enabled:
-            if cwd:
-                results = filter_by_project(results, cwd)
-        else:
-            results = enhance_results(results, cwd=cwd or None)
-
-    if not results:
-        if raw_results:
-            reason = "project_filter_removed_all"
-            details = {"cwd": cwd} if cwd else None
-        elif min_score > 0:
-            low_threshold_results = qmd_search_with_extras(
-                query,
-                limit=1,
-                semantic=False if concrete_enabled else semantic,
-                timeout=10,
-                min_score=0.0,
-                concrete=concrete_enabled,
-            )
-            reason = (
-                "threshold_too_high"
-                if low_threshold_results
-                else ("no_concrete_match" if concrete_enabled else conceptual_miss_reason)
-            )
-            details = {"min_score": min_score} if reason == "threshold_too_high" else None
-        else:
-            reason = "no_concrete_match" if concrete_enabled else conceptual_miss_reason
-            details = None
-        miss = miss_envelope(reason, details=details, metadata=search_metadata)
-        log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
-        return miss
-
-    shaped = shape_search_results(
-        results[:limit],
-        vault=vault,
-        detail_level=detail_level,
-        include_content=include_content,
-        token_budget=token_budget,
+    return runtime.search(
+        ExplicitSearchRequest(
+            query=query,
+            limit=limit,
+            semantic=semantic,
+            min_score=min_score,
+            cwd=cwd,
+            concrete=concrete,
+            detail_level=detail_level,
+            include_content=include_content,
+            token_budget=token_budget,
+        )
     )
-    output = shaped["results"]
-    metadata = shaped["metadata"]
-
-    log_retrieval("mcp", "search", query=query, results=len(output))
-    record_access(
-        [entry["path"] for entry in output if entry.get("path")],
-        hook="mcp",
-        tool="search",
-        query=query,
-        result_count=len(output),
-    )
-    return {"results": output, "metadata": metadata}
 
 
 @mcp.tool()
