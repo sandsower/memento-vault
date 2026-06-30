@@ -401,7 +401,7 @@ def _parse_utc_timestamp(value: object) -> datetime | None:
     if not value:
         return None
     try:
-        parsed = datetime.fromisoformat(str(value))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -759,7 +759,7 @@ def _iter_jsonl(path: Path):
 
 def _bridge_health_status() -> dict[str, Any]:
     log_path = Path(store_module.TRIAGE_HEALTH_LOG_PATH)
-    cutoff = datetime.now() - timedelta(hours=24)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     failures: list[dict[str, Any]] = []
     latest: dict[str, Any] | None = None
     latest_ts: datetime | None = None
@@ -776,9 +776,8 @@ def _bridge_health_status() -> dict[str, Any]:
             if rec.get("hook") != "pi-bridge":
                 continue
             ts_raw = rec.get("ts")
-            try:
-                ts = datetime.fromisoformat(str(ts_raw))
-            except ValueError:
+            ts = _parse_utc_timestamp(ts_raw)
+            if ts is None:
                 continue
             if ts < cutoff:
                 continue

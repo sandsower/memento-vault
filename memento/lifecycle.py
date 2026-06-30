@@ -241,6 +241,18 @@ def _is_pi_bridge_failure_record(rec: dict[str, object]) -> bool:
     return action.endswith("_failed") or action in _PI_BRIDGE_FAILURE_ACTIONS
 
 
+def _parse_health_timestamp(raw: object) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.replace(tzinfo=None)
+    return parsed
+
+
 def _scan_pi_bridge_health_log(path: str, cutoff: datetime) -> tuple[str | None, int, dict[str, object] | None]:
     if not os.path.exists(path):
         return str(path), 0, None
@@ -259,9 +271,8 @@ def _scan_pi_bridge_health_log(path: str, cutoff: datetime) -> tuple[str | None,
             ts_raw = rec.get("ts")
             if not ts_raw:
                 continue
-            try:
-                ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-            except ValueError:
+            ts = _parse_health_timestamp(ts_raw)
+            if ts is None:
                 continue
             if ts < cutoff or not _is_pi_bridge_failure_record(rec):
                 continue

@@ -1535,7 +1535,7 @@ def test_pi_bridge_health_warning_ignores_success_records(tmp_path):
     health_log.write_text(
         "\n".join(
             [
-                json.dumps({"ts": "2999-01-01T00:00:00", "hook": "pi-bridge", "action": "triage_spawned"}),
+                json.dumps({"ts": "2999-01-01T00:00:00.000Z", "hook": "pi-bridge", "action": "triage_spawned"}),
                 json.dumps({"ts": "2999-01-01T00:00:01", "hook": "pi-bridge", "action": "pi_decision"}),
                 json.dumps({"ts": "2999-01-01T00:00:02", "hook": "pi-bridge", "action": "pi_structured_notes_written"}),
             ]

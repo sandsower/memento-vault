@@ -128,7 +128,7 @@ def test_pi_bridge_status_surfaces_recent_bridge_failures(capsys, tmp_path, monk
             [
                 json.dumps(
                     {
-                        "ts": "2999-01-01T00:00:00",
+                        "ts": "2999-01-01T00:00:00.000Z",
                         "hook": "pi-bridge",
                         "action": "briefing_failed",
                         "operation": "briefing",
