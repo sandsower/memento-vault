@@ -2022,6 +2022,50 @@ def _dedup_context_for_group(vault: Path, group: dict[str, Any], limit: int = 20
     return [item for *_rank, item in ranked[: max(0, int(limit))]]
 
 
+def _transcript_context_lines(transcript_info: dict[str, Any]) -> list[str]:
+    included = bool(transcript_info.get("included"))
+    reason = str(transcript_info.get("reason") or ("included" if included else "unknown"))
+    lines = ["", "## Transcript context"]
+    if included:
+        if transcript_info.get("partial") or reason == "over_size_cap":
+            lines.extend(
+                [
+                    "- Mode: partial cleaned transcript from an oversize source.",
+                    f"- Raw size: {transcript_info.get('size_bytes', 'unknown')} bytes; cleaned excerpt: {transcript_info.get('cleaned_char_count', 'unknown')} chars capped at {transcript_info.get('cleaned_cap_chars', 'unknown')} chars.",
+                    "- Quality limit: transcript evidence is capped; prefer durable facts corroborated by queued captures, file context, or deduplication context.",
+                    "- Curator instruction: if the capped transcript and queued captures do not provide enough context for a high-quality note, return processed_no_notes with a discard_reason explaining the oversize partial transcript.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "- Mode: cleaned session transcript included.",
+                    f"- Raw size: {transcript_info.get('size_bytes', 'unknown')} bytes; cleaned chars: {transcript_info.get('cleaned_char_count', 'unknown')}.",
+                ]
+            )
+        return lines
+
+    if reason == "no_session_id":
+        detail = "the queued captures did not include a session transcript path"
+    elif reason == "missing":
+        detail = "the recorded session transcript path does not exist"
+    elif reason == "outside_allowed_roots":
+        detail = "the recorded transcript path is outside the configured Pi transcript roots"
+    elif reason == "empty_cleaned_transcript":
+        detail = "the transcript contained no renderable user/assistant content after cleaning"
+    else:
+        detail = reason.replace("_", " ")
+    lines.extend(
+        [
+            "- Mode: explicit fallback; no cleaned session transcript is available.",
+            f"- Reason: {detail}.",
+            "- Quality limit: queued captures are lifecycle fragments and may omit final decisions, rejected alternatives, and command outcomes.",
+            "- Curator instruction: create notes only when durable facts are explicit in queued captures, lifecycle context, or deduplication context; otherwise defer by returning processed_no_notes with a discard_reason explaining the transcript limitation.",
+        ]
+    )
+    return lines
+
+
 def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "") -> str:
     lines = [
         f"# Memento processing input: {group['group_id']}",
@@ -2032,9 +2076,14 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
         f"- Branch: {group.get('branch') or '(unknown)'}",
         f"- CWD: {group.get('cwd') or '(unknown)'}",
         f"- Capture IDs: {', '.join(str(x) for x in group.get('capture_ids', []))}",
-        "",
-        "## Deduplication context",
     ]
+    lines.extend(_transcript_context_lines(group.get("transcript") or {"included": False, "reason": "unknown"}))
+    lines.extend(
+        [
+            "",
+            "## Deduplication context",
+        ]
+    )
     dedup_context = group.get("dedup_context") or []
     if dedup_context:
         lines.append(
@@ -2095,6 +2144,77 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _transcript_context_for_group(
+    group: dict[str, Any], transcript_max_bytes: int, cleaned_cap_chars: int = 200000
+) -> tuple[dict[str, Any], str]:
+    if not group.get("session_id"):
+        return {"included": False, "reason": "no_session_id"}, ""
+
+    transcript_path = Path(str(group["session_id"])).expanduser()
+    base_info: dict[str, Any] = {"path": str(transcript_path), "included": False}
+    if not transcript_path.exists():
+        return {**base_info, "reason": "missing"}, ""
+
+    try:
+        size = transcript_path.stat().st_size
+    except OSError as exc:
+        return {**base_info, "reason": "unreadable", "error": str(exc)}, ""
+    base_info["size_bytes"] = size
+
+    if not _transcript_path_allowed(transcript_path):
+        return {**base_info, "reason": "outside_allowed_roots"}, ""
+
+    try:
+        transcript_markdown = _clean_transcript(transcript_path, total_cap=cleaned_cap_chars)
+    except OSError as exc:
+        return {**base_info, "reason": "unreadable", "error": str(exc)}, ""
+    if not transcript_markdown.strip():
+        return {**base_info, "reason": "empty_cleaned_transcript"}, ""
+
+    partial = size > int(transcript_max_bytes) or "[transcript truncated by memento processor]" in transcript_markdown
+    reason = "over_size_cap" if size > int(transcript_max_bytes) else "included"
+    return {
+        **base_info,
+        "included": True,
+        "reason": reason,
+        "partial": partial,
+        "cleaned_char_count": len(transcript_markdown),
+        "cleaned_cap_chars": cleaned_cap_chars,
+    }, transcript_markdown
+
+
+def _transcript_status_counts(groups: list[dict[str, Any]]) -> dict[str, Any]:
+    by_reason: dict[str, int] = {}
+    included = 0
+    partial = 0
+    oversize = 0
+    missing = 0
+    fallback = 0
+    for group in groups:
+        transcript = group.get("transcript") if isinstance(group.get("transcript"), dict) else {}
+        is_included = bool(transcript.get("included"))
+        reason = str(transcript.get("reason") or ("included" if is_included else "unknown"))
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+        if is_included:
+            included += 1
+        else:
+            fallback += 1
+        if transcript.get("partial") or reason == "over_size_cap":
+            partial += 1
+        if reason == "over_size_cap":
+            oversize += 1
+        if reason in {"missing", "no_session_id", "empty_cleaned_transcript", "unreadable"}:
+            missing += 1
+    return {
+        "transcript_included_group_count": included,
+        "transcript_partial_group_count": partial,
+        "transcript_fallback_group_count": fallback,
+        "oversize_transcript_group_count": oversize,
+        "missing_transcript_group_count": missing,
+        "transcript_reason_counts": by_reason,
+    }
+
+
 def _allowed_transcript_roots() -> list[Path]:
     roots = [Path.home() / ".pi" / "agent" / "sessions", Path.home() / ".pi" / "agent" / "subagents"]
     session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
@@ -2153,38 +2273,39 @@ def _clean_content_parts(parts: Any, per_tool_cap: int) -> list[str]:
 def _clean_transcript(path: Path, per_tool_cap: int = 3000, total_cap: int = 200000) -> str:
     lines: list[str] = []
     total = 0
-    for raw in path.read_text(errors="replace").splitlines():
-        if not raw.strip():
-            continue
-        try:
-            entry = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        entry_type = entry.get("type")
-        timestamp = entry.get("timestamp") or ""
-        rendered: list[str] = []
-        if entry_type == "message":
-            message = entry.get("message") or {}
-            role = message.get("role") or "message"
-            content = _clean_content_parts(message.get("content"), per_tool_cap)
-            if content:
-                rendered = [f"## {role} {timestamp}".rstrip(), "", "\n\n".join(content)]
-        elif entry_type == "custom_message":
-            content = entry.get("content")
-            if isinstance(content, str) and content.strip():
-                rendered = [f"## custom:{entry.get('customType') or 'message'} {timestamp}".rstrip(), "", content]
-        elif entry_type in {"session", "model_change", "thinking_level_change"}:
-            continue
-        if not rendered:
-            continue
-        block = "\n".join(rendered).strip()
-        if not block:
-            continue
-        lines.append(block)
-        total += len(block)
-        if total > total_cap:
-            lines.append("\n[transcript truncated by memento processor]")
-            break
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            if not raw.strip():
+                continue
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            entry_type = entry.get("type")
+            timestamp = entry.get("timestamp") or ""
+            rendered: list[str] = []
+            if entry_type == "message":
+                message = entry.get("message") or {}
+                role = message.get("role") or "message"
+                content = _clean_content_parts(message.get("content"), per_tool_cap)
+                if content:
+                    rendered = [f"## {role} {timestamp}".rstrip(), "", "\n\n".join(content)]
+            elif entry_type == "custom_message":
+                content = entry.get("content")
+                if isinstance(content, str) and content.strip():
+                    rendered = [f"## custom:{entry.get('customType') or 'message'} {timestamp}".rstrip(), "", content]
+            elif entry_type in {"session", "model_change", "thinking_level_change"}:
+                continue
+            if not rendered:
+                continue
+            block = "\n".join(rendered).strip()
+            if not block:
+                continue
+            lines.append(block)
+            total += len(block)
+            if total > total_cap:
+                lines.append("\n[transcript truncated by memento processor]")
+                break
     return "\n\n".join(lines)
 
 
@@ -2266,26 +2387,8 @@ def _queue_process_start(
         manifest_groups = []
         for group in groups:
             group["dedup_context"] = _dedup_context_for_group(vault, group)
-            transcript_info = {"included": False}
-            transcript_markdown = ""
-            if group.get("session_id"):
-                transcript_path = Path(str(group["session_id"])).expanduser()
-                if transcript_path.exists():
-                    size = transcript_path.stat().st_size
-                    allowed = _transcript_path_allowed(transcript_path)
-                    transcript_info = {
-                        "path": str(transcript_path),
-                        "size_bytes": size,
-                        "included": allowed and size <= transcript_max_bytes,
-                    }
-                    if not allowed:
-                        transcript_info["reason"] = "outside_allowed_roots"
-                    elif size > transcript_max_bytes:
-                        transcript_info["reason"] = "over_size_cap"
-                    else:
-                        transcript_markdown = _clean_transcript(transcript_path)
-                else:
-                    transcript_info = {"path": str(transcript_path), "included": False, "reason": "missing"}
+            transcript_info, transcript_markdown = _transcript_context_for_group(group, transcript_max_bytes)
+            group["transcript"] = transcript_info
             group_id = group["group_id"]
             _atomic_write_text(inputs_dir / f"{group_id}.json", json.dumps(group, ensure_ascii=False, indent=2))
             _atomic_write_text(inputs_dir / f"{group_id}.md", _render_capture_packet(group, transcript_markdown))
@@ -2305,6 +2408,7 @@ def _queue_process_start(
                     "transcript": transcript_info,
                 }
             )
+        transcript_counts = _transcript_status_counts(manifest_groups)
         manifest = {
             "run_id": run_id,
             "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -2315,6 +2419,7 @@ def _queue_process_start(
             "group_count": len(groups),
             "groups": manifest_groups,
             "status": "running",
+            **transcript_counts,
         }
         _atomic_write_text(run_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         return {
@@ -2323,6 +2428,7 @@ def _queue_process_start(
             "selected_capture_count": len(selected),
             "group_count": len(groups),
             "groups": summary_groups,
+            **transcript_counts,
         }
     except Exception:
         _release_processing_lock(run_id)
@@ -2363,6 +2469,8 @@ def _group_status_from_result(group: dict[str, Any]) -> dict[str, Any]:
         "result_json": group.get("result_json"),
         "log_markdown": group.get("log_markdown"),
     }
+    if isinstance(group.get("transcript"), dict):
+        item["transcript"] = group["transcript"]
     for key in (
         "created",
         "skipped_duplicates",
@@ -2394,6 +2502,8 @@ def _summarize_process_status(payload: dict[str, Any], active: bool) -> dict[str
     payload["pending_group_count"] = pending
     payload.setdefault("group_count", len(groups))
     payload.setdefault("selected_capture_count", sum(len(group.get("capture_ids", [])) for group in groups))
+    for key, value in _transcript_status_counts(groups).items():
+        payload.setdefault(key, value)
     return payload
 
 
@@ -2408,6 +2518,7 @@ def _queue_process_status(run_id: str = "") -> dict[str, Any]:
             "completed_group_count": 0,
             "failed_group_count": 0,
             "pending_group_count": 0,
+            **_transcript_status_counts([]),
         }
     run_dir = _processing_root() / target_run_id
     progress_path = run_dir / "progress.json"
@@ -2431,6 +2542,7 @@ def _queue_process_status(run_id: str = "") -> dict[str, Any]:
             "run_id": target_run_id,
             "run_dir": str(run_dir),
             "groups": [],
+            **_transcript_status_counts([]),
         }
     groups = [_group_status_from_result(group) for group in manifest.get("groups", [])]
     status = str(manifest.get("status") or "unknown")

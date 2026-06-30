@@ -1531,6 +1531,113 @@ def test_pi_bridge_process_start_includes_small_cleaned_transcript(capsys, tmp_p
     assert "Important decision" in packet
 
 
+def test_pi_bridge_process_start_includes_oversize_cleaned_transcript_with_quality_limits(
+    capsys, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    transcript_root = tmp_path / "sessions"
+    monkeypatch.setenv("MEMENTO_PI_TRANSCRIPT_ROOTS", str(transcript_root))
+    session_file = transcript_root / "session.jsonl"
+    transcript_root.mkdir()
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "message",
+                "timestamp": "t1",
+                "message": {"role": "user", "content": [{"type": "text", "text": "Important oversize decision"}]},
+            }
+        )
+        + "\n"
+    )
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "Body",
+                "metadata": {"project": "repo", "branch": "b", "cwd": "/repo", "session_id": str(session_file)},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo", "--transcript-max-bytes", "1"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    assert started["oversize_transcript_group_count"] == 1
+    assert started["missing_transcript_group_count"] == 0
+    run_dir = tmp_path / "state" / "processing" / started["run_id"]
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    group = manifest["groups"][0]
+    assert group["transcript"]["included"] is True
+    assert group["transcript"]["reason"] == "over_size_cap"
+    assert group["transcript"]["partial"] is True
+    packet = (run_dir / "inputs" / f"{group['group_id']}.md").read_text()
+    assert "partial cleaned transcript from an oversize source" in packet
+    assert "Important oversize decision" in packet
+    assert "return processed_no_notes" in packet
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-status", "--run-id", started["run_id"]])
+    assert code == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["oversize_transcript_group_count"] == 1
+    assert status["transcript_partial_group_count"] == 1
+
+
+def test_pi_bridge_process_start_marks_missing_transcript_fallbacks(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    missing_file = tmp_path / "sessions" / "missing.jsonl"
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "Missing file",
+                "body": "Queued capture from a missing transcript.",
+                "metadata": {"project": "repo", "branch": "b", "cwd": "/repo", "session_id": str(missing_file)},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "q2",
+                "title": "No session",
+                "body": "Queued capture without a session id.",
+                "metadata": {"project": "repo", "branch": "b", "cwd": "/repo"},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    assert started["missing_transcript_group_count"] == 2
+    assert started["transcript_fallback_group_count"] == 2
+    assert started["transcript_reason_counts"]["missing"] == 1
+    assert started["transcript_reason_counts"]["no_session_id"] == 1
+    run_dir = tmp_path / "state" / "processing" / started["run_id"]
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    packets = [(run_dir / "inputs" / f"{group['group_id']}.md").read_text() for group in manifest["groups"]]
+    assert all("explicit fallback; no cleaned session transcript is available" in packet for packet in packets)
+    assert any("recorded session transcript path does not exist" in packet for packet in packets)
+    assert any("did not include a session transcript path" in packet for packet in packets)
+    assert all("Quality limit: queued captures are lifecycle fragments" in packet for packet in packets)
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-status", "--run-id", started["run_id"]])
+    assert code == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["missing_transcript_group_count"] == 2
+    assert status["transcript_fallback_group_count"] == 2
+
+
 def test_pi_bridge_process_start_writes_deterministic_dedup_context(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     notes = tmp_path / "notes"
