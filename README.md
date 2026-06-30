@@ -221,7 +221,7 @@ Imports default to safe conflict errors on existing divergent files. Use `--conf
 The MCP server exposes read, lifecycle, write, and maintenance tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.
 
 <!-- memento-mcp-tools:start -->
-The MCP server currently registers **16 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
+The MCP server currently registers **17 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
 
 | Tool | Category | What it does | When to use it |
 |------|----------|--------------|----------------|
@@ -239,9 +239,11 @@ The MCP server currently registers **16 tools**. This table is generated from `m
 | `memento_store_smart` | Write | Search for close matches before writing, and return duplicate/update/supersede suggestions. | Use when you want a write decision with candidate paths/reasons before creating a note; it avoids obvious duplicates by default. |
 | `memento_daily_snapshot` | Write | Write a deterministic `notes/daily-<date>-<repo-slug>.md` snapshot with an append-only supersede chain. | Low-level structured daily-snapshot primitive for path-controlled integrations; do not use for ordinary notes, interactive memory capture, or session triage. |
 | `memento_capture` | Write | End-of-session triage from a transcript path or structured summary; writes fleeting session state and optionally an atomic note. | Low-level SessionEnd equivalent for agents without hook support; not a replacement for interactive `/memento` workflows. |
+| `memento_synthesize_failures` | Write | Dry-run batch synthesis from sanitized external run summaries, with optional approved lesson-note writes. | Use for Rondo/Beislið-style batch failure learning; rejects raw logs/run stores and never executes advisory issue/gate/docs actions. |
 | `memento_preserve` | Write | Archive a file or directory bundle under `archive/<slug>/` with a manifest, a lightweight index note, and optional project-linking. | Use for evidence packets, screenshots, handoff bundles, or other artifacts that should stay intact; copy by default, move only when explicitly requested. Do not use it for ordinary knowledge capture or atomic notes. |
 | `memento_reindex` | Maintenance | Rebuild the search index from all markdown files after out-of-band changes. | Use after bulk adds, git pull, Obsidian sync, or stale-index evidence; not as the default response to a broad/empty search miss. |
 <!-- memento-mcp-tools:end -->
+
 
 Common read paths:
 

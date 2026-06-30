@@ -12,6 +12,7 @@ from memento.remote_client import (
     get,
     store,
     smart_store,
+    synthesize_failures,
     capture,
     status,
 )
@@ -216,6 +217,21 @@ class TestCallTool:
         req = mock_urlopen.call_args[0][0]
         body = json.loads(req.data)
         assert body["params"]["name"] == "memento_store_smart"
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_synthesize_failures(self, mock_urlopen, mock_url):
+        synthesis_result = {"dry_run": True, "candidate_lessons": []}
+        mock_urlopen.return_value = self._mock_response(synthesis_result)
+
+        result = synthesize_failures([{"run_id": "r1", "summary": "pytest failed"}], project="/repo")
+        assert result["dry_run"] is True
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        assert body["params"]["name"] == "memento_synthesize_failures"
+        assert body["params"]["arguments"]["project"] == "/repo"
+        assert body["params"]["arguments"]["approve_writes"] is False
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")

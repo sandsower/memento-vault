@@ -168,6 +168,7 @@ from memento.store import (
     write_note,
 )
 from memento.smart_store import write_smart_store_note
+from memento.batch_synthesis import synthesize_failure_batch
 from memento.preserve import preserve_bundle
 from memento.utils import sanitize_secrets
 
@@ -1281,6 +1282,72 @@ def memento_capture(
 
     finally:
         release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_synthesize_failures(
+    run_summaries: list[dict] | dict,
+    approve_writes: bool = False,
+    project: str = "",
+    branch: str = "",
+    session_id: str = "",
+    max_candidates: int = 20,
+) -> dict:
+    """Synthesize lessons/actions from sanitized external run summaries.
+
+    Dry-run is the default and performs no vault writes or external repo
+    mutations. The input must be compact Rondo/Beislið-style run summaries;
+    raw run stores, logs, transcripts, stdout/stderr, proofs, and ledger dumps
+    are rejected. Output groups memory, process, agent, harness, environment,
+    and requirement failures and proposes concrete note/issue/gate/docs
+    improvements. Pass approve_writes=True only when the caller explicitly
+    approves storing the candidate lesson notes via typed automated-run lesson
+    capture; advisory actions are never executed by this tool.
+    """
+    result = synthesize_failure_batch(run_summaries, max_candidates=max_candidates)
+    if result.get("error"):
+        return result
+
+    if not approve_writes:
+        return result
+
+    vault = get_vault()
+    if not vault.exists():
+        return {**result, "error": f"Vault not found at {vault}", "reason": "vault_missing"}
+
+    if not acquire_vault_write_lock():
+        return {
+            **result,
+            "error": "Could not acquire vault write lock (another write in progress)",
+            "reason": "lock_timeout",
+        }
+
+    write_results = []
+    try:
+        for candidate in result.get("candidate_lessons", []):
+            write_results.append(
+                write_smart_store_note(
+                    title=str(candidate.get("title") or "").strip(),
+                    body=str(candidate.get("body") or "").strip(),
+                    note_type=str(candidate.get("note_type") or "discovery"),
+                    tags=list(candidate.get("tags") or []),
+                    certainty=int(candidate.get("certainty") or 2),
+                    project=project or None,
+                    branch=branch or None,
+                    session_id=session_id or None,
+                    origin="mcp_batch_failure_synthesis",
+                )
+            )
+    finally:
+        release_vault_write_lock()
+
+    return {
+        **result,
+        "dry_run": False,
+        "writes_approved": True,
+        "write_results": write_results,
+        "approval_required": "Candidate lessons were stored because approve_writes=true; advisory actions were not executed.",
+    }
 
 
 @mcp.tool()

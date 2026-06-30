@@ -115,6 +115,12 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
         "Low-level SessionEnd equivalent for agents without hook support; not a replacement for interactive `/memento` workflows.",
     ),
     McpToolInventoryItem(
+        "memento_synthesize_failures",
+        "Write",
+        "Dry-run batch synthesis from sanitized external run summaries, with optional approved lesson-note writes.",
+        "Use for Rondo/Beislið-style batch failure learning; rejects raw logs/run stores and never executes advisory issue/gate/docs actions.",
+    ),
+    McpToolInventoryItem(
         "memento_preserve",
         "Write",
         "Archive a file or directory bundle under `archive/<slug>/` with a manifest, a lightweight index note, and optional project-linking.",
