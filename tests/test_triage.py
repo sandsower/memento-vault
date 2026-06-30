@@ -25,6 +25,7 @@ append_session_to_project = _mod.append_session_to_project
 process_structured_notes = _mod.process_structured_notes
 run_structured_notes_worker = _mod._run_structured_notes_worker
 spawn_memento_agent = _mod.spawn_memento_agent
+sentinel_path = _mod._sentinel_path
 run_remote_triage = _mod.run_remote_triage
 
 
@@ -809,6 +810,42 @@ class TestSpawnMementoAgent:
         assert kwargs["error"] == "codex timed out"
         assert kwargs["transcript_truncated"] is False
 
+    def test_triage_mirrors_pi_llm_error_to_bridge_health(self, tmp_vault, tmp_path):
+        transcript = tmp_path / "pi-session.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "agent": "pi",
+            "session_id": "pi-sess-123",
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="codex timed out")),
+            patch("memento_triage.log_triage_health") as mock_health,
+        ):
+            written = process_structured_notes("pi-sess-123", str(transcript), meta, "api-service")
+
+        assert written == 0
+        pi_health_calls = [
+            call for call in mock_health.call_args_list if call.args[0] == "pi_structured_notes_llm_failed"
+        ]
+        assert len(pi_health_calls) == 1
+        kwargs = pi_health_calls[0].kwargs
+        assert kwargs["hook"] == "pi-bridge"
+        assert kwargs["operation"] == "triage"
+        assert kwargs["backend"] == "memento-triage.py"
+        assert kwargs["agent"] == "pi"
+        assert kwargs["session_id"] == "pi-sess-123"
+        assert kwargs["transcript_path"] == str(transcript)
+        assert kwargs["project"] == "api-service"
+        assert kwargs["error"] == "codex timed out"
+
     def test_triage_logs_lock_timeout_details(self, tmp_vault, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
         transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
@@ -986,6 +1023,47 @@ class TestMainHealthLogging:
 
         mock_log.assert_any_call("triage", "parse_transcript_failed", error="bad transcript", session_id="sess-parse")
         mock_health.assert_any_call("parse_transcript_failed", session_id="sess-parse", error="bad transcript")
+
+    def test_main_mirrors_pi_parse_failure_to_bridge_health(self, tmp_path):
+        transcript = tmp_path / "pi-session.jsonl"
+        transcript.write_text("not-json\n")
+
+        with (
+            patch(
+                "memento_triage.read_hook_input",
+                return_value={"transcript_path": str(transcript), "cwd": "/repo"},
+            ),
+            patch("memento_triage.parse_transcript", side_effect=RuntimeError("bad pi transcript")),
+            patch("memento_triage.log_retrieval"),
+            patch("memento_triage.log_triage_health") as mock_health,
+            patch.dict("memento_triage.os.environ", {"MEMENTO_AGENT": "pi"}),
+        ):
+            try:
+                _mod.main()
+            except SystemExit as exc:
+                assert exc.code == 0
+
+        mock_health.assert_any_call("parse_transcript_failed", session_id="unknown", error="bad pi transcript")
+        mock_health.assert_any_call(
+            "pi_parse_transcript_failed",
+            hook="pi-bridge",
+            operation="triage",
+            backend="memento-triage.py",
+            agent="pi",
+            session_id="unknown",
+            cwd="/repo",
+            transcript_path=str(transcript),
+            source_event=None,
+            reason=None,
+            error="bad pi transcript",
+        )
+
+    def test_sentinel_path_sanitizes_path_like_session_ids(self, tmp_vault):
+        with patch("memento_triage.get_vault", return_value=tmp_vault):
+            sentinel = sentinel_path("/Users/vic/.pi/agent/sessions/session.jsonl")
+
+        assert sentinel.parent == tmp_vault / ".agent-done"
+        assert sentinel.name == "Users_vic_.pi_a.done"
 
     def test_worker_does_not_double_count_generic_empty_in_triage_health(self, tmp_path):
         payload = tmp_path / "payload.json"

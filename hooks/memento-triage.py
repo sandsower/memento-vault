@@ -72,6 +72,30 @@ def is_substantial(meta):
     return False
 
 
+def _pi_triage_health(action, meta=None, hook_input=None, transcript_path=None, **kwargs):
+    """Mirror Pi-specific triage health into the pi-bridge health stream."""
+    meta = meta or {}
+    hook_input = hook_input or {}
+    agent = meta.get("agent") or hook_input.get("agent") or os.environ.get("MEMENTO_AGENT")
+    if agent != "pi":
+        return
+    payload = {
+        "operation": "triage",
+        "backend": "memento-triage.py",
+        "agent": "pi",
+        "session_id": kwargs.pop("session_id", None)
+        or meta.get("session_id")
+        or hook_input.get("session_id")
+        or "unknown",
+        "cwd": kwargs.pop("cwd", None) or meta.get("cwd") or hook_input.get("cwd") or "",
+        "transcript_path": str(transcript_path or hook_input.get("transcript_path") or ""),
+        "source_event": hook_input.get("source_event"),
+        "reason": hook_input.get("reason"),
+    }
+    payload.update({key: value for key, value in kwargs.items() if value is not None})
+    log_triage_health(f"pi_{action}", hook="pi-bridge", **payload)
+
+
 def has_new_insight(meta):
     """Delta-check: query QMD for existing coverage of this session's topics.
     Returns True if the session likely contains new information not already
@@ -330,10 +354,16 @@ def reindex_qmd(delay_seconds=0):
     )
 
 
+def _session_token(session_id, max_chars=32):
+    """Return a filesystem-safe short token for session-derived paths/logs."""
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "unknown"))[:max_chars]
+    return token.strip("._-") or "unknown"
+
+
 def _sentinel_path(session_id):
     """Return the sentinel path for a session's note-writing run."""
     vault = get_vault()
-    return vault / ".agent-done" / f"{session_id[:8]}.done"
+    return vault / ".agent-done" / f"{_session_token(session_id, 16)}.done"
 
 
 def _parse_structured_notes_response(raw):
@@ -368,6 +398,13 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
     """Read transcript, call the shared LLM, and write structured notes."""
     vault = get_vault()
     log_triage_health("structured_notes_attempt", session_id=session_id, project=project_slug)
+    _pi_triage_health(
+        "structured_notes_attempt",
+        meta=meta,
+        transcript_path=transcript_path,
+        session_id=session_id,
+        project=project_slug,
+    )
     try:
         transcript_text = sanitize_secrets(
             render_transcript_text(
@@ -388,6 +425,13 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             session_id=session_id,
             project=project_slug,
         )
+        _pi_triage_health(
+            "structured_notes_transcript_unreadable",
+            meta=meta,
+            transcript_path=transcript_path,
+            session_id=session_id,
+            project=project_slug,
+        )
         return 0
 
     try:
@@ -400,6 +444,15 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
     if transcript_truncated:
         log_triage_health(
             "structured_notes_transcript_truncated",
+            session_id=session_id,
+            project=project_slug,
+            transcript_chars=rendered_chars,
+            prompt_chars=len(transcript_text),
+        )
+        _pi_triage_health(
+            "structured_notes_transcript_truncated",
+            meta=meta,
+            transcript_path=transcript_path,
             session_id=session_id,
             project=project_slug,
             transcript_chars=rendered_chars,
@@ -454,6 +507,17 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             transcript_truncated=transcript_truncated,
             **llm_telemetry,
         )
+        _pi_triage_health(
+            "structured_notes_llm_failed",
+            meta=meta,
+            transcript_path=transcript_path,
+            session_id=session_id,
+            project=project_slug,
+            error=error,
+            transcript_chars=rendered_chars,
+            transcript_truncated=transcript_truncated,
+            **llm_telemetry,
+        )
         return 0
 
     notes = _parse_structured_notes_response(result.text)
@@ -471,6 +535,14 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             project=project_slug,
             **llm_telemetry,
         )
+        _pi_triage_health(
+            "structured_notes_parse_empty",
+            meta=meta,
+            transcript_path=transcript_path,
+            session_id=session_id,
+            project=project_slug,
+            **llm_telemetry,
+        )
         return 0
 
     summary = build_session_summary(meta)
@@ -483,6 +555,13 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
         )
         log_triage_health(
             "structured_notes_lock_timeout",
+            session_id=session_id,
+            project=project_slug,
+        )
+        _pi_triage_health(
+            "structured_notes_lock_timeout",
+            meta=meta,
+            transcript_path=transcript_path,
             session_id=session_id,
             project=project_slug,
         )
@@ -509,6 +588,15 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
             written += 1
         log_triage_health(
             "structured_notes_written",
+            session_id=session_id,
+            project=project_slug,
+            notes_written=written,
+            **llm_telemetry,
+        )
+        _pi_triage_health(
+            "structured_notes_written",
+            meta=meta,
+            transcript_path=transcript_path,
             session_id=session_id,
             project=project_slug,
             notes_written=written,
@@ -561,6 +649,14 @@ def _run_structured_notes_worker(payload_path, sentinel_path):
                 )
                 log_triage_health(
                     "structured_notes_failed",
+                    session_id=payload["session_id"],
+                    error=str(exc),
+                    project=payload["project_slug"],
+                )
+                _pi_triage_health(
+                    "structured_notes_failed",
+                    meta=payload.get("meta") or {},
+                    transcript_path=payload.get("transcript_path"),
                     session_id=payload["session_id"],
                     error=str(exc),
                     project=payload["project_slug"],
@@ -636,6 +732,9 @@ def run_remote_triage(hook_input):
         meta = parse_transcript(transcript_path, session_id=requested_session_id)
     except Exception:
         return
+
+    if not requested_session_id:
+        session_id = meta.get("session_id") or Path(transcript_path).stem or "unknown"
 
     if meta["exchange_count"] < 2:
         return
@@ -766,6 +865,9 @@ def main():
 
     if not transcript_path or not os.path.exists(transcript_path):
         log_triage_health("missing_transcript", session_id=session_id)
+        _pi_triage_health(
+            "missing_transcript", hook_input=hook_input, transcript_path=transcript_path, session_id=session_id
+        )
         sys.exit(0)
 
     try:
@@ -774,7 +876,17 @@ def main():
         error = str(exc)
         log_retrieval("triage", "parse_transcript_failed", error=error, session_id=session_id)
         log_triage_health("parse_transcript_failed", session_id=session_id, error=error)
+        _pi_triage_health(
+            "parse_transcript_failed",
+            hook_input=hook_input,
+            transcript_path=transcript_path,
+            session_id=session_id,
+            error=error,
+        )
         sys.exit(0)
+
+    if not requested_session_id:
+        session_id = meta.get("session_id") or Path(transcript_path).stem or "unknown"
 
     if not meta["cwd"]:
         meta["cwd"] = hook_input.get("cwd")
@@ -809,6 +921,19 @@ def main():
         "triage",
         "decision",
         session_id=session_id[:8],
+        project=project_slug,
+        exchanges=meta["exchange_count"],
+        files_edited=len(meta["files_edited"]),
+        substantial=substantial,
+        new_insight=new_insight,
+        agent_spawned=substantial and new_insight,
+    )
+    _pi_triage_health(
+        "decision",
+        meta=meta,
+        hook_input=hook_input,
+        transcript_path=transcript_path,
+        session_id=session_id,
         project=project_slug,
         exchanges=meta["exchange_count"],
         files_edited=len(meta["files_edited"]),

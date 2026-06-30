@@ -366,6 +366,16 @@ def _write_triage_payload(payload: dict[str, Any]) -> Path:
     return payload_path
 
 
+def _safe_hook_session_id(session_id: str, transcript_path: str) -> str:
+    """Return a session id safe to pass to the shared hook, or empty to let the adapter decide."""
+    candidate = str(session_id or "").strip()
+    if not candidate or candidate == "unknown" or candidate == transcript_path:
+        return ""
+    if Path(candidate).is_absolute() or "/" in candidate or "\\" in candidate or candidate in {".", ".."}:
+        return ""
+    return candidate
+
+
 def _capture_audit_file(vault: Path | None = None) -> Path:
     return _state_root() / "audit" / "pi-lifecycle-audit.jsonl"
 
@@ -685,7 +695,14 @@ def _bridge_health_status() -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
     latest: dict[str, Any] | None = None
     latest_ts: datetime | None = None
-    failure_actions = {"triage_missing_transcript", "triage_disallowed_transcript"}
+    failure_actions = {
+        "triage_missing_transcript",
+        "triage_disallowed_transcript",
+        "pi_missing_transcript",
+        "pi_structured_notes_parse_empty",
+        "pi_structured_notes_transcript_unreadable",
+        "pi_structured_notes_lock_timeout",
+    }
     if log_path.exists():
         for rec in _iter_jsonl(log_path):
             if rec.get("hook") != "pi-bridge":
@@ -1266,7 +1283,16 @@ def _triage(
         )
         return {"queued": False, "error": f"triage hook not found: {hook_script}"}
 
-    payload = {"session_id": effective_session_id, "transcript_path": str(resolved), "cwd": cwd}
+    hook_session_id = _safe_hook_session_id(session_id, raw_path)
+    payload = {
+        "transcript_path": str(resolved),
+        "cwd": cwd,
+        "agent": "pi",
+        "source_event": source_event,
+        "reason": reason,
+    }
+    if hook_session_id:
+        payload["session_id"] = hook_session_id
     env = os.environ.copy()
     env["MEMENTO_AGENT"] = "pi"
     env.setdefault("MEMENTO_PI_TRANSCRIPT_ROOTS", os.environ.get("MEMENTO_PI_TRANSCRIPT_ROOTS", ""))
