@@ -215,6 +215,8 @@ def _parse_simple_yaml(path):
                 key, _, value = line.partition(":")
                 key = key.strip()
                 value = value.strip()
+                if not key:
+                    raise ValueError(f"malformed config line in {path}: {line}")
                 if value.lower() in ("true", "yes"):
                     value = True
                 elif value.lower() in ("false", "no"):

@@ -119,9 +119,16 @@ class TestLoadConfig:
         vault.mkdir()
         config_file = vault / "memento.yml"
         config_file.write_text(": : : invalid yaml : :\n")
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError
+            return real_import(name, *args, **kwargs)
 
         with (
             patch.object(Path, "home", return_value=tmp_path),
+            patch("builtins.__import__", side_effect=fake_import),
             patch("memento.config.DEFAULT_CONFIG", {**DEFAULT_CONFIG, "vault_path": str(vault)}),
         ):
             reset_config()
