@@ -32,6 +32,8 @@ class CheckResult:
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 INIT_VERSION_RE = re.compile(r'__version__\s*=\s*["\']([^"\']+)["\']')
 FORMULA_URL_VERSION_RE = re.compile(r"/refs/tags/v([^/]+)\.tar\.gz")
+REQUIRES_PYTHON_RE = re.compile(r"requires-python\s*=\s*[\"']([^\"']+)[\"']")
+PYTHON_SPEC_RE = re.compile(r"(>=|>|<=|<|==)\s*(\d+(?:\.\d+)*)")
 
 
 def pass_(name: str, detail: str) -> CheckResult:
@@ -55,6 +57,82 @@ def require_file(root: Path, relative: str) -> tuple[Path | None, CheckResult | 
     if not path.exists():
         return None, fail("required file", f"Missing {relative}; restore it before release.")
     return path, None
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in value.split("."))
+
+
+def _pad_version(version: tuple[int, ...], length: int) -> tuple[int, ...]:
+    return version + (0,) * max(0, length - len(version))
+
+
+def _compare_versions(left: tuple[int, ...], right: tuple[int, ...]) -> int:
+    length = max(len(left), len(right))
+    left_padded = _pad_version(left, length)
+    right_padded = _pad_version(right, length)
+    if left_padded < right_padded:
+        return -1
+    if left_padded > right_padded:
+        return 1
+    return 0
+
+
+def _satisfies_python_specifier(specifier: str, runtime: tuple[int, ...]) -> bool | None:
+    """Return whether runtime satisfies a simple PEP 440 version specifier.
+
+    The release gate intentionally uses a tiny parser instead of packaging so
+    it can fail cleanly even in minimal release environments.
+    """
+    match = PYTHON_SPEC_RE.fullmatch(specifier.strip())
+    if not match:
+        return None
+
+    operator, version_text = match.groups()
+    required = _version_tuple(version_text)
+    comparison = _compare_versions(runtime, required)
+    if operator == ">=":
+        return comparison >= 0
+    if operator == ">":
+        return comparison > 0
+    if operator == "<=":
+        return comparison <= 0
+    if operator == "<":
+        return comparison < 0
+    if operator == "==":
+        return comparison == 0
+    return None
+
+
+def _satisfies_requires_python(requires_python: str, runtime: tuple[int, ...]) -> bool | None:
+    results = [_satisfies_python_specifier(part, runtime) for part in requires_python.split(",")]
+    if any(result is None for result in results):
+        return None
+    return all(bool(result) for result in results)
+
+
+def check_python_runtime_requirement(root: Path, version_info: tuple[int, ...] | None = None) -> CheckResult:
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return skip("python runtime", "pyproject.toml missing; cannot verify requires-python.")
+
+    match = REQUIRES_PYTHON_RE.search(read_text(pyproject))
+    if not match:
+        return skip("python runtime", "pyproject.toml has no requires-python declaration.")
+
+    requires_python = match.group(1)
+    runtime = version_info or tuple(sys.version_info[:3])
+    satisfied = _satisfies_requires_python(requires_python, runtime)
+    runtime_text = ".".join(str(part) for part in runtime[:3])
+    if satisfied is None:
+        return skip("python runtime", f"Unsupported requires-python specifier {requires_python!r}; verify manually.")
+    if not satisfied:
+        return fail(
+            "python runtime",
+            f"pyproject.toml requires Python {requires_python}, but this gate is running Python {runtime_text} "
+            f"({sys.executable}). Rebuild .venv with a supported interpreter before release validation.",
+        )
+    return pass_("python runtime", f"Python {runtime_text} satisfies pyproject.toml requires-python {requires_python}.")
 
 
 def check_version_consistency(root: Path) -> CheckResult:
@@ -345,6 +423,7 @@ def main(argv: list[str] | None = None) -> int:
     root = args.repo_root.resolve()
 
     checks: list[CheckResult] = [
+        check_python_runtime_requirement(root),
         check_version_consistency(root),
         check_homebrew_formula(root),
         check_pi_package_metadata(root),

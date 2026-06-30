@@ -1,5 +1,7 @@
 """Tests for smart-store duplicate and supersession suggestions."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from memento.smart_store import suggest_store_action, write_smart_store_note

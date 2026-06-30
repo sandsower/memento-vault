@@ -17,6 +17,8 @@ Conflicts are skipped by default to avoid append-only duplicates. Passing
 note and records a fresh ok ledger entry.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys
