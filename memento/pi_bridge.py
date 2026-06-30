@@ -732,7 +732,13 @@ def _commit_and_reindex_locked(vault: Path, commit_message: str, collection: str
     payload["reindex"]["attempted"] = True
     target_collection = collection or config.get("qmd_collection", "memento")
     try:
-        ok = get_backend().reindex(target_collection)
+        backend = get_backend()
+        if hasattr(backend, "repair_index"):
+            repair = backend.repair_index(target_collection)
+            ok = bool(repair.get("ok")) if isinstance(repair, dict) else bool(repair)
+            payload["reindex"]["repair"] = repair
+        else:
+            ok = backend.reindex(target_collection)
         payload["reindex"]["ok"] = bool(ok)
         payload["reindex"]["collection"] = target_collection
         payload["reindex"]["reason"] = "ok" if ok else "backend_reindex_failed"

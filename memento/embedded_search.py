@@ -7,6 +7,7 @@ remain the source of truth; the database is a derived, disposable index.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sqlite3
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_EMBED_BATCH = 64
 _MAX_NOTE_SIZE_FOR_EMBED = 100_000  # 100KB
+_METADATA_TABLE = "index_metadata"
+_EMBEDDING_SIGNATURE_KEY = "embedding_signature"
 
 
 def _is_within_vault(path: Path, vault: Path) -> bool:
@@ -71,6 +74,31 @@ def _vec_to_blob(vec: list[float]) -> bytes:
     return struct.pack(f"<{len(vec)}f", *vec)
 
 
+def _sqlite_error_text(exc: BaseException) -> str:
+    return str(exc).lower()
+
+
+def _is_rebuildable_sqlite_error(exc: BaseException) -> bool:
+    """Return True when an SQLite error indicates derived-index corruption."""
+    text = _sqlite_error_text(exc)
+    return any(
+        marker in text
+        for marker in (
+            "database disk image is malformed",
+            "file is not a database",
+            "malformed database schema",
+            "no such module: fts5",
+            "no such table: notes",
+            "no such table: notes_fts",
+            "no such table: notes_vec",
+        )
+    )
+
+
+def _metadata_json(value: dict[str, object]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 class EmbeddedSearchBackend(SearchBackend):
     """Search backend using SQLite FTS5 for BM25 and sqlite-vec for vectors.
 
@@ -89,7 +117,15 @@ class EmbeddedSearchBackend(SearchBackend):
         self._indexed: bool = False
         self._provider = embedding_provider
         self._vec_available: bool = False
-        self._init_db()
+        self._needs_reindex: bool = False
+        try:
+            self._init_db()
+        except sqlite3.DatabaseError as exc:
+            if not _is_rebuildable_sqlite_error(exc):
+                raise
+            logger.warning("Corrupt search.db during initialization, rebuilding: %s", exc)
+            self._reset_database_file()
+            self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -106,9 +142,66 @@ class EmbeddedSearchBackend(SearchBackend):
                         sqlite_vec.load(self._conn)
                     finally:
                         self._conn.enable_load_extension(False)
-                except (ImportError, sqlite3.OperationalError):
+                except (ImportError, AttributeError, sqlite3.OperationalError):
                     pass
         return self._conn
+
+    def _reset_database_file(self) -> None:
+        """Close and remove the derived SQLite index file."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                pass
+            self._conn = None
+        for path in (self._db_path, Path(f"{self._db_path}-wal"), Path(f"{self._db_path}-shm")):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._vec_available = False
+        self._needs_reindex = True
+
+    def _table_exists(self, conn: sqlite3.Connection, name: str) -> bool:
+        row = conn.execute("SELECT 1 FROM sqlite_master WHERE name = ? LIMIT 1", (name,)).fetchone()
+        return row is not None
+
+    def _read_metadata(self, conn: sqlite3.Connection, key: str) -> str | None:
+        if not self._table_exists(conn, _METADATA_TABLE):
+            return None
+        row = conn.execute(f"SELECT value FROM {_METADATA_TABLE} WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def _write_metadata(self, conn: sqlite3.Connection, key: str, value: str) -> None:
+        conn.execute(
+            f"""
+            INSERT INTO {_METADATA_TABLE} (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+
+    def _embedding_signature(self) -> str | None:
+        if self._provider is None:
+            return None
+        provider_type = type(self._provider)
+        metadata: dict[str, object] = {
+            "provider_class": f"{provider_type.__module__}.{provider_type.__qualname__}",
+            "dimensions": int(self._provider.dimensions()),
+        }
+        for attr in ("_model", "model", "_api_base", "api_base"):
+            value = getattr(self._provider, attr, None)
+            if value:
+                metadata[attr.lstrip("_")] = str(value)
+        return _metadata_json(metadata)
+
+    def _drop_vec_table(self, conn: sqlite3.Connection) -> None:
+        try:
+            conn.execute("DROP TABLE IF EXISTS notes_vec")
+            conn.commit()
+        except sqlite3.Error as exc:
+            logger.warning("Failed to drop stale vector table: %s", exc)
 
     def _init_db(self) -> None:
         """Create tables if they don't exist."""
@@ -119,6 +212,12 @@ class EmbeddedSearchBackend(SearchBackend):
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
                 updated_at REAL NOT NULL
+            )
+        """)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {_METADATA_TABLE} (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )
         """)
         # FTS5 virtual table for BM25 full-text search
@@ -163,14 +262,45 @@ class EmbeddedSearchBackend(SearchBackend):
                 sqlite_vec.load(conn)
             finally:
                 conn.enable_load_extension(False)
+
+            signature = self._embedding_signature()
+            existing_signature = self._read_metadata(conn, _EMBEDDING_SIGNATURE_KEY)
+            vec_table_existed = self._table_exists(conn, "notes_vec")
+            legacy_or_changed = vec_table_existed and existing_signature != signature
+            if legacy_or_changed:
+                logger.info("Embedding provider metadata changed; rebuilding vector index")
+                self._drop_vec_table(conn)
+                self._needs_reindex = True
+                vec_table_existed = False
+            if not vec_table_existed:
+                try:
+                    existing_notes = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+                except sqlite3.Error:
+                    existing_notes = 0
+                if existing_notes:
+                    self._needs_reindex = True
+
             dim = self._provider.dimensions()
-            conn.execute(f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec
-                USING vec0(path TEXT PRIMARY KEY, embedding float[{dim}])
-            """)
+            try:
+                conn.execute(f"""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec
+                    USING vec0(path TEXT PRIMARY KEY, embedding float[{dim}])
+                """)
+            except sqlite3.OperationalError as exc:
+                if not self._table_exists(conn, "notes_vec"):
+                    raise
+                logger.warning("Vector table incompatible with embedding provider; recreating: %s", exc)
+                self._drop_vec_table(conn)
+                conn.execute(f"""
+                    CREATE VIRTUAL TABLE notes_vec
+                    USING vec0(path TEXT PRIMARY KEY, embedding float[{dim}])
+                """)
+                self._needs_reindex = True
+            if signature is not None:
+                self._write_metadata(conn, _EMBEDDING_SIGNATURE_KEY, signature)
             conn.commit()
             self._vec_available = True
-        except (ImportError, sqlite3.OperationalError) as exc:
+        except (ImportError, AttributeError, sqlite3.OperationalError) as exc:
             logger.debug("sqlite-vec not available: %s", exc)
             self._vec_available = False
 
@@ -183,31 +313,43 @@ class EmbeddedSearchBackend(SearchBackend):
             except (sqlite3.Error, OSError):
                 return False
 
+    def _rebuild_index_unlocked(self, collection: str, reason: str) -> bool:
+        logger.warning("Rebuilding derived search index: %s", reason)
+        self._reset_database_file()
+        self._init_db()
+        ok = self._reindex_unlocked(collection)
+        self._indexed = bool(ok)
+        self._needs_reindex = not bool(ok)
+        return bool(ok)
+
+    def _repair_failure(self, reason: str) -> RuntimeError:
+        return RuntimeError(
+            "Search index repair failed after "
+            f"{reason}. The index is derived and can be rebuilt safely; run memento_reindex or remove "
+            f"{self._db_path} and retry."
+        )
+
     def _ensure_indexed(self) -> None:
         """Auto-index on first search if the database is empty.
 
         Must be called while holding self._lock.
         """
-        if self._indexed:
+        if self._indexed and not self._needs_reindex:
             return
         try:
             conn = self._get_conn()
             count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
-            if count == 0:
-                self._reindex_unlocked("memento")
+            if self._needs_reindex or count == 0:
+                reason = "embedding provider metadata changed" if self._needs_reindex else "empty index"
+                if not self._reindex_unlocked("memento"):
+                    raise self._repair_failure(reason)
+                self._needs_reindex = False
             self._indexed = True
         except sqlite3.DatabaseError as exc:
-            logger.warning("Corrupt search.db, rebuilding: %s", exc)
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
-            try:
-                self._db_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            self._init_db()
-            self._reindex_unlocked("memento")
-            self._indexed = True
+            if not _is_rebuildable_sqlite_error(exc):
+                raise
+            if not self._rebuild_index_unlocked("memento", f"sqlite corruption detected ({exc})"):
+                raise self._repair_failure(str(exc)) from exc
 
     def search(
         self,
@@ -228,22 +370,30 @@ class EmbeddedSearchBackend(SearchBackend):
             limit = 5
 
         with self._lock:
-            self._ensure_indexed()
+            for attempt in (1, 2):
+                try:
+                    self._ensure_indexed()
 
-            if concrete:
-                return self._concrete_search(query, limit, min_score)
+                    if concrete:
+                        return self._concrete_search(query, limit, min_score)
 
-            if semantic and self._vec_available:
-                return self._vec_search(query, limit, min_score)
+                    if semantic and self._vec_available:
+                        return self._vec_search(query, limit, min_score)
 
-            if not semantic and self._vec_available:
-                return self._hybrid_search(query, limit, min_score)
+                    if not semantic and self._vec_available:
+                        return self._hybrid_search(query, limit, min_score)
 
-            # FTS5, with fallback to simple search for short/symbolic tokens (C++, R)
-            results = self._fts5_search(query, limit, min_score)
-            if not results:
-                results = self._simple_search(query, limit, min_score)
-            return results
+                    # FTS5, with fallback to simple search for short/symbolic tokens (C++, R)
+                    results = self._fts5_search(query, limit, min_score)
+                    if not results:
+                        results = self._simple_search(query, limit, min_score)
+                    return results
+                except sqlite3.DatabaseError as exc:
+                    if attempt == 2 or not _is_rebuildable_sqlite_error(exc):
+                        raise
+                    if not self._rebuild_index_unlocked(collection, f"sqlite error during search ({exc})"):
+                        raise self._repair_failure(str(exc)) from exc
+            return []
 
     def _concrete_search(self, query: str, limit: int, min_score: float) -> list[dict]:
         """Literal substring search over indexed paths, titles, and content."""
@@ -286,7 +436,9 @@ class EmbeddedSearchBackend(SearchBackend):
                 """,
                 (fts_query, limit * 2),  # fetch extra for score filtering
             ).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            if _is_rebuildable_sqlite_error(exc):
+                raise
             # FTS5 query syntax error — fall back to simple term search
             return self._simple_search(query, limit, min_score)
 
@@ -380,6 +532,8 @@ class EmbeddedSearchBackend(SearchBackend):
                 (query_blob, limit * 2),
             ).fetchall()
         except sqlite3.OperationalError as exc:
+            if _is_rebuildable_sqlite_error(exc):
+                raise
             logger.warning("Vec search failed: %s", exc)
             return self._fts5_search(query, limit, min_score)
 
@@ -521,6 +675,7 @@ class EmbeddedSearchBackend(SearchBackend):
             if embed and self._vec_available and self._provider and notes_for_embedding:
                 self._batch_embed(conn, notes_for_embedding)
 
+            self._needs_reindex = False
             return True
 
         except (sqlite3.Error, OSError):
@@ -563,6 +718,7 @@ class EmbeddedSearchBackend(SearchBackend):
     def index_note(self, rel_path: str) -> bool:
         """Index or update a single note by its vault-relative path."""
         with self._lock:
+            self._ensure_indexed()
             return self._index_note_unlocked(rel_path)
 
     def _index_note_unlocked(self, rel_path: str) -> bool:
@@ -612,6 +768,26 @@ class EmbeddedSearchBackend(SearchBackend):
 
         except (sqlite3.Error, OSError):
             return False
+
+    def repair_index(self, collection: str = "memento") -> dict[str, object]:
+        """Repair stale or corrupt derived index state.
+
+        Uses the incremental indexer for normal stale/missing files and falls
+        back to a full derived-index rebuild when SQLite corruption is found.
+        """
+        with self._lock:
+            try:
+                self._ensure_indexed()
+                from memento.indexer import scan_and_index
+
+                stats = scan_and_index(self._vault_path, self)
+                self._indexed = True
+                return {"ok": True, "mode": "incremental", "stats": stats}
+            except sqlite3.DatabaseError as exc:
+                if not _is_rebuildable_sqlite_error(exc):
+                    raise
+                ok = self._rebuild_index_unlocked(collection, f"sqlite error during repair ({exc})")
+                return {"ok": ok, "mode": "rebuild", "reason": str(exc)}
 
     def close(self) -> None:
         """Close the database connection."""

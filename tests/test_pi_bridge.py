@@ -437,6 +437,26 @@ def test_pi_bridge_commit_and_reindex_helper_runs_commit_before_reindex(tmp_path
     assert [item[0] for item in call_order] == ["git_add", "git_diff", "git_commit", "reindex"]
 
 
+def test_pi_bridge_commit_helper_prefers_embedded_repair_index(tmp_path):
+    tmp_path.joinpath("notes").mkdir()
+    call_order = []
+
+    class FakeEmbeddedBackend:
+        def repair_index(self, collection):
+            call_order.append(("repair_index", collection))
+            return {"ok": True, "mode": "incremental", "stats": {"indexed": 1, "skipped": 0, "removed": 0}}
+
+    with (
+        patch("memento.pi_bridge.get_config", return_value={"auto_commit": False, "qmd_collection": "memento"}),
+        patch("memento.pi_bridge.get_backend", return_value=FakeEmbeddedBackend()),
+    ):
+        result = pi_bridge._commit_and_reindex_locked(tmp_path, "pi: capture helper")
+
+    assert result["reindex"]["ok"] is True
+    assert result["reindex"]["repair"]["mode"] == "incremental"
+    assert call_order == [("repair_index", "memento")]
+
+
 def test_pi_bridge_capture_records_manual_session_state(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     (tmp_path / "notes").mkdir()

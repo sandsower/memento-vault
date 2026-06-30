@@ -1,11 +1,34 @@
 """Tests for the EmbeddedSearchBackend (SQLite FTS5 + sqlite-vec)."""
 
+import json
 import sqlite3
 
 import pytest
 
 from memento.config import reset_config
 from memento.search_backend import SearchBackend, reset_backend
+
+
+def _sqlite_vec_available() -> bool:
+    conn = sqlite3.connect(":memory:")
+    try:
+        if not hasattr(conn, "enable_load_extension"):
+            return False
+        try:
+            import sqlite_vec
+        except ImportError:
+            return False
+        conn.enable_load_extension(True)
+        try:
+            sqlite_vec.load(conn)
+        finally:
+            conn.enable_load_extension(False)
+        conn.execute("CREATE VIRTUAL TABLE vec_probe USING vec0(embedding float[2])")
+        return True
+    except (AttributeError, sqlite3.Error):
+        return False
+    finally:
+        conn.close()
 
 
 @pytest.fixture
@@ -302,9 +325,13 @@ class TestEmbeddedSearchIndexNote:
 class MockEmbeddingProvider:
     """Deterministic embedding provider for testing vector search.
 
-    Embeds by hashing terms into a fixed 8-dimensional space. Notes with
-    overlapping terms will have similar vectors.
+    Embeds by hashing terms into a configurable fixed-dimensional space. Notes
+    with overlapping terms will have similar vectors.
     """
+
+    def __init__(self, dimensions: int = 8, model: str = "mock-embedding"):
+        self._dims = dimensions
+        self._model = model
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._hash_embed(t) for t in texts]
@@ -313,7 +340,7 @@ class MockEmbeddingProvider:
         return self._hash_embed(text)
 
     def dimensions(self) -> int:
-        return 8
+        return self._dims
 
     def is_available(self) -> bool:
         return True
@@ -321,11 +348,11 @@ class MockEmbeddingProvider:
     def _hash_embed(self, text: str) -> list[float]:
         import math
 
-        vec = [0.0] * 8
+        vec = [0.0] * self._dims
         for word in text.lower().split():
             h = hash(word) & 0xFFFFFFFF
-            for i in range(8):
-                vec[i] += ((h >> (i * 4)) & 0xF) / 15.0 - 0.5
+            for i in range(self._dims):
+                vec[i] += ((h >> ((i % 8) * 4)) & 0xF) / 15.0 - 0.5
         # L2 normalize
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
         return [v / norm for v in vec]
@@ -335,6 +362,9 @@ class MockEmbeddingProvider:
 def vec_backend(embedded_vault):
     """EmbeddedSearchBackend with mock embedding provider for vector tests."""
     from memento.embedded_search import EmbeddedSearchBackend
+
+    if not _sqlite_vec_available():
+        pytest.skip("sqlite-vec extension loading is unavailable")
 
     vault, db_path = embedded_vault
     provider = MockEmbeddingProvider()
@@ -389,6 +419,63 @@ class TestVectorSearch:
         note_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
         assert vec_count == note_count
         assert vec_count == 4  # 3 notes + 1 fleeting
+
+    def test_embedding_provider_metadata_is_recorded(self, vec_backend):
+        conn = vec_backend._get_conn()
+        raw = conn.execute("SELECT value FROM index_metadata WHERE key = ?", ("embedding_signature",)).fetchone()[0]
+        signature = json.loads(raw)
+        assert signature["dimensions"] == 8
+        assert signature["model"] == "mock-embedding"
+        assert signature["provider_class"].endswith("MockEmbeddingProvider")
+
+    def test_embedding_dimension_change_rebuilds_vector_index(self, embedded_vault):
+        if not _sqlite_vec_available():
+            pytest.skip("sqlite-vec extension loading is unavailable")
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        vault, db_path = embedded_vault
+        first = EmbeddedSearchBackend(vault_path=vault, db_path=db_path, embedding_provider=MockEmbeddingProvider(8))
+        first.reindex("memento")
+        first.close()
+
+        second = EmbeddedSearchBackend(vault_path=vault, db_path=db_path, embedding_provider=MockEmbeddingProvider(4))
+        results = second.search("Redis cache", "memento", semantic=True)
+
+        assert results
+        conn = second._get_conn()
+        raw = conn.execute("SELECT value FROM index_metadata WHERE key = ?", ("embedding_signature",)).fetchone()[0]
+        signature = json.loads(raw)
+        assert signature["dimensions"] == 4
+        vec_count = conn.execute("SELECT COUNT(*) FROM notes_vec").fetchone()[0]
+        note_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        assert vec_count == note_count == 4
+
+
+class TestEmbeddedSearchSelfHealing:
+    def test_search_repairs_corrupt_fts_index_after_first_search(self, backend):
+        backend.reindex("memento")
+        assert backend.search("Redis cache", "memento")
+        conn = backend._get_conn()
+        conn.execute("DROP TABLE notes_fts")
+        conn.commit()
+
+        results = backend.search("Redis cache", "memento")
+
+        assert results
+        repaired_conn = backend._get_conn()
+        tables = {r[0] for r in repaired_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "notes_fts" in tables
+
+    def test_startup_repairs_non_sqlite_index_file(self, embedded_vault):
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        vault, db_path = embedded_vault
+        db_path.write_bytes(b"not a sqlite database")
+
+        backend = EmbeddedSearchBackend(vault_path=vault, db_path=db_path)
+        results = backend.search("Redis cache", "memento")
+
+        assert results
 
 
 class TestFallbackWithoutVec:
