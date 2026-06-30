@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from memento import sync_ledger  # noqa: E402
+from memento.archive import iter_tombstones  # noqa: E402
 from memento.config import get_vault, slugify  # noqa: E402
 from memento.remote_client import get, is_remote, store  # noqa: E402
 
@@ -137,6 +138,31 @@ def _build_ledger_index(vault):
     return by_source, remote_paths
 
 
+def _latest_tombstones_by_path(vault):
+    """Return latest local tombstones keyed by source path."""
+    latest = {}
+    for record in iter_tombstones(vault):
+        path = record.get("path")
+        if path and (path not in latest or str(record.get("ts", "")) >= str(latest[path].get("ts", ""))):
+            latest[path] = record
+    return latest
+
+
+def _is_tombstoned_file(vault, source, path, tombstones):
+    """True when local tombstone state says this note must not be synced."""
+    record = tombstones.get(source)
+    if not record:
+        return False
+    expected_hash = record.get("content_hash")
+    if not expected_hash:
+        return True
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return True
+    return sync_ledger.content_hash(raw) == expected_hash
+
+
 def catch_up(vault, dry_run=False, batch=0):
     """Walk local notes and push anything missing from the remote.
 
@@ -174,11 +200,13 @@ def catch_up(vault, dry_run=False, batch=0):
     remote_by_name = {Path(r["path"]).name: r for r in remote_notes}
 
     ledger_by_source, ledger_remote_paths = _build_ledger_index(vault)
+    tombstones_by_source = _latest_tombstones_by_path(vault)
 
     local_files = sorted(notes_dir.glob("*.md"))
     to_push = []
     conflicts = []
     ledger_skipped = 0
+    tombstone_skipped = 0
 
     for f in local_files:
         try:
@@ -190,6 +218,10 @@ def catch_up(vault, dry_run=False, batch=0):
         remote = remote_by_name.get(f.name)
 
         source = str(f.relative_to(vault))
+
+        if _is_tombstoned_file(vault, source, f, tombstones_by_source):
+            tombstone_skipped += 1
+            continue
 
         if remote is not None:
             if remote.get("hash") == local_hash:
@@ -287,7 +319,8 @@ def catch_up(vault, dry_run=False, batch=0):
     action = "Would push" if dry_run else "Pushed"
     print(
         f"  Catch-up: {action} {pushed}, conflicts {len(conflicts)}, "
-        f"skipped {skipped}, ledger-matched {ledger_skipped}, errors {errors} "
+        f"skipped {skipped}, tombstoned {tombstone_skipped}, "
+        f"ledger-matched {ledger_skipped}, errors {errors} "
         f"(of {len(local_files)} local, {len(remote_notes)} remote)"
     )
 
@@ -335,9 +368,24 @@ def main():
     except Exception:
         vault = None
 
+    tombstones_by_source = _latest_tombstones_by_path(vault) if vault else {}
+
     for path in args:
         if not os.path.exists(path):
             print(f"  Skip (not found): {path}", file=sys.stderr)
+            continue
+
+        # Stable source key (relative to vault when possible, so moving the
+        # vault root doesn't break idempotency).
+        source = path
+        if vault:
+            try:
+                source = str(Path(path).resolve().relative_to(vault.resolve()))
+            except ValueError:
+                pass
+
+        if vault and _is_tombstoned_file(vault, source, path, tombstones_by_source):
+            print(f"  Skip (tombstoned): {source}")
             continue
 
         note = parse_note(path)
@@ -354,15 +402,6 @@ def main():
             else:
                 print(f"  Would create: {note['title']}")
             continue
-
-        # Stable source key (relative to vault when possible, so moving the
-        # vault root doesn't break idempotency).
-        source = path
-        if vault:
-            try:
-                source = str(Path(path).resolve().relative_to(vault.resolve()))
-            except ValueError:
-                pass
 
         chash = sync_ledger.content_hash(_sync_payload(note))
 
