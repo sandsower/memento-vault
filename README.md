@@ -57,6 +57,8 @@ memento-vault retrieval-report --html --output /tmp/retrieval.html
 
 Warnings exit 0 by default; failures exit 1. Use `--strict` if automation should fail on warnings too. The command is read-only: it reports suggested repairs such as `./install.sh --reinstall`, but does not modify vault/config files. JSON output includes `automation_memory` readiness metadata for runner probes without contacting remote services by default. Add `--deep` to run bounded live probes against configured integrations.
 
+The legacy `tools/vault-health-check.sh` script remains available for direct callers that need low-level structural content checks (required vault directories, note frontmatter, wikilinks, filename conventions, and git presence). Prefer `memento-vault health`/`doctor` for operational install/runtime diagnostics; use the legacy script only when you specifically want those structural vault-content checks.
+
 `--force` is reserved for recovery from broken installed files. It overwrites memento-managed files and requires confirmation, or `MEMENTO_FORCE=1` in non-interactive environments.
 
 ### Full install (hooks + retrieval + consolidation)
