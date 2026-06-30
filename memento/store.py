@@ -1,5 +1,7 @@
 """State, logging, note writing, and vault write coordination."""
 
+import hashlib
+import math
 import json
 import os
 import re
@@ -7,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memento.config import RUNTIME_DIR, get_config, slugify
+from memento.config import RUNTIME_DIR, get_config, get_vault_id, slugify
 
 RETRIEVAL_LOG_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
@@ -20,6 +22,15 @@ TRIAGE_HEALTH_LOG_PATH = os.path.join(
     "memento-vault",
     "triage-health.jsonl",
 )
+
+AUTOMATION_MEMORY_HEALTH_LOG_PATH = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
+    "memento-vault",
+    "automation-memory-health.jsonl",
+)
+
+ACCESS_LOG_PATH = os.path.join(RUNTIME_DIR, "access-log.jsonl")
+ACCESS_LOG_STATS_PATH = os.path.join(RUNTIME_DIR, "access-log-stats.json")
 
 INCEPTION_STATE_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
@@ -78,23 +89,362 @@ def _sanitize_health_error(error):
     return sanitized
 
 
-def log_triage_health(action, **kwargs):
-    """Append minimal always-on SessionEnd extraction health telemetry.
+def log_triage_health(action, hook="triage", **kwargs):
+    """Append minimal always-on health telemetry.
 
-    This is intentionally separate from retrieval diagnostics. It records only
-    operational metadata needed to detect silent triage failures, never
-    transcript text or generated note bodies.
+    Primary callers use this for SessionEnd extraction health, but the same
+    durable log also carries Pi bridge failure records (hook="pi-bridge") so
+    health surfaces can show bridge regressions even when the Python adapter is
+    unavailable.
     """
-    if "error" in kwargs:
-        kwargs = dict(kwargs)
-        kwargs["error"] = _sanitize_health_error(kwargs["error"])
+    safe_kwargs = dict(kwargs)
+    if "error" in safe_kwargs:
+        safe_kwargs["error"] = _sanitize_health_error(safe_kwargs["error"])
+    for key, value in list(safe_kwargs.items()):
+        if isinstance(value, str):
+            safe_kwargs[key] = _sanitize_health_error(value)
     entry = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "hook": "triage",
+        "hook": hook,
         "action": action,
     }
-    entry.update(kwargs)
+    entry.update(safe_kwargs)
     _append_jsonl(TRIAGE_HEALTH_LOG_PATH, entry, "_triage_health_warned")
+
+
+def log_automation_memory_health(action, **kwargs):
+    """Append minimal always-on automation memory readiness telemetry.
+
+    This is operational health data, not a run ledger: no cwd, prompt text,
+    note content, session transcript, or run evidence is recorded.
+    """
+    safe_kwargs = dict(kwargs)
+    if "error" in safe_kwargs:
+        safe_kwargs["error"] = _sanitize_health_error(safe_kwargs["error"])
+    for key, value in list(safe_kwargs.items()):
+        if isinstance(value, str):
+            safe_kwargs[key] = _sanitize_health_error(value)
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "hook": "automation-memory",
+        "action": action,
+    }
+    entry.update(safe_kwargs)
+    _append_jsonl(AUTOMATION_MEMORY_HEALTH_LOG_PATH, entry, "_automation_memory_health_warned")
+
+
+_ACCESS_LOG_CACHE = {"signature": None, "stats": {}}
+_ACCESS_LOG_EVENT_CAP = 200
+
+
+def _should_track_access():
+    return get_config().get("access_log_enabled", True)
+
+
+def _current_vault_id():
+    try:
+        vault_id = get_vault_id()
+        if vault_id:
+            return str(vault_id)
+    except Exception:
+        pass
+
+    try:
+        vault_path = str(get_config().get("vault_path") or "")
+        if vault_path:
+            return hashlib.sha256(vault_path.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        pass
+
+    return "unknown"
+
+
+def _access_log_query_summary(query):
+    if query is None:
+        return ""
+    try:
+        from memento.utils import sanitize_secrets
+
+        summary = sanitize_secrets(" ".join(str(query).split()))
+    except Exception:
+        summary = " ".join(str(query).split())
+    return summary[:160]
+
+
+def _access_log_query_hash(query_summary):
+    if not query_summary:
+        return ""
+    return hashlib.sha256(query_summary.encode("utf-8")).hexdigest()
+
+
+def _parse_access_log_ts(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _normalize_access_path(path):
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/")
+    try:
+        vault = Path(get_config()["vault_path"]).expanduser().resolve()
+        candidate = Path(text).expanduser()
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+            if resolved == vault:
+                return ""
+            try:
+                return str(resolved.relative_to(vault)).replace(os.sep, "/")
+            except ValueError:
+                return normalized
+    except Exception:
+        pass
+    return normalized
+
+
+def _read_access_log_stats_file():
+    try:
+        with open(ACCESS_LOG_STATS_PATH) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"vaults": {}}
+    if not isinstance(data, dict):
+        return {"vaults": {}}
+    vaults = data.get("vaults")
+    if not isinstance(vaults, dict):
+        data["vaults"] = {}
+    return data
+
+
+def _write_access_log_stats_file(data):
+    os.makedirs(os.path.dirname(ACCESS_LOG_STATS_PATH), exist_ok=True)
+    tmp = ACCESS_LOG_STATS_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, separators=(",", ":"), sort_keys=True)
+    os.replace(tmp, ACCESS_LOG_STATS_PATH)
+
+
+def _trim_access_events(events):
+    if len(events) > _ACCESS_LOG_EVENT_CAP:
+        return events[-_ACCESS_LOG_EVENT_CAP:]
+    return events
+
+
+def _events_from_raw_access_log(vault_id):
+    stats = {}
+    try:
+        with open(ACCESS_LOG_PATH) as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if str(entry.get("vault_id") or "") != vault_id:
+                    continue
+                path = str(entry.get("path") or "").strip()
+                if not path:
+                    continue
+                ts = _parse_access_log_ts(entry.get("ts"))
+                if ts is None:
+                    continue
+                try:
+                    rank = max(1, int(entry.get("rank") or 1))
+                except (TypeError, ValueError):
+                    rank = 1
+                bucket = stats.setdefault(path, {"events": []})
+                bucket["events"].append({"ts": ts, "rank": rank})
+    except OSError:
+        return {}
+
+    for bucket in stats.values():
+        bucket["events"] = _trim_access_events(bucket["events"])
+    return stats
+
+
+def _update_access_log_stats(vault_id, entries):
+    if not entries:
+        return
+
+    try:
+        data = _read_access_log_stats_file()
+        vaults = data.setdefault("vaults", {})
+        vault_entry = vaults.setdefault(vault_id, {"paths": {}, "updated_at": None})
+        paths = vault_entry.setdefault("paths", {})
+
+        for entry in entries:
+            path = entry["path"]
+            bucket = paths.setdefault(path, {"events": []})
+            bucket_events = bucket.setdefault("events", [])
+            bucket_events.append({"ts": entry["ts"], "rank": entry["rank"]})
+            bucket["events"] = _trim_access_events(bucket_events)
+
+        vault_entry["updated_at"] = entries[-1]["ts"]
+        _write_access_log_stats_file(data)
+    except OSError:
+        pass
+
+
+def record_access(paths, *, hook="unknown", tool="unknown", query=None, session_id=None, result_count=None):
+    """Append derived access-log entries for successful retrievals.
+
+    The access log lives in runtime state, not the vault, so it can be rebuilt
+    or discarded without touching Markdown notes or git history.
+    """
+    if not _should_track_access():
+        return
+
+    if isinstance(paths, (str, Path)):
+        path_list = [paths]
+    else:
+        path_list = list(paths or [])
+
+    path_list = [_normalize_access_path(path) for path in path_list]
+    path_list = [path for path in path_list if path]
+    if not path_list:
+        return
+
+    vault_id = _current_vault_id()
+    query_summary = _access_log_query_summary(query)
+    query_hash = _access_log_query_hash(query_summary)
+    entry_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    stats_entries = []
+
+    for rank, path in enumerate(path_list, start=1):
+        entry = {"ts": entry_ts, "path": path, "hook": hook, "tool": tool, "rank": rank, "vault_id": vault_id}
+        if query_summary:
+            entry["query_summary"] = query_summary
+            entry["query_hash"] = query_hash
+        if session_id:
+            entry["session_id"] = session_id
+        if result_count is not None:
+            entry["result_count"] = result_count
+        _append_jsonl(ACCESS_LOG_PATH, entry, "_access_log_warned")
+        stats_entries.append({"path": path, "ts": entry_ts, "rank": rank})
+
+    _update_access_log_stats(vault_id, stats_entries)
+
+
+def load_access_log_stats():
+    """Load aggregated access-log events keyed by note path for this vault."""
+    vault_id = _current_vault_id()
+    try:
+        stat = os.stat(ACCESS_LOG_STATS_PATH)
+    except OSError:
+        signature = (vault_id, None, None)
+        if _ACCESS_LOG_CACHE.get("signature") == signature:
+            return _ACCESS_LOG_CACHE.get("stats", {})
+        stats = _events_from_raw_access_log(vault_id)
+        _ACCESS_LOG_CACHE["signature"] = signature
+        _ACCESS_LOG_CACHE["stats"] = stats
+        return stats
+
+    signature = (vault_id, stat.st_mtime_ns, stat.st_size)
+    if _ACCESS_LOG_CACHE.get("signature") == signature:
+        return _ACCESS_LOG_CACHE.get("stats", {})
+
+    data = _read_access_log_stats_file()
+    vault_stats = data.get("vaults", {}).get(vault_id, {}) if isinstance(data.get("vaults"), dict) else {}
+    stats = {}
+    for path, bucket in (vault_stats.get("paths") or {}).items():
+        events = []
+        for event in (bucket.get("events") or [])[-_ACCESS_LOG_EVENT_CAP:]:
+            ts = _parse_access_log_ts(event.get("ts"))
+            if ts is None:
+                continue
+            try:
+                rank = max(1, int(event.get("rank") or 1))
+            except (TypeError, ValueError):
+                rank = 1
+            events.append({"ts": ts, "rank": rank})
+        if events:
+            stats[path] = {"events": events}
+
+    if not stats:
+        stats = _events_from_raw_access_log(vault_id)
+        if stats:
+            data.setdefault("vaults", {})[vault_id] = {
+                "paths": {
+                    path: {
+                        "events": [{"ts": event["ts"].isoformat(), "rank": event["rank"]} for event in bucket["events"]]
+                    }
+                    for path, bucket in stats.items()
+                },
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _write_access_log_stats_file(data)
+            stat = os.stat(ACCESS_LOG_STATS_PATH)
+            signature = (vault_id, stat.st_mtime_ns, stat.st_size)
+
+    _ACCESS_LOG_CACHE["signature"] = signature
+    _ACCESS_LOG_CACHE["stats"] = stats
+    return stats
+
+
+def apply_access_log_boost(results, config=None, now=None):
+    """Boost scores for notes that have been repeatedly and recently accessed."""
+    if config is None:
+        config = get_config()
+    if not config.get("access_log_enabled", True):
+        return results
+
+    try:
+        weight = float(config.get("access_log_boost_weight", 0.12))
+    except (TypeError, ValueError):
+        weight = 0.12
+    if weight <= 0 or not results:
+        return results
+
+    try:
+        half_life_days = float(config.get("access_log_half_life_days", 30))
+    except (TypeError, ValueError):
+        half_life_days = 30.0
+    if half_life_days < 0:
+        half_life_days = 0.0
+
+    current = now or datetime.now(timezone.utc)
+    stats = load_access_log_stats()
+    if not stats:
+        return results
+
+    for result in results:
+        path = str(result.get("path") or "")
+        events = stats.get(path, {}).get("events", [])
+        if not events:
+            continue
+
+        signal = 0.0
+        for event in events[-_ACCESS_LOG_EVENT_CAP:]:
+            event_ts = event.get("ts")
+            if not isinstance(event_ts, datetime):
+                continue
+            age_days = max((current - event_ts).total_seconds() / 86400.0, 0.0)
+            decay = 1.0 if half_life_days <= 0 else 0.5 ** (age_days / half_life_days)
+            rank = max(1, int(event.get("rank") or 1))
+            signal += decay / rank
+
+        if signal <= 0:
+            continue
+        boost = 1.0 + weight * math.log1p(signal)
+        result["score"] = round(float(result.get("score", 0.0)) * boost, 4)
+
+    results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+    return results
 
 
 def load_inception_state(state_path=None):
@@ -421,6 +771,74 @@ _CERTAINTY_LABELS = {
     "verified": 5,
 }
 
+_CANONICAL_NOTE_TYPES = {"decision", "discovery", "pattern", "bugfix", "tool", "architecture"}
+_LEGACY_NOTE_TYPE_ALIASES = {
+    "debug": "bugfix",
+    "debugging": "bugfix",
+    "fix": "bugfix",
+    "bug-fix": "bugfix",
+    "session": "discovery",
+}
+
+
+def _normalize_note_type(note_type):
+    """Return the canonical note type used by durable atomic notes."""
+    raw = _safe_yaml_scalar(note_type or "discovery").lower().replace("_", "-")
+    normalized = _LEGACY_NOTE_TYPE_ALIASES.get(raw, raw)
+    if normalized in _CANONICAL_NOTE_TYPES:
+        return normalized
+    return "discovery"
+
+
+def _normalize_tags(tags):
+    """Return stable, non-empty tags for frontmatter."""
+    normalized = []
+    seen = set()
+    for tag in tags or []:
+        safe = _safe_yaml_scalar(tag).strip()
+        if not safe:
+            continue
+        key = safe.lower()
+        if key in seen:
+            continue
+        normalized.append(safe)
+        seen.add(key)
+    return normalized
+
+
+def normalize_note_contract(
+    *,
+    note_type="discovery",
+    tags=None,
+    certainty=None,
+    source="session",
+    origin=None,
+    validity_context=None,
+    supersedes=None,
+    project=None,
+    branch=None,
+    session_id=None,
+):
+    """Normalize metadata to the shared durable-note contract.
+
+    All capture/write paths should pass through this adapter before frontmatter
+    is written so Claude triage, Pi capture, Pi curation, and MCP writes use the
+    same typed schema. Legacy `type: session` inputs are accepted and written as
+    typed discoveries; existing legacy notes are handled in retrieval metadata.
+    """
+    return {
+        "note_type": _normalize_note_type(note_type),
+        "tags": _normalize_tags(tags),
+        "certainty": _coerce_certainty(certainty),
+        "source": _safe_yaml_scalar(source or "session") or "session",
+        "origin": _safe_yaml_scalar(origin) or None,
+        "validity_context": _safe_yaml_scalar(validity_context) or None,
+        "supersedes": _safe_yaml_scalar(supersedes) or None,
+        "project": _safe_yaml_scalar(project) or None,
+        "branch": _safe_yaml_scalar(branch) or None,
+        "session_id": _safe_yaml_scalar(session_id) or None,
+    }
+
 
 def _coerce_certainty(certainty):
     """Return a schema-valid certainty int, or None for unusable input."""
@@ -448,13 +866,14 @@ def write_note(
     tags,
     certainty=None,
     source="session",
+    origin=None,
     validity_context=None,
     supersedes=None,
     project=None,
     branch=None,
     session_id=None,
 ):
-    """Write an atomic note with frontmatter to notes/ using an atomic rename."""
+    """Write an atomic note with normalized frontmatter to notes/ using an atomic rename."""
     notes_dir = Path(vault_path) / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
 
@@ -470,33 +889,43 @@ def write_note(
     tmp = notes_dir / f".tmp-{slug}.md"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
-    # Sanitize all scalar fields to prevent frontmatter injection
+    # Sanitize and normalize all contract fields to prevent frontmatter injection.
     safe_title = _safe_yaml_scalar(title)
-    safe_type = _safe_yaml_scalar(note_type)
-    safe_source = _safe_yaml_scalar(source)
-    safe_tags = [_safe_yaml_scalar(t) for t in tags]
+    contract = normalize_note_contract(
+        note_type=note_type,
+        tags=tags,
+        certainty=certainty,
+        source=source,
+        origin=origin,
+        validity_context=validity_context,
+        supersedes=supersedes,
+        project=project,
+        branch=branch,
+        session_id=session_id,
+    )
 
     lines = [
         "---",
         f"title: {safe_title}",
-        f"type: {safe_type}",
-        f"tags: [{', '.join(safe_tags)}]",
-        f"source: {safe_source}",
+        f"type: {contract['note_type']}",
+        f"tags: {json.dumps(contract['tags'], ensure_ascii=False)}",
+        f"source: {contract['source']}",
     ]
-    certainty_value = _coerce_certainty(certainty)
-    if certainty_value is not None:
-        lines.append(f"certainty: {certainty_value}")
-    if validity_context:
-        lines.append(f"validity-context: {_safe_yaml_scalar(validity_context)}")
-    if supersedes:
-        lines.append(f'supersedes: "{_safe_yaml_scalar(supersedes)}"')
-    if project:
-        lines.append(f"project: {_safe_yaml_scalar(project)}")
-    if branch:
-        lines.append(f"branch: {_safe_yaml_scalar(branch)}")
+    if contract["origin"]:
+        lines.append(f"origin: {contract['origin']}")
+    if contract["certainty"] is not None:
+        lines.append(f"certainty: {contract['certainty']}")
+    if contract["validity_context"]:
+        lines.append(f"validity-context: {contract['validity_context']}")
+    if contract["supersedes"]:
+        lines.append(f"supersedes: {json.dumps(contract['supersedes'], ensure_ascii=False)}")
+    if contract["project"]:
+        lines.append(f"project: {contract['project']}")
+    if contract["branch"]:
+        lines.append(f"branch: {contract['branch']}")
     lines.append(f"date: {now}")
-    if session_id:
-        lines.append(f"session_id: {_safe_yaml_scalar(session_id)}")
+    if contract["session_id"]:
+        lines.append(f"session_id: {contract['session_id']}")
 
     # Append the canonical "## Related" placeholder only if the body doesn't
     # already contain one — otherwise callers that include their own ## Related

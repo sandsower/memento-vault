@@ -47,8 +47,14 @@ class MockBackend(SearchBackend):
 
 
 @pytest.fixture(autouse=True)
-def reset():
-    """Reset the global backend after each test."""
+def isolate_default_backend(monkeypatch, tmp_path):
+    """Keep default backend selection isolated from developer environment state."""
+    isolated_vault = tmp_path / "isolated-vault"
+    monkeypatch.setattr(
+        "memento.config.get_config",
+        lambda: {"vault_path": str(isolated_vault), "search_backend": "auto", "search_db_path": ".search/search.db"},
+    )
+    monkeypatch.setattr("memento.config.get_vault", lambda: isolated_vault)
     yield
     reset_backend()
 

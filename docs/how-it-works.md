@@ -55,8 +55,8 @@ vault-briefing.py (SessionStart hook)
     |       if maps have enough notes for this project: write ready immediately
     |       else: fall through to async vsearch
     +---> ASYNC: spawn background subprocess for QMD vsearch
-    |     writes results to /tmp/memento-deferred-briefing.json
-    |     picked up by vault-recall.py on the first prompt
+    |     writes results to a session/project-scoped deferred file with a short TTL
+    |     picked up by vault-recall.py only for the matching first prompt context
     |
     v
 User types a prompt
@@ -91,18 +91,18 @@ Claude reads a file
     v
 vault-tool-context.py (PreToolUse hook, Read matcher)
     |
-    +---> skip check: system paths, vendor dirs, config files, assets
+    +---> skip check: system paths, vendor dirs, config files, assets, bridge files
     +---> session injection cap (max 5)
     +---> directory cache check (hit = use cached, miss = continue)
     +---> cooldown check (1s between QMD calls)
-    +---> extract keywords from file path (split camelCase, filter stop segments)
-    +---> BM25 search against keywords
-    +---> enhance_results() pipeline
+    +---> extract cwd-relative keywords from file path (split camelCase, filter stop segments)
+    +---> BM25 search against keywords (default min_score 0.75)
+    +---> enhance_results() pipeline with positive project-match required
     +---> dedup against recall + prior tool-context injections
     +---> return JSON with additionalContext --> Claude sees it before the file
 ```
 
-All three hooks are zero-cost when they have nothing relevant to say -- no output, no context overhead. When they do inject, overhead is ~150 input units per session on average. See [performance-analysis.md](performance-analysis.md) for benchmarks.
+All three hooks are zero-cost when they have nothing relevant to say -- no output, no context overhead. When `retrieval_log: true` or `MEMENTO_DEBUG=1` is enabled, tool context records one terminal `tool-context/decision` event per call so usefulness can be audited from skip reasons, injected paths, cache/search source, latency, and optional candidate summaries. When the hooks do inject, overhead is ~150 input units per session on average. See [performance-analysis.md](performance-analysis.md) for benchmarks.
 
 ## What gets captured
 
@@ -288,6 +288,7 @@ Use `/inception` to run manually, or `/inception --dry-run` to preview clusters 
 | `/memento` | Capture insights from the current session |
 | `/inception` | Find cross-session patterns and synthesize pattern notes |
 | `/memento-defrag` | Archive stale notes (low certainty, old bugfixes, superseded) |
+| `/preserve` | Archive artifact bundles intact with manifests and project links |
 | `/start-fresh` | Capture session + save pending work + prompt to clear context |
 | `/continue-work` | Recover context from git state, MEMORY.md, and optionally the vault |
 
@@ -307,7 +308,7 @@ Notes accumulate. `/memento-defrag` handles decay:
 - Hub notes (linked by 3+ others) -> never archive
 - Certainty 4-5 -> never archive
 
-Archived notes move to `archive/`, are removed from the QMD index, but remain in git history and are searchable via grep.
+Archived notes and preserved bundles move to `archive/`, are removed from the QMD index, but remain in git history and are searchable via grep.
 
 ## Automation consumption
 

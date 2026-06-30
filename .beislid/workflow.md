@@ -46,8 +46,10 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
   command: '.venv/bin/python -m ruff format --check .'
 - name: python-compileall
   command: '.venv/bin/python -m compileall -q memento hooks scripts'
+- name: frontmatter-schema-drift
+  command: '.venv/bin/python scripts/check_frontmatter_schema.py'
 - name: targeted-tests
-  command: '.venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py'
+  command: '.venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py'
 - name: retrieval-tests
   command: '.venv/bin/python -m pytest tests/test_tenet_*.py tests/test_multi_hop.py tests/test_deep_recall.py'
 - name: mcp-server-tests
@@ -62,7 +64,20 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
 
 ## Action policy
 
+Unattended completion handoff is allowed for feature branches only after the configured gates pass. Use the repo policy file when evaluating remote handoff actions:
+
+```bash
+beislid action-policy evaluate --policy-file .beislid/action-policy.json --mode unattended-auto --action git.push --class git-remote --sandbox-baseline non-default-branch
+beislid action-policy evaluate --policy-file .beislid/action-policy.json --mode unattended-auto --action gh.pr.create --class git-remote --sandbox-baseline non-default-branch
+beislid action-policy evaluate --policy-file .beislid/action-policy.json --mode unattended-auto --action gh.pr.ready --class git-remote --sandbox-baseline non-default-branch
+beislid action-policy evaluate --policy-file .beislid/action-policy.json --mode unattended-auto --action gh.pr.comment --class git-remote --sandbox-baseline non-default-branch
+```
+
+The permitted terminal path for unattended agents is: finish local work, run all configured gates, push the non-default feature branch, create or update a draft PR, link it on the Linear ticket, and leave the ticket in `In Review`. If all configured gates pass and the existing PR is a green draft, unattended agents may mark that PR ready for review (`gh.pr.ready`) and may post bounded PR comments whose sole purpose is to trigger configured review automation or record review-handoff state (`gh.pr.comment`). Unattended agents must not push from the default branch and must not merge automatically.
+
 ```beislid:action_policy
+policy_file: .beislid/action-policy.json
+run_mode: unattended-auto
 modes:
   supervised-auto:
     rules:
@@ -71,8 +86,28 @@ modes:
       git.branch: allow
       git.commit: allow
       git.merge: allow
+      gh.pr.ready: allow
+      gh.pr.comment: allow
       review.fix: allow
     sandbox:
+      minimum: none
+      on_uncommitted_changes: allow
+  unattended-auto:
+    rules:
+      workspace-write: allow
+      dependency-install: allow
+      git-remote: deny
+    actions:
+      git.branch: allow
+      git.commit: allow
+      git.push: allow
+      gh.pr.create: allow
+      gh.pr.ready: allow
+      gh.pr.comment: allow
+      tracker.issue.transition: allow
+      ticket.comment: allow
+    sandbox:
+      minimum: non-default-branch
       on_uncommitted_changes: allow
 ```
 

@@ -1,5 +1,7 @@
 """Configuration loading, project detection, vault identity, and runtime paths."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -30,6 +32,7 @@ DEFAULT_CONFIG = {
     "briefing_max_notes": 5,
     "briefing_min_score": 0.55,
     "prompt_recall": True,
+    "recall_concrete_mode": False,
     "recall_min_score": 0.6,
     "recall_max_notes": 3,
     "recall_high_confidence": 0.55,
@@ -57,10 +60,14 @@ DEFAULT_CONFIG = {
     "wikilink_max_expanded": 3,
     # Tool context hook (PreToolUse)
     "tool_context": True,
-    "tool_context_min_score": 0.65,
+    "tool_context_min_score": 0.75,
     "tool_context_max_notes": 2,
     "tool_context_max_injections": 5,
     "tool_context_cooldown": 1,
+    "tool_context_cache_ttl_hours": 24,  # 0 disables expiry
+    "tool_context_diagnostics": True,
+    "tool_context_diagnostics_include_candidates": False,
+    "tool_context_diagnostics_max_candidates": 10,
     # Inception (background consolidation)
     "inception_enabled": False,
     "inception_backend": "codex",
@@ -80,6 +87,10 @@ DEFAULT_CONFIG = {
     # PageRank graph boost
     "pagerank_alpha": 0.85,
     "pagerank_boost_weight": 0.3,
+    # Access-log retrieval boost
+    "access_log_enabled": True,
+    "access_log_boost_weight": 0.12,
+    "access_log_half_life_days": 30,
     # Project retrieval maps
     "project_maps_enabled": True,
     # Concept index (Tenet)
@@ -133,6 +144,7 @@ DEFAULT_CONFIG = {
     # LLM backend (agent-agnostic)
     "llm_backend": "claude",
     "llm_model": None,  # None = use agent_model for backwards compat
+    "claude_bare_headless": False,
     "llm_api_key": None,
     "llm_api_base": None,
 }
@@ -181,7 +193,7 @@ def load_config():
     config["vault_path"] = str(Path(config["vault_path"]).expanduser())
 
     # Handle floats that simple YAML parser returns as strings
-    for key in ("briefing_min_score", "recall_min_score", "inception_cluster_threshold"):
+    for key in ("briefing_min_score", "recall_min_score", "tool_context_min_score", "inception_cluster_threshold"):
         if isinstance(config.get(key), str):
             try:
                 config[key] = float(config[key])
@@ -203,6 +215,8 @@ def _parse_simple_yaml(path):
                 key, _, value = line.partition(":")
                 key = key.strip()
                 value = value.strip()
+                if not key:
+                    raise ValueError(f"malformed config line in {path}: {line}")
                 if value.lower() in ("true", "yes"):
                     value = True
                 elif value.lower() in ("false", "no"):

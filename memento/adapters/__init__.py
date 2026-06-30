@@ -5,6 +5,7 @@ The dispatcher detects the agent from the transcript format or env vars
 and routes to the appropriate adapter.
 """
 
+import importlib
 import json
 import os
 
@@ -13,28 +14,29 @@ from memento.adapters.claude import parse_transcript as _parse_claude
 _SNIFF_MAX_LINES = 20
 
 
-def _load_opencode():
-    """Import the optional OpenCode SQLite adapter on demand.
+def _load_adapter(name):
+    """Import an optional transcript adapter module on demand.
 
-    The OpenCode adapter ships as a separate module that may be absent on a
-    Claude-only install. Importing it at module load time turned its absence
-    into a fatal ImportError that took the whole triage hook down before it
-    could process Claude JSONL transcripts. Loading it lazily keeps the Claude
-    path working and surfaces a clear error only if an OpenCode transcript is
-    actually encountered. Returns the module, or None when unavailable.
+    Adapters for non-Claude agents (OpenCode, Pi, ...) ship as separate
+    modules that may be absent on a Claude-only install. Importing them at
+    module load time turned a missing module into a fatal ImportError that
+    took the whole triage hook down before it could process Claude JSONL
+    transcripts. Loading them lazily keeps the Claude path working and
+    surfaces a clear error only if such a transcript is actually encountered.
+    Returns the module, or None when it is not installed.
     """
     try:
-        from memento.adapters import opencode
+        return importlib.import_module(f"memento.adapters.{name}")
     except ImportError:
         return None
-    return opencode
 
 
-_OPENCODE_MISSING = (
-    "OpenCode transcript detected but the OpenCode adapter is not installed. "
-    "Install the memento.adapters.opencode module, or use memento_capture with "
-    "session_summary instead of transcript_path."
-)
+def _adapter_missing_error(agent):
+    return ValueError(
+        f"{agent} transcript detected but the {agent} adapter is not installed. "
+        f"Install the memento.adapters.{agent} module, or use memento_capture with "
+        "session_summary instead of transcript_path."
+    )
 
 
 def detect_agent(transcript_path):
@@ -42,23 +44,24 @@ def detect_agent(transcript_path):
 
     Detection order:
     1. MEMENTO_AGENT env var (explicit override)
-    2. Sniff the file: SQLite header → OpenCode; JSONL first records → Claude
+    2. Sniff the file: SQLite header → OpenCode; JSONL first records → Pi/Claude
 
-    Returns one of: "claude", "opencode", "codex", "cursor", "windsurf", "unknown"
+    Returns one of: "claude", "opencode", "pi", "codex", "cursor", "windsurf", "unknown"
     """
     env_agent = os.environ.get("MEMENTO_AGENT", "").lower().strip()
-    if env_agent in ("claude", "opencode", "codex", "cursor", "windsurf"):
+    if env_agent in ("claude", "opencode", "pi", "codex", "cursor", "windsurf"):
         return env_agent
 
     # OpenCode stores sessions in SQLite, so check the binary header first;
     # otherwise opening it as text would just raise UnicodeDecodeError below.
-    opencode = _load_opencode()
+    opencode = _load_adapter("opencode")
     if opencode is not None and opencode.looks_like_opencode_db(transcript_path):
         return "opencode"
 
     # Sniff transcript format by scanning early records. Claude Code writes
     # metadata records (file-history-snapshot, attachment, system) ahead of
     # the first user/assistant message, so checking only line 1 is unreliable.
+    pi = _load_adapter("pi")
     try:
         with open(transcript_path) as f:
             for _ in range(_SNIFF_MAX_LINES):
@@ -72,6 +75,8 @@ def detect_agent(transcript_path):
                     data = json.loads(stripped)
                 except json.JSONDecodeError:
                     continue
+                if pi is not None and pi.looks_like_pi_record(data):
+                    return "pi"
                 if isinstance(data, dict) and data.get("type") in ("user", "assistant"):
                     return "claude"
 
@@ -100,10 +105,15 @@ def render_transcript_text(transcript_path, agent=None, session_id=None):
         agent = detect_agent(transcript_path)
 
     if agent == "opencode":
-        opencode = _load_opencode()
+        opencode = _load_adapter("opencode")
         if opencode is None:
-            raise ValueError(_OPENCODE_MISSING)
+            raise _adapter_missing_error("opencode")
         return opencode.render_transcript_text(transcript_path, session_id=session_id)
+    if agent == "pi":
+        pi = _load_adapter("pi")
+        if pi is None:
+            raise _adapter_missing_error("pi")
+        return pi.render_transcript_text(transcript_path, session_id=session_id)
     return open(transcript_path).read()
 
 
@@ -171,10 +181,15 @@ def parse_transcript(transcript_path, agent=None, session_id=None):
     if agent == "claude":
         meta = _parse_claude(transcript_path)
     elif agent == "opencode":
-        opencode = _load_opencode()
+        opencode = _load_adapter("opencode")
         if opencode is None:
-            raise ValueError(_OPENCODE_MISSING)
+            raise _adapter_missing_error("opencode")
         meta = opencode.parse_transcript(transcript_path, session_id=session_id)
+    elif agent == "pi":
+        pi = _load_adapter("pi")
+        if pi is None:
+            raise _adapter_missing_error("pi")
+        meta = pi.parse_transcript(transcript_path)
     elif agent in ("codex", "cursor", "windsurf"):
         raise ValueError(
             f"Transcript parsing for {agent!r} is not yet implemented. "

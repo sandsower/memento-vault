@@ -64,6 +64,10 @@ auto_commit: true
 # Claude model to use for generating atomic notes
 agent_model: sonnet
 
+# Optional hardened mode for detached Claude workers.
+# When true, headless Claude calls add --bare and require API-key or apiKeyHelper auth.
+claude_bare_headless: false
+
 # Seconds to wait before committing agent-generated notes
 # (gives the background agent time to finish writing)
 agent_delay_seconds: 90
@@ -81,6 +85,10 @@ briefing_min_score: 0.3
 # --- Prompt recall (UserPromptSubmit hook) ---
 # Inject relevant vault notes before each prompt is processed
 prompt_recall: true
+
+# Concrete/literal mode for paths, UUIDs, env vars, and quoted phrases.
+# Set to auto to enable only when the prompt looks literal; true forces it.
+recall_concrete_mode: auto
 
 # Minimum QMD relevance score for recall results (0.0-1.0)
 recall_min_score: 0.4
@@ -116,7 +124,16 @@ tool_context_max_notes: 2
 tool_context_max_injections: 5
 
 # Seconds between QMD calls (rate limiting)
-tool_context_cooldown: 3
+tool_context_cooldown: 1
+
+# Hours before directory-level tool-context cache entries are refreshed (0 disables expiry)
+tool_context_cache_ttl_hours: 24
+
+# Log one terminal decision per tool-context call when retrieval_log/MEMENTO_DEBUG is enabled.
+# Candidate summaries are off by default to keep diagnostic logs compact.
+tool_context_diagnostics: true
+tool_context_diagnostics_include_candidates: false
+tool_context_diagnostics_max_candidates: 10
 
 # --- Multi-hop retrieval (experimental) ---
 # Chain follow-up searches when a prompt references past decisions or other projects.

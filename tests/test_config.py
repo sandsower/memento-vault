@@ -1,5 +1,6 @@
 """Tests for memento.config module."""
 
+import builtins
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -75,11 +76,39 @@ class TestLoadConfig:
         assert "llm_backend" in DEFAULT_CONFIG
         assert DEFAULT_CONFIG["llm_backend"] == "claude"
         assert DEFAULT_CONFIG["llm_model"] is None
+        assert DEFAULT_CONFIG["claude_bare_headless"] is False
 
     def test_recall_diagnostics_defaults_disabled(self):
         assert DEFAULT_CONFIG["recall_diagnostics"] is False
         assert DEFAULT_CONFIG["recall_diagnostics_include_candidates"] is False
         assert DEFAULT_CONFIG["recall_diagnostics_max_candidates"] == 10
+
+    def test_recall_concrete_mode_defaults_disabled(self):
+        assert DEFAULT_CONFIG["recall_concrete_mode"] is False
+
+    def test_tool_context_defaults_are_tightly_gated_and_diagnostic(self):
+        assert DEFAULT_CONFIG["tool_context_min_score"] == 0.75
+        assert DEFAULT_CONFIG["tool_context_diagnostics"] is True
+        assert DEFAULT_CONFIG["tool_context_diagnostics_include_candidates"] is False
+        assert DEFAULT_CONFIG["tool_context_diagnostics_max_candidates"] == 10
+
+    def test_simple_yaml_coerces_tool_context_min_score_string(self, tmp_path):
+        config_dir = tmp_path / ".config" / "memento-vault"
+        config_dir.mkdir(parents=True)
+        (config_dir / "memento.yml").write_text('tool_context_min_score: "0.82"\n')
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(Path, "home", return_value=tmp_path), patch("builtins.__import__", side_effect=fake_import):
+            reset_config()
+            config = load_config()
+
+        assert config["tool_context_min_score"] == 0.82
+        assert isinstance(config["tool_context_min_score"], float)
 
     def test_broad_project_query_skip_defaults_enabled(self):
         assert DEFAULT_CONFIG["recall_skip_broad_project_queries"] is True
@@ -90,9 +119,16 @@ class TestLoadConfig:
         vault.mkdir()
         config_file = vault / "memento.yml"
         config_file.write_text(": : : invalid yaml : :\n")
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "yaml":
+                raise ImportError
+            return real_import(name, *args, **kwargs)
 
         with (
             patch.object(Path, "home", return_value=tmp_path),
+            patch("builtins.__import__", side_effect=fake_import),
             patch("memento.config.DEFAULT_CONFIG", {**DEFAULT_CONFIG, "vault_path": str(vault)}),
         ):
             reset_config()

@@ -47,27 +47,30 @@ memento-vault install --reinstall
 Check local vault/install health at any time:
 
 ```bash
-memento-vault health        # concise read-only diagnostics
-memento-vault doctor        # alias for health
-memento-vault health --json # structured output for automation
+memento-vault health               # concise read-only diagnostics
+memento-vault doctor               # alias for health
+memento-vault retrieval-report      # local retrieval debug dashboard/report
+memento-vault health --json        # structured output for automation
+memento-vault health --deep        # opt-in live integration probes
+memento-vault retrieval-report --html --output /tmp/retrieval.html
 ```
 
-Warnings exit 0 by default; failures exit 1. Use `--strict` if automation should fail on warnings too. The command is read-only: it reports suggested repairs such as `./install.sh --reinstall`, but does not modify vault/config files.
+Warnings exit 0 by default; failures exit 1. Use `--strict` if automation should fail on warnings too. The command is read-only: it reports suggested repairs such as `./install.sh --reinstall`, but does not modify vault/config files. JSON output includes `automation_memory` readiness metadata for runner probes without contacting remote services by default. Add `--deep` to run bounded live probes against configured integrations.
 
 `--force` is reserved for recovery from broken installed files. It overwrites memento-managed files and requires confirmation, or `MEMENTO_FORCE=1` in non-interactive environments.
 
 ### Full install (hooks + retrieval + consolidation)
 
-The base install captures knowledge. To also inject knowledge back into active sessions and enable background consolidation:
+The base install captures knowledge and injects it back into active sessions. To also add background consolidation and the orra-init skill:
 
 ```bash
 ./install.sh --experimental
 ```
 
-This adds two modules:
+This adds extra modules:
 
-- **Tenet** -- three retrieval hooks that inject vault notes into active sessions (briefing, recall, tool context)
 - **Inception** -- background consolidation that clusters notes and synthesizes cross-session patterns
+- **orra-init** -- experimental helper skill for starting new agents/workflows
 
 Both require QMD. Inception also needs `pip install numpy hdbscan scikit-learn`. See [Tenet](#tenet) and [Inception](#inception) for details.
 
@@ -81,7 +84,7 @@ For agents that support MCP but not native hooks (Cursor, Windsurf, etc.):
 
 This installs the `memento/` package, writes generic MCP server config, and registers the server with Claude Code and Codex when those CLIs are installed. The server runs over stdio via `python -m memento`. The installer verifies the `mcp` Python package is available and installs it if needed. Claude Code gets Claude-specific skills and the concierge agent under `~/.claude`; Codex gets agent-agnostic skills under `~/.codex/skills`.
 
-You can combine flags: `./install.sh --experimental --mcp` gives you hooks + retrieval + MCP.
+You can combine flags: `./install.sh --experimental --mcp` gives you the base hooks/context + MCP, plus Inception/orra-init extras.
 
 ### Pi extension
 
@@ -99,11 +102,11 @@ For package installation from a checkout:
 pi install /path/to/memento-vault
 ```
 
-The pi bridge does not start a long-lived MCP child process. Automatic durable writes are not enabled by default. Candidate captures are queued in local state for review and can be processed into curated notes manually.
+The pi bridge does not start a long-lived MCP child process. Automatic durable writes are queued by default. Candidate captures land in local state for review and can be processed into curated notes manually.
 
 Useful pi commands/tools:
 
-- `/memento` — open the TUI dashboard for status, readable queued-capture review cards, explicit capture selection, processing previews, and live group-level processing progress.
+- `/memento` — open the TUI dashboard for status, readable queued-capture review cards, explicit capture selection, processing previews, live group-level processing progress, and retry controls for failed processing groups.
 - `/memento-status` or `memento_status` — bridge/vault status, lifecycle feature state, queue count.
 - `/memento-queue` or `memento_queue` — list queued pi capture candidates with deterministic excerpts and size metadata.
 - `/memento-process` or `memento_process` — process selected queued captures into curated durable notes. With no arguments the command shows a dry-run preview; use `/memento` for interactive selection and confirmation.
@@ -118,13 +121,13 @@ Pi bridge configuration can live in either `~/.config/memento-vault/pi-bridge.js
       "enabled": true,
       "briefing": true,
       "promptRecall": true,
-      "toolContext": false,
-      "autoCapture": false,
+      "toolContext": true,
+      "autoCapture": true,
       "captureQueue": true,
       "processQueue": true,
       "processQueueOnSessionClose": false,
       "processQueueMaxCaptures": 3,
-      "processQueueModel": null,
+      "processQueueModel": "claude-sonnet-4-20250514",
       "maxInjectedChars": 4000,
       "maxToolContextPerSession": 5
     }
@@ -139,17 +142,17 @@ Environment variables override file config:
 | `MEMENTO_PI_ENABLED` | `true` | Enable/disable the extension lifecycle work. |
 | `MEMENTO_PI_BRIEFING` | `true` | First-turn project briefing. |
 | `MEMENTO_PI_PROMPT_RECALL` | `true` | Prompt recall before each agent turn. |
-| `MEMENTO_PI_TOOL_CONTEXT` | `false` | Read-tool context injection. |
+| `MEMENTO_PI_TOOL_CONTEXT` | `true` | Read-tool context injection. |
 | `MEMENTO_PI_MAX_INJECTED_CHARS` | `4000` | Per-injection character cap. |
 | `MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION` | `5` | Tool-context injection cap per pi session. |
-| `MEMENTO_PI_AUTO_CAPTURE` | `false` | Queue automatic capture candidates on `agent_end`, compaction, and shutdown lifecycle events. |
+| `MEMENTO_PI_AUTO_CAPTURE` | `true` | Queue automatic capture candidates on `agent_end`, compaction, and shutdown lifecycle events. |
 | `MEMENTO_PI_CAPTURE_QUEUE` | `true` | Queue automatic capture candidates instead of writing notes directly. |
 | `MEMENTO_PI_PROCESS_QUEUE` | `true` | Enable manual queued-capture processing. |
 | `MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE` | `false` | Reserved future automation route for processing a small batch on session close. |
 | `MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES` | `3` | Reserved future cap for session-close processing. |
-| `MEMENTO_PI_PROCESS_QUEUE_MODEL` | unset | Optional model override for processor sessions. |
+| `MEMENTO_PI_PROCESS_QUEUE_MODEL` | `claude-sonnet-4-20250514` | Model for processor sessions; set config/env explicitly to override or `null` in config to use pi's default. |
 
-When automatic capture is enabled, pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
+When automatic capture is enabled (the default), pi lifecycle events only create reviewable queue entries in local state (`${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/queue/pi-captures.jsonl`). They do not write durable notes until `/memento-process` or `/memento` curates the queue into one or more atomic Memento notes. Processing runs write progress under `${MEMENTO_PI_STATE_HOME:-${XDG_STATE_HOME:-~/.local/state}/memento/pi}/processing/<run-id>/`, and the `/memento` footer shows a compact active/failed/interrupted indicator while background processing is visible. Failed processing groups keep their queue entries and can be retried directly from the TUI without reconstructing filters or selections. The processor prompt receives deterministic existing-note deduplication context and instructs curators to store original project/cwd/branch/session metadata as note frontmatter via `memento_capture`, not as prose boilerplate. Shutdown capture is skipped if another lifecycle capture was already queued during the same session.
 
 Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
 
@@ -183,15 +186,15 @@ See [Cloud deployment](#cloud-deployment) for details.
 
 ### Upgrading from v1.x
 
-The installer is version-aware. Modified hooks are preserved with `.new` copies for manual diffing. On subsequent upgrades, modified files are auto-merged via three-way merge (`git merge-file`).
+The installer is version-aware. Modified hooks are preserved with `.new` copies for manual diffing. On subsequent upgrades, modified files are auto-merged via three-way merge (`git merge-file`). Existing opt-outs in your Claude/Pi config continue to win; rerun `./install.sh` to pick up the default hook set after upgrading.
 
 ```bash
-cd memento-vault && git pull && ./install.sh --experimental
+cd memento-vault && git pull && ./install.sh
 ```
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.10+
 - Git
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (for hook-based setup)
 - [QMD](https://github.com/tobi/qmd) (optional, semantic search)
@@ -202,17 +205,27 @@ cd memento-vault && git pull && ./install.sh --experimental
 
 The MCP server exposes read, lifecycle, write, and maintenance tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.
 
-| Tool | What it does | When to use it |
-|------|-------------|----------------|
-| `memento_search` | Search vault notes (BM25, semantic, RRF fusion, temporal decay, PageRank boost; `concrete: auto\|true\|false` for exact identifiers and quoted phrases) | Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path. |
-| `memento_get` | Read full note content by name or path | Use after `memento_search` when a returned path needs full content, or directly when the user already supplied an exact note path/name. |
-| `memento_briefing` / `memento_recall` / `memento_session_context` / `memento_tool_context` | Lifecycle context payloads for session start, prompt recall, one-call budgeted session context, and read-tool context | Host-adapter primitives for automatic injection; not general user-answering tools. |
-| `memento_store` | Write a single knowledge note with frontmatter and project indexing | Low-level write primitive for sync/automation or agents without skill support; interactive Claude/Codex sessions should prefer `/memento` or local hooks. |
-| `memento_capture` | End-of-session triage: parse transcript or accept a summary, write fleeting + atomic note | Low-level SessionEnd equivalent for agents without hook support; not a replacement for interactive `/memento` workflows. |
-| `memento_daily_snapshot` | Write a deterministic `notes/daily-<date>-<repo-slug>.md` snapshot | Low-level structured daily-snapshot primitive for path-controlled integrations; do not use for ordinary notes, interactive memory capture, or session triage. |
-| `memento_status` | Vault status: note count, project count, config summary | Use for health/config checks; not for recall, project history, or note content. |
-| `memento_list` | Lightweight note inventory with optional content hashes | Use for sync/inventory clients; not for topical recall or reading notes. |
-| `memento_reindex` | Rebuild the search index from all markdown files (after bulk adds, git pull, Obsidian sync) | Use after out-of-band file changes or stale-index evidence; not as the default response to a broad/empty search miss. |
+<!-- memento-mcp-tools:start -->
+The MCP server currently registers **15 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
+
+| Tool | Category | What it does | When to use it |
+|------|----------|--------------|----------------|
+| `memento_search` | Read | Search vault notes with BM25, optional semantic search, hybrid ranking, temporal decay, PageRank/access-log boosts, and `concrete: auto\|true\|false` for exact identifiers and quoted phrases. | Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path. |
+| `memento_contradictions` | Read | Inspect a topic for disagreements, stale conclusions, supersession chains, and opposite-language hints. | Use when comparing competing notes about the same topic or when you need explicit superseded notes marked alongside their source paths and certainty/date context. |
+| `memento_briefing` | Lifecycle | Build a compact session-start briefing payload for host adapters. | Host-adapter primitive for automatic injection; not a general user-answering tool. |
+| `memento_recall` | Lifecycle | Build prompt-time recall context for host adapters. | Host-adapter primitive for automatic injection before an agent turn; not a general user-answering tool. |
+| `memento_tool_context` | Lifecycle | Build read-tool context for a concrete file path. | Host-adapter primitive for automatic read-tool injection; not for explicit recall/search requests. |
+| `memento_session_context` | Lifecycle | Build a one-call budgeted session context packet that can include status, recent context, recall, and tool-context preview metadata. | Host-adapter primitive that replaces separate briefing/recall/status calls when a host wants one compact payload. |
+| `memento_get` | Read | Read full note content by name or path. | Use after `memento_search` when a returned path needs full content, or directly when the user already supplied an exact note path/name. |
+| `memento_status` | Operational | Report vault health/status, note counts, project counts, and safe config summary. | Use for operational checks and setup debugging; not for recall, project history, or note content. |
+| `memento_list` | Sync | List notes with optional content hashes for lightweight inventory/sync. | Use for sync/inventory clients; not for topical recall or reading notes. |
+| `memento_store` | Write | Write a single knowledge note with managed frontmatter and project indexing. | Low-level write primitive for sync/automation or agents without skill support; interactive Claude/Codex sessions should prefer `/memento` or local hooks. |
+| `memento_store_smart` | Write | Search for close matches before writing, and return duplicate/update/supersede suggestions. | Use when you want a write decision with candidate paths/reasons before creating a note; it avoids obvious duplicates by default. |
+| `memento_daily_snapshot` | Write | Write a deterministic `notes/daily-<date>-<repo-slug>.md` snapshot with an append-only supersede chain. | Low-level structured daily-snapshot primitive for path-controlled integrations; do not use for ordinary notes, interactive memory capture, or session triage. |
+| `memento_capture` | Write | End-of-session triage from a transcript path or structured summary; writes fleeting session state and optionally an atomic note. | Low-level SessionEnd equivalent for agents without hook support; not a replacement for interactive `/memento` workflows. |
+| `memento_preserve` | Write | Archive a file or directory bundle under `archive/<slug>/` with a manifest, a lightweight index note, and optional project-linking. | Use for evidence packets, screenshots, handoff bundles, or other artifacts that should stay intact; copy by default, move only when explicitly requested. Do not use it for ordinary knowledge capture or atomic notes. |
+| `memento_reindex` | Maintenance | Rebuild the search index from all markdown files after out-of-band changes. | Use after bulk adds, git pull, Obsidian sync, or stale-index evidence; not as the default response to a broad/empty search miss. |
+<!-- memento-mcp-tools:end -->
 
 Common read paths:
 
@@ -220,6 +233,7 @@ Common read paths:
 - Prior fixes: `memento_search({"query": "Where did we fix stale headless Claude MCP config?"})`.
 - Project history: `memento_search({"query": "memento-vault recent triage failures project history"})`.
 - Exact identifier lookup: `memento_search({"query": "MEMENTO_VAULT_PATH", "concrete": "auto"})`.
+- Disagreements/supersession: `memento_contradictions({"topic": "Redis cache"})`.
 - Reading full content: take a returned `path` such as `notes/cache-policy.md`, then call `memento_get({"path": "notes/cache-policy.md"})`.
 
 Run manually:
@@ -306,9 +320,9 @@ Past knowledge flows back into active sessions via three hooks:
 
 - **Session briefing** (SessionStart): injects your project's recent sessions and relevant vault notes when a session opens. Fast sync output (<50ms), QMD search deferred to background.
 - **Prompt recall** (UserPromptSubmit): searches each prompt against the vault and surfaces matching notes before Claude processes it. Adaptive pipeline: fast BM25 path for confident matches, deep path (PRF, RRF, multi-hop wikilink-following, cross-encoder reranking) for low-confidence queries.
-- **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. Directory-level BM25 with caching and rate limiting.
+- **Tool context** (PreToolUse): injects vault notes when Claude reads files in known code areas. It uses cwd-relative path keywords, directory-level BM25 caching, rate limiting, a higher relevance threshold, and a positive project-match gate because file-read context is unsolicited.
 
-All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, and vendor directories.
+All three hooks stay silent when they have nothing relevant. Zero tokens injected on trivial prompts, config files, agent/bridge files, and vendor directories. Enable `retrieval_log: true` or `MEMENTO_DEBUG=1` and run `memento-vault retrieval-report` (or `tools/analyze-retrieval.py`) to audit tool-context skip reasons, injection rate, injected paths, latency, and recent candidate snapshots.
 
 ### Performance
 
@@ -358,7 +372,7 @@ Pattern notes start at certainty 3 (subject to temporal decay and defrag). Use `
   fleeting/       Daily logs, one line per session
   notes/          Atomic permanent notes (the good stuff)
   projects/       Project indexes linking notes and sessions
-  archive/        Stale notes moved here by /memento-defrag
+  archive/        Stale notes and preserved bundles moved here by /memento-defrag and /preserve
 ```
 
 ### Skills
@@ -368,6 +382,7 @@ Pattern notes start at certainty 3 (subject to temporal decay and defrag). Use `
 | `/memento` | Capture insights mid-session |
 | `/inception` | Find cross-session patterns, synthesize pattern notes (experimental) |
 | `/memento-defrag` | Archive low-value notes, keep the vault focused |
+| `/preserve` | Archive artifact bundles intact with manifests and project links |
 | `/start-fresh` | Capture + save pending work + clear context |
 | `/continue-work` | Recover context from local state and vault |
 
@@ -507,7 +522,10 @@ LLM backend is configurable:
 ```yaml
 llm_backend: claude        # claude, codex, gemini, anthropic-api, openai-compat
 llm_model: sonnet          # model name for the chosen backend
+claude_bare_headless: false # opt into Claude Code --bare for detached workers
 ```
+
+`claude_bare_headless: true` is the hardened mode for headless Claude workers. It skips hook/plugin/skill discovery and requires API-key or `apiKeyHelper` auth.
 
 ## Configuration
 
@@ -523,7 +541,10 @@ auto_commit: true
 # Tenet retrieval hooks
 session_briefing: true
 prompt_recall: true
+recall_concrete_mode: auto   # literal/path/UUID prompts only; true forces all prompts
 tool_context: true
+# When retrieval_log/MEMENTO_DEBUG is enabled, log tool-context decisions.
+tool_context_diagnostics: true
 
 # Retrieval pipeline
 prf_enabled: true            # pseudo-relevance feedback query expansion

@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+import subprocess
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,14 +11,23 @@ import pytest
 
 from memento import mcp_server
 from memento.config import DEFAULT_CONFIG
+from memento.mcp_inventory import (
+    END_MARKER,
+    START_MARKER,
+    inventory_tool_names,
+    registered_tool_names,
+    render_mcp_tool_markdown,
+)
 from memento.search import MISS_RECOVERY_HINTS, build_search_miss
 from memento.mcp_server import (
     _bind_host,
     _strip_injection,
     memento_capture,
+    memento_contradictions,
     memento_daily_snapshot,
     memento_get,
     memento_list,
+    memento_preserve,
     memento_reindex,
     memento_search,
     memento_status,
@@ -318,6 +329,28 @@ class TestMementoSearch:
         assert result["miss"]["reason"] == "no_exact_match"
 
 
+# --- MCP tool inventory docs drift ---
+
+
+class TestMcpToolInventoryDocs:
+    def test_inventory_covers_registered_mcp_tools_without_duplicates(self):
+        assert Counter(inventory_tool_names()) == Counter(registered_tool_names())
+
+    def test_readme_mcp_tool_inventory_is_generated_from_source_of_truth(self):
+        readme = (Path(__file__).parents[1] / "README.md").read_text()
+        start = readme.index(START_MARKER)
+        end = readme.index(END_MARKER) + len(END_MARKER)
+
+        assert readme[start:end] == render_mcp_tool_markdown()
+
+    def test_non_readme_docs_do_not_maintain_hand_copied_mcp_tool_inventory(self):
+        docs_root = Path(__file__).parents[1] / "skills" / "orra-init" / "templates"
+        bridge = (docs_root / "vault-bridge.md").read_text()
+
+        assert "do not maintain a hand-copied tool list here" in bridge
+        assert "memento_status`, `memento_get`, `memento_store`" not in bridge
+
+
 # --- tool selection descriptions ---
 
 
@@ -338,6 +371,13 @@ class TestToolSelectionDescriptions:
         assert "Use this after memento_search" in doc
         assert "search first with memento_search" in doc
 
+    def test_contradictions_docstring_guides_comparison_use(self):
+        doc = memento_contradictions.__doc__ or ""
+
+        assert "disagreements" in doc
+        assert "superseded" in doc
+        assert "certainty/date" in doc
+
     def test_lifecycle_tool_docstrings_mark_host_adapter_primitives(self):
         for tool in (
             mcp_server.memento_briefing,
@@ -352,17 +392,24 @@ class TestToolSelectionDescriptions:
 
     def test_write_tool_docstrings_separate_low_level_from_interactive_workflows(self):
         store_doc = memento_store.__doc__ or ""
+        smart_store_doc = mcp_server.memento_store_smart.__doc__ or ""
         capture_doc = memento_capture.__doc__ or ""
         daily_snapshot_doc = memento_daily_snapshot.__doc__ or ""
+        preserve_doc = memento_preserve.__doc__ or ""
 
         assert "low-level primitive" in store_doc
         assert "/memento" in store_doc
+        assert "Smart-store" in smart_store_doc
+        assert "duplicate/update/supersede" in smart_store_doc
         assert "low-level write primitive" in capture_doc
         assert "ordinary interactive" in capture_doc
         assert "/memento" in capture_doc
         assert "low-level write primitive" in daily_snapshot_doc
         assert "deterministic path-controlled" in daily_snapshot_doc
         assert "ordinary notes" in daily_snapshot_doc
+        assert "copy by default" in preserve_doc
+        assert "archive/<slug>" in preserve_doc
+        assert "remote HTTP" in preserve_doc
 
     def test_status_and_maintenance_docstrings_are_not_recall_tools(self):
         status_doc = memento_status.__doc__ or ""
@@ -384,6 +431,88 @@ class TestToolSelectionDescriptions:
         assert "Do not use for topical discovery; search first" in extension
         assert "separate from interactive /memento skill workflows" in extension
         assert "not for prior decisions, project history, or note content" in extension
+
+    def test_pi_extension_lifecycle_sanitizer_excludes_reasoning_and_renders_tools(self):
+        helper = Path(__file__).parents[1] / "extensions" / "transcript-sanitizer.ts"
+        script = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const sanitizer = await import(pathToFileURL(process.argv[1]).href);
+
+const assistant = sanitizer.summarizeRecord({
+  message: {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "secret reasoning", thinkingSignature: "sig", encrypted_content: "blob" },
+      { type: "reasoning", text: "hidden chain of thought" },
+      { type: "text", text: "Use the lifecycle queue gate for captures." },
+    ],
+  },
+}, "assistant");
+assert.match(assistant, /Use the lifecycle queue gate/);
+assert.doesNotMatch(assistant, /secret reasoning|hidden chain|thinkingSignature|encrypted_content|blob/);
+
+const tools = sanitizer.summarizeRecord({
+  message: {
+    role: "assistant",
+    content: [
+      { type: "toolCall", name: "read", arguments: { path: "extensions/memento.ts", huge: "x".repeat(1400) } },
+      { type: "toolResult", content: "y".repeat(450) },
+    ],
+  },
+}, "assistant");
+assert.match(tools, /\[tool call\] read/);
+assert.match(tools, /extensions\/memento\.ts/);
+assert.match(tools, /\[tool result\]/);
+assert.match(tools, /tool result truncated/);
+assert.ok(tools.length < 620);
+
+const normal = sanitizer.summarizeMessages([
+  { message: { role: "user", content: "Please remember the API decision." } },
+  { message: { role: "assistant", content: [{ type: "text", text: "Captured the durable decision." }] } },
+]);
+assert.match(normal, /- user: Please remember the API decision\./);
+assert.match(normal, /- assistant: Captured the durable decision\./);
+
+const eventDetails = sanitizer.sanitizeEventDetails({
+  content: [{ type: "redacted_thinking", encrypted_content: "ciphertext" }, { type: "text", text: "compact summary" }],
+});
+assert.match(eventDetails, /compact summary/);
+assert.doesNotMatch(eventDetails, /redacted_thinking|encrypted_content|ciphertext/);
+
+const pointer = sanitizer.addSessionPointerDigest(normal, "/tmp/pi-session.jsonl");
+assert.match(pointer, /Session transcript: \/tmp\/pi-session\.jsonl/);
+assert.match(pointer, /Sanitized summary digest: sha256:[0-9a-f]{16}/);
+assert.match(pointer, /Sanitized lifecycle summary:/);
+"""
+        try:
+            subprocess.run(
+                ["node", "--version"],
+                check=True,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pytest.skip("node is not available")
+        try:
+            subprocess.run(
+                ["node", "--experimental-strip-types", "-e", "1+1"],
+                check=True,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            pytest.skip("installed Node does not support --experimental-strip-types")
+        subprocess.run(
+            ["node", "--experimental-strip-types", "--input-type=module", "-e", script, str(helper)],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
 
 # --- lifecycle retrieval tools ---
@@ -480,6 +609,25 @@ class TestLifecycleRetrievalTools:
         )
 
 
+class TestContradictionInspectionTool:
+    @patch("memento.mcp_server.inspect_contradictions")
+    def test_contradictions_delegates_to_helper(self, mock_inspect):
+        expected = {
+            "topic": "redis cache",
+            "results": [],
+            "groups": [],
+            "contradictions": [],
+            "supersession": [],
+            "summary": "0 notes; no obvious contradictions",
+        }
+        mock_inspect.return_value = expected
+
+        result = mcp_server.memento_contradictions("redis cache", limit=7, min_certainty=3)
+
+        assert result == expected
+        mock_inspect.assert_called_once_with("redis cache", limit=7, min_certainty=3)
+
+
 # --- memento_store ---
 
 
@@ -510,6 +658,7 @@ class TestMementoStore:
         content = note_path.read_text()
         assert "title: Test discovery" in content
         assert "source: mcp" in content
+        assert "origin: mcp_store" in content
         assert "certainty: 3" in content
 
     @pytest.mark.usefixtures("_use_vault_config")
@@ -537,6 +686,65 @@ class TestMementoStore:
         assert second["created"] is False
         assert second["idempotent"] is True
         assert not (tmp_vault / "notes" / "duplicate-safe-note-2.md").exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_legacy_mcp_note_without_origin_is_idempotent(self, tmp_vault):
+        note_path = tmp_vault / "notes" / "legacy-mcp-note.md"
+        note_path.write_text(
+            "---\n"
+            "title: Legacy MCP note\n"
+            "type: discovery\n"
+            "tags: [sync]\n"
+            "source: mcp\n"
+            "certainty: 4\n"
+            "project: /home/vic/Projects/memento-vault\n"
+            "branch: main\n"
+            "date: 2026-06-28T19:00\n"
+            "---\n\n"
+            "Same body.\n\n"
+            "## Related\n"
+        )
+
+        result = memento_store(
+            title="Legacy MCP note",
+            body="Same body.",
+            note_type="discovery",
+            tags=["sync"],
+            certainty=4,
+            project="/home/vic/Projects/memento-vault",
+            branch="main",
+        )
+
+        assert result["path"] == "notes/legacy-mcp-note.md"
+        assert result["idempotent"] is True
+        assert not (tmp_vault / "notes" / "legacy-mcp-note-2.md").exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_mcp_store_does_not_idempotently_match_other_sources(self, tmp_vault):
+        note_path = tmp_vault / "notes" / "manual-source-note.md"
+        note_path.write_text(
+            "---\n"
+            "title: Manual source note\n"
+            "type: discovery\n"
+            "tags: [sync]\n"
+            "source: manual\n"
+            "certainty: 4\n"
+            "date: 2026-06-28T19:00\n"
+            "---\n\n"
+            "Same body.\n\n"
+            "## Related\n"
+        )
+
+        result = memento_store(
+            title="Manual source note",
+            body="Same body.",
+            note_type="discovery",
+            tags=["sync"],
+            certainty=4,
+        )
+
+        assert result["path"] == "notes/manual-source-note-2.md"
+        assert (tmp_vault / "notes" / "manual-source-note-2.md").exists()
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_same_title_different_content_still_creates_suffix(self, tmp_vault):
@@ -642,6 +850,8 @@ class TestMementoStatus:
         assert result["note_count"] == 6  # 7 sample notes minus 1 archived
         assert result["vault_path"] == str(tmp_vault)
         assert "config" in result
+        assert result["automation_memory"]["metadata"]["probe"]["name"] == "automation_memory"
+        assert result["automation_memory"]["metadata"]["network_checked"] is False
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_missing_vault(self, tmp_path, vault_config):
@@ -654,6 +864,7 @@ class TestMementoStatus:
             result = memento_status()
 
         assert result["vault_exists"] is False
+        assert result["automation_memory"]["status"] == "fail"
 
 
 # --- memento_get ---
@@ -760,7 +971,10 @@ class TestMementoCapture:
         note_path = tmp_vault / result["note_path"]
         assert note_path.exists()
         content = note_path.read_text()
+        assert "type: discovery" in content
         assert "source: mcp-capture" in content
+        assert "origin: mcp_capture:cursor" in content
+        assert "certainty: 2" in content
         assert "auth.py" in content
 
         # Verify fleeting was written
@@ -834,6 +1048,50 @@ class TestMementoCapture:
 
         assert "error" not in result
         assert result["project"] != "unknown"
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_captures_pi_transcript_from_pi_session_dir(self, tmp_vault, tmp_path, monkeypatch):
+        pi_dir = tmp_path / "pi-sessions"
+        pi_dir.mkdir()
+        monkeypatch.setattr(mcp_server.tempfile, "gettempdir", lambda: str(tmp_path / "other-temp-root"))
+        transcript = pi_dir / "session.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "message",
+                    "cwd": "/home/vic/Projects/test",
+                    "gitBranch": "feature/pi",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "Capture the Pi fix"}]},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "message",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "private"},
+                            {"type": "text", "text": "Captured it."},
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setenv("PI_CODING_AGENT_SESSION_DIR", str(pi_dir))
+
+        result = memento_capture(
+            session_summary="",
+            transcript_path=str(transcript),
+            agent="pi",
+        )
+
+        assert "error" not in result
+        assert result["project"] != "unknown"
+        note = (tmp_vault / result["note_path"]).read_text()
+        assert "Capture the Pi fix" in note
+        assert "private" not in note
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_nonexistent_transcript(self, tmp_vault):

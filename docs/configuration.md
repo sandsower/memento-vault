@@ -42,6 +42,11 @@ auto_commit: true
 # Claude model for generating atomic notes
 agent_model: sonnet
 
+# Optional hardened mode for detached Claude workers.
+# When true, memento/llm.py adds --bare to headless Claude calls.
+# This skips hook/plugin/skill discovery and requires API-key or apiKeyHelper auth.
+claude_bare_headless: false
+
 # Seconds to wait before committing agent-written notes
 agent_delay_seconds: 90
 
@@ -64,10 +69,14 @@ recall_skip_patterns:
 
 # Inject vault notes on file reads
 tool_context: true
-tool_context_min_score: 0.65
+tool_context_min_score: 0.75
 tool_context_max_notes: 2
 tool_context_max_injections: 5
 tool_context_cooldown: 1       # seconds between QMD calls
+tool_context_cache_ttl_hours: 24
+tool_context_diagnostics: true
+tool_context_diagnostics_include_candidates: false
+tool_context_diagnostics_max_candidates: 10
 ```
 
 ## Health diagnostics
@@ -79,7 +88,7 @@ memento-vault health
 memento-vault doctor   # alias
 ```
 
-Default checks are cheap and local: config parse, vault directory structure, git/auto-commit readiness, selected search backend availability, install manifest state, managed hook/package file drift, Claude hook registration, MCP CLI registration, MCP config shape, optional Pi bridge config shape, stale headless Claude MCP config detection, recent triage health, basic retrieval log health, lock files, and basic Inception state when enabled. Drift checks are report-only and suggest installer repair commands such as `./install.sh --reinstall` or `./install.sh --mcp`.
+Default checks are cheap and local: config parse, vault directory structure, git/auto-commit readiness, selected search backend availability, automation-memory readiness metadata, install manifest state, managed hook/package file drift, Claude hook registration, MCP CLI registration, MCP config shape, optional Pi bridge config shape, stale headless Claude MCP config detection, recent triage health, basic retrieval log health, lock files, and basic Inception state when enabled. Drift checks are report-only and suggest installer repair commands such as `./install.sh --reinstall` or `./install.sh --mcp`. Use `--deep` for opt-in bounded live probes against configured integrations.
 
 Options:
 
@@ -87,9 +96,12 @@ Options:
 memento-vault health --json     # structured report
 memento-vault health --verbose  # include sanitized details in human output
 memento-vault health --strict   # exit nonzero on warnings
+memento-vault health --deep     # opt-in live integration probes
 ```
 
-Exit codes: failures always exit 1; warnings exit 0 unless `--strict` is set. The command never repairs state or prints secrets.
+Exit codes: failures always exit 1; warnings exit 0 unless `--strict` is set. The command never repairs state or prints secrets. `--deep` stays read-only but may contact configured integrations with bounded timeouts.
+
+The JSON form includes an `automation_memory` readiness object with probe metadata for automated runners: search availability, recent recall/search failure rate, stale embedded-index hints, local sync-ledger divergence when a remote is configured, last successful automation-memory packet, and common failure reasons. It does not contact the remote vault by default.
 
 Automated runners consuming the vault as memory should read the health/status signals section of the [automation MemoryProvider contract](automation-memory-provider.md) for what these surfaces guarantee (read-only, secret-free, fail-open by default).
 
@@ -165,11 +177,17 @@ Requires QMD. Falls back to project index notes if QMD is unavailable.
 
 ### Prompt recall
 
-On every prompt, `vault-recall` runs a semantic search and injects matching vault notes. This is Tenet's just-in-time retrieval mechanism.
+On every prompt, `vault-recall` runs a search and injects matching vault notes. It is semantic by default, with an opt-in literal path for identifier-shaped prompts. This is Tenet's just-in-time retrieval mechanism.
 
 ```yaml
 # Disable prompt recall
 prompt_recall: false
+
+# Opt-in concrete/literal mode for path-like prompts.
+# "auto" enables literal search only for prompts that look like paths,
+# UUIDs, env vars, or quoted phrases; true forces literal search for every prompt.
+# Default false preserves the existing conceptual recall behavior.
+recall_concrete_mode: auto
 
 # Tighter relevance threshold (fewer, more relevant results)
 recall_min_score: 0.6
@@ -181,17 +199,19 @@ recall_max_notes: 5
 recall_skip_patterns: ["^(yes|no|ok)$", "^git\\s", "^npm\\s"]
 ```
 
+Keep this opt-in. Concrete mode is safer for exact identifiers and paths, but it bypasses the semantic/graph/rerank layers, so forced `true` can miss conceptual context.
+
 Deduplication is automatic -- if the top result matches the last injection, it skips until 3 prompts have passed. Requires QMD.
 
 ### Tool context
 
-When Claude reads a file, `vault-tool-context` extracts keywords from the file path and injects matching vault notes. Scoped to directories you've worked in before, skips vendor dirs, config files, and system paths.
+When Claude reads a file, `vault-tool-context` extracts cwd-relative keywords from the file path and injects matching vault notes. Tool context is on by default in fresh installs. It is an unsolicited surface, so it is deliberately gated: it skips vendor/config/system/agent files, requires QMD, requires a positive project match, deduplicates against recall and prior tool-context injections, and uses a higher default BM25 threshold than prompt recall. Requires QMD.
 
 ```yaml
 # Disable tool context
 tool_context: false
 
-# Tighter relevance threshold (default 0.65)
+# Tighter relevance threshold (default 0.75)
 tool_context_min_score: 0.85
 
 # More notes per file read (default 2)
@@ -202,9 +222,19 @@ tool_context_max_injections: 8
 
 # Rate limit between QMD calls in seconds (default 1)
 tool_context_cooldown: 3
+
+# Refresh directory-level cached results after N hours (default 24; 0 disables expiry)
+tool_context_cache_ttl_hours: 24
+
+# With retrieval_log: true or MEMENTO_DEBUG=1, log one terminal decision per call.
+tool_context_diagnostics: true
+
+# Include compact path/title/score candidate summaries in those decision logs.
+tool_context_diagnostics_include_candidates: false
+tool_context_diagnostics_max_candidates: 10
 ```
 
-Deduplicates against recall and prior tool-context injections. Requires QMD.
+Use `memento-vault retrieval-report --since 7` (or `python tools/analyze-retrieval.py --since 7`) to summarize tool-context call volume, skip reasons, injection rate, injected paths, latency, cache/search split, and top notes from retrieval logs.
 
 ### Multi-hop retrieval (wikilink-following)
 
@@ -247,6 +277,11 @@ rrf_k: 60              # RRF constant (higher = more weight to top ranks)
 pagerank_alpha: 0.85          # PageRank damping factor
 pagerank_boost_weight: 0.3    # score multiplier: score *= (1 + weight * pagerank)
 
+# Access-log boost (derived runtime log; no note mutation)
+access_log_enabled: true
+access_log_boost_weight: 0.12
+access_log_half_life_days: 30
+
 # Personalized PageRank expansion (replaces 1-hop wikilinks)
 ppr_enabled: true
 ppr_max_expanded: 5    # max notes added via PPR
@@ -284,18 +319,26 @@ Only fires on the deep path (BM25 score below `recall_high_confidence`). Adds ~1
 auto_commit: false
 ```
 
-**No QMD** (grep-only search, no Tenet):
+**No QMD** (grep-only search, disables retrieval hooks):
 
 ```yaml
 qmd_collection: ""
 ```
 
-**No Tenet** (capture only, no retrieval):
+**Disable retrieval hooks** (capture only, no briefing/recall/tool context):
+
+These three toggles default to `true` in fresh installs.
 
 ```yaml
 session_briefing: false
 prompt_recall: false
 tool_context: false
+```
+
+**Disable access-log boosts** (keep passive retrieval logging off or neutralized):
+
+```yaml
+access_log_enabled: false
 ```
 
 **No background agent** (fleeting notes only):

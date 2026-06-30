@@ -8,21 +8,26 @@ memento.lifecycle; this module only translates CLI JSON to LifecycleResult JSON.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
-import sys
 import re
 import subprocess
+import sys
+import threading
 import time
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Generator, Optional
 
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context, strip_injection
+from memento.search_backend import get_backend
+from memento.store import acquire_vault_write_lock, release_vault_write_lock, write_note
 from memento.search import (
     enhance_results,
     filter_by_project,
@@ -33,14 +38,68 @@ from memento.search import (
     qmd_search_with_extras,
     resolve_concrete_mode,
 )
+from memento.contradictions import inspect_contradictions
+from memento import store as store_module
 from memento.remote_client import get as remote_get
 from memento.remote_client import is_remote, search_envelope as remote_search_envelope, status as remote_status
-from memento.store import write_note
+from memento.store import log_triage_health
+from memento.utils import sanitize_secrets
 
 
 def _emit(payload: dict[str, Any]) -> int:
     print(json.dumps(payload, ensure_ascii=False))
     return 0
+
+
+def _bridge_config_summary() -> dict[str, Any]:
+    config = get_config()
+    return {
+        "enabled": bool(
+            config.get("session_briefing", True)
+            or config.get("prompt_recall", True)
+            or config.get("tool_context", True)
+        ),
+        "session_briefing": bool(config.get("session_briefing", True)),
+        "prompt_recall": bool(config.get("prompt_recall", True)),
+        "tool_context": bool(config.get("tool_context", True)),
+        "project_maps_enabled": bool(config.get("project_maps_enabled", True)),
+        "search_backend": config.get("search_backend", "auto"),
+    }
+
+
+def _bridge_project_slug(cwd: str) -> str:
+    if not cwd:
+        return "unknown"
+    try:
+        project_slug, _ticket = detect_project(cwd, None)
+        return project_slug or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _log_bridge_health(
+    operation: str, *, cwd: str = "", session_id: str = "unknown", error: object, **details: Any
+) -> None:
+    payload: dict[str, Any] = {
+        "operation": operation,
+        "backend": details.pop("backend", "python3"),
+        "config": details.pop("config", _bridge_config_summary()),
+        "cwd": cwd,
+        "project": details.pop("project", _bridge_project_slug(cwd)),
+        "session_id": session_id,
+        "error": str(error),
+        "error_type": type(error).__name__ if isinstance(error, BaseException) else "Error",
+    }
+    payload.update(details)
+    try:
+        log_triage_health(f"{operation}_failed", hook="pi-bridge", **payload)
+    except Exception:
+        pass
+
+
+def _emit_error(operation: str, error: Exception) -> int:
+    traceback.print_exc(file=sys.stderr)
+    return _emit(_error_payload(operation, error))
 
 
 def _error_payload(source: str, exc: Exception) -> dict[str, Any]:
@@ -57,11 +116,18 @@ def _error_payload(source: str, exc: Exception) -> dict[str, Any]:
     }
 
 
-def _run_lifecycle(source: str, fn, *args: Any) -> int:
+def _run_lifecycle(
+    source: str,
+    fn,
+    *args: Any,
+    health_metadata: dict[str, Any] | None = None,
+) -> int:
     try:
         return _emit(fn(*args).to_dict())
     except Exception as exc:  # pragma: no cover - traceback branch asserted by payload shape
         traceback.print_exc(file=sys.stderr)
+        metadata = dict(health_metadata or {})
+        _log_bridge_health(source, error=exc, **metadata)
         return _emit(_error_payload(source, exc))
 
 
@@ -97,6 +163,91 @@ def _read_queue_file(path: Path) -> list[dict[str, Any]]:
     return captures
 
 
+_QUEUE_LOCK_STATE = threading.local()
+
+
+def _queue_lock_file(vault: Path | None = None) -> Path:
+    return _state_root() / "queue" / "pi-captures.lock"
+
+
+@contextlib.contextmanager
+def _queue_lock(vault: Path | None = None) -> Generator[None, None, None]:
+    """Acquire an exclusive flock on the queue lock file.
+
+    The lock is blocking and re-entrant within a thread so nested queue
+    migrations can safely reuse the same critical section.
+    """
+    path = _queue_lock_file(vault)
+    depth = getattr(_QUEUE_LOCK_STATE, "depth", 0)
+    if depth:
+        _QUEUE_LOCK_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _QUEUE_LOCK_STATE.depth = depth
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        yield
+        return
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _QUEUE_LOCK_STATE.depth = 1
+        try:
+            yield
+        finally:
+            _QUEUE_LOCK_STATE.depth = 0
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex[:8]}")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        fd = os.open(str(tmp_path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(str(tmp_path), str(path))
+        dir_flag = getattr(os, "O_DIRECTORY", None)
+        if dir_flag is not None:
+            try:
+                dir_fd = os.open(str(path.parent), dir_flag)
+            except OSError:
+                dir_fd = None
+            if dir_fd is not None:
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _write_queue_file(captures: list[dict[str, Any]], path: Path) -> None:
+    """Atomically write the queue file using tmp+fsync+rename."""
+    _atomic_write_text(path, "".join(json.dumps(capture, ensure_ascii=False) + "\n" for capture in captures))
+
+
+def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> None:
+    _write_queue_file(captures, _queue_file(vault))
+
+
 def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
     legacy = _legacy_queue_file(vault)
     if not legacy.exists():
@@ -106,33 +257,34 @@ def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
         legacy.unlink()
         return {"migrated": True, "migrated_count": 0, "deleted_legacy_queue": True}
     new_path = _state_root() / "queue" / "pi-captures.jsonl"
-    current = _read_queue_file(new_path)
-    seen = {capture.get("id") for capture in current if capture.get("id")}
-    migrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    additions = []
-    for capture in old:
-        capture_id = capture.get("id")
-        if capture_id and capture_id in seen:
-            continue
-        item = dict(capture)
-        metadata = dict(item.get("metadata") or {})
-        metadata.setdefault("migrated_from", str(legacy))
-        metadata.setdefault("migrated_at", migrated_at)
-        item["metadata"] = metadata
-        additions.append(item)
-        if capture_id:
-            seen.add(capture_id)
-    combined = current + additions
-    _write_queue_file(combined, new_path)
-    reread_ids = {capture.get("id") for capture in _read_queue_file(new_path)}
-    old_ids = {capture.get("id") for capture in old if capture.get("id")}
-    if not old_ids.issubset(reread_ids):
-        return {
-            "migrated": False,
-            "reason": "verification_failed",
-            "legacy_queue_path": str(legacy),
-            "queue_path": str(new_path),
-        }
+    with _queue_lock(vault):
+        current = _read_queue_file(new_path)
+        seen = {capture.get("id") for capture in current if capture.get("id")}
+        migrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        additions = []
+        for capture in old:
+            capture_id = capture.get("id")
+            if capture_id and capture_id in seen:
+                continue
+            item = dict(capture)
+            metadata = dict(item.get("metadata") or {})
+            metadata.setdefault("migrated_from", str(legacy))
+            metadata.setdefault("migrated_at", migrated_at)
+            item["metadata"] = metadata
+            additions.append(item)
+            if capture_id:
+                seen.add(capture_id)
+        combined = current + additions
+        _write_queue_file(combined, new_path)
+        reread_ids = {capture.get("id") for capture in _read_queue_file(new_path)}
+        old_ids = {capture.get("id") for capture in old if capture.get("id")}
+        if not old_ids.issubset(reread_ids):
+            return {
+                "migrated": False,
+                "reason": "verification_failed",
+                "legacy_queue_path": str(legacy),
+                "queue_path": str(new_path),
+            }
     legacy.unlink()
     try:
         legacy.parent.rmdir()
@@ -149,15 +301,6 @@ def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
 
 def _load_queue(vault: Path | None = None) -> list[dict[str, Any]]:
     return _read_queue_file(_queue_file(vault))
-
-
-def _write_queue_file(captures: list[dict[str, Any]], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(capture, ensure_ascii=False) + "\n" for capture in captures))
-
-
-def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> None:
-    _write_queue_file(captures, _queue_file(vault))
 
 
 def _queue_count(vault: Path | None = None) -> int:
@@ -199,10 +342,51 @@ def _write_capture_session_state(session_id: str, cwd: str, state: dict[str, Any
     path = _capture_session_state_file(session_id, cwd)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        _atomic_write_text(path, json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     except OSError as exc:
         # Session state is an optimization for lifecycle queue suppression; capture commands must still succeed.
         print(f"[memento] warning: could not write pi capture session state: {exc}", file=sys.stderr)
+
+
+def _capture_audit_file(vault: Path | None = None) -> Path:
+    return _state_root() / "audit" / "pi-lifecycle-audit.jsonl"
+
+
+def _append_capture_audit(record: dict[str, Any], vault: Path | None = None) -> None:
+    path = _capture_audit_file(vault)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"[memento] warning: could not write pi capture audit: {exc}", file=sys.stderr)
+
+
+def _capture_lifecycle_metadata(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    metadata: dict[str, Any] = {}
+    for key, value in raw.items():
+        if value is None or value == "":
+            continue
+        metadata[str(key)] = value
+    return metadata
+
+
+def _parse_lifecycle_metadata(raw: object) -> tuple[dict[str, Any], str | None]:
+    if raw in (None, ""):
+        return {}, None
+    if isinstance(raw, dict):
+        return _capture_lifecycle_metadata(raw), None
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return {}, f"invalid lifecycle metadata: {exc.msg}"
+        if isinstance(parsed, dict):
+            return _capture_lifecycle_metadata(parsed), None
+        return {}, "lifecycle metadata must be a JSON object"
+    return {}, f"unsupported lifecycle metadata type: {type(raw).__name__}"
 
 
 def _body_hash(title: str, body: str) -> str:
@@ -229,9 +413,17 @@ def _meaningful_lifecycle_signal(body: str, source_event: str) -> tuple[bool, st
 
 
 def _mark_manual_capture_state(
-    session_id: str, cwd: str, project_slug: str, branch: str | None, title: str, body: str, now: datetime
+    session_id: str,
+    cwd: str,
+    project_slug: str,
+    branch: str | None,
+    title: str,
+    body: str,
+    now: datetime,
+    lifecycle_metadata: dict[str, Any] | None = None,
 ) -> None:
     state = _load_capture_session_state(session_id, cwd)
+    metadata = _capture_lifecycle_metadata(lifecycle_metadata)
     state.update(
         {
             "session_id": session_id,
@@ -240,15 +432,39 @@ def _mark_manual_capture_state(
             "branch": branch,
             "manual_capture_at": now.isoformat(timespec="seconds"),
             "manual_capture_body_hash": _body_hash(title, body),
+            "manual_capture_body_excerpt": _body_excerpt(body),
+            "manual_capture_body_char_count": len(body),
+            "manual_capture_lifecycle_metadata": metadata,
             "last_lifecycle_decision": "manual_capture_recorded",
         }
     )
     _write_capture_session_state(session_id, cwd, state)
+    _append_capture_audit(
+        {
+            "ts": now.isoformat(timespec="seconds"),
+            "decision": "manual_capture_recorded",
+            "queued": False,
+            "skipped": False,
+            "session_id": session_id,
+            "cwd": cwd,
+            "project": project_slug,
+            "branch": branch,
+            "title": title.strip(),
+            "body_hash": _body_hash(title, body),
+            "body_excerpt": _body_excerpt(body),
+            "body_char_count": len(body),
+            "lifecycle": metadata,
+        },
+        None,
+    )
 
 
-def _lifecycle_queue_decision(session_id: str, cwd: str, body: str, source_event: str) -> dict[str, Any]:
+def _lifecycle_queue_decision(
+    session_id: str, cwd: str, body: str, source_event: str, lifecycle_metadata: dict[str, Any] | None = None
+) -> dict[str, Any]:
     state = _load_capture_session_state(session_id, cwd)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    metadata = _capture_lifecycle_metadata(lifecycle_metadata)
     if not body.strip():
         decision = {"queue": False, "reason": "empty_body"}
     elif not state.get("manual_capture_at"):
@@ -265,11 +481,34 @@ def _lifecycle_queue_decision(session_id: str, cwd: str, body: str, source_event
             "last_lifecycle_source_event": source_event,
             "last_lifecycle_decision": "queued" if decision["queue"] else "skipped",
             "last_lifecycle_reason": decision["reason"],
+            "last_lifecycle_body_hash": _body_hash(source_event or "lifecycle", body),
+            "last_lifecycle_body_excerpt": _body_excerpt(body),
+            "last_lifecycle_lifecycle_metadata": metadata,
         }
     )
     if decision["queue"]:
         state["lifecycle_queue_count"] = int(state.get("lifecycle_queue_count") or 0) + 1
     _write_capture_session_state(session_id, cwd, state)
+    _append_capture_audit(
+        {
+            "ts": now,
+            "decision": "queued" if decision["queue"] else "skipped",
+            "queued": bool(decision["queue"]),
+            "skipped": not bool(decision["queue"]),
+            "session_id": session_id,
+            "cwd": cwd,
+            "source_event": source_event,
+            "reason": decision["reason"],
+            "body_hash": _body_hash(source_event or "lifecycle", body),
+            "body_excerpt": _body_excerpt(body),
+            "body_char_count": len(body),
+            "manual_capture_present": bool(state.get("manual_capture_at")),
+            "manual_capture_body_hash": state.get("manual_capture_body_hash"),
+            "manual_capture_at": state.get("manual_capture_at"),
+            "lifecycle": metadata,
+        },
+        None,
+    )
     return decision
 
 
@@ -292,6 +531,190 @@ def _git_branch(cwd: str) -> str | None:
     return branch or None
 
 
+@contextlib.contextmanager
+def _vault_write_lock(timeout: float = 10.0):
+    acquired = acquire_vault_write_lock(timeout=timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            release_vault_write_lock()
+
+
+def _vault_commit_script() -> Path | None:
+    repo_script = Path(__file__).resolve().parents[1] / "hooks" / "vault-commit.sh"
+    if repo_script.exists():
+        return repo_script
+    home_script = Path.home() / ".claude" / "hooks" / "vault-commit.sh"
+    if home_script.exists():
+        return home_script
+    return None
+
+
+def _commit_and_reindex_locked(vault: Path, commit_message: str, collection: str | None = None) -> dict[str, Any]:
+    """Commit vault changes and reindex search after a confirmed Pi write.
+
+    The caller must hold the vault write lock before calling this helper.
+    """
+    config = get_config()
+    scheduled_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    payload: dict[str, Any] = {
+        "scheduled_at": scheduled_at,
+        "vault": str(vault),
+        "commit_message": commit_message,
+        "commit": {
+            "attempted": False,
+            "ok": False,
+            "reason": "auto_commit_disabled" if not config.get("auto_commit", True) else "not_run",
+        },
+        "reindex": {
+            "attempted": False,
+            "ok": False,
+            "reason": "not_run",
+        },
+    }
+
+    try:
+        configured_vault = Path(config.get("vault_path", str(vault))).expanduser().resolve()
+    except Exception:
+        configured_vault = vault
+    try:
+        vault_resolved = vault.resolve()
+    except Exception:
+        vault_resolved = vault
+    if configured_vault != vault_resolved:
+        payload["commit"]["reason"] = "vault_mismatch"
+        payload["reindex"]["reason"] = "vault_mismatch"
+        payload["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        return payload
+
+    notes_dir = vault / "notes"
+    if config.get("auto_commit", True) and (vault / ".git").exists() and notes_dir.exists():
+        payload["commit"]["attempted"] = True
+        try:
+            subprocess.run(
+                ["git", "-C", str(vault), "add", "-A", "notes"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            diff_check = subprocess.run(
+                ["git", "-C", str(vault), "diff", "--cached", "--quiet", "--", "notes"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if diff_check.returncode == 0:
+                payload["commit"]["ok"] = True
+                payload["commit"]["reason"] = "no_changes"
+            else:
+                completed = subprocess.run(
+                    ["git", "-C", str(vault), "commit", "-m", commit_message],
+                    cwd=str(vault),
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+                payload["commit"]["ok"] = completed.returncode == 0
+                payload["commit"]["returncode"] = completed.returncode
+                if completed.returncode != 0:
+                    payload["commit"]["reason"] = "commit_failed"
+                    stderr = (completed.stderr or completed.stdout or "").strip()
+                    if stderr:
+                        payload["commit"]["stderr"] = stderr[:500]
+                else:
+                    payload["commit"]["reason"] = "ok"
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            payload["commit"]["reason"] = type(exc).__name__
+            payload["commit"]["error"] = str(exc)
+    else:
+        payload["commit"]["reason"] = "auto_commit_disabled" if not config.get("auto_commit", True) else "git_missing"
+
+    payload["reindex"]["attempted"] = True
+    target_collection = collection or config.get("qmd_collection", "memento")
+    try:
+        ok = get_backend().reindex(target_collection)
+        payload["reindex"]["ok"] = bool(ok)
+        payload["reindex"]["collection"] = target_collection
+        payload["reindex"]["reason"] = "ok" if ok else "backend_reindex_failed"
+    except Exception as exc:
+        payload["reindex"]["reason"] = type(exc).__name__
+        payload["reindex"]["error"] = str(exc)
+    payload["completed_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return payload
+
+
+def _iter_jsonl(path: Path):
+    try:
+        with path.open() as handle:
+            for line in handle:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict):
+                    yield rec
+    except OSError:
+        return
+
+
+def _bridge_health_status() -> dict[str, Any]:
+    log_path = Path(store_module.TRIAGE_HEALTH_LOG_PATH)
+    cutoff = datetime.now() - timedelta(hours=24)
+    failures: list[dict[str, Any]] = []
+    latest: dict[str, Any] | None = None
+    latest_ts: datetime | None = None
+    if log_path.exists():
+        for rec in _iter_jsonl(log_path):
+            if rec.get("hook") != "pi-bridge":
+                continue
+            ts_raw = rec.get("ts")
+            try:
+                ts = datetime.fromisoformat(str(ts_raw))
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+            failure = {
+                "ts": rec.get("ts"),
+                "operation": rec.get("operation") or rec.get("action"),
+                "backend": rec.get("backend"),
+                "cwd": rec.get("cwd"),
+                "project": rec.get("project"),
+                "session_id": rec.get("session_id"),
+                "error": sanitize_secrets(str(rec.get("error") or "")),
+                "error_type": rec.get("error_type"),
+                "reason": rec.get("reason"),
+            }
+            failures.append(failure)
+            if latest_ts is None or ts >= latest_ts:
+                latest_ts = ts
+                latest = rec
+    if not failures:
+        return {"status": "pass", "window_hours": 24, "recent_failure_count": 0, "log_path": str(log_path)}
+    latest_error = sanitize_secrets(str((latest or {}).get("error") or ""))
+    latest_error = strip_injection(" ".join(latest_error.split()))[:140]
+    return {
+        "status": "warn",
+        "window_hours": 24,
+        "recent_failure_count": len(failures),
+        "log_path": str(log_path),
+        "last_failure": {
+            "operation": (latest or {}).get("operation") or (latest or {}).get("action"),
+            "backend": (latest or {}).get("backend"),
+            "cwd": (latest or {}).get("cwd"),
+            "project": (latest or {}).get("project"),
+            "session_id": (latest or {}).get("session_id"),
+            "error": latest_error,
+            "error_type": (latest or {}).get("error_type"),
+        },
+        "recent_failures": failures[:5],
+    }
+
+
 def _status(cwd: str = "") -> dict[str, Any]:
     vault = get_vault()
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
@@ -306,6 +729,13 @@ def _status(cwd: str = "") -> dict[str, Any]:
             remote_error = remote.get("error") if isinstance(remote, dict) else None
         except Exception as exc:
             remote_error = str(exc)
+    audit_path = _capture_audit_file(vault)
+    audit_count = 0
+    last_audit: dict[str, Any] | None = None
+    if audit_path.exists():
+        for rec in _iter_jsonl(audit_path):
+            audit_count += 1
+            last_audit = rec
     return {
         "vault_path": str(vault),
         "vault_exists": vault.exists(),
@@ -320,11 +750,23 @@ def _status(cwd: str = "") -> dict[str, Any]:
         "queue_path": str(_queue_file(vault)),
         "legacy_queue_path": str(_legacy_queue_file(vault)),
         "legacy_queue_exists": _legacy_queue_file(vault).exists(),
+        "capture_audit_path": str(audit_path),
+        "capture_audit_count": audit_count,
+        "last_capture_audit": {
+            "decision": (last_audit or {}).get("decision"),
+            "queued": (last_audit or {}).get("queued"),
+            "skipped": (last_audit or {}).get("skipped"),
+            "reason": (last_audit or {}).get("reason"),
+            "source_event": (last_audit or {}).get("source_event"),
+            "manual_capture_present": (last_audit or {}).get("manual_capture_present"),
+            "manual_capture_at": (last_audit or {}).get("manual_capture_at"),
+        },
+        "pi_bridge_health": _bridge_health_status(),
         "lifecycle": {
             "briefing": get_config().get("session_briefing", True),
             "prompt_recall": get_config().get("prompt_recall", True),
             "tool_context": get_config().get("tool_context", True),
-            "auto_capture": False,
+            "auto_capture": True,
             "capture_queue": True,
         },
     }
@@ -389,6 +831,33 @@ def _search(query: str, limit: int, cwd: str = "", concrete: object = "auto") ->
     return {"results": sanitized}
 
 
+def _contradictions(topic: str, limit: int, min_certainty: int = 2) -> dict[str, Any]:
+    payload = inspect_contradictions(topic, limit, min_certainty)
+    if isinstance(payload, dict):
+        for result in payload.get("results", []):
+            result["title"] = strip_injection(result.get("title", ""))
+            result["snippet"] = strip_injection(result.get("snippet", ""))
+            result["status"] = strip_injection(result.get("status", ""))
+            result["polarity"] = strip_injection(result.get("polarity", ""))
+            result["path"] = strip_injection(result.get("path", ""))
+        for group in payload.get("groups", []):
+            group["theme"] = strip_injection(group.get("theme", ""))
+            group["summary"] = strip_injection(group.get("summary", ""))
+            group["note_paths"] = [strip_injection(path) for path in group.get("note_paths", [])]
+        for item in payload.get("contradictions", []):
+            item["kind"] = strip_injection(item.get("kind", ""))
+            item["paths"] = [strip_injection(path) for path in item.get("paths", [])]
+            item["titles"] = [strip_injection(title) for title in item.get("titles", [])]
+        for item in payload.get("supersession", []):
+            item["older_path"] = strip_injection(item.get("older_path", ""))
+            item["newer_path"] = strip_injection(item.get("newer_path", ""))
+            item["older_title"] = strip_injection(item.get("older_title", ""))
+            item["newer_title"] = strip_injection(item.get("newer_title", ""))
+        if isinstance(payload.get("summary"), str):
+            payload["summary"] = strip_injection(payload["summary"])
+    return payload
+
+
 def _get(path: str) -> dict[str, Any]:
     if not path.strip():
         return {"error": "path is required"}
@@ -430,6 +899,41 @@ def _get(path: str) -> dict[str, Any]:
     return {"error": f"Note not found: {note_path}"}
 
 
+def _capture_note_tags(tags: list[str], project_slug: str, source_event: str = "manual") -> list[str]:
+    """Merge caller-provided tags with Pi/project tags while preserving order."""
+    merged = ["pi"]
+    if source_event in {"manual", "tool"}:
+        merged.append("manual")
+    if project_slug != "unknown":
+        merged.append(project_slug)
+    for tag in tags:
+        clean = str(tag).strip()
+        if clean:
+            merged.append(clean)
+    deduped = []
+    seen = set()
+    for tag in merged:
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(tag)
+    return deduped
+
+
+def _capture_certainty(certainty: int | str | None) -> int | dict[str, str]:
+    """Normalize Pi capture certainty, rejecting values outside the 1-5 contract."""
+    if certainty in (None, ""):
+        return 2
+    try:
+        value = int(certainty)
+    except (TypeError, ValueError):
+        return {"error": "certainty must be an integer from 1 to 5"}
+    if 1 <= value <= 5:
+        return value
+    return {"error": "certainty must be an integer from 1 to 5"}
+
+
 def _capture(
     title: str,
     body: str,
@@ -438,6 +942,11 @@ def _capture(
     queue: bool = False,
     reason: str = "manual",
     source_event: str = "manual",
+    note_type: str = "session",
+    tags: list[str] | None = None,
+    certainty: int | str | None = None,
+    branch_override: str | None = None,
+    lifecycle_metadata: object | None = None,
 ) -> dict[str, Any]:
     if not title.strip():
         return {"error": "title is required"}
@@ -447,10 +956,42 @@ def _capture(
     if not vault.exists():
         return {"error": f"Vault not found at {vault}"}
     project_slug, _ticket = detect_project(cwd, None) if cwd else ("unknown", None)
-    branch = _git_branch(cwd)
+    branch = str(branch_override).strip() if branch_override else _git_branch(cwd)
+    clean_note_type = str(note_type or "session").strip() or "session"
+    merged_tags = _capture_note_tags(tags or [], project_slug, source_event)
+    clean_certainty = _capture_certainty(certainty)
+    lifecycle_metadata_value, lifecycle_metadata_error = _parse_lifecycle_metadata(lifecycle_metadata)
+    if isinstance(clean_certainty, dict):
+        return clean_certainty
+    if queue and os.environ.get("MEMENTO_PI_PROCESSOR") == "true" and _is_lifecycle_source(source_event):
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _append_capture_audit(
+            {
+                "ts": now,
+                "decision": "processor_session_skipped",
+                "queued": False,
+                "skipped": True,
+                "session_id": session_id,
+                "cwd": cwd,
+                "source_event": source_event,
+                "reason": "processor_session",
+                "body_hash": _body_hash(source_event or "lifecycle", body),
+                "body_excerpt": _body_excerpt(body),
+                "body_char_count": len(body),
+                "lifecycle": lifecycle_metadata_value,
+            },
+            None,
+        )
+        return {
+            "queued": False,
+            "skipped": True,
+            "reason": "processor_session",
+            "source_event": source_event,
+            "session_id": session_id,
+        }
     if queue:
         if _is_lifecycle_source(source_event):
-            decision = _lifecycle_queue_decision(session_id, cwd, body, source_event)
+            decision = _lifecycle_queue_decision(session_id, cwd, body, source_event, lifecycle_metadata_value)
             if not decision["queue"]:
                 return {
                     "queued": False,
@@ -460,6 +1001,21 @@ def _capture(
                     "session_id": session_id,
                 }
         capture_id = f"pi-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        metadata = {
+            "cwd": cwd,
+            "project": project_slug,
+            "branch": branch,
+            "session_id": session_id,
+            "note_type": clean_note_type,
+            "tags": merged_tags,
+            "certainty": clean_certainty,
+        }
+        if os.environ.get("MEMENTO_PI_PROCESSOR") == "true":
+            metadata["memento_processor"] = True
+        if lifecycle_metadata_value:
+            metadata["lifecycle"] = lifecycle_metadata_value
+        if lifecycle_metadata_error:
+            metadata["lifecycle_metadata_error"] = lifecycle_metadata_error
         capture = {
             "id": capture_id,
             "title": title.strip(),
@@ -467,35 +1023,44 @@ def _capture(
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "reason": reason,
             "source_event": source_event,
-            "metadata": {
-                "cwd": cwd,
-                "project": project_slug,
-                "branch": branch,
-                "session_id": session_id,
-            },
+            "metadata": metadata,
         }
-        captures = _load_queue(vault)
-        captures.append(capture)
-        _write_queue(captures, vault)
+        with _queue_lock(vault):
+            captures = _load_queue(vault)
+            captures.append(capture)
+            _write_queue(captures, vault)
         return {"id": capture_id, "title": title.strip(), "queued": True, "queue_path": str(_queue_file(vault))}
 
     clean_title = title.strip()
     clean_body = body.strip()
-    note_path = write_note(
-        vault,
-        clean_title,
-        clean_body,
-        "session",
-        ["pi", project_slug] if project_slug != "unknown" else ["pi"],
-        source="pi",
-        project=project_slug if project_slug != "unknown" else None,
-        branch=branch,
-        session_id=session_id if session_id != "unknown" else None,
-    )
-    if reason == "manual" or source_event in {"manual", "tool"}:
-        _mark_manual_capture_state(
-            session_id, cwd, project_slug, branch, clean_title, clean_body, datetime.now(timezone.utc)
+    with _vault_write_lock() as acquired:
+        if not acquired:
+            return {"error": "vault write lock unavailable"}
+        note_path = write_note(
+            vault,
+            clean_title,
+            clean_body,
+            clean_note_type,
+            merged_tags,
+            certainty=clean_certainty,
+            source="pi-capture",
+            origin=f"pi_bridge:{source_event or reason or 'manual'}",
+            project=cwd or None,
+            branch=branch,
+            session_id=session_id if session_id != "unknown" else None,
         )
+        if reason == "manual" or source_event in {"manual", "tool"}:
+            _mark_manual_capture_state(
+                session_id,
+                cwd,
+                project_slug,
+                branch,
+                clean_title,
+                clean_body,
+                datetime.now(timezone.utc),
+                lifecycle_metadata_value,
+            )
+        _commit_and_reindex_locked(vault, f"pi: capture {clean_title[:80]}")
     return {"path": str(note_path.relative_to(vault)), "title": clean_title, "queued": False}
 
 
@@ -514,6 +1079,29 @@ def _capture_review_metadata(capture: dict[str, Any]) -> dict[str, Any]:
         "body_char_count": len(body),
         "body_size_bytes": size_bytes,
         "body_kb": round(size_bytes / 1024, 1),
+    }
+
+
+def _capture_lifecycle_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
+    metadata = capture.get("metadata") or {}
+    lifecycle = metadata.get("lifecycle") if isinstance(metadata, dict) else {}
+    if not isinstance(lifecycle, dict):
+        lifecycle = {}
+    return {
+        "source_event": str(capture.get("source_event") or lifecycle.get("source_event") or ""),
+        "reason": str(capture.get("reason") or lifecycle.get("reason") or ""),
+        "event_timestamp": lifecycle.get("event_timestamp"),
+        "event_index": lifecycle.get("event_index"),
+        "turn_count": lifecycle.get("turn_count"),
+        "user_message_count": lifecycle.get("user_message_count"),
+        "assistant_message_count": lifecycle.get("assistant_message_count"),
+        "tool_call_count": lifecycle.get("tool_call_count"),
+        "file_edit_count": lifecycle.get("file_edit_count"),
+        "file_read_count": lifecycle.get("file_read_count"),
+        "session_entry_count": lifecycle.get("session_entry_count"),
+        "session_last_entry_at": lifecycle.get("session_last_entry_at"),
+        "summary": lifecycle.get("summary"),
+        "body_digest": lifecycle.get("body_digest"),
     }
 
 
@@ -630,9 +1218,117 @@ def _queue_cleanup(
             entry = dict(capture)
             entry["cleanup"] = {"discarded_at": discarded_at, "class": klass, "reason": reason}
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    _write_queue(retained, vault)
+    with _queue_lock(vault):
+        current = _load_queue(vault)
+        still_discardable = []
+        for capture in current:
+            klass, _reason = _classify_queued_capture(capture)
+            if klass in discard_set:
+                still_discardable.append(capture)
+        final_retained = [c for c in current if c not in still_discardable]
+        _write_queue(final_retained, vault)
     result["backup_path"] = str(backup_path)
     result["archive_path"] = str(archive_path)
+    return result
+
+
+def _capture_queue_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
+    metadata = capture.get("metadata") or {}
+    body = str(capture.get("body") or "")
+    size_bytes = len(body.encode("utf-8"))
+    lifecycle = _capture_lifecycle_snapshot(capture)
+    return {
+        "id": capture.get("id"),
+        "title": capture.get("title"),
+        "created_at": capture.get("created_at"),
+        "reason": capture.get("reason"),
+        "source_event": capture.get("source_event"),
+        "project": metadata.get("project"),
+        "branch": metadata.get("branch"),
+        "session_id": metadata.get("session_id"),
+        "body_excerpt": _body_excerpt(body),
+        "body_char_count": len(body),
+        "body_size_bytes": size_bytes,
+        "body_kb": round(size_bytes / 1024, 1),
+        "lifecycle": lifecycle,
+        "lifecycle_reason": lifecycle.get("reason"),
+        "turn_count": lifecycle.get("turn_count"),
+        "tool_call_count": lifecycle.get("tool_call_count"),
+        "file_edit_count": lifecycle.get("file_edit_count"),
+        "file_read_count": lifecycle.get("file_read_count"),
+    }
+
+
+def _queue_discard(
+    capture_id: str | list[str] | tuple[str, ...],
+    apply: bool = False,
+    reason: str = "manual_discard",
+    source: str = "queue-discard",
+    vault: Path | None = None,
+) -> dict[str, Any]:
+    if isinstance(capture_id, (list, tuple)):
+        capture_ids = [str(item).strip() for item in capture_id if str(item).strip()]
+    else:
+        raw_capture_id = str(capture_id).strip()
+        capture_ids = [raw_capture_id] if raw_capture_id else []
+    if not capture_ids:
+        return {"error": "at least one capture id is required", "reason": "missing_capture_ids"}
+
+    queue_path = _queue_file(vault)
+    captures = _load_queue(vault)
+    capture_id_set = set(capture_ids)
+    found = [capture for capture in captures if str(capture.get("id")) in capture_id_set]
+    found_ids = {str(capture.get("id")) for capture in found}
+    missing_ids = [capture_id for capture_id in capture_ids if capture_id not in found_ids]
+    result: dict[str, Any] = {
+        "queue_path": str(queue_path),
+        "dry_run": not apply,
+        "discarded": len(found),
+        "remaining": len(captures) - len(found),
+        "captures": [_capture_queue_snapshot(capture) for capture in found],
+        "reason": reason,
+        "source": source,
+    }
+    if missing_ids:
+        result["error"] = "capture ids not found"
+        result["missing_ids"] = missing_ids
+        return result
+    if not apply:
+        return result
+
+    lock_path = _lock_file()
+    if lock_path.exists():
+        lock = _read_processing_lock(lock_path)
+        if _is_pid_alive(int(lock.get("pid", 0))):
+            result["blocked"] = f"processing run active (pid {lock.get('pid')}, run {lock.get('run_id')})"
+            result["dry_run"] = True
+            return result
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = queue_path.with_name(f"{queue_path.name}.bak-{stamp}-discard")
+    backup_path.write_text(queue_path.read_text(errors="replace") if queue_path.exists() else "")
+    archive_path = queue_path.with_name(f"pi-captures-discarded-{stamp}.jsonl")
+    discarded_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    with _queue_lock(vault):
+        current = _load_queue(vault)
+        current_ids = {str(capture.get("id")) for capture in current}
+        if not capture_id_set.issubset(current_ids):
+            result["error"] = "capture ids not found"
+            result["missing_ids"] = sorted(capture_id_set.difference(current_ids))
+            return result
+        current_map = {str(capture.get("id")): capture for capture in current}
+        retained = [capture for capture in current if str(capture.get("id")) not in capture_id_set]
+        with archive_path.open("a") as handle:
+            for capture_id in capture_ids:
+                capture = current_map[capture_id]
+                entry = dict(capture)
+                entry["discard"] = {"discarded_at": discarded_at, "reason": reason, "source": source}
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        _write_queue(retained, vault)
+    result["backup_path"] = str(backup_path)
+    result["archive_path"] = str(archive_path)
+    result["retained"] = len(retained)
+    result["remaining"] = len(retained)
     return result
 
 
@@ -756,6 +1452,31 @@ def _selected_captures(
     return selected
 
 
+def _selected_queue_captures(
+    captures: list[dict[str, Any]],
+    capture_id: str | list[str] | tuple[str, ...] = "",
+    project: str = "",
+    branch: str = "",
+    session_id: str = "",
+    newest: bool = False,
+) -> list[dict[str, Any]]:
+    selected = []
+    capture_ids = _normalize_capture_ids(capture_id)
+    for capture in captures:
+        metadata = capture.get("metadata") or {}
+        if capture_ids and str(capture.get("id")) not in capture_ids:
+            continue
+        if project and metadata.get("project") != project:
+            continue
+        if branch and metadata.get("branch") != branch:
+            continue
+        if session_id and metadata.get("session_id") != session_id:
+            continue
+        selected.append(capture)
+    selected.sort(key=_capture_created_at, reverse=newest)
+    return selected
+
+
 def _group_captures(captures: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, dict[str, Any]] = {}
     for capture in captures:
@@ -778,6 +1499,71 @@ def _group_captures(captures: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(groups.values())
 
 
+def _dedup_tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _frontmatter_value(text: str, key: str) -> str:
+    match = re.search(rf"^{re.escape(key)}:\s*(.+)$", text, re.MULTILINE)
+    return match.group(1).strip().strip("\"'") if match else ""
+
+
+def _frontmatter_tags(text: str) -> list[str]:
+    match = re.search(r"^tags:\s*\[([^\]]*)\]", text, re.MULTILINE)
+    if not match:
+        return []
+    return [item.strip().strip("\"'") for item in match.group(1).split(",") if item.strip()]
+
+
+def _dedup_context_for_group(vault: Path, group: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
+    """Return deterministic existing-note context for queued-capture curation.
+
+    The curator runs in a separate Pi session, so it must receive note titles and
+    paths up front rather than relying on voluntary search calls to discover
+    duplicates. Ranking is deterministic: project matches first, then lexical
+    overlap against queued capture titles/bodies, then path.
+    """
+    notes_dir = vault / "notes"
+    if not notes_dir.exists():
+        return []
+
+    project = str(group.get("project") or "").strip().lower()
+    query_parts: list[str] = []
+    for capture in group.get("captures", []):
+        query_parts.append(str(capture.get("title") or ""))
+        query_parts.append(str(capture.get("body") or "")[:1000])
+    query_tokens = _dedup_tokens("\n".join(query_parts))
+
+    ranked: list[tuple[int, int, str, dict[str, Any]]] = []
+    for note_path in sorted(notes_dir.glob("*.md"), key=lambda path: path.name):
+        try:
+            text = note_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        title = _frontmatter_value(text, "title") or note_path.stem
+        note_type = _frontmatter_value(text, "type")
+        note_project = _frontmatter_value(text, "project")
+        tags = _frontmatter_tags(text)
+        haystack = " ".join([title, note_type, note_project, " ".join(tags)])
+        overlap = len(query_tokens & _dedup_tokens(haystack))
+        note_tag_set = {tag.lower() for tag in tags}
+        project_match = int(bool(project) and (note_project.lower() == project or project in note_tag_set))
+        if overlap <= 0:
+            continue
+        rel_path = str(note_path.relative_to(vault))
+        item = {
+            "path": rel_path,
+            "title": title,
+            "type": note_type,
+            "tags": tags,
+            "project": note_project,
+        }
+        ranked.append((project_match, overlap, rel_path, item))
+
+    ranked.sort(key=lambda row: (-row[0], -row[1], row[2]))
+    return [item for *_rank, item in ranked[: max(0, int(limit))]]
+
+
 def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "") -> str:
     lines = [
         f"# Memento processing input: {group['group_id']}",
@@ -789,10 +1575,46 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
         f"- CWD: {group.get('cwd') or '(unknown)'}",
         f"- Capture IDs: {', '.join(str(x) for x in group.get('capture_ids', []))}",
         "",
-        "## Queued captures",
+        "## Deduplication context",
     ]
+    dedup_context = group.get("dedup_context") or []
+    if dedup_context:
+        lines.append(
+            "Existing notes selected deterministically from the vault. Treat matching titles/topics as likely duplicates; read a candidate with memento_get before deciding to create overlapping notes."
+        )
+        for item in dedup_context:
+            tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+            tag_text = f" tags=[{', '.join(str(tag) for tag in tags)}]" if tags else ""
+            type_text = f" type={item.get('type')}" if item.get("type") else ""
+            lines.append(f"- {item.get('path')}: {item.get('title')}{type_text}{tag_text}")
+    else:
+        lines.append("- No existing note candidates matched this group deterministically.")
+    lines.extend(["", "## Queued captures"])
     for capture in group.get("captures", []):
         metadata = capture.get("metadata") or {}
+        lifecycle = metadata.get("lifecycle") if isinstance(metadata, dict) else {}
+        if not isinstance(lifecycle, dict):
+            lifecycle = {}
+        lifecycle_lines = []
+        if lifecycle:
+            file_edits = lifecycle.get("file_edits") if isinstance(lifecycle.get("file_edits"), list) else []
+            file_reads = lifecycle.get("file_reads") if isinstance(lifecycle.get("file_reads"), list) else []
+            file_edits_text = ", ".join(str(path) for path in file_edits[:5]) if file_edits else ""
+            file_reads_text = ", ".join(str(path) for path in file_reads[:5]) if file_reads else ""
+            lifecycle_lines = [
+                "",
+                "- Lifecycle context:",
+                f"  - Source event: {lifecycle.get('source_event') or capture.get('source_event') or ''}",
+                f"  - Reason: {lifecycle.get('reason') or capture.get('reason') or ''}",
+                f"  - Event timestamp: {lifecycle.get('event_timestamp') or ''}",
+                f"  - Event index: {lifecycle.get('event_index') or ''}",
+                f"  - Turns: {lifecycle.get('turn_count') or ''}",
+                f"  - Tool calls: {lifecycle.get('tool_call_count') or ''}",
+                f"  - File edits: {file_edits_text}",
+                f"  - File reads: {file_reads_text}",
+                f"  - Session entries: {lifecycle.get('session_entry_count') or ''}",
+                f"  - Last session entry: {lifecycle.get('session_last_entry_at') or ''}",
+            ]
         lines.extend(
             [
                 "",
@@ -803,6 +1625,9 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
                 f"- Source event: {capture.get('source_event') or ''}",
                 f"- Project: {metadata.get('project') or ''}",
                 f"- Branch: {metadata.get('branch') or ''}",
+            ]
+            + lifecycle_lines
+            + [
                 "",
                 str(capture.get("body") or ""),
             ]
@@ -813,7 +1638,7 @@ def _render_capture_packet(group: dict[str, Any], transcript_markdown: str = "")
 
 
 def _allowed_transcript_roots() -> list[Path]:
-    roots = [Path.home() / ".pi" / "agent" / "sessions"]
+    roots = [Path.home() / ".pi" / "agent" / "sessions", Path.home() / ".pi" / "agent" / "subagents"]
     session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
     if session_dir:
         roots.append(Path(session_dir).expanduser())
@@ -982,6 +1807,7 @@ def _queue_process_start(
             directory.mkdir(parents=True, exist_ok=True)
         manifest_groups = []
         for group in groups:
+            group["dedup_context"] = _dedup_context_for_group(vault, group)
             transcript_info = {"included": False}
             transcript_markdown = ""
             if group.get("session_id"):
@@ -1003,8 +1829,8 @@ def _queue_process_start(
                 else:
                     transcript_info = {"path": str(transcript_path), "included": False, "reason": "missing"}
             group_id = group["group_id"]
-            (inputs_dir / f"{group_id}.json").write_text(json.dumps(group, ensure_ascii=False, indent=2))
-            (inputs_dir / f"{group_id}.md").write_text(_render_capture_packet(group, transcript_markdown))
+            _atomic_write_text(inputs_dir / f"{group_id}.json", json.dumps(group, ensure_ascii=False, indent=2))
+            _atomic_write_text(inputs_dir / f"{group_id}.md", _render_capture_packet(group, transcript_markdown))
             manifest_groups.append(
                 {
                     "group_id": group_id,
@@ -1017,6 +1843,7 @@ def _queue_process_start(
                     "input_markdown": str(inputs_dir / f"{group_id}.md"),
                     "result_json": str(results_dir / f"{group_id}.json"),
                     "log_markdown": str(logs_dir / f"{group_id}.md"),
+                    "dedup_context": group.get("dedup_context", []),
                     "transcript": transcript_info,
                 }
             )
@@ -1031,7 +1858,7 @@ def _queue_process_start(
             "groups": manifest_groups,
             "status": "running",
         }
-        (run_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+        _atomic_write_text(run_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         return {
             "run_id": run_id,
             "run_dir": str(run_dir),
@@ -1078,7 +1905,15 @@ def _group_status_from_result(group: dict[str, Any]) -> dict[str, Any]:
         "result_json": group.get("result_json"),
         "log_markdown": group.get("log_markdown"),
     }
-    for key in ("created", "skipped_duplicates", "discard_reason", "error", "reason"):
+    for key in (
+        "created",
+        "skipped_duplicates",
+        "discard_reason",
+        "error",
+        "reason",
+        "result_state",
+        "result_protocol",
+    ):
         if key in result:
             item[key] = result[key]
     return item
@@ -1089,10 +1924,15 @@ def _summarize_process_status(payload: dict[str, Any], active: bool) -> dict[str
     completed_statuses = {"processed", "processed_no_notes"}
     completed = sum(1 for group in groups if group.get("status") in completed_statuses)
     failed = sum(1 for group in groups if group.get("status") == "failed")
+    retryable_capture_count = sum(
+        len(group.get("capture_ids", [])) for group in groups if group.get("status") == "failed"
+    )
     pending = max(0, len(groups) - completed - failed)
     payload["active"] = active
     payload["completed_group_count"] = completed
     payload["failed_group_count"] = failed
+    payload["retryable_group_count"] = failed
+    payload["retryable_capture_count"] = retryable_capture_count
     payload["pending_group_count"] = pending
     payload.setdefault("group_count", len(groups))
     payload.setdefault("selected_capture_count", sum(len(group.get("capture_ids", [])) for group in groups))
@@ -1154,6 +1994,51 @@ def _queue_process_status(run_id: str = "") -> dict[str, Any]:
     return _summarize_process_status(payload, lock_active)
 
 
+def _queue_process_retry(run_id: str = "", group_ids: list[str] | None = None) -> dict[str, Any]:
+    status = _queue_process_status(run_id)
+    target_run_id = str(status.get("run_id") or run_id or "")
+    groups = status.get("groups") if isinstance(status.get("groups"), list) else []
+    if status.get("status") == "idle" or not target_run_id:
+        return {"error": "processing run not found", "reason": "run_not_found"}
+
+    requested_group_ids = {str(group_id).strip() for group_id in (group_ids or []) if str(group_id).strip()}
+    retry_groups = [
+        group
+        for group in groups
+        if str(group.get("status") or "") == "failed"
+        and (not requested_group_ids or str(group.get("group_id") or "") in requested_group_ids)
+    ]
+    if not retry_groups:
+        return {
+            "error": "no failed groups to retry",
+            "reason": "no_failed_groups",
+            "run_id": target_run_id,
+            "group_count": len(groups),
+            "groups": groups,
+        }
+
+    selected_capture_ids: list[str] = []
+    for group in retry_groups:
+        for capture_id in group.get("capture_ids", []):
+            capture = str(capture_id).strip()
+            if capture and capture not in selected_capture_ids:
+                selected_capture_ids.append(capture)
+
+    return {
+        "run_id": target_run_id,
+        "source_run_id": target_run_id,
+        "group_count": len(groups),
+        "retry_group_count": len(retry_groups),
+        "selected_group_ids": [
+            str(group.get("group_id") or "") for group in retry_groups if str(group.get("group_id") or "")
+        ],
+        "selected_capture_count": len(selected_capture_ids),
+        "selected_capture_ids": selected_capture_ids,
+        "groups": retry_groups,
+        "queue_path": str(_queue_file(get_vault())),
+    }
+
+
 def _reported_note_exists_in_vault(vault: Path, path: str) -> bool:
     if not path or Path(path).is_absolute():
         return False
@@ -1171,70 +2056,116 @@ def _queue_process_finalize(run_id: str) -> dict[str, Any]:
     if not manifest_path.exists():
         return {"error": f"processing run not found: {run_id}", "reason": "run_not_found"}
     manifest = json.loads(manifest_path.read_text(errors="replace"))
-    captures = _load_queue(vault)
+    captures: list[dict[str, Any]] = []
     dequeue_ids: set[str] = set()
-    group_results = []
-    for group in manifest.get("groups", []):
-        expected_ids = set(str(x) for x in group.get("capture_ids", []))
-        result_path = Path(group.get("result_json", ""))
-        if not result_path.exists():
-            group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"})
-            continue
-        try:
-            result = json.loads(result_path.read_text(errors="replace"))
-        except json.JSONDecodeError:
-            group_results.append(
-                {"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"}
-            )
-            continue
-        processed_ids = set(str(x) for x in result.get("processed_capture_ids", []))
-        status = result.get("status")
-        valid = processed_ids == expected_ids and status in {"processed", "processed_no_notes"}
-        reason = "ok"
-        if not valid:
-            reason = "invalid_status_or_capture_ids"
-        elif status == "processed_no_notes" and not str(result.get("discard_reason") or "").strip():
-            valid = False
-            reason = "missing_discard_reason"
-        elif status == "processed":
-            created = result.get("created", [])
-            if not created:
-                valid = False
-                reason = "missing_created_note"
-            for note in created:
-                path = note.get("path") if isinstance(note, dict) else note
-                if not path or not _reported_note_exists_in_vault(vault, str(path)):
+    group_results: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    try:
+        with _queue_lock():
+            captures = _load_queue(vault)
+            for group in manifest.get("groups", []):
+                expected_ids = set(str(x) for x in group.get("capture_ids", []))
+                result_path = Path(group.get("result_json", ""))
+                if not result_path.exists():
+                    group_results.append(
+                        {"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"}
+                    )
+                    continue
+                try:
+                    result = json.loads(result_path.read_text(errors="replace"))
+                except json.JSONDecodeError:
+                    group_results.append(
+                        {"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"}
+                    )
+                    continue
+                processed_ids = set(str(x) for x in result.get("processed_capture_ids", []))
+                status = str(result.get("status") or "")
+                result_state = str(result.get("result_state") or "")
+                if status == "failed":
+                    group_results.append(
+                        {
+                            "group_id": group.get("group_id"),
+                            "status": "failed",
+                            "reason": result_state or str(result.get("reason") or "failed_result"),
+                            "result_state": result_state or "failed",
+                        }
+                    )
+                    continue
+                valid = processed_ids == expected_ids and status in {"processed", "processed_no_notes"}
+                reason = "ok"
+                if not valid:
+                    reason = "invalid_status_or_capture_ids"
+                elif status == "processed_no_notes" and not str(result.get("discard_reason") or "").strip():
                     valid = False
-                    reason = "missing_created_note"
-                    break
-        if valid:
-            dequeue_ids.update(expected_ids)
-            group_results.append(
-                {
-                    "group_id": group.get("group_id"),
-                    "status": status,
-                    "reason": reason,
-                    "dequeued_capture_ids": sorted(expected_ids),
-                }
-            )
-        else:
-            group_results.append({"group_id": group.get("group_id"), "status": "failed", "reason": reason})
-    remaining = [capture for capture in captures if str(capture.get("id")) not in dequeue_ids]
-    _write_queue(remaining, vault)
-    manifest["status"] = "finalized"
-    manifest["finalized_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    manifest["dequeued_capture_ids"] = sorted(dequeue_ids)
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
-    _release_processing_lock(run_id)
+                    reason = "missing_discard_reason"
+                elif status == "processed":
+                    created = result.get("created", [])
+                    if not created:
+                        valid = False
+                        reason = "missing_created_note"
+                    for note in created:
+                        path = note.get("path") if isinstance(note, dict) else note
+                        if not path or not _reported_note_exists_in_vault(vault, str(path)):
+                            valid = False
+                            reason = "missing_created_note"
+                            break
+                if valid:
+                    dequeue_ids.update(expected_ids)
+                    group_results.append(
+                        {
+                            "group_id": group.get("group_id"),
+                            "status": status,
+                            "reason": reason,
+                            "result_state": result_state or "success",
+                            "dequeued_capture_ids": sorted(expected_ids),
+                        }
+                    )
+                else:
+                    group_results.append(
+                        {
+                            "group_id": group.get("group_id"),
+                            "status": "failed",
+                            "reason": reason,
+                            "result_state": result_state or "invalid_result",
+                        }
+                    )
+            remaining = [capture for capture in captures if str(capture.get("id")) not in dequeue_ids]
+            _write_queue(remaining, vault)
+            manifest["status"] = "finalized"
+            manifest["finalized_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            manifest["dequeued_capture_ids"] = sorted(dequeue_ids)
+            _atomic_write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
+            if dequeue_ids:
+                with _vault_write_lock() as acquired:
+                    if acquired:
+                        _commit_and_reindex_locked(vault, f"pi: process-finalize {run_id[:8]}")
+    finally:
+        _release_processing_lock(run_id)
     return {"run_id": run_id, "dequeued": len(dequeue_ids), "remaining": len(remaining), "groups": group_results}
 
 
-def _run_json(source: str, fn, *args: Any) -> int:
+def _run_json(
+    source: str,
+    fn,
+    *args: Any,
+    health_metadata: dict[str, Any] | None = None,
+) -> int:
     try:
-        return _emit(fn(*args))
+        payload = fn(*args)
+        if health_metadata and isinstance(payload, dict) and payload.get("error"):
+            metadata = dict(health_metadata or {})
+            _log_bridge_health(source, error=payload.get("error"), reason=payload.get("reason", "error"), **metadata)
+        return _emit(payload)
     except Exception as exc:  # pragma: no cover - defensive CLI boundary
         traceback.print_exc(file=sys.stderr)
+        metadata = dict(health_metadata or {})
+        _log_bridge_health(source, error=exc, **metadata)
         return _emit({"error": str(exc), "source": source, "reason": "error", "error_type": type(exc).__name__})
+
+
+def _build_pi_briefing(cwd: str, session_id: str) -> Any:
+    """Build Pi briefing without spawning Claude-style deferred work Pi cannot consume."""
+    return build_briefing(cwd, session_id, allow_deferred=False)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1275,6 +2206,11 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--cwd", default="")
     search.add_argument("--concrete", default="auto", choices=("auto", "true", "false"))
 
+    contradictions = sub.add_parser("contradictions", help="Inspect contradictory or superseded notes")
+    contradictions.add_argument("--topic", default="")
+    contradictions.add_argument("--limit", type=int, default=20)
+    contradictions.add_argument("--min-certainty", type=int, default=2)
+
     get = sub.add_parser("get", help="Read a memento note")
     get.add_argument("--path", default="")
 
@@ -1286,6 +2222,15 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--queue", action="store_true", help="Queue for later review instead of writing a note")
     capture.add_argument("--reason", default="manual")
     capture.add_argument("--source-event", default="manual")
+    capture.add_argument("--note-type", default="session")
+    capture.add_argument("--tag", action="append", default=[])
+    capture.add_argument("--certainty", default=None)
+    capture.add_argument("--branch", default=None)
+    capture.add_argument(
+        "--lifecycle-metadata",
+        default=None,
+        help="Optional JSON object with richer Pi lifecycle context and audit metadata",
+    )
 
     queue = sub.add_parser("queue", help="Inspect or process queued pi captures")
     queue_sub = queue.add_subparsers(dest="queue_command", required=True)
@@ -1310,6 +2255,16 @@ def build_parser() -> argparse.ArgumentParser:
         "process-finalize", help="Finalize a processing run and dequeue validated captures"
     )
     process_finalize.add_argument("--run-id", required=True)
+    process_retry = queue_sub.add_parser(
+        "process-retry", help="Resolve failed groups from a prior processing run into a retry selection"
+    )
+    process_retry.add_argument("--run-id", default="")
+    process_retry.add_argument(
+        "--group-id",
+        action="append",
+        default=[],
+        help="Failed group id to retry (repeatable; default: all failed groups)",
+    )
     cleanup = queue_sub.add_parser(
         "cleanup", help="Classify queued captures and archive low-value ones (dry-run by default)"
     )
@@ -1326,6 +2281,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Class to discard (repeatable; default: raw_dump, invalid). Manual captures are never discarded.",
     )
     cleanup.add_argument("--samples", type=int, default=3, help="Sample entries shown per class")
+    discard = queue_sub.add_parser("discard", help="Archive queued capture(s) without processing")
+    discard.add_argument("--id", action="append", default=[], help="Queued capture id to discard")
+    discard.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rewrite the queue, archiving the discarded capture(s); without this flag nothing is written",
+    )
+    discard.add_argument("--reason", default="manual_discard")
+    discard.add_argument("--source", default="queue-discard")
 
     return parser
 
@@ -1333,9 +2297,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "briefing":
-        return _run_lifecycle("briefing", build_briefing, args.cwd, args.session_id)
+        return _run_lifecycle(
+            "briefing",
+            _build_pi_briefing,
+            args.cwd,
+            args.session_id,
+            health_metadata={"cwd": args.cwd, "session_id": args.session_id},
+        )
     if args.command == "recall":
-        return _run_lifecycle("recall", build_recall, args.prompt, args.cwd, args.session_id)
+        return _run_lifecycle(
+            "recall",
+            build_recall,
+            args.prompt,
+            args.cwd,
+            args.session_id,
+            health_metadata={"cwd": args.cwd, "session_id": args.session_id},
+        )
     if args.command == "session-context":
         return _run_json(
             "session-context",
@@ -1357,11 +2334,14 @@ def main(argv: list[str] | None = None) -> int:
             args.file_path,
             args.cwd,
             args.session_id,
+            health_metadata={"cwd": args.cwd, "session_id": args.session_id},
         )
     if args.command == "status":
         return _run_json("status", _status, args.cwd)
     if args.command == "search":
         return _run_json("search", _search, args.query, args.limit, args.cwd, args.concrete)
+    if args.command == "contradictions":
+        return _run_json("contradictions", _contradictions, args.topic, args.limit, args.min_certainty)
     if args.command == "get":
         return _run_json("get", _get, args.path)
     if args.command == "capture":
@@ -1375,6 +2355,12 @@ def main(argv: list[str] | None = None) -> int:
             args.queue,
             args.reason,
             args.source_event,
+            args.note_type,
+            args.tag,
+            args.certainty,
+            args.branch,
+            args.lifecycle_metadata,
+            health_metadata={"cwd": args.cwd, "session_id": args.session_id},
         )
     if args.command == "queue":
         if args.queue_command == "list":
@@ -1397,8 +2383,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_json("queue", _queue_process_status, args.run_id)
         if args.queue_command == "process-finalize":
             return _run_json("queue", _queue_process_finalize, args.run_id)
+        if args.queue_command == "process-retry":
+            return _run_json("queue", _queue_process_retry, args.run_id, args.group_id)
         if args.queue_command == "cleanup":
             return _run_json("queue", _queue_cleanup, args.apply, args.discard_classes, args.samples)
+        if args.queue_command == "discard":
+            return _run_json("queue", _queue_discard, args.id, args.apply)
     raise AssertionError(f"unhandled command: {args.command}")
 
 

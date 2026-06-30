@@ -665,3 +665,46 @@ class TestMcpConfig:
         config = json.loads((tmp_path / "mcp-servers.json").read_text())
         assert "other-server" in config
         assert "memento-vault" in config
+
+
+class TestMergeSettings:
+    def test_default_install_adds_retrieval_hooks_and_permissions(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.json"
+        settings_path.write_text(json.dumps({"hooks": {"SessionEnd": []}}))
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                HELPERS,
+                "merge-settings",
+                str(settings_path),
+                str(claude_dir),
+                str(tmp_path / "vault"),
+                "false",
+                "",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0
+        merged = json.loads(settings_path.read_text())
+
+        hooks = merged["hooks"]
+        assert "SessionEnd" in hooks
+        assert "SessionStart" in hooks
+        assert "UserPromptSubmit" in hooks
+        assert "PreToolUse" in hooks
+        assert hooks["SessionEnd"][0]["hooks"][0]["command"].endswith("memento-triage.py")
+        assert hooks["SessionStart"][0]["hooks"][0]["command"].endswith("vault-briefing.py")
+        assert hooks["UserPromptSubmit"][0]["hooks"][0]["command"].endswith("vault-recall.py")
+        assert hooks["PreToolUse"][0]["hooks"][0]["command"].endswith("vault-tool-context.py")
+
+        perms = merged["permissions"]["allow"]
+        assert any(rule == f"Read({tmp_path / 'vault'}/**)" for rule in perms)
+        assert any(rule == f"Edit({tmp_path / 'vault'}/**)" for rule in perms)
+        assert any(rule == f"Write({tmp_path / 'vault'}/**)" for rule in perms)
+        assert any(rule.endswith("/hooks/vault-commit.sh:*)") for rule in perms)

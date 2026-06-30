@@ -1,12 +1,14 @@
 """HTTP client for connecting to a remote memento vault server.
 
 Used by hooks when MEMENTO_VAULT_URL is set. Provides the same operations
-as the local vault (search, store, get, capture, status) but over HTTP,
-calling the remote MCP server's tools via a simple REST-like wrapper.
+as the local vault (search, contradictions, store, smart_store, get, capture, preserve, status)
+but over HTTP, calling the remote MCP server's tools via a simple REST-like wrapper.
 
 The MCP streamable-http transport uses JSON-RPC over HTTP POST. This client
 speaks that protocol directly — no MCP client library needed.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -102,14 +104,14 @@ def _call_tool(tool_name: str, arguments: dict, timeout: int = 30) -> dict:
     return result
 
 
-def list_notes(include_hash: bool = True) -> list[dict] | None:
+def list_notes(include_hash: bool = True, timeout: int = 30) -> list[dict] | None:
     """List all notes on the remote vault with optional content hashes.
 
     Returns None on error (network failure, server error, malformed response).
     Callers must distinguish None (error) from [] (genuinely empty remote) —
     treating an error as an empty vault would cause bulk-push of duplicates.
     """
-    result = _call_tool("memento_list", {"include_hash": include_hash})
+    result = _call_tool("memento_list", {"include_hash": include_hash}, timeout=timeout)
     if isinstance(result, list):
         return result
     if isinstance(result, dict) and "error" in result:
@@ -127,6 +129,7 @@ def search_envelope(
     min_score: float = 0.0,
     cwd: str = "",
     concrete: object = "auto",
+    timeout: int = 30,
 ) -> dict:
     """Search the remote vault, preserving structured miss metadata when present."""
     result = _call_tool(
@@ -139,6 +142,7 @@ def search_envelope(
             "cwd": cwd,
             "concrete": concrete,
         },
+        timeout=timeout,
     )
     if isinstance(result, list):
         return {"results": result}
@@ -161,18 +165,29 @@ def search(
     min_score: float = 0.0,
     cwd: str = "",
     concrete: object = "auto",
+    timeout: int = 30,
 ) -> list[dict]:
     """Search the remote vault, returning only results for legacy callers."""
     envelope = search_envelope(
-        query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd, concrete=concrete
+        query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd, concrete=concrete, timeout=timeout
     )
     results = envelope.get("results")
     return results if isinstance(results, list) else []
 
 
-def get(path: str) -> dict | None:
+def contradictions(topic: str, limit: int = 20, min_certainty: int = 2, timeout: int = 30) -> dict:
+    """Inspect remote notes for disagreement and supersession candidates."""
+    result = _call_tool(
+        "memento_contradictions",
+        {"topic": topic, "limit": limit, "min_certainty": min_certainty},
+        timeout=timeout,
+    )
+    return result if isinstance(result, dict) else {"results": []}
+
+
+def get(path: str, timeout: int = 30) -> dict | None:
     """Get a specific note from the remote vault."""
-    result = _call_tool("memento_get", {"path": path})
+    result = _call_tool("memento_get", {"path": path}, timeout=timeout)
     if isinstance(result, dict) and "error" not in result:
         return result
     return None
@@ -189,6 +204,7 @@ def store(
     session_id: str | None = None,
     validity_context: str | None = None,
     supersedes: str | None = None,
+    timeout: int = 30,
 ) -> dict:
     """Store a note in the remote vault."""
     args = {"title": title, "body": body, "note_type": note_type}
@@ -206,7 +222,42 @@ def store(
         args["validity_context"] = validity_context
     if supersedes:
         args["supersedes"] = supersedes
-    return _call_tool("memento_store", args)
+    return _call_tool("memento_store", args, timeout=timeout)
+
+
+def smart_store(
+    title: str,
+    body: str,
+    note_type: str = "discovery",
+    tags: list[str] | None = None,
+    certainty: int | None = None,
+    project: str | None = None,
+    branch: str | None = None,
+    session_id: str | None = None,
+    validity_context: str | None = None,
+    supersedes: str | None = None,
+    origin: str | None = None,
+    timeout: int = 30,
+) -> dict:
+    """Smart-store a note in the remote vault."""
+    args = {"title": title, "body": body, "note_type": note_type}
+    if tags:
+        args["tags"] = tags
+    if certainty is not None:
+        args["certainty"] = certainty
+    if project:
+        args["project"] = project
+    if branch:
+        args["branch"] = branch
+    if session_id:
+        args["session_id"] = session_id
+    if validity_context:
+        args["validity_context"] = validity_context
+    if supersedes:
+        args["supersedes"] = supersedes
+    if origin:
+        args["origin"] = origin
+    return _call_tool("memento_store_smart", args, timeout=timeout)
 
 
 def capture(
@@ -217,6 +268,7 @@ def capture(
     session_id: str | None = None,
     agent: str = "unknown",
     fleeting_only: bool = False,
+    timeout: int = 30,
 ) -> dict:
     """Capture a session to the remote vault."""
     args = {"session_summary": session_summary, "cwd": cwd, "branch": branch, "agent": agent}
@@ -226,9 +278,45 @@ def capture(
         args["session_id"] = session_id
     if fleeting_only:
         args["fleeting_only"] = True
-    return _call_tool("memento_capture", args)
+    return _call_tool("memento_capture", args, timeout=timeout)
 
 
-def status() -> dict:
+def preserve(
+    path: str,
+    title: str | None = None,
+    slug: str | None = None,
+    project: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    move: bool = False,
+    include_manifest: bool = True,
+    link_project_index: bool = True,
+    cwd: str = "",
+    branch: str = "",
+    session_id: str | None = None,
+    timeout: int = 30,
+) -> dict:
+    """Preserve a file or directory bundle in the remote archive."""
+    args = {"path": path, "move": move, "include_manifest": include_manifest, "link_project_index": link_project_index}
+    if title:
+        args["title"] = title
+    if slug:
+        args["slug"] = slug
+    if project:
+        args["project"] = project
+    if description:
+        args["description"] = description
+    if tags:
+        args["tags"] = tags
+    if cwd:
+        args["cwd"] = cwd
+    if branch:
+        args["branch"] = branch
+    if session_id:
+        args["session_id"] = session_id
+    return _call_tool("memento_preserve", args, timeout=timeout)
+
+
+def status(timeout: int = 30) -> dict:
     """Get status of the remote vault."""
-    return _call_tool("memento_status", {})
+    return _call_tool("memento_status", {}, timeout=timeout)

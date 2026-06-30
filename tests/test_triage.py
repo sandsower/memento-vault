@@ -471,7 +471,11 @@ class TestProcessStructuredNotes:
         assert written == 1
         note = tmp_vault / "notes" / "redis-cache-keys-need-explicit-ttl.md"
         assert note.exists()
-        assert "type: bugfix" in note.read_text()
+        note_text = note.read_text()
+        assert "type: bugfix" in note_text
+        assert "source: session" in note_text
+        assert "origin: claude_triage:claude" in note_text
+        assert "certainty: 3" in note_text
         project_file = tmp_vault / "projects" / "api-service.md"
         assert project_file.exists()
         assert "[[redis-cache-keys-need-explicit-ttl]]" in project_file.read_text()

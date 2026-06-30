@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import argparse
 import errno
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
+import sys
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from memento import remote_client
+from memento.search_backend import get_backend, reset_backend
 
 
 PASS = "pass"
@@ -22,8 +28,40 @@ _STATUSES = (PASS, WARN, FAIL)
 _EXPECTED_DIRS = ("notes", "fleeting", "projects", "archive")
 _CORE_DIRS = ("notes", "fleeting", "projects")
 _HEALTH_WINDOW_HOURS = 24
+_DEEP_PROBE_TIMEOUT_SECONDS = 5
+_DEEP_PROBE_QUERY = "memento-vault health probe"
 _STALE_LOCK_SECONDS = 600
+_INCEPTION_RECENT_RUNS_LIMIT = 5
+_INCEPTION_ERROR_DETAIL_LIMIT = 500
 _RECENT_FAILURE_ACTION_MARKERS = ("failed", "failure", "error", "unexpected", "unavailable")
+_RETRIEVAL_SKIP_ACTIONS = {
+    "broad-project-query",
+    "deferred-ready",
+    "low-signal-prompt",
+    "query_too_broad",
+    "skipped-prompt",
+}
+_RETRIEVAL_NO_RESULT_REASONS = {
+    "dedup-skip",
+    "duplicate",
+    "filtered-empty",
+    "literal_mode_auto_selected",
+    "no-results",
+    "no_concrete_match",
+    "no_exact_match",
+    "project-mismatch-filtered-empty",
+    "project_filter_removed_all",
+    "threshold_too_high",
+}
+_RETRIEVAL_BACKEND_UNAVAILABLE_REASONS = {
+    "backend_unavailable",
+    "empty_vault",
+    "index_stale_or_missing",
+    "qmd-unavailable",
+    "semantic_mode_not_available",
+}
+_RETRIEVAL_BACKEND_EXCEPTION_ACTIONS = {"extra_collection_failed", "qmd_get_unexpected", "qmd_search_unexpected"}
+_RETRIEVAL_ERROR_DETAIL_LIMIT = 500
 _STALE_MCP_HINT = (
     "likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
     'copied hooks should use {"mcpServers": {}} for --mcp-config'
@@ -58,6 +96,11 @@ RETRIEVAL_LOG_PATH = str(
 )
 TRIAGE_HEALTH_LOG_PATH = str(
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memento-vault" / "triage-health.jsonl"
+)
+AUTOMATION_MEMORY_HEALTH_LOG_PATH = str(
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "memento-vault"
+    / "automation-memory-health.jsonl"
 )
 INCEPTION_STATE_PATH = str(
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memento-vault" / "inception-state.json"
@@ -104,6 +147,7 @@ class HealthReport:
     status: str
     summary: dict[str, int]
     checks: list[CheckResult]
+    automation_memory: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self, verbose: bool = True) -> dict[str, Any]:
         checks = []
@@ -112,11 +156,15 @@ class HealthReport:
             if not verbose:
                 item.pop("details", None)
             checks.append(item)
-        return {"status": self.status, "summary": dict(self.summary), "checks": checks}
+        payload = {"status": self.status, "summary": dict(self.summary), "checks": checks}
+        if self.automation_memory:
+            payload["automation_memory"] = self.automation_memory
+        return payload
 
 
-def build_report() -> HealthReport:
+def build_report(*, deep: bool = False, probe_timeout_seconds: int = _DEEP_PROBE_TIMEOUT_SECONDS) -> HealthReport:
     """Run cheap, read-only health checks."""
+    probe_timeout_seconds = max(1, int(probe_timeout_seconds))
     checks: list[CheckResult] = []
     config_check, config = _check_config_parse()
     checks.append(config_check)
@@ -124,7 +172,8 @@ def build_report() -> HealthReport:
     vault = Path(config.get("vault_path") or _DEFAULT_CONFIG["vault_path"]).expanduser()
     checks.append(_check_vault_dirs(vault))
     checks.append(_check_git(vault, config))
-    checks.append(_check_search_backend(vault, config))
+    search_check = _check_search_backend(vault, config)
+    checks.append(search_check)
     manifest_check, manifest = _check_install_manifest()
     checks.append(manifest_check)
     checks.append(_check_managed_files(manifest))
@@ -132,14 +181,210 @@ def build_report() -> HealthReport:
     checks.extend(_check_mcp_config())
     checks.append(_check_mcp_registration())
     checks.append(_check_pi_bridge_config())
+    checks.append(_check_pi_bridge_health())
     checks.append(_check_triage_health())
-    checks.append(_check_retrieval_health())
+    checks.append(_check_retrieval_health(config=config, search_check=search_check))
     checks.append(_check_locks())
     checks.append(_check_inception(config))
+    if deep:
+        checks.extend(_check_deep_diagnostics(config=config, vault=vault, probe_timeout_seconds=probe_timeout_seconds))
+    automation_memory = build_automation_memory_readiness(config=config, vault=vault, checks=checks)
+    checks.append(
+        CheckResult(
+            "automation memory",
+            automation_memory["status"],
+            automation_memory["message"],
+            automation_memory["metadata"],
+        )
+    )
 
     summary = {status: sum(1 for check in checks if check.status == status) for status in _STATUSES}
     status = FAIL if summary[FAIL] else WARN if summary[WARN] else PASS
-    return HealthReport(status=status, summary=summary, checks=checks)
+    return HealthReport(status=status, summary=summary, checks=checks, automation_memory=automation_memory)
+
+
+def _check_deep_diagnostics(*, config: dict[str, Any], vault: Path, probe_timeout_seconds: int) -> list[CheckResult]:
+    checks: list[CheckResult] = []
+    checks.append(_check_deep_search_probe(config=config, probe_timeout_seconds=probe_timeout_seconds))
+    checks.append(_check_deep_mcp_probe(vault=vault, probe_timeout_seconds=probe_timeout_seconds))
+    checks.append(_check_deep_pi_bridge_probe(vault=vault, probe_timeout_seconds=probe_timeout_seconds))
+    if remote_client.is_remote():
+        checks.append(_check_deep_remote_probe(probe_timeout_seconds=probe_timeout_seconds))
+    return checks
+
+
+def _check_deep_search_probe(*, config: dict[str, Any], probe_timeout_seconds: int) -> CheckResult:
+    reset_backend()
+    backend = get_backend()
+    collection = str(config.get("qmd_collection") or "memento")
+    start = time.monotonic()
+    try:
+        results = backend.search(
+            _DEEP_PROBE_QUERY,
+            collection,
+            limit=1,
+            timeout=probe_timeout_seconds,
+            min_score=0.0,
+            concrete=True,
+        )
+    except Exception as exc:
+        return CheckResult(
+            "deep search probe",
+            WARN,
+            f"selected search backend probe failed: {exc}",
+            {"timeout_seconds": probe_timeout_seconds, "error": str(exc)},
+        )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    return CheckResult(
+        "deep search probe",
+        PASS,
+        f"selected search backend answered probe query ({len(results)} result(s))",
+        {
+            "query": _DEEP_PROBE_QUERY,
+            "timeout_seconds": probe_timeout_seconds,
+            "latency_ms": latency_ms,
+            "backend": type(backend).__name__,
+            "collection": collection,
+            "result_count": len(results),
+            "first_result": _sanitize_obj(results[0]) if results else None,
+        },
+    )
+
+
+def _check_deep_mcp_probe(*, vault: Path, probe_timeout_seconds: int) -> CheckResult:
+    start = time.monotonic()
+    try:
+        from memento import mcp_server
+
+        status = mcp_server.memento_status()
+        search = mcp_server.memento_search(_DEEP_PROBE_QUERY, limit=1, semantic=False, min_score=0.0, cwd=str(vault))
+    except Exception as exc:
+        return CheckResult(
+            "deep mcp probe",
+            WARN,
+            f"local MCP tool probe failed: {exc}",
+            {"timeout_seconds": probe_timeout_seconds, "error": str(exc)},
+        )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    result_count = (
+        len(search) if isinstance(search, list) else len(search.get("results", [])) if isinstance(search, dict) else 0
+    )
+    return CheckResult(
+        "deep mcp probe",
+        PASS,
+        "local MCP tools responded to probe calls",
+        {
+            "timeout_seconds": probe_timeout_seconds,
+            "latency_ms": latency_ms,
+            "status": _sanitize_obj(status),
+            "search_result_count": result_count,
+            "search": _sanitize_obj(search),
+        },
+    )
+
+
+def _check_deep_pi_bridge_probe(*, vault: Path, probe_timeout_seconds: int) -> CheckResult:
+    env = os.environ.copy()
+    repo_root = str(_repo_root())
+    env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else repo_root
+    start = time.monotonic()
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "memento.pi_bridge", "status", "--cwd", str(vault)],
+            text=True,
+            capture_output=True,
+            timeout=probe_timeout_seconds,
+            cwd=repo_root,
+            env=env,
+            check=False,
+        )
+    except Exception as exc:
+        return CheckResult(
+            "deep pi bridge probe",
+            WARN,
+            f"Pi bridge status probe failed: {exc}",
+            {"timeout_seconds": probe_timeout_seconds, "error": str(exc)},
+        )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    stdout = _safe_text(completed.stdout.strip())
+    stderr = _safe_text(completed.stderr.strip())
+    if completed.returncode != 0:
+        return CheckResult(
+            "deep pi bridge probe",
+            WARN,
+            f"Pi bridge status probe exited {completed.returncode}",
+            {
+                "timeout_seconds": probe_timeout_seconds,
+                "latency_ms": latency_ms,
+                "returncode": completed.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+            },
+        )
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return CheckResult(
+            "deep pi bridge probe",
+            WARN,
+            f"Pi bridge status probe returned invalid JSON: {exc}",
+            {
+                "timeout_seconds": probe_timeout_seconds,
+                "latency_ms": latency_ms,
+                "stdout": stdout,
+                "stderr": stderr,
+            },
+        )
+    return CheckResult(
+        "deep pi bridge probe",
+        PASS,
+        "Pi bridge status probe responded",
+        {
+            "timeout_seconds": probe_timeout_seconds,
+            "latency_ms": latency_ms,
+            "status": _sanitize_obj(payload),
+            "stdout": stdout,
+            "stderr": stderr,
+        },
+    )
+
+
+def _check_deep_remote_probe(*, probe_timeout_seconds: int) -> CheckResult:
+    start = time.monotonic()
+    try:
+        status = remote_client.status(timeout=probe_timeout_seconds)
+        search = remote_client.search_envelope(_DEEP_PROBE_QUERY, limit=1, timeout=probe_timeout_seconds)
+    except Exception as exc:
+        return CheckResult(
+            "deep remote probe",
+            WARN,
+            f"remote vault probe failed: {exc}",
+            {"timeout_seconds": probe_timeout_seconds, "error": str(exc)},
+        )
+    latency_ms = int((time.monotonic() - start) * 1000)
+    if isinstance(status, dict) and status.get("error"):
+        return CheckResult(
+            "deep remote probe",
+            WARN,
+            f"remote vault status probe failed: {status['error']}",
+            {
+                "timeout_seconds": probe_timeout_seconds,
+                "latency_ms": latency_ms,
+                "status": _sanitize_obj(status),
+                "search": _sanitize_obj(search),
+            },
+        )
+    return CheckResult(
+        "deep remote probe",
+        PASS,
+        "remote vault status and search probes responded",
+        {
+            "timeout_seconds": probe_timeout_seconds,
+            "latency_ms": latency_ms,
+            "status": _sanitize_obj(status),
+            "search": _sanitize_obj(search),
+        },
+    )
 
 
 def render_human(report: HealthReport, verbose: bool = False) -> str:
@@ -171,9 +416,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit structured JSON")
     parser.add_argument("--verbose", action="store_true", help="Include sanitized details in human output")
     parser.add_argument("--strict", action="store_true", help="Exit nonzero when warnings are present")
+    parser.add_argument("--deep", action="store_true", help="Run opt-in live integration probes")
     args = parser.parse_args(argv)
 
-    report = build_report()
+    report = build_report(deep=args.deep)
     if args.json:
         print(json.dumps(report.to_dict(verbose=True), indent=2, sort_keys=True))
     else:
@@ -260,7 +506,9 @@ def _parse_simple_yaml(path: Path) -> dict[str, Any]:
                 parsed = False
             elif value.isdigit():
                 parsed = int(value)
-            elif value.startswith("[") and value.endswith("]"):
+            elif value.startswith("["):
+                if not value.endswith("]"):
+                    raise ValueError(f"malformed list value in {path}: {value}")
                 inner = value[1:-1].strip()
                 parsed = [v.strip().strip('"').strip("'") for v in inner.split(",")] if inner else []
             elif (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
@@ -341,6 +589,271 @@ def _check_search_backend(vault: Path, config: dict[str, Any]) -> CheckResult:
     return CheckResult("search", FAIL, "search_backend auto found no usable local backend")
 
 
+def build_automation_memory_readiness(
+    *,
+    config: dict[str, Any] | None = None,
+    vault: Path | None = None,
+    checks: list[CheckResult] | None = None,
+    qmd_available: bool | None = None,
+) -> dict[str, Any]:
+    """Build cheap, read-only automation-memory readiness metadata.
+
+    The payload is designed for orchestration probes (for example Rondo): it is
+    secret-sanitized, never performs network I/O, and reports degraded memory as
+    explicit metadata rather than making optional memory fail closed by default.
+    """
+    if config is None:
+        _config_check, config = _check_config_parse()
+    vault = vault or Path(config.get("vault_path") or _DEFAULT_CONFIG["vault_path"]).expanduser()
+    checks = checks or []
+    search_check = next((check for check in checks if check.name == "search"), None) or _check_search_backend(
+        vault, config
+    )
+    search = _automation_search_metadata(vault, config, search_check, qmd_available=qmd_available)
+    recall = _automation_recall_metadata(config=config, search_check=search_check)
+    remote_sync = _automation_remote_sync_metadata(vault)
+    last_packet = _last_successful_automation_packet()
+    common_failure_reasons = _common_automation_failure_reasons(vault)
+
+    readiness = "ready"
+    status = PASS
+    blockers: list[str] = []
+    degradations: list[str] = []
+    if not vault.exists():
+        readiness = "unavailable"
+        status = FAIL
+        blockers.append("vault_missing")
+    if not search["available"]:
+        readiness = "unavailable"
+        status = FAIL
+        blockers.append("search_backend_unavailable")
+    elif search["status"] == WARN:
+        readiness = "degraded"
+        status = WARN
+        degradations.append("search_backend_degraded")
+    if search.get("stale_index", {}).get("stale"):
+        if status != FAIL:
+            status = WARN
+            readiness = "degraded"
+        degradations.append("stale_index")
+    if recall["events"] >= 3 and recall["failure_rate"] >= 0.5:
+        if status != FAIL:
+            status = WARN
+            readiness = "degraded"
+        degradations.append("recall_failure_rate")
+    if remote_sync.get("pending_retry_count", 0):
+        if status != FAIL:
+            status = WARN
+            readiness = "degraded"
+        degradations.append("remote_sync_pending_retries")
+
+    message = f"automation memory {readiness}"
+    if degradations:
+        message += f" ({', '.join(degradations)})"
+    if blockers:
+        message += f" ({', '.join(blockers)})"
+
+    metadata: dict[str, Any] = {
+        "schema_version": 1,
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
+        "window_hours": _HEALTH_WINDOW_HOURS,
+        "cheap_read_only": True,
+        "network_checked": False,
+        "readiness": readiness,
+        "fail_open_default": True,
+        "search": search,
+        "recall": recall,
+        "remote_sync": remote_sync,
+        "last_successful_packet": last_packet,
+        "common_failure_reasons": common_failure_reasons,
+        "probe": {
+            "name": "automation_memory",
+            "version": 1,
+            "readiness": readiness,
+            "required_by_default": False,
+        },
+    }
+    return {"ready": status != FAIL, "status": status, "message": message, "metadata": _sanitize_obj(metadata)}
+
+
+def _automation_search_metadata(
+    vault: Path, config: dict[str, Any], search_check: CheckResult, *, qmd_available: bool | None = None
+) -> dict[str, Any]:
+    choice = str(config.get("search_backend", "auto"))
+    available = search_check.status != FAIL
+    if qmd_available is not None:
+        if choice == "qmd":
+            available = bool(qmd_available)
+        elif choice == "auto" and qmd_available:
+            available = True
+    return {
+        "backend": choice,
+        "available": available,
+        "status": search_check.status,
+        "message": search_check.message,
+        "qmd_available": shutil.which("qmd") is not None if qmd_available is None else bool(qmd_available),
+        "stale_index": _embedded_index_staleness(vault, config),
+    }
+
+
+def _embedded_index_staleness(vault: Path, config: dict[str, Any]) -> dict[str, Any]:
+    db_path = vault / str(config.get("search_db_path", ".search/search.db"))
+    metadata: dict[str, Any] = {
+        "checked": True,
+        "backend": "embedded",
+        "db_path": str(db_path),
+        "stale": False,
+    }
+    if not vault.exists():
+        metadata.update({"checked": False, "reason": "vault_missing"})
+        return metadata
+    if not db_path.exists():
+        metadata.update({"checked": False, "reason": "embedded_index_missing"})
+        return metadata
+    newest_note_mtime = None
+    try:
+        for dirname in _CORE_DIRS:
+            root = vault / dirname
+            if not root.exists():
+                continue
+            for path in root.rglob("*.md"):
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                newest_note_mtime = mtime if newest_note_mtime is None else max(newest_note_mtime, mtime)
+        db_mtime = db_path.stat().st_mtime
+    except OSError as exc:
+        metadata.update({"checked": False, "reason": type(exc).__name__})
+        return metadata
+    if newest_note_mtime is None:
+        metadata.update({"reason": "no_notes"})
+        return metadata
+    lag_seconds = int(max(0, newest_note_mtime - db_mtime))
+    metadata.update(
+        {
+            "db_mtime": datetime.fromtimestamp(db_mtime).isoformat(timespec="seconds"),
+            "newest_note_mtime": datetime.fromtimestamp(newest_note_mtime).isoformat(timespec="seconds"),
+            "lag_seconds": lag_seconds,
+            "stale": lag_seconds > 60,
+        }
+    )
+    return metadata
+
+
+def _automation_recall_metadata(
+    *, config: dict[str, Any] | None = None, search_check: CheckResult | None = None
+) -> dict[str, Any]:
+    path = Path(RETRIEVAL_LOG_PATH)
+    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    diagnostics = _scan_retrieval_logs(path, cutoff)
+    status = WARN if diagnostics["events"] >= 3 and diagnostics["failure_rate"] >= 0.5 else PASS
+    metadata = {
+        "log_path": str(path),
+        "events": diagnostics["events"],
+        "failures": diagnostics["failures"],
+        "failure_rate": diagnostics["failure_rate"],
+        "status": status,
+        "last_error": diagnostics["last_error"],
+        "last_error_truncated": diagnostics["last_error_truncated"],
+        "no_results": diagnostics["no_results"],
+        "backend_unavailable": diagnostics["backend_unavailable"],
+        "backend_exceptions": diagnostics["backend_exceptions"],
+        "low_signal_skips": diagnostics["low_signal_skips"],
+        "other_failures": diagnostics["other_failures"],
+    }
+    remediation = _retrieval_remediation(diagnostics, config or {}, search_check)
+    if remediation:
+        metadata["remediation"] = remediation
+    return metadata
+
+
+def _automation_remote_sync_metadata(vault: Path) -> dict[str, Any]:
+    remote_configured = bool(os.environ.get("MEMENTO_VAULT_URL"))
+    metadata: dict[str, Any] = {
+        "remote_configured": remote_configured,
+        "checked": remote_configured,
+        "check": "local_sync_ledger",
+        "network_checked": False,
+        "pending_retry_count": 0,
+    }
+    if not remote_configured:
+        metadata["reason"] = "remote_not_configured"
+        return metadata
+    ledger = vault / ".sync" / "ledger.jsonl"
+    metadata["ledger_path"] = str(ledger)
+    if not ledger.exists():
+        metadata["reason"] = "sync_ledger_missing"
+        return metadata
+    current: dict[tuple[str, str], dict[str, Any]] = {}
+    ok_count = error_count = 0
+    last_ok = last_error = None
+    for rec in _iter_jsonl(ledger):
+        kind = str(rec.get("kind") or "")
+        source = str(rec.get("source") or "")
+        if not kind or not source:
+            continue
+        status = rec.get("status")
+        if status == "ok":
+            ok_count += 1
+            last_ok = rec.get("ts") or last_ok
+        elif status == "error":
+            error_count += 1
+            last_error = rec.get("ts") or last_error
+        current[(kind, source)] = rec
+    pending = [rec for rec in current.values() if rec.get("status") == "error"]
+    metadata.update(
+        {
+            "ok_count": ok_count,
+            "error_count": error_count,
+            "pending_retry_count": len(pending),
+            "last_success_at": last_ok,
+            "last_error_at": last_error,
+            "pending_kinds": sorted({str(rec.get("kind")) for rec in pending}),
+        }
+    )
+    return metadata
+
+
+def _last_successful_automation_packet() -> dict[str, Any] | None:
+    latest: dict[str, Any] | None = None
+    latest_ts: datetime | None = None
+    for rec in _iter_jsonl(Path(AUTOMATION_MEMORY_HEALTH_LOG_PATH)):
+        if rec.get("hook") != "automation-memory" or rec.get("action") != "packet_success":
+            continue
+        ts = _parse_ts(rec.get("ts"))
+        if ts is None:
+            continue
+        if latest_ts is None or ts >= latest_ts:
+            latest_ts = ts
+            latest = {
+                "ts": rec.get("ts"),
+                "source": rec.get("source"),
+                "should_inject": bool(rec.get("should_inject")),
+                "result_count": int(rec.get("result_count") or 0),
+                "warning_count": int(rec.get("warning_count") or 0),
+                "truncated": bool(rec.get("truncated")),
+            }
+    return latest
+
+
+def _common_automation_failure_reasons(vault: Path, limit: int = 5) -> list[dict[str, Any]]:
+    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    counts: Counter[str] = Counter()
+    for path in (Path(RETRIEVAL_LOG_PATH), Path(TRIAGE_HEALTH_LOG_PATH), vault / ".sync" / "ledger.jsonl"):
+        for rec in _iter_recent_jsonl(path, cutoff):
+            reason = None
+            if rec.get("status") == "error":
+                reason = rec.get("error") or "sync_error"
+            else:
+                action = str(rec.get("action") or "")
+                if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
+                    reason = rec.get("error") or rec.get("reason") or action
+            if reason:
+                counts[_safe_text(str(reason))] += 1
+    return [{"reason": reason, "count": count} for reason, count in counts.most_common(limit)]
+
+
 def _config_dir() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "memento-vault"
 
@@ -408,6 +921,8 @@ _CRITICAL_MANAGED_KEYS = {
     "memento/pi_bridge.py",
     "memento/adapters/__init__.py",
     "memento/adapters/claude.py",
+    "memento/adapters/opencode.py",
+    "memento/adapters/pi.py",
 }
 
 
@@ -553,19 +1068,14 @@ def _check_managed_files(manifest: dict[str, Any] | None) -> CheckResult:
 
 
 def _expected_claude_hooks(manifest: dict[str, Any] | None) -> list[tuple[str, str]]:
-    options = (
-        manifest.get("options") if isinstance(manifest, dict) and isinstance(manifest.get("options"), dict) else {}
-    )
-    expected = [("SessionEnd", "memento-triage.py")]
-    if options.get("experimental"):
-        expected.extend(
-            [
-                ("SessionStart", "vault-briefing.py"),
-                ("UserPromptSubmit", "vault-recall.py"),
-                ("PreToolUse", "vault-tool-context.py"),
-            ]
-        )
-    return expected
+    # Retrieval hooks are part of the default posture now; experimental install
+    # options only gate the extra add-ons elsewhere in the installer.
+    return [
+        ("SessionEnd", "memento-triage.py"),
+        ("SessionStart", "vault-briefing.py"),
+        ("UserPromptSubmit", "vault-recall.py"),
+        ("PreToolUse", "vault-tool-context.py"),
+    ]
 
 
 def _check_claude_hooks(manifest: dict[str, Any] | None) -> CheckResult:
@@ -780,8 +1290,18 @@ def _check_mcp_config() -> list[CheckResult]:
     return checks
 
 
-_PI_BOOL_KEYS = {"enabled", "briefing", "promptRecall", "toolContext", "autoCapture", "captureQueue"}
-_PI_INT_KEYS = {"maxInjectedChars", "maxToolContextPerSession"}
+_PI_BOOL_KEYS = {
+    "enabled",
+    "briefing",
+    "promptRecall",
+    "toolContext",
+    "autoCapture",
+    "captureQueue",
+    "processQueue",
+    "processQueueOnSessionClose",
+}
+_PI_INT_KEYS = {"maxInjectedChars", "maxToolContextPerSession", "processQueueMaxCaptures"}
+_PI_STRING_OR_NULL_KEYS = {"processQueueModel"}
 
 
 def _check_pi_bridge_config() -> CheckResult:
@@ -808,6 +1328,10 @@ def _check_pi_bridge_config() -> CheckResult:
         value = candidate.get(key)
         if key in candidate and (type(value) is not int or value < 0):
             invalid.append(key)
+    for key in sorted(_PI_STRING_OR_NULL_KEYS):
+        value = candidate.get(key)
+        if key in candidate and not (isinstance(value, str) or value is None):
+            invalid.append(key)
     if invalid:
         return CheckResult(
             "pi bridge",
@@ -815,10 +1339,67 @@ def _check_pi_bridge_config() -> CheckResult:
             f"Pi bridge config has invalid key types: {', '.join(invalid)}",
             {"path": str(path), "invalid_keys": invalid},
         )
-    configured = sorted(key for key in candidate if key in _PI_BOOL_KEYS or key in _PI_INT_KEYS)
+    configured = sorted(
+        key for key in candidate if key in _PI_BOOL_KEYS or key in _PI_INT_KEYS or key in _PI_STRING_OR_NULL_KEYS
+    )
     return CheckResult(
         "pi bridge", PASS, "Pi bridge config shape looks valid", {"path": str(path), "configured_keys": configured}
     )
+
+
+def _check_pi_bridge_health() -> CheckResult:
+    path = Path(TRIAGE_HEALTH_LOG_PATH)
+    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    if not path.exists():
+        return CheckResult(
+            "pi bridge health",
+            PASS,
+            "no recent Pi bridge failures recorded",
+            {"log_path": str(path), "window_hours": _HEALTH_WINDOW_HOURS},
+        )
+
+    recent_failures: list[dict[str, Any]] = []
+    latest_failure: dict[str, Any] | None = None
+    for rec in _iter_recent_jsonl(path, cutoff):
+        if rec.get("hook") != "pi-bridge":
+            continue
+        failure = {
+            "ts": rec.get("ts"),
+            "action": rec.get("action"),
+            "operation": rec.get("operation") or rec.get("action"),
+            "backend": rec.get("backend"),
+            "config": rec.get("config"),
+            "cwd": rec.get("cwd"),
+            "project": rec.get("project"),
+            "session_id": rec.get("session_id"),
+            "error": rec.get("error"),
+            "error_type": rec.get("error_type"),
+            "reason": rec.get("reason"),
+        }
+        recent_failures.append(_sanitize_obj(failure))
+        latest_failure = failure
+
+    if not recent_failures:
+        return CheckResult(
+            "pi bridge health",
+            PASS,
+            "no recent Pi bridge failures recorded",
+            {"log_path": str(path), "window_hours": _HEALTH_WINDOW_HOURS},
+        )
+
+    last_error = _safe_text(str((latest_failure or {}).get("error") or ""))
+    message = f"Pi bridge failures {len(recent_failures)} in last {_HEALTH_WINDOW_HOURS}h"
+    if last_error:
+        message += f' — last error: "{last_error}"'
+    details: dict[str, Any] = {
+        "log_path": str(path),
+        "window_hours": _HEALTH_WINDOW_HOURS,
+        "events": len(recent_failures),
+        "failures": len(recent_failures),
+        "last_failure": _sanitize_obj(latest_failure or {}),
+        "recent_failures": recent_failures[:5],
+    }
+    return CheckResult("pi bridge health", WARN, message, details)
 
 
 def _has_stale_empty_mcp_config(path: Path) -> bool:
@@ -921,38 +1502,193 @@ def _scan_triage_log(path: Path, cutoff: datetime, legacy: bool) -> tuple[str | 
     return (str(path), total, failed, invalid_mcp_failed, stale_certainty_failed, last_error)
 
 
-def _check_retrieval_health() -> CheckResult:
+def _check_retrieval_health(
+    *, config: dict[str, Any] | None = None, search_check: CheckResult | None = None
+) -> CheckResult:
     path = Path(RETRIEVAL_LOG_PATH)
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
     if not path.exists():
         return CheckResult(
             "retrieval", WARN, "retrieval log not found; recall/search failure rate unavailable", {"path": str(path)}
         )
-    total = failed = 0
-    last_error = None
-    for rec in _iter_recent_jsonl(path, cutoff):
-        hook = rec.get("hook")
-        if hook not in {"recall", "search"}:
-            continue
-        action = str(rec.get("action") or "")
-        if action in {"low-signal-prompt", "skipped-prompt", "deferred-ready"}:
-            continue
-        total += 1
-        if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
-            failed += 1
-            last_error = rec.get("error") or action
+
+    diagnostics = _scan_retrieval_logs(path, cutoff)
+    remediation = _retrieval_remediation(diagnostics, config or {}, search_check)
+    details = dict(diagnostics)
+    details["log_path"] = str(path)
+    details["window_hours"] = _HEALTH_WINDOW_HOURS
+    if remediation:
+        details["remediation"] = remediation
+
+    total = diagnostics["events"]
+    failed = diagnostics["failures"]
     if total == 0:
-        return CheckResult("retrieval", PASS, "no recent recall/search failures recorded", {"log_path": str(path)})
-    if failed / total >= 0.5:
-        return CheckResult(
-            "retrieval",
-            WARN,
-            f"recall/search failures {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h",
-            {"log_path": str(path), "last_error": last_error},
-        )
-    return CheckResult(
-        "retrieval", PASS, f"recent recall/search health ok ({failed}/{total} failures)", {"log_path": str(path)}
+        if diagnostics["low_signal_skips"]:
+            return CheckResult(
+                "retrieval",
+                PASS,
+                f"only low-signal recall/search skips recorded in last {_HEALTH_WINDOW_HOURS}h",
+                details,
+            )
+        return CheckResult("retrieval", PASS, "no recent recall/search failures recorded", details)
+
+    category_summary = (
+        f"backend unavailable {diagnostics['backend_unavailable']}, "
+        f"backend exceptions {diagnostics['backend_exceptions']}, "
+        f"no-results {diagnostics['no_results']}, "
+        f"low-signal skips {diagnostics['low_signal_skips']}"
     )
+    if diagnostics["failure_rate"] >= 0.5:
+        message = (
+            f"recall/search backend failures {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h ({category_summary})"
+        )
+        if remediation:
+            message += f"; {remediation[0]}"
+        return CheckResult("retrieval", WARN, message, details)
+
+    return CheckResult(
+        "retrieval",
+        PASS,
+        f"recent recall/search health ok ({failed}/{total} failures; {category_summary})",
+        details,
+    )
+
+
+def _scan_retrieval_logs(path: Path, cutoff: datetime) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "events": 0,
+        "successes": 0,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "no_results": 0,
+        "backend_unavailable": 0,
+        "backend_exceptions": 0,
+        "low_signal_skips": 0,
+        "other_failures": 0,
+        "last_error": None,
+        "last_error_truncated": False,
+        "last_error_kind": None,
+    }
+    for rec in _iter_recent_jsonl(path, cutoff):
+        kind = _classify_retrieval_record(rec)
+        if kind is None:
+            continue
+        if kind == "low_signal_skip":
+            diagnostics["low_signal_skips"] += 1
+            continue
+
+        diagnostics["events"] += 1
+        if kind == "success":
+            diagnostics["successes"] += 1
+        elif kind == "no_result":
+            diagnostics["no_results"] += 1
+        elif kind == "backend_unavailable":
+            diagnostics["backend_unavailable"] += 1
+            _record_retrieval_error(diagnostics, rec, kind)
+        elif kind == "backend_exception":
+            diagnostics["backend_exceptions"] += 1
+            _record_retrieval_error(diagnostics, rec, kind)
+        else:
+            diagnostics["other_failures"] += 1
+            _record_retrieval_error(diagnostics, rec, kind)
+
+    diagnostics["failures"] = (
+        diagnostics["backend_unavailable"] + diagnostics["backend_exceptions"] + diagnostics["other_failures"]
+    )
+    if diagnostics["events"]:
+        diagnostics["failure_rate"] = round(diagnostics["failures"] / diagnostics["events"], 4)
+    return diagnostics
+
+
+def _classify_retrieval_record(rec: dict[str, Any]) -> str | None:
+    hook = str(rec.get("hook") or "")
+    action = str(rec.get("action") or "")
+    reason = str(rec.get("reason") or "")
+    if hook not in {"recall", "search", "mcp"}:
+        return None
+    if hook == "mcp" and action not in {"search", "search_miss"}:
+        return None
+    if action.startswith("diagnostic-"):
+        return None
+
+    reason_or_action = reason if action == "search_miss" and reason else action
+    normalized = _normalize_retrieval_reason(reason_or_action)
+    if normalized in _RETRIEVAL_SKIP_ACTIONS:
+        return "low_signal_skip"
+    if action in {"inject", "search"} and normalized not in _RETRIEVAL_BACKEND_UNAVAILABLE_REASONS:
+        return "success"
+    if normalized in _RETRIEVAL_BACKEND_UNAVAILABLE_REASONS:
+        return "backend_unavailable"
+    if action in _RETRIEVAL_BACKEND_EXCEPTION_ACTIONS:
+        return "backend_exception"
+    if normalized in _RETRIEVAL_NO_RESULT_REASONS:
+        return "no_result"
+    if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
+        return "backend_exception" if hook == "search" else "other_failure"
+    return None
+
+
+def _normalize_retrieval_reason(reason: str) -> str:
+    aliases = {
+        "broad-project-query": "query_too_broad",
+        "filtered-empty": "filtered-empty",
+        "low-signal-prompt": "low-signal-prompt",
+        "no-results": "no-results",
+        "project-mismatch-filtered-empty": "project-mismatch-filtered-empty",
+        "qmd-unavailable": "backend_unavailable",
+        "skipped-prompt": "skipped-prompt",
+        "vault-unavailable": "empty_vault",
+    }
+    return aliases.get(reason, reason)
+
+
+def _record_retrieval_error(diagnostics: dict[str, Any], rec: dict[str, Any], kind: str) -> None:
+    value = rec.get("error") or rec.get("reason") or rec.get("action") or kind
+    text, truncated = _safe_retrieval_error(value)
+    diagnostics["last_error"] = text
+    diagnostics["last_error_truncated"] = truncated
+    diagnostics["last_error_kind"] = kind
+
+
+def _safe_retrieval_error(value: Any) -> tuple[str, bool]:
+    text = _safe_text(" ".join(str(value or "").split()))
+    truncated = len(text) > _RETRIEVAL_ERROR_DETAIL_LIMIT
+    if truncated:
+        text = text[:_RETRIEVAL_ERROR_DETAIL_LIMIT] + "..."
+    return text, truncated
+
+
+def _retrieval_remediation(
+    diagnostics: dict[str, Any], config: dict[str, Any], search_check: CheckResult | None
+) -> list[str]:
+    if diagnostics.get("failures", 0) == 0:
+        return []
+    backend = str(config.get("search_backend") or "auto")
+    hints: list[str] = []
+    if diagnostics.get("backend_unavailable", 0):
+        if backend == "qmd":
+            hints.append(
+                "qmd search backend is configured but unavailable; verify qmd is on PATH or choose embedded/grep"
+            )
+        elif backend == "embedded":
+            hints.append(
+                "embedded search backend is configured but unavailable; run memento_reindex and verify the index path"
+            )
+        elif backend == "grep":
+            hints.append(
+                "grep search backend is configured but unavailable; verify the vault notes/projects directories"
+            )
+        else:
+            hints.append(
+                "search backend is unavailable; run memento health/status and reindex or reinstall the configured backend"
+            )
+    if diagnostics.get("backend_exceptions", 0):
+        hints.append(
+            "search backend raised exceptions; inspect --verbose last_error and run memento_reindex if index state is stale"
+        )
+    if search_check and search_check.status == FAIL:
+        hints.append(search_check.message)
+    return list(dict.fromkeys(hints))
 
 
 def _check_locks() -> CheckResult:
@@ -1044,32 +1780,203 @@ def _pid_is_live(pid: int | None) -> bool:
         return exc.errno == errno.EPERM
 
 
+def _missing_inception_dependencies() -> list[str]:
+    return [pkg for pkg in ("numpy", "hdbscan", "sklearn") if importlib.util.find_spec(pkg) is None]
+
+
+def _safe_excerpt(value: Any, limit: int = _INCEPTION_ERROR_DETAIL_LIMIT) -> tuple[str, bool]:
+    text = _sanitize_secrets(" ".join(str(value or "").split()))
+    truncated = len(text) > limit
+    if truncated:
+        text = text[:limit] + "..."
+    return text, truncated
+
+
+def _format_duration(seconds: int) -> str:
+    remaining = max(0, int(seconds))
+    parts: list[str] = []
+    for suffix, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if remaining >= size:
+            value, remaining = divmod(remaining, size)
+            if value:
+                parts.append(f"{value}{suffix}")
+    if remaining or not parts:
+        parts.append(f"{remaining}s")
+    return " ".join(parts)
+
+
+def _summarize_inception_runs(runs: Any, limit: int = _INCEPTION_RECENT_RUNS_LIMIT) -> list[dict[str, Any]]:
+    if not isinstance(runs, list):
+        return []
+    summaries: list[dict[str, Any]] = []
+    for run in runs[-limit:]:
+        if not isinstance(run, dict):
+            summaries.append(_sanitize_obj(run))
+            continue
+        item: dict[str, Any] = {}
+        for key in ("iso", "clusters_found", "notes_written", "dry_run"):
+            if key in run:
+                item[key] = run[key]
+        for key in ("error", "last_error", "reason"):
+            if run.get(key):
+                excerpt, truncated = _safe_excerpt(run[key])
+                item["error"] = excerpt
+                item["error_truncated"] = truncated
+                break
+        summaries.append(_sanitize_obj(item))
+    return summaries
+
+
+def _extract_inception_error(state: dict[str, Any]) -> dict[str, Any] | None:
+    candidates: list[tuple[str, Any]] = []
+    for key in ("last_error", "error"):
+        value = state.get(key)
+        if value:
+            candidates.append((key, value))
+    for key in ("last_failure", "failure"):
+        value = state.get(key)
+        if isinstance(value, dict):
+            for subkey in ("error", "message", "reason"):
+                if value.get(subkey):
+                    candidates.append((f"{key}.{subkey}", value[subkey]))
+                    break
+        elif value:
+            candidates.append((key, value))
+    runs = state.get("runs")
+    if isinstance(runs, list):
+        for index, run in enumerate(reversed(runs), start=1):
+            if not isinstance(run, dict):
+                continue
+            for key in ("last_error", "error", "exception", "reason"):
+                value = run.get(key)
+                if value:
+                    candidates.append((f"runs[-{index}].{key}", value))
+                    break
+    for source, value in candidates:
+        excerpt, truncated = _safe_excerpt(value)
+        if excerpt:
+            return {"source": source, "error": excerpt, "truncated": truncated}
+    return None
+
+
+def _last_inception_run(state: dict[str, Any]) -> tuple[datetime | None, str | None, str | None]:
+    raw = state.get("last_run_iso")
+    dt = _parse_ts(raw)
+    if dt is not None:
+        return dt, str(raw), "last_run_iso"
+    runs = state.get("runs")
+    if isinstance(runs, list):
+        for index, run in enumerate(reversed(runs), start=1):
+            if not isinstance(run, dict):
+                continue
+            for key in ("iso", "ts", "last_run_iso"):
+                raw_run = run.get(key)
+                dt = _parse_ts(raw_run)
+                if dt is not None:
+                    return dt, dt.isoformat(timespec="seconds"), f"runs[-{index}].{key}"
+    return None, None, None
+
+
 def _check_inception(config: dict[str, Any]) -> CheckResult:
     if not config.get("inception_enabled", False):
         return CheckResult("inception", PASS, "inception disabled")
+
     state_path = Path(INCEPTION_STATE_PATH)
+    details: dict[str, Any] = {
+        "state_path": str(state_path),
+        "lock_path": str(INCEPTION_LOCK_PATH),
+        "state_present": state_path.exists(),
+    }
+    issue_messages: list[str] = []
+    summary_messages: list[str] = []
+    status = PASS
+
+    missing_dependencies = _missing_inception_dependencies()
+    if missing_dependencies:
+        details["missing_dependencies"] = missing_dependencies
+        issue_messages.append(f"missing optional dependencies: {', '.join(missing_dependencies)}")
+        status = FAIL
+
+    lock_details = _inspect_lock("inception", Path(INCEPTION_LOCK_PATH))
+    details["lock"] = _sanitize_obj(lock_details)
+    if lock_details["message"]:
+        issue_messages.append(lock_details["message"])
+    if lock_details["status"] == FAIL:
+        status = FAIL
+    elif lock_details["status"] == WARN and status == PASS:
+        status = WARN
+
     if not state_path.exists():
-        return CheckResult(
-            "inception", WARN, "inception enabled but state file is missing", {"state_path": str(state_path)}
+        issue_messages.append("state file is missing")
+        if status == PASS:
+            status = WARN
+        message = (
+            "; ".join(issue_messages)
+            if issue_messages
+            else f"inception enabled but state file is missing: {state_path}"
         )
+        return CheckResult("inception", status, message, details)
+
     try:
         state = json.loads(state_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        return CheckResult("inception", WARN, f"inception state is unreadable: {exc}", {"state_path": str(state_path)})
-    last_run = state.get("last_run_iso")
-    if not last_run:
-        return CheckResult(
-            "inception", WARN, "inception enabled but has no recorded run", {"state_path": str(state_path)}
-        )
-    return CheckResult(
-        "inception",
-        PASS,
-        f"inception last ran at {last_run}",
-        {"state_path": str(state_path), "last_run_note_count": state.get("last_run_note_count")},
+        details["state_error"] = _safe_text(str(exc))
+        issue_messages.append(f"state file is unreadable: {exc}")
+        if status == PASS:
+            status = WARN
+        message = "; ".join(issue_messages)
+        return CheckResult("inception", status, message, details)
+
+    if not isinstance(state, dict):
+        issue_messages.append("state file root must be an object")
+        if status == PASS:
+            status = WARN
+        message = "; ".join(issue_messages)
+        return CheckResult("inception", status, message, details)
+
+    details["state_valid"] = True
+    runs = state.get("runs") if isinstance(state.get("runs"), list) else []
+    details["run_count"] = len(runs)
+    details["processed_notes_count"] = (
+        len(state.get("processed_notes", [])) if isinstance(state.get("processed_notes"), list) else 0
     )
+    details["last_run_note_count"] = state.get("last_run_note_count")
+    details["recent_runs"] = _summarize_inception_runs(runs)
+
+    last_run_dt, last_run_iso, last_run_source = _last_inception_run(state)
+    if last_run_dt is None:
+        issue_messages.append("no recorded run yet")
+        if status == PASS:
+            status = WARN
+    else:
+        age_seconds = int(max(0, (datetime.now() - last_run_dt).total_seconds()))
+        details["last_run_iso"] = last_run_iso
+        details["last_run_source"] = last_run_source
+        details["last_run_age_seconds"] = age_seconds
+        details["last_run_age_human"] = _format_duration(age_seconds)
+        if state.get("last_run_iso") is None or last_run_source != "last_run_iso":
+            issue_messages.append("last_run_iso missing or invalid; using most recent run summary")
+            if status == PASS:
+                status = WARN
+        summary_messages.append(f"last ran {details['last_run_age_human']} ago")
+        summary_messages.append(f"{details['run_count']} recorded run(s)")
+        last_count = details["last_run_note_count"]
+        if last_count is not None:
+            summary_messages.append(f"last run note count {last_count}")
+
+    last_error = _extract_inception_error(state)
+    if last_error:
+        details["last_error"] = last_error["error"]
+        details["last_error_source"] = last_error["source"]
+        details["last_error_truncated"] = last_error["truncated"]
+        summary_messages.append(f'last error: "{last_error["error"]}"')
+
+    message_parts = issue_messages + summary_messages
+    message = "; ".join(message_parts) if message_parts else "inception enabled"
+    return CheckResult("inception", status, message, details)
 
 
-def _iter_recent_jsonl(path: Path, cutoff: datetime):
+def _iter_jsonl(path: Path):
     try:
         with path.open() as handle:
             for line in handle:
@@ -1077,12 +1984,18 @@ def _iter_recent_jsonl(path: Path, cutoff: datetime):
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                ts = _parse_ts(rec.get("ts"))
-                if ts is None or ts < cutoff:
-                    continue
-                yield rec
+                if isinstance(rec, dict):
+                    yield rec
     except OSError:
         return
+
+
+def _iter_recent_jsonl(path: Path, cutoff: datetime):
+    for rec in _iter_jsonl(path):
+        ts = _parse_ts(rec.get("ts"))
+        if ts is None or ts < cutoff:
+            continue
+        yield rec
 
 
 def _parse_ts(raw: Any) -> datetime | None:

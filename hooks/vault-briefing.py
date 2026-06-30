@@ -19,7 +19,12 @@ from memento.utils import read_hook_input  # noqa: E402
 
 def main() -> None:
     if "--deferred" in sys.argv:
-        run_deferred_briefing_search()
+        deferred_path = None
+        if "--deferred-path" in sys.argv:
+            index = sys.argv.index("--deferred-path")
+            if index + 1 < len(sys.argv):
+                deferred_path = sys.argv[index + 1]
+        run_deferred_briefing_search(deferred_path)
         sys.exit(0)
 
     try:

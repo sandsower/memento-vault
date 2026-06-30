@@ -8,9 +8,11 @@ from unittest.mock import patch
 
 import pytest
 
-from memento.adapters import detect_agent, parse_transcript, truncate_transcript
+from memento.adapters import detect_agent, parse_transcript, render_transcript_text, truncate_transcript
 from memento.adapters.claude import parse_transcript as parse_claude
 from memento.adapters.opencode import parse_transcript as parse_opencode
+from memento.adapters.pi import parse_transcript as parse_pi
+from memento.adapters.pi import render_transcript_text as render_pi
 
 
 @pytest.fixture
@@ -132,6 +134,34 @@ class TestDetectAgent:
         transcript.write_text("\n".join(json.dumps({"type": "file-history-snapshot", "i": i}) for i in range(5)) + "\n")
         assert detect_agent(str(transcript)) == "unknown"
 
+    def test_detects_pi_from_message_records(self, tmp_path):
+        transcript = tmp_path / "pi-session.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "message",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "remember this"}]},
+                }
+            )
+            + "\n"
+        )
+        assert detect_agent(str(transcript)) == "pi"
+
+    def test_detects_pi_from_streaming_session_records(self, tmp_path):
+        transcript = tmp_path / "pi-stream.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "session", "version": 3, "id": "pi-s1", "cwd": "/repo"})
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "message_start",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "remember this"}]},
+                }
+            )
+            + "\n"
+        )
+        assert detect_agent(str(transcript)) == "pi"
+
 
 # --- parse_transcript (dispatcher) ---
 
@@ -158,6 +188,13 @@ class TestParseTranscript:
         with patch.dict(os.environ, {"MEMENTO_AGENT": "windsurf"}):
             with pytest.raises(ValueError, match="not yet implemented"):
                 parse_transcript(str(claude_transcript))
+
+    def test_dispatcher_routes_to_pi(self, tmp_path):
+        transcript = _write_pi_transcript(tmp_path)
+        meta = parse_transcript(str(transcript))
+        assert meta["agent"] == "pi"
+        assert meta["first_prompt"] == "Fix the Pi transcript adapter"
+        assert "memento/adapters/pi.py" in meta["files_edited"]
 
 
 # --- Claude adapter ---
@@ -534,6 +571,295 @@ class TestOpencodeAdapter:
             assert meta["user_messages"] == 2
         finally:
             os.chmod(opencode_db, 0o644)
+
+
+# --- Pi adapter ---
+
+
+def _write_pi_transcript(tmp_path, records=None):
+    transcript = tmp_path / "pi-session.jsonl"
+    records = records or [
+        {
+            "type": "session",
+            "session_id": "pi-s1",
+            "cwd": "/repo/memento-vault",
+            "gitBranch": "vic/mem-41",
+        },
+        {
+            "type": "message",
+            "timestamp": "2026-06-14T00:00:00Z",
+            "cwd": "/repo/memento-vault",
+            "gitBranch": "vic/mem-41",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Fix the Pi transcript adapter"}],
+            },
+        },
+        {
+            "type": "message",
+            "timestamp": "2026-06-14T00:00:01Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "hidden chain of thought", "encrypted_content": "opaque"},
+                    {"type": "text", "text": "I'll add the adapter."},
+                    {"type": "toolCall", "name": "read", "arguments": {"file_path": "memento/adapters/__init__.py"}},
+                    {"type": "toolCall", "name": "edit", "arguments": {"file_path": "memento/adapters/pi.py"}},
+                ],
+            },
+        },
+        {
+            "type": "message",
+            "timestamp": "2026-06-14T00:00:02Z",
+            "message": {"role": "user", "content": [{"type": "text", "text": "ship it"}]},
+        },
+        {
+            "type": "message",
+            "timestamp": "2026-06-14T00:00:03Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done. Pi transcripts now render safely."}],
+            },
+        },
+    ]
+    transcript.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    return transcript
+
+
+class TestPiAdapter:
+    def test_parses_metadata_and_files(self, tmp_path):
+        transcript = _write_pi_transcript(tmp_path)
+        meta = parse_pi(str(transcript))
+        assert meta["cwd"] == "/repo/memento-vault"
+        assert meta["git_branch"] == "vic/mem-41"
+        assert meta["exchange_count"] == 2
+        assert meta["user_messages"] == 2
+        assert meta["files_read"] == ["memento/adapters/__init__.py"]
+        assert meta["files_edited"] == ["memento/adapters/pi.py"]
+        assert meta["first_prompt"] == "Fix the Pi transcript adapter"
+        assert meta["last_outcome"] == "Done."
+        assert meta["session_id"] == "pi-s1"
+
+    def test_parses_streaming_pi_session_shape(self, tmp_path):
+        transcript = _write_pi_transcript(
+            tmp_path,
+            [
+                {"type": "session", "version": 3, "id": "pi-s1", "cwd": "/repo/memento-vault"},
+                {
+                    "type": "message_start",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": '<file name="prompt.md">Fix the adapter</file>'}],
+                    },
+                },
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": '<file name="prompt.md">Fix the adapter</file>'}],
+                    },
+                },
+                {
+                    "type": "message_update",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "thinking", "thinking": "private reasoning"}],
+                    },
+                },
+                {
+                    "type": "tool_execution_start",
+                    "toolName": "read",
+                    "args": {"path": "memento/adapters/__init__.py"},
+                },
+                {
+                    "type": "tool_execution_start",
+                    "toolName": "write",
+                    "args": {"path": "memento/adapters/pi.py"},
+                },
+                {
+                    "type": "tool_execution_end",
+                    "toolName": "read",
+                    "result": {"content": [{"type": "text", "text": "x" * 20}]},
+                },
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "secret"},
+                            {"type": "text", "text": "Done. Adapter supports Pi event streams."},
+                        ],
+                    },
+                },
+            ],
+        )
+
+        meta = parse_pi(str(transcript))
+        rendered = render_pi(str(transcript), per_tool_cap=5)
+
+        assert meta["cwd"] == "/repo/memento-vault"
+        assert meta["session_id"] == "pi-s1"
+        assert meta["exchange_count"] == 1
+        assert meta["user_messages"] == 1
+        assert meta["files_read"] == ["memento/adapters/__init__.py"]
+        assert meta["files_edited"] == ["memento/adapters/pi.py"]
+        assert meta["first_prompt"] == "Fix the adapter"
+        assert meta["last_outcome"] == "Done."
+        assert "User: <file" in rendered
+        assert "Assistant tool read: memento/adapters/__init__.py" in rendered
+        assert "Assistant tool write: memento/adapters/pi.py" in rendered
+        assert "Tool result read: xxxxx" in rendered
+        assert "[tool result truncated]" in rendered
+        assert "private reasoning" not in rendered
+        assert "secret" not in rendered
+
+    def test_render_transcript_text_deduplicates_finalized_tool_events(self, tmp_path):
+        tool_call_id = "call-1"
+        transcript = _write_pi_transcript(
+            tmp_path,
+            [
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "toolCall",
+                                "id": tool_call_id,
+                                "name": "read",
+                                "arguments": {"path": "memento/adapters/pi.py"},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "tool_execution_start",
+                    "toolName": "read",
+                    "toolCallId": tool_call_id,
+                    "args": {"path": "memento/adapters/pi.py"},
+                },
+                {
+                    "type": "tool_execution_end",
+                    "toolName": "read",
+                    "toolCallId": tool_call_id,
+                    "result": {"content": [{"type": "text", "text": "x" * 20}]},
+                },
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "toolResult",
+                        "toolName": "read",
+                        "toolCallId": tool_call_id,
+                        "content": [{"type": "text", "text": "x" * 20}],
+                    },
+                },
+            ],
+        )
+
+        rendered = render_pi(str(transcript), per_tool_cap=5)
+
+        assert rendered.count("Assistant tool read: memento/adapters/pi.py") == 1
+        assert rendered.count("Tool result read: xxxxx") == 1
+        assert "xxxxxxxxxx" not in rendered
+        assert "[tool result truncated]" in rendered
+
+    def test_render_transcript_text_excludes_thinking_and_caps_tool_results(self, tmp_path):
+        transcript = _write_pi_transcript(
+            tmp_path,
+            [
+                {
+                    "type": "message",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "Capture durable signal"}]},
+                },
+                {
+                    "type": "message",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "reasoning", "text": "private reasoning"},
+                            {"type": "thinking", "thinking": "secret reasoning", "thinkingSignature": "sig"},
+                            {"type": "toolCall", "name": "memento_capture", "arguments": {"title": "Decision"}},
+                        ],
+                    },
+                },
+                {
+                    "type": "message",
+                    "message": {"role": "toolResult", "content": [{"type": "toolResult", "text": "x" * 20}]},
+                },
+                {
+                    "type": "message",
+                    "message": {"role": "toolResult", "content": [{"type": "text", "text": "y" * 20}]},
+                },
+            ],
+        )
+        rendered = render_pi(str(transcript), per_tool_cap=5)
+        assert "User: Capture durable signal" in rendered
+        assert "Assistant tool memento_capture" in rendered
+        assert "Tool: xxxxx" in rendered
+        assert "Tool: yyyyy" in rendered
+        assert "yyyyyyyyyy" not in rendered
+        assert "[tool result truncated]" in rendered
+        assert "private reasoning" not in rendered
+        assert "secret reasoning" not in rendered
+        assert "thinkingSignature" not in rendered
+
+    def test_dispatcher_render_uses_pi_renderer(self, tmp_path):
+        transcript = _write_pi_transcript(tmp_path)
+        rendered = render_transcript_text(str(transcript), agent="pi")
+        assert "User: Fix the Pi transcript adapter" in rendered
+        assert "Assistant: I'll add the adapter." in rendered
+        assert "hidden chain of thought" not in rendered
+
+    def test_empty_transcript_is_predictable(self, tmp_path):
+        transcript = tmp_path / "empty.jsonl"
+        transcript.write_text("")
+        meta = parse_pi(str(transcript))
+        assert meta["exchange_count"] == 0
+        assert meta["files_edited"] == []
+        assert render_pi(str(transcript)) == ""
+
+    def test_malformed_jsonl_records_are_skipped(self, tmp_path):
+        transcript = tmp_path / "partial.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "session", "id": "pi-s1", "cwd": "/repo"})
+            + "\n"
+            + '{"type":"message",'
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "message",
+                    "message": {"role": "user", "content": [{"type": "text", "text": "keep this"}]},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        meta = parse_pi(str(transcript))
+        rendered = render_pi(str(transcript))
+
+        assert meta["session_id"] == "pi-s1"
+        assert meta["first_prompt"] == "keep this"
+        assert "User: keep this" in rendered
+
+    def test_oversize_render_can_be_truncated_by_shared_budget(self, tmp_path):
+        records = [
+            {
+                "type": "message",
+                "message": {"role": "user", "content": [{"type": "text", "text": "start " + "a" * 5000}]},
+            },
+            {
+                "type": "message",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "end " + "z" * 5000}]},
+            },
+        ]
+        transcript = _write_pi_transcript(tmp_path, records)
+        rendered = render_pi(str(transcript))
+        truncated = truncate_transcript(rendered, 1000)
+        assert len(truncated) <= 1000
+        assert "transcript truncated" in truncated
+        assert truncated.startswith("User: start")
+        assert truncated.endswith("z" * 100)
 
 
 class TestTruncateTranscript:

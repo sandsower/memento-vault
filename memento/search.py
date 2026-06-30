@@ -9,7 +9,7 @@ from typing import Optional
 
 from memento.config import RUNTIME_DIR, get_config, get_vault
 from memento.search_backend import _clean_snippet, get_backend  # noqa: F401 (_clean_snippet re-exported for compat)
-from memento.store import log_retrieval
+from memento.store import apply_access_log_boost, log_retrieval
 from memento.graph import (
     apply_pagerank_boost,
     extract_wikilinks,
@@ -729,8 +729,9 @@ def apply_quality_signals(results, config=None):
     deferred briefing, MCP search). Classes, per audit 2026-06-10 Part 2:
     - queued Pi raw captures (type: session + pi/queued tags): dropped
     - log-shaped paths (fleeting daily logs, project index files): dropped
-    - remaining `type: session` notes: penalized until the capture schema
-      is unified (MEM-50)
+    - remaining legacy `type: session` notes: penalized, except old Pi manual
+      captures are treated as typed low-certainty discoveries for MEM-50
+      compatibility
     - low certainty (<= 2): mild penalty; untyped notes: mild penalty
     """
     if config is None:
@@ -761,15 +762,22 @@ def apply_quality_signals(results, config=None):
             # `type: "Session"` or `tags: [PI, QUEUED]` can't bypass the rules.
             note_type = str(meta.get("type") or "").strip().strip('"').strip("'").lower()
             tags = {str(tag).strip().strip('"').strip("'").lower() for tag in (meta.get("tags") or [])}
-            if note_type == "session" and tags & {"pi", "queued"}:
+            if note_type == "session" and "queued" in tags:
                 log_retrieval("search", "quality_excluded", path=path, reason="queued-session-capture")
                 continue
+            source = str(meta.get("source") or "").strip().strip('"').strip("'").lower()
+            origin = str(meta.get("origin") or "").strip().strip('"').strip("'").lower()
+            legacy_pi_capture = note_type == "session" and (
+                "pi" in tags or source in {"pi", "pi-capture"} or origin.startswith("pi_bridge")
+            )
             factor = 1.0
-            if note_type == "session":
+            if note_type == "session" and not legacy_pi_capture:
                 factor *= session_factor
             elif not note_type:
                 factor *= untyped_factor
             certainty = meta.get("certainty")
+            if certainty is None and legacy_pi_capture:
+                certainty = 2
             if certainty is not None and certainty <= 2:
                 factor *= low_certainty_factor
             if factor != 1.0:
@@ -787,8 +795,9 @@ def enhance_results(results, config=None, cwd=None, require_project_match=False)
       1. Temporal decay (age-based score adjustment)
       2. Quality signals (drop/penalize low-quality note classes)
       3. PageRank boost (centrality-based score boost)
-      4. Project filter (scope to current project)
-      5. PPR expansion (Personalized PageRank link traversal)
+      4. Access-log boost (recent/frequent successful retrievals)
+      5. Project filter (scope to current project)
+      6. PPR expansion (Personalized PageRank link traversal)
          Falls back to naive wikilink expansion if networkx unavailable.
 
     Call this after qmd_search to improve result quality.
@@ -815,6 +824,8 @@ def enhance_results(results, config=None, cwd=None, require_project_match=False)
 
     if pagerank:
         results = apply_pagerank_boost(results, pagerank, config)
+
+    results = apply_access_log_boost(results, config)
 
     if cwd:
         results = filter_by_project(results, cwd, require_match=require_project_match)

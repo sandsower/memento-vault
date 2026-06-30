@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,7 @@ from pathlib import Path
 
 from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, slugify
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
+from memento.health import build_automation_memory_readiness
 from memento.llm import is_invalid_mcp_config_error, llm_complete
 from memento.search import (
     MISS_RECOVERY_HINTS,
@@ -28,10 +30,17 @@ from memento.search import (
     prf_expand_query,
     qmd_search,
     qmd_search_with_extras,
+    resolve_concrete_mode,
     rrf_fuse,
 )
-from memento.store import RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, log_retrieval
-from memento.utils import read_hook_input
+from memento.store import (
+    RETRIEVAL_LOG_PATH,
+    TRIAGE_HEALTH_LOG_PATH,
+    log_automation_memory_health,
+    log_retrieval,
+    record_access,
+)
+from memento.utils import read_hook_input, sanitize_secrets
 
 TRIAGE_HEALTH_WINDOW_HOURS = 24
 TRIAGE_HEALTH_MIN_EVENTS = 3
@@ -190,6 +199,92 @@ def _mark_triage_warn_shown():
             json.dump({"date": datetime.now().strftime("%Y-%m-%d")}, f)
     except OSError:
         pass
+
+
+PI_BRIDGE_WARN_STATE_PATH = os.path.join(RUNTIME_DIR, "pi-bridge-warn-state.json")
+
+
+def _pi_bridge_warn_shown_today():
+    try:
+        with open(PI_BRIDGE_WARN_STATE_PATH) as f:
+            return json.load(f).get("date") == datetime.now().strftime("%Y-%m-%d")
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
+def _mark_pi_bridge_warn_shown():
+    try:
+        with open(PI_BRIDGE_WARN_STATE_PATH, "w") as f:
+            json.dump({"date": datetime.now().strftime("%Y-%m-%d")}, f)
+    except OSError:
+        pass
+
+
+def _health_error_excerpt(error: object, limit: int = 140) -> str:
+    text = sanitize_secrets(" ".join(str(error or "").split()))
+    text = _strip_injection(text)
+    return text[:limit]
+
+
+def _scan_pi_bridge_health_log(path: str, cutoff: datetime) -> tuple[str | None, int, dict[str, object] | None]:
+    if not os.path.exists(path):
+        return str(path), 0, None
+
+    count = 0
+    latest: dict[str, object] | None = None
+    latest_ts: datetime | None = None
+    with open(path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict) or rec.get("hook") != "pi-bridge":
+                continue
+            ts_raw = rec.get("ts")
+            if not ts_raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+            count += 1
+            if latest_ts is None or ts >= latest_ts:
+                latest_ts = ts
+                latest = rec
+    return str(path), count, latest
+
+
+def pi_bridge_health_warning(rate_limited=False):
+    """Return a one-line warning if recent Pi bridge commands are failing."""
+    try:
+        cutoff = datetime.now() - timedelta(hours=TRIAGE_HEALTH_WINDOW_HOURS)
+        log_path, failures, latest = _scan_pi_bridge_health_log(TRIAGE_HEALTH_LOG_PATH, cutoff)
+        if failures == 0:
+            return None
+        if rate_limited:
+            if _pi_bridge_warn_shown_today():
+                return None
+            _mark_pi_bridge_warn_shown()
+
+        warning = (
+            f"[vault] WARN: Pi bridge failing {failures} recent command(s) in last {TRIAGE_HEALTH_WINDOW_HOURS}h "
+            f"— check {log_path}"
+        )
+        if latest:
+            operation = str(latest.get("operation") or latest.get("action") or "unknown")
+            backend = str(latest.get("backend") or "unknown")
+            project = str(latest.get("project") or "unknown")
+            cwd = str(latest.get("cwd") or "unknown")
+            session_id = str(latest.get("session_id") or "unknown")
+            warning += f" — last: {operation} via {backend} · {project} · {cwd} · session {session_id}"
+            if latest.get("error"):
+                warning += f' — error: "{_health_error_excerpt(latest.get("error"))}"'
+        return warning
+    except Exception:
+        return None
 
 
 def triage_health_warning(rate_limited=False):
@@ -396,7 +491,59 @@ def _find_hook_script(name):
     return None
 
 
-def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
+def _deferred_scope(project_slug: str, session_id: str, cwd: str = "") -> dict:
+    return {
+        "project_slug": project_slug or "unknown",
+        "session_id": session_id or "unknown",
+        "cwd": str(Path(cwd).expanduser()) if cwd else "",
+    }
+
+
+def deferred_briefing_path(project_slug: str = "unknown", session_id: str = "unknown", cwd: str = "") -> str:
+    """Return the session/project-scoped deferred briefing file path."""
+    scope = _deferred_scope(project_slug, session_id, cwd)
+    raw = "\0".join([scope["project_slug"], scope["session_id"], scope["cwd"]])
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    base = Path(DEFERRED_BRIEFING_PATH)
+    return str(base.with_name(f"{base.stem}-{digest}{base.suffix}"))
+
+
+def _deferred_is_expired(data: dict, ttl_seconds: int = 60) -> bool:
+    timestamp = data.get("timestamp") or data.get("params", {}).get("timestamp")
+    try:
+        timestamp_float = float(timestamp)
+    except (TypeError, ValueError):
+        return True
+    return (time.time() - timestamp_float) > ttl_seconds
+
+
+def _deferred_scope_matches(data: dict, project_slug: str, session_id: str) -> bool:
+    scope = data.get("scope") or data.get("params", {}).get("scope") or {}
+    if not isinstance(scope, dict):
+        return False
+    return scope.get("project_slug") == (project_slug or "unknown") and scope.get("session_id") == (
+        session_id or "unknown"
+    )
+
+
+def _cleanup_legacy_deferred_briefing(scoped_path: str) -> None:
+    """Remove unscoped legacy deferred results instead of allowing cross-session consumption."""
+    legacy_path = Path(DEFERRED_BRIEFING_PATH)
+    if str(legacy_path) == scoped_path or not legacy_path.exists():
+        return
+    try:
+        with legacy_path.open() as f:
+            data = json.load(f)
+        if not data.get("scope") and not data.get("params", {}).get("scope"):
+            legacy_path.unlink()
+    except (json.JSONDecodeError, OSError):
+        try:
+            legacy_path.unlink()
+        except OSError:
+            pass
+
+
+def spawn_deferred_search(project_slug, git_branch, linked_notes, config, session_id="unknown"):
     """Spawn a background subprocess to run QMD search and write results."""
     max_notes = config.get("briefing_max_notes", 5)
     min_score = config.get("briefing_min_score", 0.3)
@@ -407,14 +554,20 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
         branch_words = git_branch.replace("-", " ").replace("/", " ")
         query_parts.append(branch_words)
 
+    cwd = config.get("_cwd", "")
+    scope = _deferred_scope(project_slug, session_id, cwd)
+    deferred_path = deferred_briefing_path(project_slug, session_id, cwd)
+
     # Write the search params for the background worker
     params = {
         "query": " ".join(query_parts),
         "max_notes": max_notes,
         "min_score": min_score,
         "linked_notes": linked_notes,
-        "cwd": config.get("_cwd", ""),
+        "cwd": cwd,
         "timestamp": time.time(),
+        "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
+        "scope": scope,
     }
 
     worker = _find_hook_script("vault-briefing.py")
@@ -428,12 +581,12 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
         return
 
     try:
-        with open(DEFERRED_BRIEFING_PATH, "w") as f:
-            json.dump({"status": "pending", "params": params}, f)
+        with open(deferred_path, "w") as f:
+            json.dump({"status": "pending", "params": params, "scope": scope, "timestamp": params["timestamp"]}, f)
 
         # Spawn background worker — the same script with --deferred flag
         _subprocess.Popen(
-            [sys.executable, str(worker), "--deferred"],
+            [sys.executable, str(worker), "--deferred", "--deferred-path", deferred_path],
             stdin=_subprocess.DEVNULL,
             stdout=_subprocess.DEVNULL,
             stderr=_subprocess.DEVNULL,
@@ -442,18 +595,23 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config):
     except OSError:
         # If spawn fails, clean up so recall doesn't wait for stale pending
         try:
-            os.unlink(DEFERRED_BRIEFING_PATH)
+            os.unlink(deferred_path)
         except OSError:
             pass
 
 
-def run_deferred_briefing_search():
-    """Background worker: run QMD search and write results to the deferred file."""
+def run_deferred_briefing_search(deferred_path: str | None = None):
+    """Background worker: run QMD search and write results to the scoped deferred file."""
+    path = deferred_path or DEFERRED_BRIEFING_PATH
     try:
-        with open(DEFERRED_BRIEFING_PATH) as f:
+        with open(path) as f:
             data = json.load(f)
 
-        if data.get("status") != "pending":
+        if data.get("status") != "pending" or _deferred_is_expired(data, DEFERRED_BRIEFING_TTL_SECONDS):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
             sys.exit(0)
 
         params = data["params"]
@@ -461,6 +619,7 @@ def run_deferred_briefing_search():
         max_notes = params["max_notes"]
         min_score = params["min_score"]
         linked_notes = params.get("linked_notes", [])
+        scope = params.get("scope") or data.get("scope") or _deferred_scope("unknown", "unknown", params.get("cwd", ""))
 
         import time as _time
 
@@ -479,6 +638,7 @@ def run_deferred_briefing_search():
         # Format results, dedup against linked notes
         seen = set()
         note_lines = []
+        note_paths = []
 
         for result in results:
             title = result.get("title", "")
@@ -486,6 +646,7 @@ def run_deferred_briefing_search():
                 continue
             seen.add(title)
             note_lines.append(format_qmd_result(result))
+            note_paths.append(result.get("path", ""))
 
         for note_name in linked_notes:
             if note_name in seen or len(note_lines) >= max_notes:
@@ -494,14 +655,27 @@ def run_deferred_briefing_search():
             oneliner = read_note_oneliner(note_name)
             if oneliner:
                 note_lines.append(f"  - {oneliner}")
+                note_paths.append(f"notes/{note_name}.md")
 
         final_notes = note_lines[:max_notes]
-        with open(DEFERRED_BRIEFING_PATH, "w") as f:
+        final_paths = [path for path in note_paths[:max_notes] if path]
+        if final_paths:
+            record_access(
+                final_paths,
+                hook="briefing",
+                tool="deferred-search",
+                query=query,
+                session_id=params.get("session_id", "unknown"),
+                result_count=len(final_paths),
+            )
+        with open(path, "w") as f:
             json.dump(
                 {
                     "status": "ready",
                     "note_lines": final_notes,
                     "timestamp": time.time(),
+                    "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
+                    "scope": scope,
                 },
                 f,
             )
@@ -519,12 +693,12 @@ def run_deferred_briefing_search():
     except Exception:
         # Clean up on failure
         try:
-            os.unlink(DEFERRED_BRIEFING_PATH)
+            os.unlink(path)
         except OSError:
             pass
 
 
-def run_remote_briefing(cwd, config):
+def run_remote_briefing(cwd, config, session_id="unknown"):
     """Run briefing via the remote vault client. Returns content or None."""
     from memento.remote_client import status as remote_status, search as remote_search
 
@@ -553,8 +727,20 @@ def run_remote_briefing(cwd, config):
             title = result.get("title", "")
             note_lines.append(f"  - {title}")
 
-        with open(DEFERRED_BRIEFING_PATH, "w") as f:
-            json.dump({"status": "ready", "note_lines": note_lines, "timestamp": time.time(), "source": "remote"}, f)
+        scope = _deferred_scope(project_slug, session_id, cwd)
+        deferred_path = deferred_briefing_path(project_slug, session_id, cwd)
+        with open(deferred_path, "w") as f:
+            json.dump(
+                {
+                    "status": "ready",
+                    "note_lines": note_lines,
+                    "timestamp": time.time(),
+                    "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
+                    "source": "remote",
+                    "scope": scope,
+                },
+                f,
+            )
 
     return summary
 
@@ -576,9 +762,7 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
 
     if is_remote() and allow_deferred:
         try:
-            if os.path.exists(DEFERRED_BRIEFING_PATH):
-                os.unlink(DEFERRED_BRIEFING_PATH)
-            remote_content = run_remote_briefing(cwd, config)
+            remote_content = run_remote_briefing(cwd, config, session_id)
             if remote_content:
                 return LifecycleResult(True, remote_content, "briefing", metadata={**metadata, "remote": True})
         except Exception as exc:
@@ -612,9 +796,12 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
         f"[vault] Project: {project_slug}{branch_str} | {len(recent_sessions)} sessions{last_date} | {note_count} notes"
     ]
 
-    warning = triage_health_warning(rate_limited=True)
-    if warning:
-        lines.append(warning)
+    for warning in (
+        triage_health_warning(rate_limited=True),
+        pi_bridge_health_warning(rate_limited=True),
+    ):
+        if warning:
+            lines.append(warning)
 
     if allow_deferred and config.get("project_maps_enabled", True) and has_qmd():
         try:
@@ -625,13 +812,17 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
                 for note in map_notes[:max_notes]:
                     title = note.get("title", "")
                     note_lines.append(f"  - {title}")
-                with open(DEFERRED_BRIEFING_PATH, "w") as f:
+                record_access_hits("briefing", "project-maps", map_notes[:max_notes], session_id=session_id)
+                scope = _deferred_scope(project_slug, session_id, cwd)
+                with open(deferred_briefing_path(project_slug, session_id, cwd), "w") as f:
                     json.dump(
                         {
                             "status": "ready",
                             "note_lines": note_lines,
                             "timestamp": time.time(),
+                            "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
                             "source": "project-maps",
+                            "scope": scope,
                         },
                         f,
                     )
@@ -649,7 +840,7 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
 
     if allow_deferred and has_qmd():
         config["_cwd"] = cwd
-        spawn_deferred_search(project_slug, git_branch, linked_notes, config)
+        spawn_deferred_search(project_slug, git_branch, linked_notes, config, session_id=session_id)
 
     return LifecycleResult(True, "\n".join(lines), "briefing", metadata=metadata)
 
@@ -775,9 +966,14 @@ def is_broad_project_history_query(prompt: str) -> bool:
     return False
 
 
-def should_append_project_to_recall(prompt: str) -> bool:
+def should_append_project_to_recall(prompt: str, concrete: bool = False) -> bool:
     """Only append project slug when the prompt has enough standalone signal."""
-    return not is_low_signal_recall_prompt(prompt) and not is_broad_project_history_query(prompt)
+    return not concrete and not is_low_signal_recall_prompt(prompt) and not is_broad_project_history_query(prompt)
+
+
+def resolve_recall_concrete_mode(prompt: str, config: dict) -> tuple[bool, bool]:
+    """Resolve the configured prompt-recall concrete mode against the prompt."""
+    return resolve_concrete_mode(config.get("recall_concrete_mode", False), prompt)
 
 
 def _project_slug_from_value(value: str | None) -> str:
@@ -907,19 +1103,23 @@ def log_recall_candidates(config: dict, results: list[dict], stage: str, **kwarg
     log_recall_diagnostic(config, "candidates", stage=stage, candidates=candidates, **kwargs)
 
 
-def should_skip_recall(prompt, config):
+def should_skip_recall(prompt, config, concrete: bool = False):
     """Relevance gate — returns True if we should skip vault injection."""
     prompt = prompt.strip()
 
-    # Too short
-    if len(prompt) < 10:
-        return True
+    # Concrete recall is opt-in and intentionally bypasses the length/
+    # low-signal/broad-project gates so exact paths, env vars, UUIDs, and
+    # quoted phrases can go straight to the literal search path.
+    if not concrete:
+        # Too short
+        if len(prompt) < 10:
+            return True
 
-    if config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
-        return True
+        if config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
+            return True
 
-    if config.get("recall_skip_broad_project_queries", True) and is_broad_project_history_query(prompt):
-        return True
+        if config.get("recall_skip_broad_project_queries", True) and is_broad_project_history_query(prompt):
+            return True
 
     # Skill invocation
     if prompt.startswith("/"):
@@ -1046,6 +1246,16 @@ def record_recall(paths, session_id="unknown"):
     _mutate_recall_dedup(write)
 
 
+def record_access_hits(
+    hook: str, tool: str, results: list[dict], *, query: str | None = None, session_id: str = "unknown"
+):
+    """Write derived access-log entries for successful retrieval hits."""
+    paths = [str(result.get("path", "")).strip() for result in results if str(result.get("path", "")).strip()]
+    if not paths:
+        return
+    record_access(paths, hook=hook, tool=tool, query=query, session_id=session_id, result_count=len(paths))
+
+
 def bump_prompts_since(session_id="unknown"):
     """Age this session's dedup entries by one prompt; drop expired paths."""
 
@@ -1097,39 +1307,49 @@ def format_result(result):
     return line
 
 
-def consume_deferred_briefing():
-    """Check for deferred briefing from SessionStart and consume it.
+def consume_deferred_briefing(cwd: str = "", session_id: str = "unknown", project_slug: str | None = None):
+    """Check for this session/project's deferred briefing and consume it.
 
-    Returns formatted lines to prepend, or empty list.
-    If the background search is still pending, leaves the file intact
-    so the next prompt can pick it up. Only deletes on successful
-    consumption or if the file is stale (>60s).
+    Returns formatted lines to prepend, or empty list. Results are scoped by
+    project and session and expire after ``DEFERRED_BRIEFING_TTL_SECONDS``.
+    Pending files are left intact until they expire; ready files are deleted on
+    successful consumption or rejected when stale/corrupt.
     """
+    if project_slug is None:
+        git_branch = get_git_branch(cwd) if cwd else ""
+        project_slug, _ticket = detect_project(cwd, git_branch) if cwd else ("unknown", None)
+
+    path = deferred_briefing_path(project_slug or "unknown", session_id or "unknown", cwd)
+    _cleanup_legacy_deferred_briefing(path)
+
     try:
-        if not os.path.exists(DEFERRED_BRIEFING_PATH):
+        if not os.path.exists(path):
             return []
 
-        with open(DEFERRED_BRIEFING_PATH) as f:
+        with open(path) as f:
             data = json.load(f)
 
         status = data.get("status", "")
 
+        if _deferred_is_expired(data, DEFERRED_BRIEFING_TTL_SECONDS):
+            os.unlink(path)
+            return []
+
+        if not _deferred_scope_matches(data, project_slug or "unknown", session_id or "unknown"):
+            os.unlink(path)
+            return []
+
         if status == "pending":
-            # Background worker still running — check staleness
-            ts = data.get("params", {}).get("timestamp", 0)
-            if ts and (time.time() - ts) > 60:
-                # Stale pending file — worker probably crashed
-                os.unlink(DEFERRED_BRIEFING_PATH)
-            # Either way, nothing to inject yet
+            # Background worker still running; this session can pick it up on a later prompt.
             return []
 
         if status != "ready":
-            os.unlink(DEFERRED_BRIEFING_PATH)
+            os.unlink(path)
             return []
 
         # Got results — consume and clean up
         note_lines = data.get("note_lines", [])
-        os.unlink(DEFERRED_BRIEFING_PATH)
+        os.unlink(path)
 
         # Mark vsearch as warm for RRF hybrid search
         try:
@@ -1144,7 +1364,7 @@ def consume_deferred_briefing():
 
     except (json.JSONDecodeError, OSError, KeyError):
         try:
-            os.unlink(DEFERRED_BRIEFING_PATH)
+            os.unlink(path)
         except OSError:
             pass
         return []
@@ -1391,7 +1611,7 @@ def consume_deep_recall():
         return []
 
 
-def run_remote_recall(prompt, cwd, config, session_id="unknown"):
+def run_remote_recall(prompt, cwd, config, session_id="unknown", concrete: bool = False):
     """Run recall via the remote vault client.
 
     Returns (lines, top_path, results, reason, project_decisions). A non-terminal
@@ -1401,16 +1621,22 @@ def run_remote_recall(prompt, cwd, config, session_id="unknown"):
     """
     from memento.remote_client import search_envelope as remote_search_envelope
 
-    if should_skip_recall(prompt, config):
+    if should_skip_recall(prompt, config, concrete=concrete):
         reason = "broad-project-query" if is_broad_project_history_query(prompt) else "skipped-prompt"
         return [], None, [], reason, []
 
     max_notes = config.get("recall_max_notes", 3)
     min_score = config.get("recall_min_score", 0.4)
 
-    envelope = remote_search_envelope(query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd, concrete=False)
+    envelope = remote_search_envelope(
+        query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd, concrete=concrete
+    )
     raw_results = envelope.get("results", [])
-    results, project_decisions = filter_recall_results_by_explicit_project(prompt, raw_results)
+    if concrete:
+        results = raw_results
+        project_decisions = []
+    else:
+        results, project_decisions = filter_recall_results_by_explicit_project(prompt, raw_results)
     if not results:
         if project_decisions:
             reason = "project-mismatch-filtered-empty"
@@ -1447,6 +1673,9 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         except Exception:
             project_slug = "unknown"
 
+    concrete_mode = config.get("recall_concrete_mode", False)
+    concrete_enabled, concrete_auto_selected = resolve_recall_concrete_mode(prompt or "", config)
+
     log_recall_diagnostic(
         config,
         "start",
@@ -1456,6 +1685,9 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         project_slug=project_slug,
         signal_terms=recall_signal_terms(prompt or ""),
         low_signal=is_low_signal_recall_prompt(prompt or ""),
+        concrete_mode=concrete_mode,
+        concrete_enabled=concrete_enabled,
+        concrete_auto_selected=concrete_auto_selected,
     )
 
     if not config.get("prompt_recall", True):
@@ -1467,10 +1699,14 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     # Each recall invocation is one user prompt: age this session's dedup
     # entries exactly once, regardless of which branch we take below.
     bump_prompts_since(session_id)
-    if should_skip_recall(prompt, config):
-        if config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
+    if should_skip_recall(prompt, config, concrete=concrete_enabled):
+        if not concrete_enabled and config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
             reason = "low-signal-prompt"
-        elif config.get("recall_skip_broad_project_queries", True) and is_broad_project_history_query(prompt):
+        elif (
+            not concrete_enabled
+            and config.get("recall_skip_broad_project_queries", True)
+            and is_broad_project_history_query(prompt)
+        ):
             reason = "broad-project-query"
         else:
             reason = "skipped-prompt"
@@ -1481,6 +1717,8 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
             reason=reason,
             normalized_prompt=re.sub(r"\s+", " ", prompt).strip(),
             broad_project_query=is_broad_project_history_query(prompt),
+            concrete_enabled=concrete_enabled,
+            concrete_auto_selected=concrete_auto_selected,
         )
         log_recall_diagnostic(config, "decision", decision="skipped", reason=reason)
         return [], None, [], reason
@@ -1492,7 +1730,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     if is_remote() and prompt:
         try:
             lines, top_path, remote_results, remote_reason, project_decisions = run_remote_recall(
-                prompt, cwd, config, session_id=session_id
+                prompt, cwd, config, session_id=session_id, concrete=concrete_enabled
             )
             if project_decisions and config.get("recall_diagnostics_include_candidates", False):
                 log_recall_diagnostic(
@@ -1539,7 +1777,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
     # Bias toward current project by appending project slug to query
     query = prompt
     appended_project = False
-    if cwd and should_append_project_to_recall(prompt):
+    if cwd and should_append_project_to_recall(prompt, concrete=concrete_enabled):
         if project_slug and project_slug != "unknown":
             query = f"{prompt} {project_slug.replace('-', ' ')}"
             appended_project = True
@@ -1579,12 +1817,15 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         semantic=False,
         timeout=5,
         min_score=min_score,
+        concrete=concrete_enabled,
     )
     top_score = results[0]["score"] if results else 0
     pipeline_depth = "bm25"
     log_recall_candidates(config, results, "bm25", query=query)
+    if concrete_enabled:
+        pipeline_depth = "concrete"
 
-    if top_score < high_conf and results:
+    if not concrete_enabled and top_score < high_conf and results:
         # Low confidence — try harder with PRF + RRF
 
         # PRF: expand query using terms from the results we already have (zero extra QMD calls)
@@ -1623,50 +1864,54 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
 
     latency_ms = int((time.time() - t0) * 1000)
     results_before = len(results)
-
-    # Concept index supplement (always, O(1) lookup)
-    if config.get("concept_index_enabled", True):
-        try:
-            concept_hits = lookup_concepts(prompt)
-            if concept_hits:
-                existing_paths = {r.get("path", "") for r in results}
-                for hit in concept_hits:
-                    if hit["path"] not in existing_paths:
-                        hit["score"] = max(hit.get("score", 0), config.get("concept_index_score", 0.5))
-                        results.append(hit)
-                        existing_paths.add(hit["path"])
-                log_recall_candidates(config, results, "concept-index", query=query)
-        except Exception:
-            pass
-
-    # Multi-hop retrieval: follow wikilinks from top results
-    multi_hop_gate = top_score < high_conf and config.get("multi_hop_enabled", False)
+    project_decisions = []
+    project_filter_applied = False
+    multi_hop_gate = False
     multi_hop_added = 0
-    if multi_hop_gate and results:
-        try:
-            pre_hop_count = len(results)
-            results = multi_hop_search(prompt, results, config=config)
-            multi_hop_added = len(results) - pre_hop_count
-            pipeline_depth += "+hop"
-            log_recall_candidates(config, results, "multi-hop", query=query)
-        except Exception:
-            pass
-
-    # Deep recall: spawn background codex for complex prompts
-    # Gate: low confidence AND feature enabled
     deep_recall_spawned = False
-    if (
-        top_score < high_conf
-        and config.get("deep_recall_enabled", False)
-        and results
-        and not os.path.exists(DEEP_RECALL_PENDING_PATH)
-    ):
-        try:
-            spawn_deep_recall(prompt, results, config)
-            deep_recall_spawned = True
-            pipeline_depth += "+deep"
-        except Exception:
-            pass
+
+    if not concrete_enabled:
+        # Concept index supplement (always, O(1) lookup)
+        if config.get("concept_index_enabled", True):
+            try:
+                concept_hits = lookup_concepts(prompt)
+                if concept_hits:
+                    existing_paths = {r.get("path", "") for r in results}
+                    for hit in concept_hits:
+                        if hit["path"] not in existing_paths:
+                            hit["score"] = max(hit.get("score", 0), config.get("concept_index_score", 0.5))
+                            results.append(hit)
+                            existing_paths.add(hit["path"])
+                    log_recall_candidates(config, results, "concept-index", query=query)
+            except Exception:
+                pass
+
+        # Multi-hop retrieval: follow wikilinks from top results
+        multi_hop_gate = top_score < high_conf and config.get("multi_hop_enabled", False)
+        if multi_hop_gate and results:
+            try:
+                pre_hop_count = len(results)
+                results = multi_hop_search(prompt, results, config=config)
+                multi_hop_added = len(results) - pre_hop_count
+                pipeline_depth += "+hop"
+                log_recall_candidates(config, results, "multi-hop", query=query)
+            except Exception:
+                pass
+
+        # Deep recall: spawn background codex for complex prompts
+        # Gate: low confidence AND feature enabled
+        if (
+            top_score < high_conf
+            and config.get("deep_recall_enabled", False)
+            and results
+            and not os.path.exists(DEEP_RECALL_PENDING_PATH)
+        ):
+            try:
+                spawn_deep_recall(prompt, results, config)
+                deep_recall_spawned = True
+                pipeline_depth += "+deep"
+            except Exception:
+                pass
 
     if not results:
         if min_score > 0:
@@ -1704,24 +1949,27 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         log_recall_diagnostic(config, "decision", decision="skipped", reason=str(miss_reason), latency_ms=latency_ms)
         return [], None, [], miss_reason
 
-    results = enhance_results(results, config, cwd=cwd)
-    log_recall_candidates(config, results, "enhanced", query=query)
+    if not concrete_enabled:
+        results = enhance_results(results, config, cwd=cwd)
+        log_recall_candidates(config, results, "enhanced", query=query)
 
-    results, project_decisions = filter_recall_results_by_explicit_project(prompt, results)
-    project_filter_applied = bool(project_decisions)
-    if project_decisions and config.get("recall_diagnostics_include_candidates", False):
-        log_recall_diagnostic(config, "candidates", stage="project-filter", candidates=project_decisions, query=query)
+        results, project_decisions = filter_recall_results_by_explicit_project(prompt, results)
+        project_filter_applied = bool(project_decisions)
+        if project_decisions and config.get("recall_diagnostics_include_candidates", False):
+            log_recall_diagnostic(
+                config, "candidates", stage="project-filter", candidates=project_decisions, query=query
+            )
 
-    # CE reranking (only on deep path)
-    if top_score < high_conf and config.get("reranker_enabled", True) and len(results) > 1:
-        try:
-            from tenet_reranker import rerank
+        # CE reranking (only on deep path)
+        if top_score < high_conf and config.get("reranker_enabled", True) and len(results) > 1:
+            try:
+                from tenet_reranker import rerank
 
-            results = rerank(prompt, results, config)
-            pipeline_depth += "+ce"
-            log_recall_candidates(config, results, "reranked", query=query)
-        except Exception:
-            pass
+                results = rerank(prompt, results, config)
+                pipeline_depth += "+ce"
+                log_recall_candidates(config, results, "reranked", query=query)
+            except Exception:
+                pass
 
     if not results:
         reason = "project-mismatch-filtered-empty" if project_filter_applied else "filtered-empty"
@@ -1813,6 +2061,7 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown", *, rec
     content = "\n".join(lines)
     if top_path and record:
         record_recall([r.get("path", "") for r in results], session_id)
+        record_access_hits("recall", "inject", results, query=prompt, session_id=session_id)
     return LifecycleResult(
         should_inject=True,
         content=content,
@@ -1832,14 +2081,87 @@ def _session_context_char_budget(token_budget: int | None) -> tuple[int, int]:
     return normalized_tokens, normalized_tokens * 4
 
 
-def _queue_capture_count(vault: Path) -> int:
-    queue_path = vault / "queue" / "pi-captures.jsonl"
-    if not queue_path.exists():
-        return 0
+def _pi_state_root() -> Path:
+    raw = os.environ.get("MEMENTO_PI_STATE_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
+    return base / "memento" / "pi"
+
+
+def _pi_queue_path_source() -> str:
+    if os.environ.get("MEMENTO_PI_STATE_HOME"):
+        return "memento_pi_state_home"
+    if os.environ.get("XDG_STATE_HOME"):
+        return "xdg_state_home"
+    return "default_xdg_state"
+
+
+def _pi_queue_file() -> Path:
+    return _pi_state_root() / "queue" / "pi-captures.jsonl"
+
+
+def _legacy_pi_queue_file(vault: Path) -> Path:
+    return vault / "queue" / "pi-captures.jsonl"
+
+
+def _queue_capture_keys(path: Path) -> list[str]:
+    if not path.exists():
+        return []
     try:
-        return sum(1 for line in queue_path.read_text(errors="replace").splitlines() if line.strip())
+        lines = path.read_text(errors="replace").splitlines()
     except OSError:
-        return 0
+        return []
+
+    keys = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            capture = json.loads(line)
+        except json.JSONDecodeError:
+            keys.append(f"id:invalid-{len(keys) + 1}")
+            continue
+        if isinstance(capture, dict) and capture.get("id"):
+            keys.append(f"id:{capture['id']}")
+        else:
+            keys.append(f"no-id:{path}:{len(keys) + 1}:{line}")
+    return keys
+
+
+def _queue_capture_count(path: Path) -> int:
+    return len(_queue_capture_keys(path))
+
+
+def _queue_capture_status(vault: Path) -> dict[str, object]:
+    queue_path = _pi_queue_file()
+    legacy_queue_path = _legacy_pi_queue_file(vault)
+    current_capture_keys = _queue_capture_keys(queue_path)
+    legacy_capture_keys = [] if queue_path == legacy_queue_path else _queue_capture_keys(legacy_queue_path)
+    current_queued_capture_count = len(current_capture_keys)
+    legacy_queued_capture_count = len(legacy_capture_keys)
+    combined_queued_capture_count = len(dict.fromkeys(current_capture_keys + legacy_capture_keys))
+    legacy_queue_exists = False if queue_path == legacy_queue_path else legacy_queue_path.exists()
+
+    status: dict[str, object] = {
+        "queued_capture_count": combined_queued_capture_count,
+        "count": combined_queued_capture_count,
+        "queued_capture_count_source": "current",
+        "current_queued_capture_count": current_queued_capture_count,
+        "queue_path": str(queue_path),
+        "queue_path_source": _pi_queue_path_source(),
+        "legacy_queue_path": str(legacy_queue_path),
+        "legacy_queue_exists": legacy_queue_exists,
+        "legacy_queued_capture_count": legacy_queued_capture_count,
+    }
+    if current_queued_capture_count == 0 and legacy_queued_capture_count:
+        status["queued_capture_count_source"] = "legacy_fallback"
+        status["queue_status_note"] = "using legacy vault queue fallback; pi_bridge migrates this queue to XDG state"
+    elif legacy_queued_capture_count:
+        status["queued_capture_count_source"] = "current_plus_legacy"
+        status["queue_status_note"] = "including legacy vault queue captures pending pi_bridge migration"
+    return status
 
 
 def _compact_session_result(result: dict) -> dict:
@@ -1926,6 +2248,18 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
     if len(json.dumps(payload)) <= packet_char_budget:
         return _finalize_session_context_payload(payload)
 
+    status_section = payload.get("sections", {}).get("status")
+    if isinstance(status_section, dict) and isinstance(status_section.get("automation_memory"), dict):
+        automation_memory = status_section["automation_memory"]
+        status_section["automation_memory"] = {
+            "ready": automation_memory.get("ready"),
+            "status": automation_memory.get("status"),
+            "readiness": automation_memory.get("readiness"),
+        }
+
+    if len(json.dumps(payload)) <= packet_char_budget:
+        return _finalize_session_context_payload(payload)
+
     expandable_paths = payload["metadata"].get("expandable_paths", [])
     while expandable_paths and len(json.dumps(payload)) > packet_char_budget:
         expandable_paths.pop()
@@ -1996,14 +2330,42 @@ def build_session_context(
         vault = get_vault()
         notes_dir = vault / "notes"
         projects_dir = vault / "projects"
-        warning = triage_health_warning(rate_limited=True)
-        if warning:
-            warnings.append(warning)
+        for warning in (
+            triage_health_warning(rate_limited=True),
+            pi_bridge_health_warning(rate_limited=True),
+        ):
+            if warning:
+                warnings.append(warning)
         status = {
             "vault_exists": vault.exists(),
             "qmd_available": has_qmd(),
             "note_count": len(list(notes_dir.glob("*.md"))) if notes_dir.exists() else 0,
             "project_count": len(list(projects_dir.glob("*.md"))) if projects_dir.exists() else 0,
+        }
+        automation_memory = build_automation_memory_readiness(
+            config=get_config(),
+            vault=vault,
+            qmd_available=status["qmd_available"],
+        )
+        automation_metadata = automation_memory.get("metadata", {})
+        status["automation_memory"] = {
+            "ready": automation_memory.get("ready"),
+            "status": automation_memory.get("status"),
+            "message": automation_memory.get("message"),
+            "readiness": automation_metadata.get("readiness"),
+            "probe": automation_metadata.get("probe"),
+            "search": {
+                "available": automation_metadata.get("search", {}).get("available"),
+                "status": automation_metadata.get("search", {}).get("status"),
+            },
+            "recall": {
+                "events": automation_metadata.get("recall", {}).get("events"),
+                "failure_rate": automation_metadata.get("recall", {}).get("failure_rate"),
+            },
+            "remote_sync": {
+                "remote_configured": automation_metadata.get("remote_sync", {}).get("remote_configured"),
+                "pending_retry_count": automation_metadata.get("remote_sync", {}).get("pending_retry_count"),
+            },
         }
         sections["status"] = status
         if warning and all(warning not in block for block in content_blocks):
@@ -2012,11 +2374,16 @@ def build_session_context(
             f"[vault] Status: {status['note_count']} notes, qmd {'available' if status['qmd_available'] else 'unavailable'}"
         )
 
-        queued_capture_count = _queue_capture_count(vault)
-        queue = {"queued_capture_count": queued_capture_count, "queue_path": str(vault / "queue" / "pi-captures.jsonl")}
+        queue = _queue_capture_status(vault)
+        queued_capture_count = int(queue["queued_capture_count"])
         sections["queue"] = queue
         if queued_capture_count:
-            content_blocks.append(f"[vault] Capture queue: {queued_capture_count} queued pi capture(s)")
+            suffix = ""
+            if queue.get("queued_capture_count_source") == "legacy_fallback":
+                suffix = " (legacy fallback)"
+            elif queue.get("queued_capture_count_source") == "current_plus_legacy":
+                suffix = " (includes legacy queue)"
+            content_blocks.append(f"[vault] Capture queue: {queued_capture_count} queued pi capture(s){suffix}")
 
     if include_tool_context_preview:
         sections["tool_context_preview"] = {
@@ -2054,11 +2421,20 @@ def build_session_context(
     payload = _fit_session_context_payload(payload, packet_char_budget)
     if recall_top_path and recall_content_marker and recall_content_marker in payload.get("content", ""):
         record_recall([recall_top_path], session_id)
+    log_automation_memory_health(
+        "packet_success",
+        source="session-context",
+        should_inject=bool(payload.get("should_inject")),
+        result_count=len(payload.get("results") or []),
+        warning_count=len(payload.get("metadata", {}).get("warnings", [])),
+        truncated=bool(payload.get("metadata", {}).get("truncated")),
+    )
     return payload
 
 
 RECALL_DEDUP_PATH = os.path.join(RUNTIME_DIR, "recall-dedup.json")
 DEFERRED_BRIEFING_PATH = os.path.join(RUNTIME_DIR, "deferred-briefing.json")
+DEFERRED_BRIEFING_TTL_SECONDS = 60
 DEEP_RECALL_PENDING_PATH = os.path.join(RUNTIME_DIR, "deep-recall-pending.json")
 
 CACHE_PATH = os.path.join(RUNTIME_DIR, "tool-context-cache.json")
@@ -2226,9 +2602,23 @@ def should_skip_tool_context_path(file_path: str) -> bool:
     return path.name in SKIP_FILENAMES
 
 
-def extract_tool_context_keywords(file_path: str) -> str:
-    """Extract searchable keywords from a file path for BM25 query."""
+def extract_tool_context_keywords(file_path: str, cwd: str = "") -> str:
+    """Extract searchable keywords from a file path for BM25 query.
+
+    File-read hooks pass absolute normalized paths, but BM25 queries should be
+    about the code area, not the user's checkout/worktree scaffolding. Prefer a
+    path relative to the session cwd when possible, then fall back to stripping
+    the home directory.
+    """
     path = file_path
+    if cwd:
+        try:
+            rel = os.path.relpath(os.path.realpath(file_path), os.path.realpath(os.path.expanduser(cwd)))
+            if rel and not rel.startswith("..") and not os.path.isabs(rel):
+                path = rel
+        except (OSError, ValueError):
+            pass
+
     home = str(Path.home())
     if path.startswith(home):
         path = path[len(home) :]
@@ -2258,7 +2648,11 @@ def extract_tool_context_keywords(file_path: str) -> str:
 
 # v2: caches written before the relative-path cwd fix hold dir entries
 # poisoned by paths resolved against the wrong project; drop them once.
-TOOL_CONTEXT_CACHE_SCHEMA = 2
+# v3: dir entries become project-scoped ("<cwd>::<dir>") and carry a ts for
+# TTL expiry; pre-v3 keys are shape-incompatible, so drop them once.
+# v4: query extraction became cwd-relative; old dir entries may be poisoned by
+# checkout/worktree path terms and must be recomputed.
+TOOL_CONTEXT_CACHE_SCHEMA = 4
 
 
 def load_cache() -> dict:
@@ -2287,6 +2681,29 @@ def save_cache(cache: dict) -> None:
             json.dump(cache, f)
     except OSError:
         pass
+
+
+def _tool_context_dir_key(cwd: str, normalized_path: str) -> str:
+    """Scope cache entries by project (cwd) as well as directory.
+
+    A directory shared between checkouts (or a mis-resolved path) must not
+    replay one project's cached results into another project's sessions.
+    """
+    try:
+        scope = os.path.realpath(os.path.expanduser(cwd)).rstrip("/") if cwd else "-"
+    except (OSError, ValueError):
+        scope = "-"
+    return f"{scope}::{Path(normalized_path).parent}"
+
+
+def _tool_context_entry_fresh(entry: dict, config: dict) -> bool:
+    try:
+        ttl_hours = float(config.get("tool_context_cache_ttl_hours", 24))
+    except (TypeError, ValueError):
+        ttl_hours = 24.0
+    if ttl_hours <= 0:
+        return True  # TTL disabled
+    return (time.time() - float(entry.get("ts", 0))) < ttl_hours * 3600
 
 
 def get_recall_paths(session_id: str = "unknown") -> set[str]:
@@ -2342,17 +2759,72 @@ def format_tool_context_result(result: dict) -> str:
     return line
 
 
+def tool_context_diagnostics_enabled(config: dict) -> bool:
+    """Return whether retrieval logs should include tool-context decisions."""
+    return bool(config.get("tool_context_diagnostics", True))
+
+
+def log_tool_context_decision(
+    config: dict,
+    decision: str,
+    metadata: dict,
+    *,
+    candidates: list[dict] | None = None,
+    **kwargs,
+) -> None:
+    """Log one terminal tool-context decision for diagnostic analysis.
+
+    ``log_retrieval`` still controls whether anything is written (via
+    retrieval_log/MEMENTO_DEBUG). This helper makes the tool-context path
+    measurable when diagnostic logging is enabled: every call emits a terminal
+    decision, and optional candidate summaries explain why a note did or did
+    not survive gating.
+    """
+    if not tool_context_diagnostics_enabled(config):
+        return
+
+    payload = {
+        "decision": decision,
+        "reason": decision,
+        "cwd": metadata.get("cwd", ""),
+        "session_id": metadata.get("session_id", ""),
+        "tool_name": metadata.get("tool_name", ""),
+        "file_path": metadata.get("file_path", ""),
+    }
+    if metadata.get("lineage_id"):
+        payload["lineage_id"] = metadata.get("lineage_id")
+    if metadata.get("query"):
+        payload["query"] = metadata.get("query")
+    payload.update(kwargs)
+
+    if candidates is not None and config.get("tool_context_diagnostics_include_candidates", False):
+        max_candidates = int(config.get("tool_context_diagnostics_max_candidates", 10) or 10)
+        payload["candidates"] = [_candidate_summary(result) for result in candidates[: max(0, max_candidates)]]
+
+    log_retrieval("tool-context", "decision", **payload)
+
+
 def build_tool_context(
     tool_name: str,
     file_path: str,
     cwd: str = "",
     session_id: str = "unknown",
+    lineage_id: str | None = None,
 ) -> LifecycleResult:
-    """Build context for a file-read tool result."""
-    config = get_config()
-    metadata = {"cwd": cwd, "session_id": session_id, "tool_name": tool_name, "file_path": file_path}
+    """Build context for a file-read tool result.
 
-    def no_context(reason: str) -> LifecycleResult:
+    lineage_id, when provided, keys the per-session injection caps instead of
+    session_id: resumed sessions get fresh session ids but share a transcript,
+    and caps keyed on the transient id reset on every resume.
+    """
+    config = get_config()
+    lineage = lineage_id or session_id
+    metadata = {"cwd": cwd, "session_id": session_id, "tool_name": tool_name, "file_path": file_path}
+    if lineage_id:
+        metadata["lineage_id"] = lineage_id
+
+    def no_context(reason: str, **diagnostics) -> LifecycleResult:
+        log_tool_context_decision(config, reason, metadata, **diagnostics)
         return LifecycleResult(False, "", "tool-context", reason=reason, metadata=metadata)
 
     if not config.get("tool_context", True):
@@ -2383,48 +2855,90 @@ def build_tool_context(
 
     cache = load_cache()
     max_injections = config.get("tool_context_max_injections", 5)
-    if session_injection_count(cache, session_id) >= max_injections:
-        return no_context("cap-reached")
+    if session_injection_count(cache, lineage) >= max_injections:
+        return no_context("cap-reached", max_injections=max_injections)
 
-    dir_key = str(Path(normalized_path).parent)
+    dir_key = _tool_context_dir_key(cwd, normalized_path)
     search_query = None
     latency_ms = 0
-    if dir_key in cache.get("dirs", {}):
-        cached = cache["dirs"][dir_key]
-        results = cached.get("results", [])
+    source = "search"
+    raw_result_count = None
+    enhanced_result_count = None
+    cached_entry = cache.get("dirs", {}).get(dir_key)
+    if cached_entry is not None and not _tool_context_entry_fresh(cached_entry, config):
+        del cache["dirs"][dir_key]
+        cached_entry = None
+        log_retrieval("tool-context", "cache-expired", dir_key=dir_key)
+    if cached_entry is not None:
+        source = "cache"
+        results = cached_entry.get("results", [])
+        search_query = cached_entry.get("query")
+        raw_result_count = cached_entry.get("raw_result_count")
+        enhanced_result_count = cached_entry.get("enhanced_result_count")
+        if search_query:
+            metadata["query"] = search_query
         if not results:
-            return no_context("no-results")
+            return no_context("no-results", dir_key=dir_key, source=source)
         log_retrieval("tool-context", "cache-hit", file_path=normalized_path, dir_key=dir_key)
     else:
         cooldown = config.get("tool_context_cooldown", 3)
         last_call = cache.get("last_qmd_call", 0)
         if time.time() - last_call < cooldown:
-            return no_context("cooldown")
+            return no_context("cooldown", cooldown=cooldown, seconds_since_last_call=round(time.time() - last_call, 3))
 
-        search_query = extract_tool_context_keywords(normalized_path)
+        search_query = extract_tool_context_keywords(normalized_path, cwd)
         metadata["query"] = search_query
         if not search_query or len(search_query.split()) < 2:
-            cache.setdefault("dirs", {})[dir_key] = {"results": []}
+            cache.setdefault("dirs", {})[dir_key] = {"results": [], "ts": time.time(), "query": search_query}
             save_cache(cache)
-            return no_context("insufficient-keywords")
+            return no_context("insufficient-keywords", dir_key=dir_key, query=search_query)
 
         min_score = config.get("tool_context_min_score", 0.75)
         max_notes = config.get("tool_context_max_notes", 2)
         t0 = time.time()
-        results = qmd_search_with_extras(
-            search_query,
-            limit=max_notes + 5,
-            semantic=False,
-            timeout=2,
-            min_score=min_score,
-        )
+        try:
+            raw_results = qmd_search_with_extras(
+                search_query,
+                limit=max_notes + 5,
+                semantic=False,
+                timeout=2,
+                min_score=min_score,
+            )
+            raw_result_count = len(raw_results)
+            # Tool-context is unsolicited injection: require a positive project
+            # match instead of letting untagged notes through as general knowledge.
+            results = enhance_results(raw_results, config, cwd=cwd, require_project_match=True)
+            enhanced_result_count = len(results)
+        except Exception as exc:
+            latency_ms = int((time.time() - t0) * 1000)
+            cache["last_qmd_call"] = time.time()
+            save_cache(cache)
+            log_retrieval(
+                "tool-context",
+                "backend-error",
+                query=search_query,
+                file_path=normalized_path,
+                latency_ms=latency_ms,
+                error_type=type(exc).__name__,
+            )
+            return no_context(
+                "backend-error",
+                dir_key=dir_key,
+                source=source,
+                latency_ms=latency_ms,
+                error_type=type(exc).__name__,
+                min_score=min_score,
+            )
         latency_ms = int((time.time() - t0) * 1000)
-        # Tool-context is unsolicited injection: require a positive project
-        # match instead of letting untagged notes through as general knowledge.
-        results = enhance_results(results, config, cwd=cwd, require_project_match=True)
 
         cache["last_qmd_call"] = time.time()
-        cache.setdefault("dirs", {})[dir_key] = {"results": results}
+        cache.setdefault("dirs", {})[dir_key] = {
+            "results": results,
+            "ts": time.time(),
+            "query": search_query,
+            "raw_result_count": raw_result_count,
+            "enhanced_result_count": enhanced_result_count,
+        }
         save_cache(cache)
 
         if not results:
@@ -2435,14 +2949,29 @@ def build_tool_context(
                 file_path=normalized_path,
                 latency_ms=latency_ms,
             )
-            return no_context("no-results")
+            return no_context(
+                "no-results",
+                dir_key=dir_key,
+                source=source,
+                latency_ms=latency_ms,
+                raw_result_count=raw_result_count,
+                enhanced_result_count=enhanced_result_count,
+                min_score=min_score,
+            )
 
     recall_paths = get_recall_paths(session_id)
-    already_injected = session_injected_paths(cache, session_id)
+    already_injected = session_injected_paths(cache, lineage)
     exclude = recall_paths | already_injected
     filtered = [r for r in results if r.get("path", "") not in exclude]
     if not filtered:
-        return no_context("duplicate")
+        return no_context(
+            "duplicate",
+            dir_key=dir_key,
+            source=source,
+            result_count=len(results),
+            recall_excluded_count=len(recall_paths),
+            session_excluded_count=len(already_injected),
+        )
 
     max_notes = config.get("tool_context_max_notes", 2)
     selected = filtered[:max_notes]
@@ -2460,11 +2989,30 @@ def build_tool_context(
         file_path=normalized_path,
         query=search_query or dir_key,
         injected_titles=injected_titles,
+        injected_paths=injected_paths,
         injected_chars=len(injected_text),
         latency_ms=latency_ms,
     )
+    record_access_hits("tool-context", "inject", selected, query=search_query or dir_key, session_id=session_id)
+    log_tool_context_decision(
+        config,
+        "injected",
+        metadata,
+        candidates=filtered,
+        dir_key=dir_key,
+        source=source,
+        result_count=len(results),
+        filtered_count=len(filtered),
+        selected_count=len(selected),
+        injected_titles=injected_titles,
+        injected_paths=injected_paths,
+        injected_chars=len(injected_text),
+        latency_ms=latency_ms,
+        raw_result_count=raw_result_count,
+        enhanced_result_count=enhanced_result_count,
+    )
 
-    record_injection(cache, session_id, injected_paths)
+    record_injection(cache, lineage, injected_paths)
     save_cache(cache)
     return LifecycleResult(
         should_inject=True,

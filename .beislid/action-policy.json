@@ -16,6 +16,8 @@
         "git.merge": "allow",
         "git.push": "allow",
         "gh.pr.create": "allow",
+        "gh.pr.ready": "allow",
+        "gh.pr.comment": "allow",
         "gh.pr.merge": "allow",
         "review.fix": "allow",
         "tracker.issue.transition": "allow",
@@ -35,13 +37,14 @@
         "gate.install-exec-smoke": "allow"
       },
       "sandbox": {
-        "on_uncommitted_changes": "allow"
+        "on_uncommitted_changes": "allow",
+        "minimum": "none"
       }
     },
     "unattended-auto": {
       "rules": {
         "dependency-install": "allow",
-        "git-remote": "allow",
+        "git-remote": "deny",
         "workspace-write": "allow"
       },
       "actions": {
@@ -53,6 +56,8 @@
         "git.commit": "allow",
         "git.push": "allow",
         "gh.pr.create": "allow",
+        "gh.pr.ready": "allow",
+        "gh.pr.comment": "allow",
         "tracker.issue.transition": "allow",
         "workspace.lifecycle.create": "allow",
         "workspace.hook.after_create": "allow",
@@ -70,7 +75,8 @@
         "gate.install-exec-smoke": "allow"
       },
       "sandbox": {
-        "on_uncommitted_changes": "allow"
+        "on_uncommitted_changes": "allow",
+        "minimum": "non-default-branch"
       }
     }
   }

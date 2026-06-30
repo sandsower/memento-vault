@@ -11,7 +11,7 @@
 # Or with a custom vault path:
 #   MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 #
-# Install experimental modules (Tenet retrieval + Inception consolidation + orra-init skill):
+# Install extra experimental modules (Inception consolidation + orra-init skill):
 #   ./install.sh --experimental
 #
 # Install MCP server config (Claude Code, Codex, and generic MCP clients):
@@ -51,7 +51,7 @@ Memento Vault installer v${NEW_VERSION}
 Usage: ./install.sh [OPTIONS]
 
 Options:
-  --experimental  Install Tenet retrieval, Inception consolidation, and orra-init skill
+  --experimental  Install Inception consolidation and orra-init skill
   --mcp           Install MCP server config (Claude Code, Codex, generic clients)
   --remote [URL]  Connect to a remote vault (implies --mcp)
   --reinstall     Safely rerun same-version install using local-edit protection
@@ -66,7 +66,7 @@ flags re-applies whatever was used last time.
 
 Examples:
   ./install.sh                              # Upgrade with previously saved options
-  ./install.sh --experimental --mcp         # First install with extras
+  ./install.sh --experimental --mcp         # First install with Inception/orra-init + MCP
   ./install.sh --remote https://vault.example.com:8745
   MEMENTO_VAULT_PATH=~/my-vault ./install.sh
 EOF
@@ -255,9 +255,9 @@ if [ ! -f "$CONFIG_DIR/memento.yml" ]; then
 else
     info "Config already exists at $CONFIG_DIR/memento.yml"
     NEW_KEYS=()
-    EXPECTED_KEYS="exchange_threshold file_count_threshold inception_enabled"
+    EXPECTED_KEYS="exchange_threshold file_count_threshold inception_enabled session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes tool_context tool_context_min_score tool_context_max_notes tool_context_max_injections tool_context_cooldown tool_context_cache_ttl_hours tool_context_diagnostics tool_context_diagnostics_include_candidates tool_context_diagnostics_max_candidates"
     if [ "$EXPERIMENTAL" = true ]; then
-        EXPECTED_KEYS="$EXPECTED_KEYS session_briefing briefing_max_notes briefing_min_score prompt_recall recall_min_score recall_max_notes tool_context tool_context_min_score tool_context_max_notes multi_hop_enabled multi_hop_max"
+        EXPECTED_KEYS="$EXPECTED_KEYS multi_hop_enabled multi_hop_max"
     fi
     for key in $EXPECTED_KEYS; do
         if ! grep -q "^${key}:" "$CONFIG_DIR/memento.yml" 2>/dev/null; then
@@ -279,14 +279,13 @@ mkdir -p "$CLAUDE_DIR/hooks"
 HOOKS_UPDATED=0
 HOOKS_SKIPPED=0
 
-STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py wait-and-commit.py _backfill_certainty.py memento-remote-sync.py"
-EXPERIMENTAL_HOOKS="memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py memento-inception.py tenet_reranker.py"
+STABLE_HOOKS="memento-triage.py vault-commit.sh memento-sweeper.py wait-and-commit.py _backfill_certainty.py memento-remote-sync.py memento_utils.py vault-briefing.py vault-recall.py vault-tool-context.py"
+EXPERIMENTAL_HOOKS="memento-inception.py tenet_reranker.py"
 
+INSTALL_HOOKS="$STABLE_HOOKS"
 if [ "$EXPERIMENTAL" = true ]; then
-    INSTALL_HOOKS="$STABLE_HOOKS $EXPERIMENTAL_HOOKS"
-    info "Experimental mode: installing Tenet + Inception + orra-init"
-else
-    INSTALL_HOOKS="$STABLE_HOOKS"
+    INSTALL_HOOKS="$INSTALL_HOOKS $EXPERIMENTAL_HOOKS"
+    info "Experimental mode: installing Inception + orra-init"
 fi
 
 for hook in $INSTALL_HOOKS; do
@@ -414,7 +413,7 @@ for mod in __init__.py config.py utils.py search.py search_backend.py graph.py s
     fi
 done
 
-for mod in __init__.py claude.py; do
+for mod in __init__.py claude.py opencode.py pi.py; do
     if [ -f "$SCRIPT_DIR/memento/adapters/$mod" ]; then
         if safe_copy "$SCRIPT_DIR/memento/adapters/$mod" "$MEMENTO_PKG_DIR/adapters/$mod" "memento/adapters/$mod"; then
             ((PKG_COPIED++)) || true
@@ -424,7 +423,7 @@ for mod in __init__.py claude.py; do
     fi
 done
 
-for critical in __init__.py config.py utils.py store.py search.py lifecycle.py pi_bridge.py adapters/__init__.py adapters/claude.py; do
+for critical in __init__.py config.py utils.py store.py search.py lifecycle.py pi_bridge.py adapters/__init__.py adapters/claude.py adapters/opencode.py adapters/pi.py; do
     if [ ! -f "$MEMENTO_PKG_DIR/$critical" ]; then
         error "Critical file missing: $MEMENTO_PKG_DIR/$critical"
         error "Hooks will not work. Rerun with --force or fix permissions."

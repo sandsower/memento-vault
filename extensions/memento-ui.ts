@@ -2,15 +2,26 @@ import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi
 
 export type MementoPanelView = "actions" | "status" | "queue" | "process";
 
+export type MementoQueuedCaptureSummary = {
+	id: string;
+	title: string;
+	excerpt: string;
+	project: string;
+	branch: string;
+	size: string;
+};
+
 export type MementoPanelState = {
 	view: MementoPanelView;
 	selectedIndex: number;
 	message?: string;
 	confirmProcess?: boolean;
+	confirmDiscard?: boolean;
 	queueItemCount?: number;
 	processItemCount?: number;
 	selectedCaptureIds?: string[];
 	inspectIndex?: number;
+	discardCapture?: MementoQueuedCaptureSummary;
 };
 
 export type MementoPanelAction =
@@ -20,15 +31,19 @@ export type MementoPanelAction =
 	| { type: "toggle-widget" }
 	| { type: "show"; view: MementoPanelView }
 	| { type: "toggle-capture" }
+	| { type: "request-discard" }
 	| { type: "inspect-group" }
 	| { type: "dry-run" }
-	| { type: "process" };
+	| { type: "process" }
+	| { type: "retry-failed" }
+	| { type: "discard" };
 
 const ACTIONS = [
 	{ label: "Capture current session", action: { type: "capture-current" } as MementoPanelAction },
 	{ label: "Review queued captures", action: { type: "show", view: "queue" } as MementoPanelAction },
 	{ label: "Preview queued processing", action: { type: "dry-run" } as MementoPanelAction },
 	{ label: "Process queued captures", action: { type: "process" } as MementoPanelAction },
+	{ label: "Discard highlighted queued capture", action: { type: "request-discard" } as MementoPanelAction },
 	{ label: "Status / diagnostics", action: { type: "show", view: "status" } as MementoPanelAction },
 	{ label: "Toggle footer details", action: { type: "toggle-widget" } as MementoPanelAction },
 ];
@@ -46,6 +61,11 @@ export function reduceMementoPanelState(
 		if (key === "n" || key === "escape" || key === "q") return { state: { ...state, confirmProcess: false, selectedIndex } };
 		return { state: { ...state, selectedIndex } };
 	}
+	if (state.confirmDiscard) {
+		if (key === "y") return { state: { ...state, confirmDiscard: false, selectedIndex }, action: { type: "discard" } };
+		if (key === "n" || key === "escape" || key === "q") return { state: { ...state, confirmDiscard: false, selectedIndex, discardCapture: undefined } };
+		return { state: { ...state, selectedIndex } };
+	}
 
 	if (key === "down" || key === "j") return { state: { ...state, selectedIndex: Math.min(maxIndex, selectedIndex + 1) } };
 	if (key === "up" || key === "k") return { state: { ...state, selectedIndex: Math.max(0, selectedIndex - 1) } };
@@ -60,7 +80,9 @@ export function reduceMementoPanelState(
 	if (key === "c") return { state: { ...state, selectedIndex }, action: { type: "capture-current" } };
 	if (key === "w") return { state: { ...state, selectedIndex }, action: { type: "toggle-widget" } };
 	if (key === " " && state.view === "queue") return { state: { ...state, selectedIndex }, action: { type: "toggle-capture" } };
+	if (key === "x" && state.view === "queue") return { state: { ...state, selectedIndex }, action: { type: "request-discard" } };
 	if (key === "i" && state.view === "process") return { state: { ...state, inspectIndex: selectedIndex }, action: { type: "inspect-group" } };
+	if (key === "t" && state.view === "process") return { state: { ...state, selectedIndex }, action: { type: "retry-failed" } };
 	if (key === "d") return { state: { ...state, view: "process", selectedIndex: 0, inspectIndex: undefined }, action: { type: "dry-run" } };
 	if (key === "p") return { state: { ...state, view: "process", selectedIndex: 0, inspectIndex: undefined, confirmProcess: true } };
 	if (key === "enter") {
@@ -80,11 +102,24 @@ export function renderMementoPanelLines(
 	const body = [summaryLine(data.status, data.queue, data.process), ""];
 	if (state.message) body.push(state.message, "");
 	if (state.confirmProcess) body.push(`Process ${state.selectedCaptureIds?.length ?? 0} selected queued capture(s) now? y/N`, "");
+	if (state.confirmDiscard && state.discardCapture) {
+		body.push("Discard this queued capture? It will be archived, not deleted. y/N", "");
+		body.push(`ID: ${state.discardCapture.id}`, `Title: ${fitLine(state.discardCapture.title, 84)}`);
+		if (state.discardCapture.excerpt) body.push(`Excerpt: ${fitLine(state.discardCapture.excerpt, 78)}`);
+		body.push(
+			`Project: ${state.discardCapture.project}${state.discardCapture.branch ? `/${state.discardCapture.branch}` : ""}`,
+			`Size: ${state.discardCapture.size}`,
+			"",
+		);
+	}
 	if (state.view === "actions") body.push(...renderActions(state.selectedIndex, data.widgetEnabled));
 	else if (state.view === "status") body.push(...formatStatusLines(data.status, { includeDetails: true }));
 	else if (state.view === "queue") body.push(...formatQueueLines(data.queue, { limit: 10, selectedIds: state.selectedCaptureIds, cursorIndex: state.selectedIndex }));
 	else body.push(...formatProcessLines(data.process, { cursorIndex: state.selectedIndex, inspectIndex: state.inspectIndex }));
-	body.push("", "↑↓/j/k move · space select · i inspect · d dry-run · p process · r refresh · q back");
+	const help = state.view === "process"
+		? "↑↓/j/k move · i inspect · t retry failed · d dry-run · p process · r refresh · q back"
+		: "↑↓/j/k move · space select · x discard · i inspect · d dry-run · p process · r refresh · q back";
+	body.push("", help);
 	return frameLines("Memento Vault", body, Math.max(1, width));
 }
 
@@ -94,11 +129,20 @@ export function renderMementoStatusText(status?: Record<string, unknown>, queue?
 	const processStatus = String(process?.status ?? "");
 	const queueCount = numberValue(queue?.count ?? status?.queued_capture_count);
 	if (processStatus === "running") return `🧠 processing ${numberValue(process?.completed_group_count)}/${numberValue(process?.group_count)} · ${queueCount}q · /memento`;
-	if (["failed", "interrupted"].includes(processStatus)) return `🧠 processing ${processStatus} · ${queueCount}q · /memento`;
+	const piBridge = recordValue(status?.piBridge);
+	const bridgeHealth = recordValue(status?.pi_bridge_health) ?? recordValue(piBridge?.health);
+	const bridgeCount = numberValue(bridgeHealth?.recent_failure_count ?? bridgeHealth?.failures ?? bridgeHealth?.events);
+	const bridgeSuffix = bridgeHealth?.status === "warn" ? ` · bridge ${bridgeCount || "!"}` : "";
+	const auditCount = numberValue(status?.capture_audit_count);
+	const auditSuffix = auditCount > 0 ? ` · audit ${auditCount}` : "";
+	if (["failed", "interrupted"].includes(processStatus)) {
+		const failedCount = numberValue(process?.failed_group_count ?? process?.retryable_group_count);
+		return `🧠 processing ${processStatus}${failedCount > 0 ? ` · ${failedCount} failed` : ""} · ${queueCount}q${bridgeSuffix} · /memento`;
+	}
 	const vault = status?.vault_exists === false ? "!" : "✓";
 	const notes = numberValue(status?.note_count);
-	if (queueCount > 0 || options.pinned) return `🧠 ${queueCount}q · ${vault} · ${notes}n · /memento`;
-	return `🧠 ${vault} · /memento`;
+	if (queueCount > 0 || options.pinned || bridgeHealth?.status === "warn" || auditCount > 0) return `🧠 ${queueCount}q · ${vault} · ${notes}n${bridgeSuffix}${auditSuffix} · /memento`;
+	return `🧠 ${vault}${bridgeSuffix}${auditSuffix} · /memento`;
 }
 
 export function renderMementoWidgetLines(status?: Record<string, unknown>, queue?: Record<string, unknown>, width = 100): string[] | undefined {
@@ -117,6 +161,7 @@ export function formatStatusLines(status?: Record<string, unknown>, options: { i
 	const piBridge = recordValue(status.piBridge);
 	const lifecycle = recordValue(status.lifecycle);
 	const bridgeConfig = recordValue(piBridge?.config);
+	const bridgeHealth = recordValue(status.pi_bridge_health) ?? recordValue(piBridge?.health);
 	const lines = [
 		`Status: ${status.vault_exists === false ? "! vault missing" : "✓ reachable"} · qmd ${boolMark(status.qmd_available)} · remote ${status.remote_configured ? boolMark(status.remote_available) : "off"}`,
 		`Vault: ${shortPath(String(status.vault_path ?? "unknown"), 80)}`,
@@ -124,11 +169,26 @@ export function formatStatusLines(status?: Record<string, unknown>, options: { i
 		`Notes: ${numberValue(status.note_count)} · Projects: ${numberValue(status.project_count)} · Queue: ${numberValue(status.queued_capture_count)}`,
 		`Lifecycle: briefing ${boolMark(lifecycle?.briefing)} · recall ${boolMark(lifecycle?.prompt_recall)} · tool context ${boolMark(lifecycle?.tool_context)} · capture queue ${boolMark(lifecycle?.capture_queue)}`,
 	];
+	if (bridgeHealth?.status === "warn") {
+		const count = numberValue(bridgeHealth?.recent_failure_count ?? bridgeHealth?.failures ?? bridgeHealth?.events);
+		const lastFailure = recordValue(bridgeHealth?.last_failure);
+		const lastError = String(lastFailure?.error ?? "");
+		lines.push(`Pi bridge: ${count || 1} recent failure${count === 1 ? "" : "s"}${lastError ? ` · last: ${fitLine(lastError, 72)}` : ""}`);
+	}
 	if (options.includeDetails) {
+		const lastAudit = recordValue(status.last_capture_audit) ?? recordValue(piBridge?.lastCaptureAudit);
 		lines.push(
 			`Config: enabled ${boolMark(bridgeConfig?.enabled)} · auto capture ${boolMark(bridgeConfig?.autoCapture)} · process queue ${boolMark(bridgeConfig?.processQueue)}`,
 			`Last lifecycle: ${String(piBridge?.lastLifecycleReason ?? "unknown")}`,
+			`Capture audit: ${numberValue(status.capture_audit_count ?? 0)} record${numberValue(status.capture_audit_count ?? 0) === 1 ? "" : "s"}${lastAudit ? ` · last ${String(lastAudit?.decision ?? lastAudit?.reason ?? "unknown")}` : ""}`,
 		);
+		if (bridgeHealth) {
+			const lastFailure = recordValue(bridgeHealth.last_failure);
+			lines.push(
+				`Pi bridge health: ${String(bridgeHealth.status ?? "unknown")} · recent ${numberValue(bridgeHealth.recent_failure_count ?? bridgeHealth.failures ?? bridgeHealth.events)}`,
+				`Pi bridge last failure: ${String(lastFailure?.operation ?? lastFailure?.action ?? "unknown")} · ${String(lastFailure?.backend ?? "unknown")} · ${String(lastFailure?.project ?? "unknown")} · ${String(lastFailure?.session_id ?? "unknown")}`,
+			);
+		}
 	}
 	return lines;
 }
@@ -157,6 +217,18 @@ export function formatQueueLines(queue?: Record<string, unknown>, options: { lim
 		lines.push(`    ${fitLine(`${project}${branch ? `/${branch}` : ""}${session ? ` · session: ${shortPath(session, 42)}` : ""}`, 88)}`);
 		const excerpt = String(capture.body_excerpt ?? "");
 		if (excerpt) lines.push(`    ${fitLine(excerpt, 88)}`);
+		const lifecycle = recordValue(capture.lifecycle);
+		if (lifecycle) {
+			const lifecycleSummary = [
+				String(lifecycle.source_event ?? capture.source_event ?? ""),
+				lifecycle.turn_count !== undefined ? `turns ${String(lifecycle.turn_count)}` : "",
+				lifecycle.tool_call_count !== undefined ? `tools ${String(lifecycle.tool_call_count)}` : "",
+				lifecycle.file_edit_count !== undefined ? `edits ${String(lifecycle.file_edit_count)}` : "",
+			]
+				.filter(Boolean)
+				.join(" · ");
+			if (lifecycleSummary) lines.push(`    lifecycle: ${fitLine(lifecycleSummary, 88)}`);
+		}
 	}
 	if (count > captures.length) lines.push(`… ${count - captures.length} more not loaded`);
 	return lines;
@@ -185,7 +257,10 @@ export function formatProcessLines(payload?: Record<string, unknown>, options: {
 		if (group.session_id) lines.push(`     session: ${shortPath(String(group.session_id), 84)}`);
 		if (group.discard_reason) lines.push(`     no notes: ${fitLine(String(group.discard_reason), 80)}`);
 		if (group.error || group.reason) lines.push(`     ${fitLine(String(group.error ?? group.reason), 80)}`);
+		if (group.status === "failed" && group.log_markdown) lines.push(`     log: ${shortPath(String(group.log_markdown), 78)}`);
 	}
+	const retryable = numberValue(payload.retryable_group_count ?? groups.filter((group) => String(group.status ?? "") === "failed").length);
+	if (retryable > 0) lines.push(`Retryable failed groups: ${retryable} · select one and press t`);
 	const inspected = options.inspectIndex !== undefined ? groups[options.inspectIndex] : undefined;
 	if (inspected) {
 		lines.push("", `Artifacts for ${String(inspected.group_id ?? `group ${options.inspectIndex + 1}`)}:`);
@@ -205,6 +280,24 @@ function renderActions(selectedIndex: number, widgetEnabled: boolean): string[] 
 		lines.push(`${cursor} ${item.label}${suffix}`);
 	}
 	return lines;
+}
+
+export function queueCaptureSummary(queue?: Record<string, unknown>, index = 0): MementoQueuedCaptureSummary | undefined {
+	const captures = Array.isArray(queue?.captures) ? queue.captures as Record<string, unknown>[] : [];
+	if (captures.length === 0) return undefined;
+	const safeIndex = Math.min(Math.max(0, Math.floor(index)), captures.length - 1);
+	const capture = captures[safeIndex];
+	const metadata = recordValue(capture.metadata);
+	const id = String(capture.id ?? "");
+	if (!id) return undefined;
+	return {
+		id,
+		title: String(capture.title ?? "Untitled capture"),
+		excerpt: String(capture.body_excerpt ?? ""),
+		project: String(metadata?.project ?? metadata?.project_slug ?? "unknown"),
+		branch: String(metadata?.branch ?? ""),
+		size: formatSize(capture.body_size_bytes ?? capture.body_char_count),
+	};
 }
 
 function summaryLine(status?: Record<string, unknown>, queue?: Record<string, unknown>, process?: Record<string, unknown>): string {

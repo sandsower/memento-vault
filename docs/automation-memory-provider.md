@@ -196,18 +196,18 @@ Available today, via `memento_status` (read-only, secret-free, cheap):
 - `note_count`, `project_count`, `fleeting_count` — rough corpus size
 - `config` — non-secret config summary (collection, backends, feature flags)
 
-`memento-vault health` (CLI) runs deeper read-only checks — config parse, vault structure, backend availability, recent triage health from the 24-hour triage-health log, retrieval log health, lock files — with `--json` for structured output and `--strict` to exit non-zero on warnings. Lifecycle packets also surface a triage-health warning inline when recent capture failure rates are high.
+`memento-vault health` (CLI) runs deeper read-only checks — config parse, vault structure, backend availability, recent triage health from the 24-hour triage-health log, retrieval log health, lock files — with `--json` for structured output and `--strict` to exit non-zero on warnings. Its JSON includes an `automation_memory` readiness object for orchestration probes. `memento_status` exposes the same readiness object, and `memento_session_context` includes a compact probe summary in `sections.status.automation_memory`. Lifecycle packets also surface a triage-health warning inline when recent capture failure rates are high.
 
-Planned signals — named by this contract, **implemented by MEM-9** (automation memory health checks):
+Automation memory readiness reports:
 
-- search backend availability as an explicit health check
-- recent recall failure rate over a time window
-- stale index warnings
-- local/remote vault divergence (when a remote is configured)
-- timestamp of the last successful automation memory packet
-- common failure reasons, structured from logs
+- search backend availability as explicit readiness metadata
+- recent recall/search failure rate over a 24-hour window
+- embedded-index staleness warnings when a local index exists
+- local/remote divergence via the local sync ledger when `MEMENTO_VAULT_URL` is configured (no network probe by default)
+- timestamp/shape of the last successful automation memory packet
+- common failure reasons, structured from local health/retrieval/sync logs
 
-All health surfaces, current and planned, are read-only, cheap by default, and MUST NOT contain secrets. A runner SHOULD check availability before a run if it intends to fail closed on missing memory; otherwise the fail-open defaults make a pre-check optional.
+All health surfaces are read-only, cheap by default, fail-open unless the caller explicitly chooses fail-closed, and MUST NOT contain secrets. A runner SHOULD check availability before a run if it intends to fail closed on missing memory; otherwise the fail-open defaults make a pre-check optional.
 
 ### Transport notes
 

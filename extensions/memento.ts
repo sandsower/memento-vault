@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -9,11 +10,15 @@ import {
 	formatProcessLines,
 	formatQueueLines,
 	formatStatusLines,
+	queueCaptureSummary,
 	reduceMementoPanelState,
 	renderMementoPanelLines,
 	renderMementoStatusText,
 	type MementoPanelState,
 } from "./memento-ui.js";
+import { defaultConfig as bridgeDefaultConfig, loadConfig } from "./memento-config.js";
+import { decorateStatusDetails } from "./memento-status.js";
+import { addSessionPointerDigest, sanitizeEventDetails, summarizeMessages, summarizeSessionEntries } from "./transcript-sanitizer.js";
 
 interface LifecycleResult {
 	should_inject: boolean;
@@ -39,104 +44,11 @@ interface BridgeConfig {
 	maxToolContextPerSession: number;
 }
 
-const defaultConfig: BridgeConfig = {
-	enabled: true,
-	briefing: true,
-	promptRecall: true,
-	toolContext: false,
-	autoCapture: false,
-	captureQueue: true,
-	processQueue: true,
-	processQueueOnSessionClose: false,
-	processQueueMaxCaptures: 3,
-	processQueueModel: null,
-	maxInjectedChars: 4000,
-	maxToolContextPerSession: 5,
-};
+const defaultConfig: BridgeConfig = bridgeDefaultConfig as BridgeConfig;
 
 interface LoadedBridgeConfig {
 	config: BridgeConfig;
 	sources: string[];
-}
-
-function envBool(name: string): boolean | undefined {
-	const raw = process.env[name];
-	if (raw === undefined) return undefined;
-	return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
-}
-
-function envInt(name: string): number | undefined {
-	const raw = process.env[name];
-	if (raw === undefined) return undefined;
-	const parsed = Number.parseInt(raw, 10);
-	return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
-}
-
-function readJson(path: string): unknown | undefined {
-	if (!existsSync(path)) return undefined;
-	return JSON.parse(readFileSync(path, "utf8"));
-}
-
-function bridgeConfigFrom(raw: unknown): Partial<BridgeConfig> {
-	const root = raw as Record<string, unknown> | undefined;
-	const memento = root?.memento as Record<string, unknown> | undefined;
-	const candidate = (memento?.piBridge ?? root?.piBridge ?? root) as Record<string, unknown> | undefined;
-	const partial: Partial<BridgeConfig> = {};
-	if (!candidate) return partial;
-
-	for (const key of ["enabled", "briefing", "promptRecall", "toolContext", "autoCapture", "captureQueue", "processQueue", "processQueueOnSessionClose"] as const) {
-		if (typeof candidate[key] === "boolean") partial[key] = candidate[key];
-	}
-	for (const key of ["maxInjectedChars", "maxToolContextPerSession", "processQueueMaxCaptures"] as const) {
-		if (typeof candidate[key] === "number" && Number.isFinite(candidate[key]) && candidate[key] >= 0) partial[key] = candidate[key];
-	}
-	if (typeof candidate.processQueueModel === "string" || candidate.processQueueModel === null) partial.processQueueModel = candidate.processQueueModel;
-	return partial;
-}
-
-function applyEnv(config: BridgeConfig): BridgeConfig {
-	return {
-		...config,
-		enabled: envBool("MEMENTO_PI_ENABLED") ?? config.enabled,
-		briefing: envBool("MEMENTO_PI_BRIEFING") ?? config.briefing,
-		promptRecall: envBool("MEMENTO_PI_PROMPT_RECALL") ?? config.promptRecall,
-		toolContext: envBool("MEMENTO_PI_TOOL_CONTEXT") ?? config.toolContext,
-		autoCapture: envBool("MEMENTO_PI_AUTO_CAPTURE") ?? config.autoCapture,
-		captureQueue: envBool("MEMENTO_PI_CAPTURE_QUEUE") ?? config.captureQueue,
-		processQueue: envBool("MEMENTO_PI_PROCESS_QUEUE") ?? config.processQueue,
-		processQueueOnSessionClose: envBool("MEMENTO_PI_PROCESS_QUEUE_ON_SESSION_CLOSE") ?? config.processQueueOnSessionClose,
-		processQueueMaxCaptures: envInt("MEMENTO_PI_PROCESS_QUEUE_MAX_CAPTURES") ?? config.processQueueMaxCaptures,
-		processQueueModel: process.env.MEMENTO_PI_PROCESS_QUEUE_MODEL ?? config.processQueueModel,
-		maxInjectedChars: envInt("MEMENTO_PI_MAX_INJECTED_CHARS") ?? config.maxInjectedChars,
-		maxToolContextPerSession: envInt("MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION") ?? config.maxToolContextPerSession,
-	};
-}
-
-function loadConfig(cwd = process.cwd()): LoadedBridgeConfig {
-	let config = { ...defaultConfig };
-	const sources = ["defaults"];
-	const candidates = [
-		join(homedir(), ".config", "memento-vault", "pi-bridge.json"),
-		resolve(cwd, ".pi", "settings.json"),
-		resolve(cwd, "package.json"),
-	];
-
-	for (const path of candidates) {
-		try {
-			const raw = readJson(path);
-			if (!raw) continue;
-			const partial = bridgeConfigFrom(raw);
-			if (Object.keys(partial).length === 0) continue;
-			config = { ...config, ...partial };
-			sources.push(path);
-		} catch (error) {
-			sources.push(`${path}:error:${String(error)}`);
-		}
-	}
-
-	const envConfig = applyEnv(config);
-	if (JSON.stringify(envConfig) !== JSON.stringify(config)) sources.push("environment");
-	return { config: envConfig, sources };
 }
 
 function capText(text: string, maxChars: number): string {
@@ -144,50 +56,103 @@ function capText(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}\n[vault] truncated by memento pi bridge cap (${maxChars} chars)`;
 }
 
-function summarizeMessages(messages: unknown): string {
-	if (!Array.isArray(messages)) return "Pi agent turn ended; message details unavailable.";
-	const summary = messages
-		.slice(-8)
-		.map((message, index) => summarizeRecord(message, `message-${index + 1}`))
-		.filter((line) => line.length > 4)
-		.join("\n");
-	return summary || "Pi agent turn ended; no message summary available.";
-}
-
-function summarizeRecord(value: unknown, fallbackRole: string): string {
-	const record = value as Record<string, unknown>;
-	const nested = record.message as Record<string, unknown> | undefined;
-	const role = String(nested?.role ?? record.role ?? record.type ?? fallbackRole);
-	const rawContent = nested?.content ?? record.content ?? record.summary ?? record.text ?? "";
-	const content = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent).slice(0, 500);
-	return `- ${role}: ${content.replace(/\s+/g, " ").trim().slice(0, 500)}`;
-}
-
-function summarizeSessionEntries(entries: unknown, reason: string): string {
-	if (!Array.isArray(entries)) return `Pi ${reason}; session entry details unavailable.`;
-	const recent = entries.slice(-12).map((entry, index) => summarizeRecord(entry, `entry-${index + 1}`));
-	return [`Pi ${reason}.`, "", "Recent session entries:", ...recent].join("\n");
-}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "..");
+const bridgeHealthLogPath = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "memento-vault", "triage-health.jsonl");
+
+function sanitizeBridgeHealthText(value: unknown): string {
+	let text = String(value ?? "");
+	for (const [pattern, replacement] of [
+		[/sk-[A-Za-z0-9]{20,}/g, "[REDACTED_API_KEY]"],
+		[/ghp_[A-Za-z0-9]{36,}/g, "[REDACTED_GITHUB_TOKEN]"],
+		[/github_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_GITHUB_TOKEN]"],
+		[/Bearer\s+[A-Za-z0-9_\-.]{20,}/g, "Bearer [REDACTED_TOKEN]"],
+	] as const) {
+		text = text.replace(pattern, replacement);
+	}
+	return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+}
+
+function appendBridgeHealthRecord(entry: Record<string, unknown>): void {
+	try {
+		mkdirSync(dirname(bridgeHealthLogPath), { recursive: true });
+		appendFileSync(bridgeHealthLogPath, `${JSON.stringify(entry)}\n`);
+	} catch {
+		// best-effort telemetry only
+	}
+}
 
 async function runJson(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	args: string[],
+	health?: { operation: string; cwd?: string; sessionId?: string; project?: string; config?: BridgeConfig; configSources?: string[] },
 ): Promise<Record<string, unknown>> {
-	const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...args], {
-		cwd: repoRoot,
-		signal: ctx.signal,
-		timeout: 15_000,
-	});
-	if (result.code !== 0) return { error: "process-failed", code: result.code, stderr: result.stderr };
 	try {
-		return JSON.parse(result.stdout) as Record<string, unknown>;
+		const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...args], {
+			cwd: repoRoot,
+			signal: ctx.signal,
+			timeout: 15_000,
+		});
+		if (result.code !== 0) {
+			if (health) {
+				appendBridgeHealthRecord({
+					ts: new Date().toISOString(),
+					hook: "pi-bridge",
+					action: `${health.operation}_failed`,
+					operation: health.operation,
+					backend: "python3",
+					config: health.config,
+					config_sources: health.configSources,
+					cwd: health.cwd ?? "",
+					project: health.project ?? "unknown",
+					session_id: health.sessionId ?? "unknown",
+					code: result.code,
+					error: sanitizeBridgeHealthText(result.stderr || `exit code ${result.code}`),
+				});
+			}
+			return { error: "process-failed", code: result.code, stderr: result.stderr };
+		}
+		try {
+			return JSON.parse(result.stdout) as Record<string, unknown>;
+		} catch (error) {
+			if (health) {
+				appendBridgeHealthRecord({
+					ts: new Date().toISOString(),
+					hook: "pi-bridge",
+					action: `${health.operation}_failed`,
+					operation: health.operation,
+					backend: "python3",
+					config: health.config,
+					config_sources: health.configSources,
+					cwd: health.cwd ?? "",
+					project: health.project ?? "unknown",
+					session_id: health.sessionId ?? "unknown",
+					error: sanitizeBridgeHealthText(String(error)),
+					stdout: sanitizeBridgeHealthText(result.stdout),
+				});
+			}
+			return { error: "invalid-json", stdout: result.stdout, message: String(error) };
+		}
 	} catch (error) {
-		return { error: "invalid-json", stdout: result.stdout, message: String(error) };
+		if (health) {
+			appendBridgeHealthRecord({
+				ts: new Date().toISOString(),
+				hook: "pi-bridge",
+				action: `${health.operation}_failed`,
+				operation: health.operation,
+				backend: "python3",
+				config: health.config,
+				config_sources: health.configSources,
+				cwd: health.cwd ?? "",
+				project: health.project ?? "unknown",
+				session_id: health.sessionId ?? "unknown",
+				error: sanitizeBridgeHealthText(String(error)),
+			});
+		}
+		return { error: "process-failed", message: String(error) };
 	}
 }
 
@@ -196,34 +161,93 @@ async function runLifecycle(
 	ctx: ExtensionContext,
 	args: string[],
 	source: string,
+	health?: { cwd?: string; sessionId?: string; project?: string; config?: BridgeConfig; configSources?: string[] },
 ): Promise<LifecycleResult> {
-	const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...args], {
-		cwd: repoRoot,
-		signal: ctx.signal,
-		timeout: 15_000,
-	});
+	try {
+		const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...args], {
+			cwd: repoRoot,
+			signal: ctx.signal,
+			timeout: 15_000,
+		});
 
-	if (result.code !== 0) {
+		if (result.code !== 0) {
+			if (health) {
+				appendBridgeHealthRecord({
+					ts: new Date().toISOString(),
+					hook: "pi-bridge",
+					action: `${source}_failed`,
+					operation: source,
+					backend: "python3",
+					config: health.config,
+					config_sources: health.configSources,
+					cwd: health.cwd ?? "",
+					project: health.project ?? "unknown",
+					session_id: health.sessionId ?? "unknown",
+					code: result.code,
+					error: sanitizeBridgeHealthText(result.stderr || `exit code ${result.code}`),
+				});
+			}
+			return {
+				should_inject: false,
+				content: "",
+				source,
+				results: [],
+				reason: "process-failed",
+				metadata: { code: result.code, stderr: result.stderr },
+			};
+		}
+
+		try {
+			return JSON.parse(result.stdout) as LifecycleResult;
+		} catch (error) {
+			if (health) {
+				appendBridgeHealthRecord({
+					ts: new Date().toISOString(),
+					hook: "pi-bridge",
+					action: `${source}_failed`,
+					operation: source,
+					backend: "python3",
+					config: health.config,
+					config_sources: health.configSources,
+					cwd: health.cwd ?? "",
+					project: health.project ?? "unknown",
+					session_id: health.sessionId ?? "unknown",
+					error: sanitizeBridgeHealthText(String(error)),
+					stdout: sanitizeBridgeHealthText(result.stdout),
+				});
+			}
+			return {
+				should_inject: false,
+				content: "",
+				source,
+				results: [],
+				reason: "invalid-json",
+				metadata: { stdout: result.stdout, error: String(error) },
+			};
+		}
+	} catch (error) {
+		if (health) {
+			appendBridgeHealthRecord({
+				ts: new Date().toISOString(),
+				hook: "pi-bridge",
+				action: `${source}_failed`,
+				operation: source,
+				backend: "python3",
+				config: health.config,
+				config_sources: health.configSources,
+				cwd: health.cwd ?? "",
+				project: health.project ?? "unknown",
+				session_id: health.sessionId ?? "unknown",
+				error: sanitizeBridgeHealthText(String(error)),
+			});
+		}
 		return {
 			should_inject: false,
 			content: "",
 			source,
 			results: [],
 			reason: "process-failed",
-			metadata: { code: result.code, stderr: result.stderr },
-		};
-	}
-
-	try {
-		return JSON.parse(result.stdout) as LifecycleResult;
-	} catch (error) {
-		return {
-			should_inject: false,
-			content: "",
-			source,
-			results: [],
-			reason: "invalid-json",
-			metadata: { stdout: result.stdout, error: String(error) },
+			metadata: { error: String(error) },
 		};
 	}
 }
@@ -265,6 +289,10 @@ function parseProcessCommandArgs(raw: string): string[] {
 	return trimmed.split(/\s+/g);
 }
 
+function isProcessorSession(): boolean {
+	return String(process.env.MEMENTO_PI_PROCESSOR ?? "").toLowerCase() === "true";
+}
+
 async function currentProjectSlug(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string> {
 	const payload = await runJson(pi, ctx, ["status", "--cwd", ctx.cwd]);
 	return String(payload.project_slug ?? "unknown");
@@ -292,8 +320,20 @@ function defaultSelectedCaptureIds(queue: Record<string, unknown> | undefined, p
 	return selected;
 }
 
+function processGroups(payload?: Record<string, unknown>): Record<string, unknown>[] {
+	return Array.isArray(payload?.groups) ? payload.groups as Record<string, unknown>[] : [];
+}
+
+function selectedProcessGroup(payload?: Record<string, unknown>, index = 0): Record<string, unknown> | undefined {
+	const groups = processGroups(payload);
+	if (groups.length === 0) return undefined;
+	const safeIndex = Math.min(Math.max(0, Math.floor(index)), groups.length - 1);
+	return groups[safeIndex];
+}
+
 function countGroups(payload?: Record<string, unknown>): number {
-	return Array.isArray(payload?.groups) ? payload.groups.length : 1;
+	const groups = processGroups(payload);
+	return groups.length > 0 ? groups.length : 1;
 }
 
 function processingMessage(payload?: Record<string, unknown>): string {
@@ -328,25 +368,167 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	let latestQueue: Record<string, unknown> | undefined;
 	let latestProcess: Record<string, unknown> | undefined;
 
-	async function queueLifecycleCapture(ctx: ExtensionContext, title: string, body: string, reason: string, sourceEvent: string) {
-		if (!config.enabled || !config.autoCapture || !config.captureQueue) return undefined;
-		const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
-		const payload = await runJson(pi, ctx, [
-			"capture",
-			"--title",
-			title,
-			"--body",
-			body,
-			"--cwd",
-			ctx.cwd,
-			"--session-id",
-			sessionFile,
-			"--queue",
-			"--reason",
+	function isRecord(value: unknown): value is Record<string, unknown> {
+		return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+	}
+
+	function firstString(...values: unknown[]): string {
+		for (const value of values) {
+			if (typeof value === "string" && value.trim()) return value.trim();
+		}
+		return "";
+	}
+
+	function digestText(text: string): string {
+		return createHash("sha256").update(text).digest("hex").slice(0, 16);
+	}
+
+	function toolPathFromArgs(args: unknown): string {
+		if (!isRecord(args)) return "";
+		return firstString(args.path, args.file_path, args.filePath, args.file);
+	}
+
+	function collectLifecycleMetadata(sourceEvent: string, reason: string, body: string, event: unknown, ctx: ExtensionContext): Record<string, unknown> {
+		const sessionEntries = ctx.sessionManager.getEntries();
+		const entries = Array.isArray(sessionEntries) ? sessionEntries : [];
+		const fileEdits = new Set<string>();
+		const fileReads = new Set<string>();
+		let userMessageCount = 0;
+		let assistantMessageCount = 0;
+		let toolCallCount = 0;
+		let firstEntryAt = "";
+		let lastEntryAt = "";
+
+		const noteTimestamp = (value: unknown) => {
+			const stamp = firstString(value);
+			if (!stamp) return;
+			if (!firstEntryAt) firstEntryAt = stamp;
+			lastEntryAt = stamp;
+		};
+
+		const scanContent = (content: unknown) => {
+			if (typeof content === "string") return;
+			if (Array.isArray(content)) {
+				for (const part of content) scanContent(part);
+				return;
+			}
+			if (!isRecord(content)) return;
+			const type = firstString(content.type).toLowerCase();
+			if (type === "toolcall") {
+				toolCallCount += 1;
+				const name = firstString(content.name, content.tool, content.toolName).toLowerCase();
+				const path = toolPathFromArgs(content.arguments ?? content.input ?? content.parameters ?? content.args);
+				if (path) {
+					if (["edit", "write", "patch", "apply_patch", "multiedit"].includes(name)) fileEdits.add(path);
+					if (name === "read") fileReads.add(path);
+				}
+				return;
+			}
+			if (type === "toolresult" || type === "tool_result" || type === "function_call_output") {
+				return;
+			}
+			if (content.content !== undefined) scanContent(content.content);
+			if (content.message !== undefined) scanContent(content.message);
+			if (content.args !== undefined) scanContent(content.args);
+			if (content.input !== undefined) scanContent(content.input);
+			if (content.result !== undefined) scanContent(content.result);
+		};
+
+		const inspectMessage = (message: unknown) => {
+			if (!isRecord(message)) return;
+			const role = firstString(message.role).toLowerCase();
+			if (role === "user") userMessageCount += 1;
+			if (role === "assistant") assistantMessageCount += 1;
+			scanContent(message.content);
+		};
+
+		for (const entry of entries) {
+			if (!isRecord(entry)) continue;
+			noteTimestamp(entry.timestamp ?? entry.created_at ?? entry.createdAt ?? entry.time);
+			const type = firstString(entry.type).toLowerCase();
+			if (type === "message" || type === "message_start" || type === "message_end") {
+				inspectMessage(entry.message);
+				continue;
+			}
+			if (type === "tool_execution_start") {
+				toolCallCount += 1;
+				const path = toolPathFromArgs(entry.args ?? entry.input ?? entry.arguments ?? {});
+				const name = firstString(entry.toolName, entry.name).toLowerCase();
+				if (path) {
+					if (["edit", "write", "patch", "apply_patch", "multiedit"].includes(name)) fileEdits.add(path);
+					if (name === "read") fileReads.add(path);
+				}
+				continue;
+			}
+			if (type === "custom_message") {
+				scanContent(entry.content);
+				continue;
+			}
+			inspectMessage(entry.message);
+			scanContent(entry.content);
+			scanContent(entry.result);
+		}
+
+		const summaryDigest = digestText(body);
+		return {
+			source_event: sourceEvent,
 			reason,
-			"--source-event",
-			sourceEvent,
-		]);
+			event_timestamp: new Date().toISOString(),
+			event_index: entries.length,
+			turn_count: Math.min(userMessageCount, assistantMessageCount),
+			user_message_count: userMessageCount,
+			assistant_message_count: assistantMessageCount,
+			tool_call_count: toolCallCount,
+			file_edit_count: fileEdits.size,
+			file_read_count: fileReads.size,
+			file_edits: Array.from(fileEdits).slice(0, 20),
+			file_reads: Array.from(fileReads).slice(0, 20),
+			session_entry_count: entries.length,
+			session_first_entry_at: firstEntryAt,
+			session_last_entry_at: lastEntryAt,
+			summary: body,
+			summary_digest: summaryDigest,
+			tool_context_count: toolContextCount,
+			last_lifecycle_reason: lastLifecycleReason,
+			lifecycle_capture_queued: lifecycleCaptureQueued,
+			project_slug: String(latestStatus?.project_slug ?? "unknown"),
+			session_file: ctx.sessionManager.getSessionFile() ?? "unknown",
+		};
+	}
+
+	async function queueLifecycleCapture(ctx: ExtensionContext, title: string, body: string, reason: string, sourceEvent: string, event?: unknown) {
+		if (!config.enabled || !config.autoCapture || !config.captureQueue) return undefined;
+		if (isProcessorSession()) {
+			lastLifecycleReason = `${sourceEvent}-capture-skipped:processor_session`;
+			await refreshAmbientWidget(ctx);
+			return { skipped: true, reason: "processor_session", source_event: sourceEvent };
+		}
+		const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
+		const queuedBody = addSessionPointerDigest(body, sessionFile);
+		const lifecycleMetadata = collectLifecycleMetadata(sourceEvent, reason, queuedBody, event, ctx);
+		const payload = await runJson(
+			pi,
+			ctx,
+			[
+				"capture",
+				"--title",
+				title,
+				"--body",
+				queuedBody,
+				"--cwd",
+				ctx.cwd,
+				"--session-id",
+				sessionFile,
+				"--queue",
+				"--reason",
+				reason,
+				"--source-event",
+				sourceEvent,
+				"--lifecycle-metadata",
+				JSON.stringify(lifecycleMetadata),
+			],
+			{ operation: "capture", cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
+		);
 		lifecycleCaptureQueued = lifecycleCaptureQueued || Boolean(payload.queued);
 		lastLifecycleReason = payload.error
 			? `queue-error:${String(payload.error)}`
@@ -358,7 +540,13 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	}
 
 	function statusDetails(payload: Record<string, unknown>) {
-		return { ...payload, piBridge: { config, configSources: loadedConfig.sources, toolContextCount, lifecycleCaptureQueued, lastLifecycleReason } };
+		return decorateStatusDetails(payload, {
+			config,
+			configSources: loadedConfig.sources,
+			toolContextCount,
+			lifecycleCaptureQueued,
+			lastLifecycleReason,
+		});
 	}
 
 	async function loadStatus(ctx: ExtensionContext) {
@@ -422,6 +610,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				ctx,
 				["briefing", "--cwd", ctx.cwd, "--session-id", sessionFile],
 				"briefing",
+				{ cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
 			);
 			lastLifecycleReason = briefing.reason ?? (briefing.should_inject ? "briefing-inject" : "briefing-skip");
 			if (briefing.should_inject && briefing.content) {
@@ -435,6 +624,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				ctx,
 				["recall", "--prompt", event.prompt, "--cwd", ctx.cwd, "--session-id", sessionFile],
 				"recall",
+				{ cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
 			);
 			lastLifecycleReason = recall.reason ?? (recall.should_inject ? "recall-inject" : "recall-skip");
 			if (recall.should_inject && recall.content) {
@@ -469,6 +659,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			ctx,
 			["tool-context", "--tool-name", "read", "--file-path", filePath, "--cwd", ctx.cwd, "--session-id", sessionFile],
 			"tool-context",
+			{ cwd: ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources },
 		);
 		lastLifecycleReason = toolContext.reason ?? (toolContext.should_inject ? "tool-context-inject" : "tool-context-skip");
 		if (!toolContext.should_inject || !toolContext.content) return;
@@ -481,24 +672,24 @@ export default function mementoExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (event, ctx) => {
 		const body = summarizeMessages((event as { messages?: unknown }).messages);
-		await queueLifecycleCapture(ctx, "Pi session candidate capture", body, "agent_end", "agent_end");
+		await queueLifecycleCapture(ctx, "Pi session candidate capture", body, "agent_end", "agent_end", event);
 	});
 
 	pi.on("session_before_compact", async (_event, ctx) => {
 		const body = summarizeSessionEntries(ctx.sessionManager.getEntries(), "is about to compact the current session");
-		await queueLifecycleCapture(ctx, "Pi pre-compaction candidate capture", body, "session_before_compact", "session_before_compact");
+		await queueLifecycleCapture(ctx, "Pi pre-compaction candidate capture", body, "session_before_compact", "session_before_compact", _event);
 	});
 
 	pi.on("session_compact", async (event, ctx) => {
-		const body = `Pi compacted the current session.\n\nEvent details:\n${JSON.stringify(event, null, 2).slice(0, 2000)}`;
-		await queueLifecycleCapture(ctx, "Pi compaction candidate capture", body, "session_compact", "session_compact");
+		const body = `Pi compacted the current session.\n\nEvent details:\n${sanitizeEventDetails(event, 2000)}`;
+		await queueLifecycleCapture(ctx, "Pi compaction candidate capture", body, "session_compact", "session_compact", event);
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
 		if (!lifecycleCaptureQueued) {
 			const reason = String((event as { reason?: unknown }).reason ?? "shutdown");
 			const body = summarizeSessionEntries(ctx.sessionManager.getEntries(), `session is shutting down (${reason})`);
-			await queueLifecycleCapture(ctx, "Pi shutdown candidate capture", body, `session_shutdown:${reason}`, "session_shutdown");
+			await queueLifecycleCapture(ctx, "Pi shutdown candidate capture", body, `session_shutdown:${reason}`, "session_shutdown", event);
 		}
 		ctx.ui.setStatus("memento", "🧠 stopped");
 		if (ctx.hasUI) ctx.ui.setWidget("memento", undefined);
@@ -585,6 +776,29 @@ export default function mementoExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "memento_contradictions",
+		label: "Memento Contradictions",
+		description: "Inspect a topic for disagreements, stale conclusions, and supersession chains. Use when comparing competing notes about the same topic or when you need explicit superseded notes marked alongside their source paths and certainty/date context.",
+		parameters: Type.Object({
+			topic: Type.String({ description: "Topic or question to inspect for contradictions" }),
+			limit: Type.Optional(Type.Number({ description: "Maximum results, default 20" })),
+			min_certainty: Type.Optional(Type.Number({ description: "Minimum certainty to include, default 2" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const payload = await runJson(pi, ctx, [
+				"contradictions",
+				"--topic",
+				params.topic,
+				"--limit",
+				String(params.limit ?? 20),
+				"--min-certainty",
+				String(params.min_certainty ?? 2),
+			]);
+			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+		},
+	});
+
+	pi.registerTool({
 		name: "memento_get",
 		label: "Memento Get",
 		description: "Read the full content of a specific memento note by path or note name. Use after memento_search when a result path needs full content, or directly when the user already supplied an exact note path/name. Do not use for topical discovery; search first.",
@@ -604,10 +818,16 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			title: Type.String({ description: "Short note title for the durable memory" }),
 			body: Type.String({ description: "Durable decision, discovery, fix, or reusable pattern to capture" }),
+			note_type: Type.Optional(Type.String({ description: "Frontmatter type such as decision, discovery, pattern, bugfix, or tool" })),
+			tags: Type.Optional(Type.Array(Type.String(), { description: "Frontmatter tags for this note" })),
+			certainty: Type.Optional(Type.Number({ description: "Frontmatter certainty from 1 to 5" })),
+			cwd: Type.Optional(Type.String({ description: "Original project cwd for frontmatter/project detection; defaults to current cwd" })),
+			branch: Type.Optional(Type.String({ description: "Original git branch for frontmatter; defaults to the branch detected from cwd" })),
+			session_id: Type.Optional(Type.String({ description: "Original session identifier for frontmatter; defaults to current pi session" })),
 			queue: Type.Optional(Type.Boolean({ description: "Queue for review instead of writing a note immediately" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const sessionFile = ctx.sessionManager.getSessionFile() ?? "unknown";
+			const sessionFile = params.session_id ?? ctx.sessionManager.getSessionFile() ?? "unknown";
 			const args = [
 				"capture",
 				"--title",
@@ -615,12 +835,26 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				"--body",
 				params.body,
 				"--cwd",
-				ctx.cwd,
+				params.cwd ?? ctx.cwd,
 				"--session-id",
 				sessionFile,
 			];
-			if (params.queue) args.push("--queue", "--reason", "manual", "--source-event", "tool");
-			const payload = await runJson(pi, ctx, args);
+			if (params.note_type) args.push("--note-type", params.note_type);
+			if (params.branch) args.push("--branch", params.branch);
+			if (typeof params.certainty === "number" && Number.isFinite(params.certainty)) {
+				const certainty = Math.floor(params.certainty);
+				if (certainty < 1 || certainty > 5) {
+					const payload = { error: "certainty must be an integer from 1 to 5" };
+					return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload, isError: true };
+				}
+				args.push("--certainty", String(certainty));
+			}
+			for (const tag of params.tags ?? []) if (tag.trim()) args.push("--tag", tag.trim());
+			if (params.queue) {
+				args.push("--queue", "--reason", "manual", "--source-event", "tool");
+				args.push("--lifecycle-metadata", JSON.stringify(collectLifecycleMetadata("tool", "manual", params.body, undefined, ctx)));
+			}
+			const payload = await runJson(pi, ctx, args, { operation: "capture", cwd: params.cwd ?? ctx.cwd, sessionId: sessionFile, project: String(latestStatus?.project_slug ?? "unknown"), config: config, configSources: loadedConfig.sources });
 			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
 		},
 	});
@@ -766,7 +1000,10 @@ export default function mementoExtension(pi: ExtensionAPI) {
 							void refreshAmbientWidget(ctx);
 							state = { ...state, message: `Footer status ${footerDetailsPinned ? "detailed" : "compact"}.` };
 						}
-						if (next.action?.type === "refresh" || next.action?.type === "show") void refresh();
+						if (next.action?.type === "refresh" || next.action?.type === "show") {
+							state = { ...state, confirmDiscard: false, discardCapture: undefined };
+							void refresh();
+						}
 						if (next.action?.type === "toggle-capture") {
 							const ids = captureIdsFromQueue(latestQueue);
 							const id = ids[state.selectedIndex];
@@ -781,8 +1018,78 @@ export default function mementoExtension(pi: ExtensionAPI) {
 								state = { ...state, selectedCaptureIds: [...selected], message: `${selected.size} capture(s) selected.` };
 							}
 						}
+						if (next.action?.type === "request-discard") {
+							const capture = queueCaptureSummary(latestQueue, state.selectedIndex);
+							if (!capture) {
+								state = { ...state, message: "Select a queued capture first." };
+							} else {
+								state = { ...state, confirmDiscard: true, discardCapture: capture, message: `Discard ${capture.id}? y/N` };
+							}
+						}
 						if (next.action?.type === "inspect-group") {
 							state = { ...state, message: "Showing artifact paths for selected group." };
+						}
+						if (next.action?.type === "retry-failed") {
+							const selectedGroup = selectedProcessGroup(latestProcess, state.selectedIndex);
+							if (!config.processQueue) {
+								state = { ...state, view: "process", message: "Queue processing is disabled." };
+							} else if (!selectedGroup || String(selectedGroup.status ?? "") !== "failed") {
+								state = { ...state, view: "process", message: "Select a failed group first." };
+							} else {
+								state = { ...state, view: "process", message: `Retrying ${String(selectedGroup.group_id ?? "failed group")}…` };
+								requestRender();
+								void (async () => {
+									const plan = await runJson(pi, ctx, ["queue", "process-retry", "--run-id", String(latestProcess?.run_id ?? ""), "--group-id", String(selectedGroup.group_id ?? "")]);
+									const retryIds = Array.isArray(plan.selected_capture_ids) ? plan.selected_capture_ids.map((captureId) => String(captureId)).filter(Boolean) : [];
+									if (plan.error || retryIds.length === 0) {
+										state = { ...state, message: plan.error ? `Retry failed: ${String(plan.error)}` : "No captures available to retry." };
+										requestRender();
+										return;
+									}
+									startPolling();
+									processPreview = await runProcessWorker(pi, ctx, processArgsFromCaptureIds(retryIds, config.processQueueMaxCaptures), config);
+									latestQueue = await loadQueue(ctx, false, 10);
+									latestProcess = await loadProcessStatus(ctx);
+									processPreview = latestProcess?.status === "idle" ? processPreview : latestProcess;
+									syncCounts();
+									await refreshAmbientWidget(ctx);
+									state = { ...state, selectedCaptureIds: defaultSelectedCaptureIds(latestQueue, String(latestStatus?.project_slug ?? "unknown"), config.processQueueMaxCaptures), message: processingMessage(processPreview) };
+									requestRender();
+								})();
+							}
+						}
+						if (next.action?.type === "discard") {
+							const target = state.discardCapture;
+							if (!target?.id) {
+								state = { ...state, message: "Select a queued capture first.", confirmDiscard: false, discardCapture: undefined };
+							} else {
+								const discardId = target.id;
+								const selectionSnapshot = [...(state.selectedCaptureIds ?? [])];
+								const cursorSnapshot = state.selectedIndex;
+								state = { ...state, view: "queue", message: `Discarding ${discardId}…` };
+								requestRender();
+								void (async () => {
+									const payload = await runJson(pi, ctx, ["queue", "discard", "--id", discardId, "--apply"]);
+									latestStatus = await loadStatus(ctx);
+									latestQueue = await loadQueue(ctx, false, 10);
+									latestProcess = await loadProcessStatus(ctx);
+									syncCounts();
+									const remainingIds = new Set(captureIdsFromQueue(latestQueue));
+									const nextSelected = selectionSnapshot.filter((captureId) => remainingIds.has(captureId));
+									const nextIndex = Math.min(cursorSnapshot, Math.max(0, captureIdsFromQueue(latestQueue).length - 1));
+									const succeeded = !payload.error;
+									state = {
+										...state,
+										selectedCaptureIds: succeeded ? nextSelected : selectionSnapshot,
+										selectedIndex: nextIndex,
+										confirmDiscard: false,
+										discardCapture: undefined,
+										message: payload.error ? `Discard failed: ${String(payload.error)}` : `Discarded ${discardId}.`,
+									};
+									await refreshAmbientWidget(ctx);
+									requestRender();
+								})();
+							}
 						}
 						if (next.action?.type === "dry-run") {
 							if ((state.selectedCaptureIds ?? []).length === 0) {

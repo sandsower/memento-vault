@@ -5,6 +5,8 @@ Walks vault dirs (notes/, fleeting/, projects/) and indexes .md files
 that are missing from or stale in the search database.
 """
 
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 

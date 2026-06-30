@@ -1,9 +1,12 @@
-"""MCP server for memento vault — exposes search, store, status, capture, and get operations.
+"""MCP server for memento vault — exposes search, store, status, capture, preserve, and get operations.
 
 Supports both stdio (local) and streamable-http (remote) transports.
 When running over HTTP, authentication is enforced via bearer tokens.
 """
 
+from __future__ import annotations
+
+import inspect
 import json
 import os
 import re
@@ -12,9 +15,132 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:  # pragma: no cover - fallback for stripped test envs
+
+    class FastMCP:  # type: ignore[no-redef]
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self._tools = {}
+
+        def tool(self, *decorator_args, **decorator_kwargs):
+            def decorator(func):
+                name = decorator_kwargs.get("name") or getattr(func, "__name__", "tool")
+                self._tools[name] = func
+                return func
+
+            if decorator_args and callable(decorator_args[0]) and not decorator_kwargs:
+                return decorator(decorator_args[0])
+            return decorator
+
+        def _jsonrpc_app(self):
+            async def app(scope, receive, send):
+                if scope["type"] != "http":
+                    return
+                path = scope.get("path") or ""
+                if path.rstrip("/") not in {"/mcp", "mcp"}:
+                    body = b"Not Found"
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 404,
+                            "headers": [[b"content-type", b"text/plain"], [b"content-length", str(len(body)).encode()]],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": body})
+                    return
+                if scope.get("method") != "POST":
+                    body = b"Method Not Allowed"
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 405,
+                            "headers": [[b"content-type", b"text/plain"], [b"content-length", str(len(body)).encode()]],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": body})
+                    return
+
+                chunks = []
+                while True:
+                    event = await receive()
+                    if event.get("type") != "http.request":
+                        continue
+                    if event.get("body"):
+                        chunks.append(event["body"])
+                    if not event.get("more_body"):
+                        break
+                try:
+                    payload = json.loads(b"".join(chunks).decode() or "{}")
+                except json.JSONDecodeError as exc:
+                    response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
+                else:
+                    response = await self._handle_jsonrpc(payload)
+
+                body = json.dumps(response).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                            [b"content-length", str(len(body)).encode()],
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+
+            return app
+
+        async def _handle_jsonrpc(self, payload):
+            if not isinstance(payload, dict):
+                return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
+            request_id = payload.get("id")
+            method = payload.get("method")
+            params = payload.get("params") or {}
+            if method != "tools/call":
+                return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "Method not found"}}
+            tool_name = params.get("name")
+            arguments = params.get("arguments") or {}
+            if not isinstance(tool_name, str):
+                return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Missing tool name"}}
+            tool = globals().get(tool_name)
+            if tool is None:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
+                }
+            try:
+                result = tool(**arguments)
+                if inspect.isawaitable(result):
+                    result = await result
+                safe_result = json.loads(json.dumps(result, default=str))
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(exc)}}
+            text_result = json.dumps(safe_result, ensure_ascii=False)
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "content": [{"type": "text", "text": text_result}],
+                    "structuredContent": {"result": safe_result},
+                },
+            }
+
+        def run(self, *args, **kwargs):
+            raise RuntimeError("mcp package is required to run the MCP server")
+
+        def streamable_http_app(self):
+            return self._jsonrpc_app()
+
+        def sse_app(self):
+            return self._jsonrpc_app()
+
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
+from memento.health import build_automation_memory_readiness
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context
 from memento.search import (
     enhance_results,
@@ -26,16 +152,21 @@ from memento.search import (
     qmd_search_with_extras,
     resolve_concrete_mode,
 )
+from memento.contradictions import inspect_contradictions
 from memento.store import (
     acquire_vault_write_lock,
     append_fleeting_session,
     append_project_session_line,
     log_retrieval,
+    normalize_note_contract,
+    record_access,
     release_vault_write_lock,
     update_project_index,
     write_daily_snapshot,
     write_note,
 )
+from memento.smart_store import write_smart_store_note
+from memento.preserve import preserve_bundle
 from memento.utils import sanitize_secrets
 
 
@@ -70,11 +201,13 @@ def _note_payload_matches(
     note_type: str,
     tags: list[str],
     certainty: int | None = None,
+    source: str | None = None,
     project: str | None = None,
     branch: str | None = None,
     validity_context: str | None = None,
     supersedes: str | None = None,
     session_id: str | None = None,
+    origin: str | None = None,
 ) -> bool:
     """Return True when an existing note represents the same store payload."""
     try:
@@ -108,12 +241,14 @@ def _note_payload_matches(
     ]
 
     optional_fields = {
+        "source": source,
         "certainty": str(int(certainty)) if certainty is not None else None,
         "project": project,
         "branch": branch,
         "validity-context": validity_context,
         "supersedes": supersedes,
         "session_id": session_id,
+        "origin": origin,
     }
     for key, expected in optional_fields.items():
         if expected is not None:
@@ -139,17 +274,18 @@ def _build_server() -> FastMCP:
             "Memento Vault is a persistent knowledge store for coding agents.\n\n"
             "General answering path: use memento_search when the user asks about "
             "past decisions, prior fixes, project history, session context, or exact "
-            "identifiers. Use memento_get after search when you need the full content "
-            "for a returned path, or directly when the user already supplied a note "
-            "path/name. Use memento_status for vault health and memento_list for "
-            "sync/inventory.\n\n"
+            "identifiers. Use memento_contradictions when the user wants to inspect "
+            "disagreements, stale conclusions, or supersession chains. Use memento_get "
+            "after search when you need the full content for a returned path, or directly "
+            "when the user already supplied a note path/name. Use memento_status for vault "
+            "health and memento_list for sync/inventory.\n\n"
             "Lifecycle tools (memento_briefing, memento_recall, "
             "memento_session_context, memento_tool_context) are host-adapter primitives for automatic context "
             "injection, not general user-answering tools.\n\n"
             "Writes: if your agent has a `memento` skill or `SessionEnd` hook, "
             "use it — the skill is local-first (writes to the git-backed vault, "
             "commits, then syncs here), which avoids duplicate notes and keeps "
-            "the local vault canonical. memento_store, memento_capture, and "
+            "the local vault canonical. memento_store, memento_store_smart, memento_capture, and "
             "memento_daily_snapshot are low-level primitives intended for automated "
             "sync/scripts, structured daily-snapshot integrations, and agents "
             "without skill/hook support (Windsurf, some Cursor configs). Do not "
@@ -180,6 +316,21 @@ def _strip_injection(text: str) -> str:
     text = re.sub(r"(?i)^(system|assistant)\s*:", "[filtered]:", text, flags=re.MULTILINE)
     text = re.sub(r"</?s>", "", text)
     return text
+
+
+def _vault_relative_access_path(vault: Path, path: str) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        candidate = Path(text).expanduser()
+        vault_resolved = vault.resolve()
+        resolved = candidate.resolve() if candidate.is_absolute() else (vault / candidate).resolve()
+        if resolved == vault_resolved:
+            return ""
+        return str(resolved.relative_to(vault_resolved)).replace(os.sep, "/")
+    except Exception:
+        return text.replace("\\", "/")
 
 
 @mcp.tool()
@@ -286,7 +437,7 @@ def memento_search(
     output = []
     for r in results[:limit]:
         entry = {
-            "path": r.get("path", ""),
+            "path": _vault_relative_access_path(vault, r.get("path", "")),
             "title": _strip_injection(r.get("title", "")),
             "score": round(r.get("score", 0.0), 4),
             "snippet": _strip_injection(r.get("snippet", "")),
@@ -306,7 +457,55 @@ def memento_search(
         output.append(entry)
 
     log_retrieval("mcp", "search", query=query, results=len(output))
+    record_access(
+        [entry["path"] for entry in output if entry.get("path")],
+        hook="mcp",
+        tool="search",
+        query=query,
+        result_count=len(output),
+    )
     return output
+
+
+@mcp.tool()
+def memento_contradictions(topic: str, limit: int = 20, min_certainty: int = 2) -> dict:
+    """Inspect a topic for disagreements, stale conclusions, and supersession chains.
+
+    Use this when you want to compare competing notes about the same topic,
+    surface explicit superseded notes, or understand whether newer notes have
+    replaced older conclusions. Output includes source paths plus certainty/date
+    context for the inspected notes.
+    """
+    payload = inspect_contradictions(topic, limit=limit, min_certainty=min_certainty)
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        for entry in payload["results"]:
+            entry["title"] = _strip_injection(entry.get("title", ""))
+            entry["snippet"] = _strip_injection(entry.get("snippet", ""))
+            entry["status"] = _strip_injection(entry.get("status", ""))
+            entry["polarity"] = _strip_injection(entry.get("polarity", ""))
+            entry["path"] = _strip_injection(entry.get("path", ""))
+        for group in payload.get("groups", []):
+            group["theme"] = _strip_injection(group.get("theme", ""))
+            group["summary"] = _strip_injection(group.get("summary", ""))
+            group["note_paths"] = [_strip_injection(path) for path in group.get("note_paths", [])]
+        for item in payload.get("contradictions", []):
+            item["kind"] = _strip_injection(item.get("kind", ""))
+            item["paths"] = [_strip_injection(path) for path in item.get("paths", [])]
+            item["titles"] = [_strip_injection(title) for title in item.get("titles", [])]
+        for item in payload.get("supersession", []):
+            item["older_path"] = _strip_injection(item.get("older_path", ""))
+            item["newer_path"] = _strip_injection(item.get("newer_path", ""))
+            item["older_title"] = _strip_injection(item.get("older_title", ""))
+            item["newer_title"] = _strip_injection(item.get("newer_title", ""))
+        if isinstance(payload.get("summary"), str):
+            payload["summary"] = _strip_injection(payload["summary"])
+    log_retrieval(
+        "mcp",
+        "contradictions",
+        topic=topic,
+        results=len(payload.get("results", [])) if isinstance(payload, dict) else 0,
+    )
+    return payload
 
 
 @mcp.tool()
@@ -387,6 +586,7 @@ def memento_store(
     session_id: str | None = None,
     validity_context: str | None = None,
     supersedes: str | None = None,
+    origin: str | None = None,
 ) -> dict:
     """Store a new note in the memento vault (low-level primitive).
 
@@ -400,7 +600,7 @@ def memento_store(
     Args:
         title: Note title (used as the filename slug).
         body: Note body content (markdown).
-        note_type: Note type -- one of: discovery, decision, pattern, debugging, architecture.
+        note_type: Note type -- one of: discovery, decision, pattern, bugfix, tool, architecture. Legacy debugging/session aliases are normalized.
         tags: List of tags for categorization.
         certainty: Confidence level 1-5 (5 = proven fact, 1 = speculation).
         project: Project path or identifier this note belongs to.
@@ -408,6 +608,7 @@ def memento_store(
         session_id: Session identifier for traceability.
         validity_context: Conditions under which this note remains valid.
         supersedes: Title of a note this one replaces.
+        origin: Optional integration path that created the note.
 
     Returns:
         Dict with the path of the written note, or an error.
@@ -422,6 +623,19 @@ def memento_store(
         return {"error": f"Vault not found at {vault}"}
 
     sanitized_body = sanitize_secrets(body)
+    explicit_origin = origin is not None
+    contract = normalize_note_contract(
+        note_type=note_type,
+        tags=tags or [],
+        certainty=certainty,
+        source="mcp",
+        origin=origin or "mcp_store",
+        validity_context=validity_context,
+        supersedes=supersedes,
+        project=project,
+        branch=branch,
+        session_id=session_id,
+    )
 
     if not acquire_vault_write_lock():
         return {"error": "Could not acquire vault write lock (another write in progress)"}
@@ -432,14 +646,16 @@ def memento_store(
             target,
             title=title,
             body=sanitized_body,
-            note_type=note_type,
-            tags=tags or [],
-            certainty=certainty,
-            project=project,
-            branch=branch,
-            validity_context=validity_context,
-            supersedes=supersedes,
-            session_id=session_id,
+            note_type=contract["note_type"],
+            tags=contract["tags"],
+            certainty=contract["certainty"],
+            source=contract["source"],
+            project=contract["project"],
+            branch=contract["branch"],
+            validity_context=contract["validity_context"],
+            supersedes=contract["supersedes"],
+            session_id=contract["session_id"],
+            origin=contract["origin"] if explicit_origin else None,
         ):
             rel_path = str(target.relative_to(vault))
             log_retrieval("mcp", "store_idempotent", title=title, path=rel_path)
@@ -454,15 +670,16 @@ def memento_store(
             vault,
             title=title.strip(),
             body=sanitized_body,
-            note_type=note_type,
-            tags=tags or [],
-            certainty=certainty,
-            source="mcp",
-            validity_context=validity_context,
-            supersedes=supersedes,
-            project=project,
-            branch=branch,
-            session_id=session_id,
+            note_type=contract["note_type"],
+            tags=contract["tags"],
+            certainty=contract["certainty"],
+            source=contract["source"],
+            origin=contract["origin"],
+            validity_context=contract["validity_context"],
+            supersedes=contract["supersedes"],
+            project=contract["project"],
+            branch=contract["branch"],
+            session_id=contract["session_id"],
         )
 
         # Update project index if we can derive a project slug
@@ -476,6 +693,56 @@ def memento_store(
         log_retrieval("mcp", "store", title=title, path=str(path))
         return {"path": str(path.relative_to(vault)), "title": title.strip()}
 
+    finally:
+        release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_store_smart(
+    title: str,
+    body: str,
+    note_type: str = "discovery",
+    tags: list[str] | None = None,
+    certainty: int | None = None,
+    project: str | None = None,
+    branch: str | None = None,
+    session_id: str | None = None,
+    validity_context: str | None = None,
+    supersedes: str | None = None,
+    origin: str | None = None,
+) -> dict:
+    """Smart-store a note by searching for close matches before writing.
+
+    Use this when the caller wants duplicate/update/supersede suggestions
+    before writing a new note. The tool returns a decision object with the
+    best candidate paths and reasons.
+    """
+    if not title or not title.strip():
+        return {"error": "title is required"}
+    if not body or not body.strip():
+        return {"error": "body is required"}
+
+    vault = get_vault()
+    if not vault.exists():
+        return {"error": f"Vault not found at {vault}"}
+
+    if not acquire_vault_write_lock():
+        return {"error": "Could not acquire vault write lock (another write in progress)"}
+
+    try:
+        return write_smart_store_note(
+            title=title.strip(),
+            body=sanitize_secrets(body),
+            note_type=note_type,
+            tags=tags,
+            certainty=certainty,
+            project=project,
+            branch=branch,
+            session_id=session_id,
+            validity_context=validity_context,
+            supersedes=supersedes,
+            origin=origin,
+        )
     finally:
         release_vault_write_lock()
 
@@ -603,6 +870,11 @@ def memento_status() -> dict:
     }
 
     if not vault_exists:
+        status["automation_memory"] = build_automation_memory_readiness(
+            config=config,
+            vault=vault,
+            qmd_available=status["qmd_available"],
+        )
         return status
 
     notes_dir = vault / "notes"
@@ -622,6 +894,11 @@ def memento_status() -> dict:
         "reranker_enabled": config.get("reranker_enabled", True),
         "inception_enabled": config.get("inception_enabled", False),
     }
+    status["automation_memory"] = build_automation_memory_readiness(
+        config=config,
+        vault=vault,
+        qmd_available=status["qmd_available"],
+    )
 
     log_retrieval("mcp", "status")
     return status
@@ -668,20 +945,25 @@ def memento_get(path: str) -> dict:
         if title_match:
             title = title_match.group(1).strip().strip('"').strip("'")
 
-        return {
-            "path": path,
+        logged_path = _vault_relative_access_path(vault, path)
+        result = {
+            "path": logged_path or path,
             "title": _strip_injection(title),
             "content": _strip_injection(content),
         }
+        record_access([result["path"]], hook="mcp", tool="get", query=path, result_count=1)
+        return result
 
     # Fall back to QMD get
     result = qmd_get(path)
     if result:
-        return {
-            "path": result.get("path", path),
+        result_payload = {
+            "path": _vault_relative_access_path(vault, result.get("path", path)) or result.get("path", path),
             "title": _strip_injection(result.get("title", "")),
             "content": _strip_injection(result.get("content", "")),
         }
+        record_access([result_payload["path"]], hook="mcp", tool="get", query=path, result_count=1)
+        return result_payload
 
     # Fall back to remote vault if configured
     from memento.remote_client import is_remote, get as remote_get
@@ -689,11 +971,14 @@ def memento_get(path: str) -> dict:
     if is_remote():
         remote_result = remote_get(path)
         if remote_result:
-            return {
-                "path": remote_result.get("path", path),
+            result_payload = {
+                "path": _vault_relative_access_path(vault, remote_result.get("path", path))
+                or remote_result.get("path", path),
                 "title": _strip_injection(remote_result.get("title", "")),
                 "content": _strip_injection(remote_result.get("content", "")),
             }
+            record_access([result_payload["path"]], hook="mcp", tool="get", query=path, result_count=1)
+            return result_payload
 
     return {"error": f"Note not found: {path}"}
 
@@ -729,7 +1014,7 @@ def memento_capture(
         files_edited: List of files that were edited.
         session_id: Session identifier for traceability. Auto-generated if omitted.
         transcript_path: Path to a transcript file for full triage parsing.
-        agent: Which agent produced this session (claude, codex, cursor, windsurf).
+        agent: Which agent produced this session (claude, opencode, pi, codex, cursor, windsurf).
         fleeting_only: If true, only write a fleeting log entry and project index
             update — do not create a permanent atomic note. Used by remote hooks
             for non-substantial sessions to match local triage semantics.
@@ -767,9 +1052,17 @@ def memento_capture(
             (Path.home() / ".codex").resolve(),
             (Path.home() / ".cursor").resolve(),
             (Path.home() / ".codeium").resolve(),
+            (Path.home() / ".pi" / "agent" / "sessions").resolve(),
+            (Path.home() / ".pi" / "agent" / "subagents").resolve(),
             (xdg_data_home / "opencode").resolve(),
             Path(tempfile.gettempdir()).resolve(),
         ]
+        pi_session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+        if pi_session_dir:
+            allowed_roots.append(Path(pi_session_dir).expanduser().resolve())
+        for raw_root in os.environ.get("MEMENTO_PI_TRANSCRIPT_ROOTS", "").split(os.pathsep):
+            if raw_root.strip():
+                allowed_roots.append(Path(raw_root.strip()).expanduser().resolve())
         if not any(candidate == root or root in candidate.parents for root in allowed_roots):
             return {"error": "transcript_path must be inside a known agent directory"}
 
@@ -891,6 +1184,7 @@ def memento_capture(
             tags=[agent, project_slug] if project_slug != "unknown" else [agent],
             certainty=2,
             source="mcp-capture",
+            origin=f"mcp_capture:{agent}",
             project=cwd or None,
             branch=branch or None,
             session_id=session_id,
@@ -911,6 +1205,86 @@ def memento_capture(
             "fleeting": fleeting_result["fleeting"],
         }
 
+    finally:
+        release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_preserve(
+    path: str,
+    title: str | None = None,
+    slug: str | None = None,
+    project: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    move: bool = False,
+    include_manifest: bool = True,
+    link_project_index: bool = True,
+    cwd: str = "",
+    branch: str = "",
+    session_id: str = "",
+) -> dict:
+    """Archive a file or directory bundle under ``archive/<slug>/``.
+
+    Preserve artifact bundles intact instead of decomposing them into atomic
+    notes. copy by default; move only when explicitly requested. When running
+    over remote HTTP, preserve only paths rooted in the server cwd or vault —
+    arbitrary server-side file reads are rejected.
+
+    Args:
+        path: File or directory to preserve.
+        title: Optional human-readable title for the bundle.
+        slug: Optional archive slug.
+        project: Optional project slug or path for index linking.
+        description: Optional summary/provenance note.
+        tags: Optional tags to annotate the bundle index.
+        move: When true, move the source instead of copying it.
+        include_manifest: Write a manifest with hashes/provenance (default: True).
+        link_project_index: Update the relevant project index when a project can be detected.
+        cwd: Original cwd for provenance when available.
+        branch: Original branch for provenance when available.
+        session_id: Original session id for provenance when available.
+
+    Returns:
+        Dict with archive, manifest, and optional project-index paths.
+    """
+    vault = get_vault()
+    if not vault.exists():
+        return {"error": f"Vault not found at {vault}"}
+
+    if not acquire_vault_write_lock():
+        return {"error": "Could not acquire vault write lock"}
+
+    try:
+        result = preserve_bundle(
+            vault,
+            path,
+            title=title,
+            slug=slug,
+            project=project,
+            description=description,
+            tags=tags,
+            move=move,
+            include_manifest=include_manifest,
+            link_project_index=link_project_index,
+            cwd=cwd,
+            branch=branch,
+            session_id=session_id,
+            transport=_active_transport,
+        )
+        if "error" in result:
+            log_retrieval("mcp", "preserve_failed", path=path, error=result["error"])
+            return result
+
+        log_retrieval(
+            "mcp",
+            "preserve",
+            path=path,
+            archive_path=result.get("archive_path"),
+            file_count=result.get("file_count"),
+            moved=move,
+        )
+        return result
     finally:
         release_vault_write_lock()
 

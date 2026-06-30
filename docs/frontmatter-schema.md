@@ -1,28 +1,65 @@
 # Frontmatter Schema
 
-Every atomic note in `notes/` has YAML frontmatter. Here's the schema.
+Durable notes in `notes/` use YAML frontmatter. This document is the human-facing schema for the fields emitted by current writers: Claude/session triage, MCP store/capture, Pi capture/curation, daily snapshots, and Inception pattern notes.
+
+Run the drift checker whenever a writer or this document changes:
+
+```bash
+.venv/bin/python scripts/check_frontmatter_schema.py
+# or, outside the repo venv:
+python3 scripts/check_frontmatter_schema.py
+```
+
+CI runs the same checker so documented fields, note types, and source values stay aligned with implementation.
 
 ## Required fields
+
+These fields are present on ordinary atomic notes written by `write_note` and its current callers.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `title` | string | Short descriptive title |
-| `type` | enum | `decision`, `discovery`, `pattern`, `bugfix`, or `tool` |
+| `type` | enum | Canonical note type; see [Note types](#note-types) |
 | `tags` | list | Controlled tags for categorization |
+| `source` | enum-ish string | Capture family; see [Source values](#source-values) |
 | `date` | datetime | ISO 8601 with time: `YYYY-MM-DDTHH:MM` |
 
 ## Optional fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `source` | enum | `manual` (/memento), `session` (auto-captured), or `inception` (pattern consolidation) |
+| `origin` | string | Specific adapter/tool path that wrote the note (for example `claude_triage:claude`, `pi_bridge:tool`, `mcp_capture:cursor`) |
 | `certainty` | int 1-5 | Epistemic confidence level |
 | `validity-context` | string | What makes this note true or false |
-| `supersedes` | wikilink | `[[older-note-name]]` if this replaces an older note |
-| `synthesized_from` | list | Source note slugs (inception pattern notes only) |
+| `supersedes` | wikilink or title | `[[older-note-name]]` or note title if this replaces an older note |
+| `synthesized_from` | list | Source note slugs (required on Inception pattern notes) |
 | `project` | string | Full path to the working directory |
 | `branch` | string | Git branch name |
-| `session_id` | uuid | Claude Code session ID |
+| `session_id` | uuid/string | Agent session ID |
+
+## Variant-specific fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `repo_slug` | string | Daily snapshot repository identifier; emitted by `write_daily_snapshot` |
+
+Daily snapshots also accept caller-provided `frontmatter_extra` keys. The writer strips managed keys (`title`, `type`, `tags`, `source`, `certainty`, `date`, `repo_slug`, `supersedes`) before merging extras, so arbitrary extra keys are integration-specific rather than part of the managed schema.
+
+## Source values
+
+| Source | Current writer / meaning |
+|--------|--------------------------|
+| `session` | Local session triage (`hooks/memento-triage.py`) and default `write_note` source |
+| `mcp` | `memento_store` low-level store primitive |
+| `mcp-capture` | `memento_capture` session-summary note writer |
+| `pi-capture` | Pi bridge manual/tool/lifecycle capture notes |
+| `inception` | Inception pattern-note writer |
+| `orra` | Daily snapshot writer for path-controlled integrations such as orra vault-bridge |
+| `manual` | Legacy/manual local notes retained for compatibility; current Pi manual captures use `source: pi-capture` with an `origin` that identifies the manual/tool path |
+
+## Compatibility
+
+Older Pi bridge captures may have been written as `type: session` without `certainty`. New writes are normalized through the shared contract as typed notes (usually `type: discovery`, `certainty: 2`, `source: pi-capture`). Retrieval quality signals treat existing non-queued Pi `type: session` notes as low-certainty discoveries so they remain compatible without rewriting user vault history. The certainty backfill helper can also add `certainty: 2` to legacy session notes, `certainty: 3` to legacy manual notes, and `certainty: 3` to Inception pattern notes.
 
 ## Certainty scale
 
@@ -40,9 +77,39 @@ Every atomic note in `notes/` has YAML frontmatter. Here's the schema.
 |------|-------------|
 | `decision` | A choice was made between alternatives |
 | `discovery` | Something learned or understood |
-| `pattern` | A recurring approach or technique |
+| `pattern` | A recurring approach or technique; Inception writes cross-note pattern notes with `source: inception` |
 | `bugfix` | Root cause and fix for a bug |
 | `tool` | A tool, script, or configuration created |
+| `architecture` | System design, integration boundaries, or durable architectural context |
+| `daily` | Structured daily snapshot written by `write_daily_snapshot` |
+
+## Writer-specific shapes
+
+### `write_note` / atomic captures
+
+`write_note` normalizes canonical note types, tags, certainty, source, origin, validity context, supersedes, project, branch, and session id before writing. It always writes `title`, `type`, `tags`, `source`, and `date`; optional fields are written only when present.
+
+### `write_daily_snapshot`
+
+Daily snapshots are deterministic path-controlled notes named `notes/daily-<date>-<repo_slug>.md`. Their managed frontmatter is:
+
+```yaml
+---
+title: Daily 2026-06-29 memento-vault
+type: daily
+tags: [daily, memento-vault]
+source: orra
+certainty: 2
+date: 2026-06-29T14:30
+repo_slug: memento-vault
+---
+```
+
+When a snapshot supersedes an existing daily note, the writer adds `supersedes: "[[daily-<date>-<repo_slug>]]"`.
+
+### Inception pattern notes
+
+Inception writes `type: pattern`, `source: inception`, capped certainty, and a required `synthesized_from` list of source note slugs. It also adds `## Related` links back to source notes.
 
 ## Example
 
@@ -51,7 +118,8 @@ Every atomic note in `notes/` has YAML frontmatter. Here's the schema.
 title: Redis cache invalidation requires explicit TTL
 type: discovery
 tags: [redis, caching, backend]
-source: manual
+source: session
+origin: claude_triage:claude
 certainty: 4
 validity-context: while using Redis 7.x with cluster mode
 project: /home/user/work/my-api
