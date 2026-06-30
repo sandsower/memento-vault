@@ -17,11 +17,14 @@ from pathlib import Path
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 CLAUDE_SESSIONS = Path.home() / ".claude" / "sessions"
+PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
+PI_SUBAGENTS = Path.home() / ".pi" / "agent" / "subagents"
 TRIAGE_SCRIPT = Path(__file__).parent / "memento-triage.py"
 _RUNTIME = os.environ.get("XDG_RUNTIME_DIR", os.path.join(str(Path.home()), ".cache", "memento-vault"))
 os.makedirs(_RUNTIME, mode=0o700, exist_ok=True)
 LOCK_FILE = Path(_RUNTIME) / "sweeper.lock"
 MAX_AGE_HOURS = 24
+ORPHAN_GRACE_SECONDS = int(os.environ.get("MEMENTO_SWEEPER_ORPHAN_GRACE_SECONDS", "300"))
 
 
 def resolve_vault():
@@ -80,9 +83,9 @@ def release_lock():
 
 
 def collect_known_session_ids():
-    """Extract all session UUIDs already recorded in fleeting notes."""
+    """Extract session IDs already recorded in fleeting notes."""
     known = set()
-    uuid_pattern = re.compile(r"`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`")
+    session_pattern = re.compile(r"`([^`\n]{1,240})`")
 
     if not FLEETING.exists():
         return known
@@ -90,11 +93,55 @@ def collect_known_session_ids():
     for f in FLEETING.glob("*.md"):
         try:
             text = f.read_text()
-            known.update(uuid_pattern.findall(text))
+            known.update(session_pattern.findall(text))
         except Exception:
             continue
 
     return known
+
+
+def pi_session_dirs():
+    """Return Pi transcript roots, including env-configured session directories."""
+    roots = [PI_SESSIONS, PI_SUBAGENTS]
+    session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+    if session_dir:
+        roots.append(Path(session_dir).expanduser())
+    extra = os.environ.get("MEMENTO_PI_TRANSCRIPT_ROOTS", "")
+    for raw in extra.split(os.pathsep):
+        if raw.strip():
+            roots.append(Path(raw.strip()).expanduser())
+    deduped = []
+    seen = set()
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(root)
+    return deduped
+
+
+def session_id_from_transcript(jsonl):
+    """Best-effort session id extraction for Claude/Pi JSONL transcripts."""
+    try:
+        with open(jsonl, encoding="utf-8", errors="replace") as handle:
+            for _idx, raw in zip(range(20), handle):
+                if not raw.strip():
+                    continue
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                for key in ("session_id", "sessionId"):
+                    if data.get(key):
+                        return str(data[key])
+                session = data.get("session") if isinstance(data.get("session"), dict) else {}
+                if session.get("id"):
+                    return str(session["id"])
+                if data.get("type") == "session" and data.get("id"):
+                    return str(data["id"])
+    except OSError:
+        pass
+    return Path(jsonl).stem
 
 
 def collect_active_session_ids():
@@ -121,30 +168,45 @@ def collect_active_session_ids():
 
 
 def find_recent_transcripts():
-    """Find JSONL transcript files modified within MAX_AGE_HOURS."""
+    """Find recent, idle Claude/Pi JSONL transcript files."""
+    newest_allowed = time.time() - ORPHAN_GRACE_SECONDS
     cutoff = time.time() - (MAX_AGE_HOURS * 3600)
     transcripts = {}
 
-    if not CLAUDE_PROJECTS.exists():
-        return transcripts
+    if CLAUDE_PROJECTS.exists():
+        for jsonl in CLAUDE_PROJECTS.glob("*/*.jsonl"):
+            try:
+                stat = jsonl.stat()
+                if cutoff <= stat.st_mtime <= newest_allowed:
+                    session_id = session_id_from_transcript(jsonl)
+                    transcripts[session_id] = {"path": str(jsonl), "agent": "claude"}
+            except Exception:
+                continue
 
-    for jsonl in CLAUDE_PROJECTS.glob("*/*.jsonl"):
-        try:
-            if jsonl.stat().st_mtime >= cutoff:
-                session_id = jsonl.stem
-                transcripts[session_id] = str(jsonl)
-        except Exception:
+    for root in pi_session_dirs():
+        if not root.exists():
             continue
+        for jsonl in root.rglob("*.jsonl"):
+            try:
+                stat = jsonl.stat()
+                if cutoff <= stat.st_mtime <= newest_allowed:
+                    session_id = session_id_from_transcript(jsonl)
+                    transcripts[session_id] = {"path": str(jsonl), "agent": "pi"}
+            except Exception:
+                continue
 
     return transcripts
 
 
-def triage_orphan(session_id, transcript_path):
+def triage_orphan(session_id, transcript):
     """Feed an orphan transcript through memento-triage.py."""
+    transcript_path = transcript.get("path") if isinstance(transcript, dict) else transcript
+    agent = transcript.get("agent") if isinstance(transcript, dict) else None
     hook_input = json.dumps(
         {
             "session_id": session_id,
             "transcript_path": transcript_path,
+            "agent": agent,
         }
     )
 
@@ -153,6 +215,9 @@ def triage_orphan(session_id, transcript_path):
         # Fall back to installed location
         triage = str(Path.home() / ".claude" / "hooks" / "memento-triage.py")
 
+    env = os.environ.copy()
+    if agent:
+        env["MEMENTO_AGENT"] = str(agent)
     try:
         subprocess.Popen(
             [sys.executable, triage],
@@ -160,6 +225,7 @@ def triage_orphan(session_id, transcript_path):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         ).communicate(input=hook_input.encode(), timeout=30)
     except (subprocess.TimeoutExpired, Exception):
         pass
