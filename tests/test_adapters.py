@@ -907,3 +907,38 @@ class TestTruncateTranscript:
 
         assert len(result) == 100
         assert result == text[-100:]
+
+
+class TestLazyAdapterLoading:
+    """Optional adapters (opencode, pi) may be absent on a Claude-only install.
+
+    The opencode and pi modules are optional transcript backends that may be
+    absent. Their absence must never crash the dispatcher at import or detection
+    time; it may surface only as a clear error if such a transcript is actually
+    parsed. This guards against the regression where a top-level import of a
+    missing adapter took the whole triage hook down before it could process
+    Claude transcripts.
+    """
+
+    def test_load_adapter_returns_none_on_import_error(self):
+        import memento.adapters as adapters_mod
+
+        with patch.object(adapters_mod.importlib, "import_module", side_effect=ImportError("absent")):
+            assert adapters_mod._load_adapter("opencode") is None
+            assert adapters_mod._load_adapter("pi") is None
+
+    def test_detect_falls_back_to_claude_when_adapters_absent(self, claude_transcript):
+        with patch("memento.adapters._load_adapter", return_value=None):
+            assert detect_agent(str(claude_transcript)) == "claude"
+
+    @pytest.mark.parametrize("agent", ["opencode", "pi"])
+    def test_parse_missing_adapter_raises_clear_error(self, claude_transcript, agent):
+        with patch("memento.adapters._load_adapter", return_value=None):
+            with pytest.raises(ValueError, match=f"{agent} adapter is not installed"):
+                parse_transcript(str(claude_transcript), agent=agent)
+
+    @pytest.mark.parametrize("agent", ["opencode", "pi"])
+    def test_render_missing_adapter_raises_clear_error(self, claude_transcript, agent):
+        with patch("memento.adapters._load_adapter", return_value=None):
+            with pytest.raises(ValueError, match=f"{agent} adapter is not installed"):
+                render_transcript_text(str(claude_transcript), agent=agent)
