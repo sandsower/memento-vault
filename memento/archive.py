@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -66,10 +67,14 @@ def _normalize_rel(path: str | os.PathLike) -> str:
 
 def _safe_dest(vault: Path, rel: str) -> Path:
     normalized = _normalize_rel(rel)
-    dest = (vault / normalized).resolve()
     root = vault.resolve()
-    if not _is_relative_to(dest, root):
-        raise ValueError(f"archive path escapes vault: {rel}")
+    dest = root
+    for part in PurePosixPath(normalized).parts:
+        dest = dest / part
+        if dest.is_symlink():
+            raise ArchiveError(f"archive path uses symlinked destination: {rel}")
+    if not _is_relative_to(dest.resolve(), root):
+        raise ArchiveError(f"archive path escapes vault: {rel}")
     return dest
 
 
@@ -95,6 +100,10 @@ def _ensure_identity(vault: Path) -> dict:
 def tombstones_path(vault: Path) -> Path:
     """Return the vault-local tombstone log path."""
     return Path(vault) / TOMBSTONES_REL
+
+
+def _is_allowed_tombstone_rel(rel: str) -> bool:
+    return rel.startswith("notes/") and rel.endswith(".md")
 
 
 def _iter_jsonl(path: Path):
@@ -124,16 +133,27 @@ def iter_tombstones(vault: Path):
             record["path"] = _normalize_rel(path)
         except ValueError:
             continue
+        if not _is_allowed_tombstone_rel(record["path"]):
+            continue
         yield record
 
 
-def _latest_tombstones(vault: Path) -> dict[str, dict]:
+def _latest_log_records(vault: Path) -> dict[str, dict]:
     latest: dict[str, dict] = {}
     for record in iter_tombstones(vault):
         path = record["path"]
         if path not in latest or str(record.get("ts", "")) >= str(latest[path].get("ts", "")):
             latest[path] = record
     return latest
+
+
+def latest_active_tombstones(vault: Path) -> dict[str, dict]:
+    """Return latest deletion tombstones, ignoring newer restore records."""
+    return {path: record for path, record in _latest_log_records(vault).items() if record.get("reason") != "restored"}
+
+
+def _latest_tombstones(vault: Path) -> dict[str, dict]:
+    return latest_active_tombstones(vault)
 
 
 def _append_jsonl(path: Path, records: Iterable[dict]) -> int:
@@ -163,6 +183,8 @@ def record_tombstone(
     """
     vault = Path(vault)
     rel = _normalize_rel(rel_path)
+    if not _is_allowed_tombstone_rel(rel):
+        raise ValueError(f"unsupported tombstone path: {rel}")
     path = _safe_dest(vault, rel)
     if content_hash is None and path.exists() and path.is_file():
         content_hash = _sha256_file(path)
@@ -173,13 +195,22 @@ def record_tombstone(
     return record
 
 
+def _restore_record(vault: Path, rel_path: str | os.PathLike, *, ts: str | None = None) -> dict:
+    rel = _normalize_rel(rel_path)
+    if not _is_allowed_tombstone_rel(rel):
+        raise ValueError(f"unsupported tombstone path: {rel}")
+    record = {"ts": ts or _utcnow_iso(), "path": rel, "reason": "restored"}
+    _append_jsonl(tombstones_path(vault), [record])
+    return record
+
+
 def _active_tombstones(vault: Path) -> list[dict]:
-    """Return tombstones that still apply to currently absent paths."""
+    """Return latest deletion tombstones that still apply to absent paths."""
     active = []
-    for record in iter_tombstones(vault):
+    for record in latest_active_tombstones(vault).values():
         try:
             dest = _safe_dest(vault, record["path"])
-        except ValueError:
+        except (ArchiveError, ValueError):
             continue
         if dest.exists():
             continue
@@ -187,13 +218,16 @@ def _active_tombstones(vault: Path) -> list[dict]:
     return active
 
 
-def _iter_export_files(vault: Path):
+def _iter_export_files(vault: Path, *, exclude_paths: Iterable[Path] = ()):
     seen: set[str] = set()
+    excluded = {p.resolve() for p in exclude_paths}
     for root_name in CONTENT_ROOTS:
         root = vault / root_name
         if not root.exists():
             continue
         for path in sorted(p for p in root.rglob("*") if p.is_file()):
+            if path.is_symlink() or path.resolve() in excluded:
+                continue
             rel = path.relative_to(vault).as_posix()
             seen.add(rel)
             yield rel, path
@@ -201,6 +235,8 @@ def _iter_export_files(vault: Path):
         if rel == TOMBSTONES_REL:
             continue
         path = vault / rel
+        if path.is_symlink() or path.resolve() in excluded:
+            continue
         if path.exists() and path.is_file() and rel not in seen:
             seen.add(rel)
             yield rel, path
@@ -221,7 +257,7 @@ def export_archive(vault: Path, archive_path: Path, *, include_manifest_hashes: 
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for root_name in CONTENT_ROOTS:
             zf.writestr(f"{PAYLOAD_PREFIX}{root_name}/", b"")
-        for rel, path in _iter_export_files(vault):
+        for rel, path in _iter_export_files(vault, exclude_paths=(archive_path,)):
             data = path.read_bytes()
             info = {"path": rel, "size": len(data)}
             if include_manifest_hashes:
@@ -269,6 +305,10 @@ def _read_manifest(zf: zipfile.ZipFile) -> dict:
     return manifest
 
 
+def _is_allowed_payload_rel(rel: str) -> bool:
+    return rel in STATE_FILES or any(rel.startswith(f"{root}/") for root in CONTENT_ROOTS)
+
+
 def _payload_members(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     members: dict[str, zipfile.ZipInfo] = {}
     for info in zf.infolist():
@@ -276,10 +316,27 @@ def _payload_members(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
             continue
         rel = info.filename[len(PAYLOAD_PREFIX) :]
         try:
-            members[_normalize_rel(rel)] = info
+            normalized = _normalize_rel(rel)
         except ValueError:
             raise ArchiveError(f"archive contains unsafe path: {info.filename}")
+        if not _is_allowed_payload_rel(normalized):
+            raise ArchiveError(f"archive contains unsupported payload path: {normalized}")
+        members[normalized] = info
     return members
+
+
+def _manifest_content_roots(manifest: dict) -> list[str]:
+    roots = manifest.get("content_roots") or list(CONTENT_ROOTS)
+    normalized = []
+    for root in roots:
+        try:
+            rel = _normalize_rel(root)
+        except (TypeError, ValueError) as exc:
+            raise ArchiveError(f"archive manifest contains unsafe content root: {root}") from exc
+        if rel not in CONTENT_ROOTS:
+            raise ArchiveError(f"archive manifest contains unsupported content root: {rel}")
+        normalized.append(rel)
+    return normalized
 
 
 def _read_payload_tombstones(zf: zipfile.ZipFile, members: dict[str, zipfile.ZipInfo]) -> list[dict]:
@@ -295,6 +352,8 @@ def _read_payload_tombstones(zf: zipfile.ZipFile, members: dict[str, zipfile.Zip
             record["path"] = _normalize_rel(record["path"])
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             continue
+        if not _is_allowed_tombstone_rel(record["path"]):
+            raise ArchiveError(f"archive contains unsupported tombstone path: {record['path']}")
         records.append(record)
     return records
 
@@ -313,23 +372,44 @@ def _merge_jsonl_file(dest: Path, incoming: str) -> bool:
 
 def _write_file(dest: Path, data: bytes) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, dest)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=dest.parent,
+            prefix=f".{dest.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(data)
+            tmp_path = Path(tmp.name)
+        os.replace(tmp_path, dest)
+    except Exception:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
 
 
-def _local_tombstone_action(rel: str, incoming_hash: str, local_tombstones: dict[str, dict], conflict: str) -> str:
-    """Return write/skip/conflict for a payload covered by a local tombstone."""
+def _local_tombstone_action(
+    vault: Path, rel: str, incoming_hash: str, local_tombstones: dict[str, dict], conflict: str
+) -> str:
+    """Return write/skip/conflict/restored for a payload covered by a local tombstone."""
     record = local_tombstones.get(rel)
     if not record:
         return "write"
     deleted_hash = record.get("content_hash")
-    if not deleted_hash:
-        return "write" if conflict == "overwrite" else "skip"
-    if deleted_hash == incoming_hash:
-        return "skip"
+    if deleted_hash:
+        dest = _safe_dest(vault, rel)
+        if dest.exists() and dest.is_file() and _sha256_file(dest) != deleted_hash:
+            return "restored"
     if conflict == "overwrite":
         return "write"
+    if not deleted_hash:
+        return "skip"
+    if deleted_hash == incoming_hash:
+        return "skip"
     if conflict == "skip":
         return "skip"
     return "conflict"
@@ -371,7 +451,7 @@ def _stage_import(
         if rel == "vault-identity.json" and (vault / rel).exists():
             continue
         incoming_hash = _sha256_bytes(zf.read(info))
-        tombstone_action = _local_tombstone_action(rel, incoming_hash, local_tombstones, conflict)
+        tombstone_action = _local_tombstone_action(vault, rel, incoming_hash, local_tombstones, conflict)
         if tombstone_action == "conflict":
             conflicts.append(rel)
             continue
@@ -414,7 +494,7 @@ def import_archive(
         if conflicts and conflict == "error":
             raise ArchiveConflictError(conflicts)
 
-        for root_name in manifest.get("content_roots") or CONTENT_ROOTS:
+        for root_name in _manifest_content_roots(manifest):
             _safe_dest(vault, root_name).mkdir(parents=True, exist_ok=True)
 
         incoming_tombstones = _read_payload_tombstones(zf, members)
@@ -425,6 +505,7 @@ def import_archive(
         local_tombstones = _latest_tombstones(vault)
 
         written = skipped = overwritten = tombstone_skipped = tombstoned = merged = 0
+        restored_paths: set[str] = set()
 
         if apply_tombstones:
             for rel in tombstone_deletes:
@@ -464,19 +545,27 @@ def import_archive(
                 continue
 
             incoming_hash = _sha256_bytes(data)
-            tombstone_action = _local_tombstone_action(rel, incoming_hash, local_tombstones, conflict)
+            tombstone_action = _local_tombstone_action(vault, rel, incoming_hash, local_tombstones, conflict)
             if tombstone_action == "skip":
                 tombstone_skipped += 1
                 continue
             if tombstone_action == "conflict":
                 raise ArchiveConflictError([rel])
+            if tombstone_action == "restored":
+                restored_paths.add(rel)
 
             if dest.exists() and dest.is_file():
                 local_hash = _sha256_file(dest)
                 if local_hash == incoming_hash:
+                    if rel in restored_paths:
+                        _restore_record(vault, rel)
+                        merged += 1
                     skipped += 1
                     continue
                 if conflict == "skip":
+                    if rel in restored_paths:
+                        _restore_record(vault, rel)
+                        merged += 1
                     skipped += 1
                     continue
                 if conflict == "overwrite":
@@ -486,6 +575,9 @@ def import_archive(
 
             _write_file(dest, data)
             written += 1
+            if rel in local_tombstones:
+                _restore_record(vault, rel)
+                merged += 1
 
     return {
         "archive_path": str(archive_path),
