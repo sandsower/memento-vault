@@ -1588,6 +1588,36 @@ def test_pi_bridge_process_start_includes_oversize_cleaned_transcript_with_quali
     assert status["transcript_partial_group_count"] == 1
 
 
+def test_pi_bridge_transcript_context_distinguishes_cleaning_cap_from_oversize():
+    lines = pi_bridge._transcript_context_lines(
+        {
+            "included": True,
+            "reason": "included",
+            "partial": True,
+            "size_bytes": 100,
+            "cleaned_char_count": 40,
+            "cleaned_cap_chars": 40,
+        }
+    )
+    text = "\n".join(lines)
+
+    assert "partial cleaned transcript capped during transcript cleaning" in text
+    assert "oversize source" not in text
+    assert "explaining the partial transcript" in text
+
+
+def test_pi_bridge_transcript_context_authorizes_before_filesystem_probe(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_TRANSCRIPT_ROOTS", str(tmp_path / "allowed"))
+    outside = tmp_path / "outside.jsonl"
+
+    with patch.object(Path, "exists", side_effect=AssertionError("exists() should not run for outside roots")):
+        info, transcript = pi_bridge._transcript_context_for_group({"session_id": str(outside)}, 1)
+
+    assert transcript == ""
+    assert info["included"] is False
+    assert info["reason"] == "outside_allowed_roots"
+
+
 def test_pi_bridge_process_start_marks_missing_transcript_fallbacks(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     transcript_root = tmp_path / "sessions"
