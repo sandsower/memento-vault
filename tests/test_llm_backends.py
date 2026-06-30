@@ -1,9 +1,11 @@
 """Tests for the shared LLM backend abstraction."""
 
+import io
 import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
 
 from memento.llm import LLMResult, llm_complete, preflight_check
 
@@ -304,6 +306,7 @@ class TestCliBackends:
         assert result.backend == "claude"
         assert result.model == "sonnet"
         assert result.prompt_bytes == len("test prompt".encode("utf-8"))
+        assert result.output_bytes == len("claude output".encode("utf-8"))
         assert result.duration_ms is not None and result.duration_ms >= 0
 
     @patch("memento.llm.subprocess.run")
@@ -315,6 +318,7 @@ class TestCliBackends:
         assert result.ok is False
         assert result.backend == "claude"
         assert result.prompt_bytes == len("test prompt".encode("utf-8"))
+        assert result.output_bytes == 0
         assert result.duration_ms is not None
 
     @patch("memento.llm.subprocess.run")
@@ -560,8 +564,145 @@ class TestApiBackends:
         assert req.headers["x-api-key"] == "secret"
         assert payload["model"] == "claude-3-5-sonnet-latest"
         assert payload["messages"][0]["content"] == "test prompt"
+        assert payload["max_tokens"] == 4096
         assert result.ok is True
         assert result.text == "anthropic output"
+        assert result.output_bytes == len("anthropic output".encode("utf-8"))
+
+    @patch("memento.llm.request.urlopen")
+    def test_anthropic_api_backend_uses_configurable_max_tokens_and_scaled_timeout(self, mock_urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"content": [{"type": "text", "text": "ok"}]}).encode()
+        mock_urlopen.return_value.__enter__.return_value = response
+
+        llm_complete(
+            "x" * 500_000,
+            {
+                "llm_backend": "anthropic-api",
+                "llm_model": "claude-3-5-sonnet-latest",
+                "llm_api_key": "secret",
+                "llm_max_tokens": 1234,
+                "llm_api_retries": 1,
+            },
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        payload = json.loads(req.data.decode())
+        assert payload["max_tokens"] == 1234
+        assert mock_urlopen.call_args.kwargs["timeout"] == 160
+
+    @patch("memento.llm.time.sleep")
+    @patch("memento.llm.request.urlopen")
+    def test_anthropic_api_retries_retryable_http_failure(self, mock_urlopen, mock_sleep):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"content": [{"type": "text", "text": "ok"}]}).encode()
+        response_context = MagicMock()
+        response_context.__enter__.return_value = response
+        retryable = HTTPError(
+            "https://api.anthropic.com/v1/messages",
+            429,
+            "rate limited",
+            {"Retry-After": "0"},
+            io.BytesIO(b"rate limited"),
+        )
+        mock_urlopen.side_effect = [retryable, response_context]
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "anthropic-api",
+                "llm_model": "claude-3-5-sonnet-latest",
+                "llm_api_key": "secret",
+                "llm_api_retries": 2,
+            },
+        )
+
+        assert result.ok is True
+        assert result.text == "ok"
+        assert mock_urlopen.call_count == 2
+        mock_sleep.assert_called_once_with(0.0)
+
+    @patch("memento.llm.time.sleep")
+    @patch("memento.llm.request.urlopen")
+    def test_anthropic_api_retries_transient_network_failure(self, mock_urlopen, mock_sleep):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"content": [{"type": "text", "text": "ok"}]}).encode()
+        response_context = MagicMock()
+        response_context.__enter__.return_value = response
+        mock_urlopen.side_effect = [URLError("connection reset"), response_context]
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "anthropic-api",
+                "llm_model": "claude-3-5-sonnet-latest",
+                "llm_api_key": "secret",
+                "llm_api_retries": 2,
+                "llm_api_initial_backoff_seconds": 0,
+            },
+        )
+
+        assert result.ok is True
+        assert result.text == "ok"
+        assert mock_urlopen.call_count == 2
+        mock_sleep.assert_called_once_with(0.0)
+
+    @patch("memento.llm.time.sleep")
+    @patch("memento.llm.request.urlopen")
+    def test_anthropic_api_does_not_retry_non_retryable_http_failure(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = HTTPError(
+            "https://api.anthropic.com/v1/messages",
+            400,
+            "bad request",
+            {},
+            io.BytesIO(b"bad request"),
+        )
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "anthropic-api",
+                "llm_model": "claude-3-5-sonnet-latest",
+                "llm_api_key": "secret",
+                "llm_api_retries": 3,
+            },
+        )
+
+        assert result.ok is False
+        assert "HTTP 400" in result.error
+        assert mock_urlopen.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("memento.llm.request.urlopen")
+    def test_anthropic_api_backend_uses_tool_choice_for_structured_json(self, mock_urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "content": [{"type": "tool_use", "name": "emit_notes", "input": {"notes": []}}],
+                "usage": {"input_tokens": 11, "output_tokens": 22},
+            }
+        ).encode()
+        mock_urlopen.return_value.__enter__.return_value = response
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "anthropic-api",
+                "llm_model": "claude-3-5-sonnet-latest",
+                "llm_api_key": "secret",
+                "llm_structured_json_tool_name": "emit_notes",
+                "llm_structured_json_schema": {"type": "object", "properties": {"notes": {"type": "array"}}},
+            },
+        )
+
+        req = mock_urlopen.call_args[0][0]
+        payload = json.loads(req.data.decode())
+        assert payload["tool_choice"] == {"type": "tool", "name": "emit_notes"}
+        assert payload["tools"][0]["input_schema"]["properties"]["notes"]["type"] == "array"
+        assert json.loads(result.text) == {"notes": []}
+        assert result.input_tokens == 11
+        assert result.output_tokens == 22
+        assert result.output_bytes == len(result.text.encode("utf-8"))
 
     @patch("memento.llm.request.urlopen")
     def test_openai_compat_backend_sends_correct_request(self, mock_urlopen):

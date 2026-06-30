@@ -25,6 +25,9 @@ class LLMResult:
     backend: str | None = None
     model: str | None = None
     prompt_bytes: int | None = None
+    output_bytes: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     duration_ms: int | None = None
 
     def __post_init__(self):
@@ -72,11 +75,20 @@ def _with_invalid_mcp_config_hint(message):
     return f"{message}\n\n{hint}"
 
 
-def _success(text):
+def _success(text, *, input_tokens=None, output_tokens=None):
+    if text is None:
+        return _error("LLM returned empty response")
     stripped = text.strip()
     if not stripped:
         return _error("LLM returned empty response")
-    return LLMResult(text=stripped, ok=True, error=None)
+    return LLMResult(
+        text=stripped,
+        ok=True,
+        error=None,
+        output_bytes=len(stripped.encode("utf-8")),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 def _stderr_is_warning_only(stderr_text):
@@ -244,27 +256,127 @@ def _gemini_complete(prompt, model=None, timeout=30):
     return _run_cli(cmd, timeout=timeout, stdin_input=prompt)
 
 
-def _api_complete(url, headers, payload, extract_text, timeout=30):
+def _as_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value, default):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _retry_after_seconds(exc):
+    headers = getattr(exc, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _http_error_message(exc):
+    try:
+        body = exc.read().decode(errors="replace")[:500]
+    except Exception:
+        body = ""
+    prefix = f"HTTP {exc.code}"
+    return f"{prefix}: {body}" if body else prefix
+
+
+def _api_complete(url, headers, payload, extract_text, timeout=30, attempts=1, backoff_seconds=1.0):
     from urllib.error import HTTPError, URLError
 
+    attempts = max(1, _as_int(attempts, 1))
+    backoff_seconds = max(0.0, _as_float(backoff_seconds, 1.0))
     data = json.dumps(payload).encode()
-    req = request.Request(url, data=data, method="POST")
-    for key, value in headers.items():
-        req.add_header(key, value)
-        req.headers[key] = value
-    try:
-        with request.urlopen(req, timeout=timeout) as response:
-            body = json.loads(response.read().decode())
-    except (URLError, HTTPError, OSError, json.JSONDecodeError) as exc:
-        return _error(str(exc))
+    last_error = None
 
-    try:
-        return _success(extract_text(body))
-    except (KeyError, TypeError, IndexError) as exc:
-        return _error(f"Unexpected LLM response structure: {exc}")
+    for attempt in range(attempts):
+        req = request.Request(url, data=data, method="POST")
+        for key, value in headers.items():
+            req.add_header(key, value)
+            req.headers[key] = value
+        try:
+            with request.urlopen(req, timeout=timeout) as response:
+                body = json.loads(response.read().decode())
+        except HTTPError as exc:
+            last_error = _http_error_message(exc)
+            retryable = exc.code == 429 or 500 <= exc.code <= 599
+            if retryable and attempt < attempts - 1:
+                delay = _retry_after_seconds(exc)
+                if delay is None:
+                    delay = backoff_seconds * (2**attempt)
+                time.sleep(delay)
+                continue
+            return _error(last_error)
+        except (URLError, TimeoutError, OSError) as exc:
+            last_error = str(exc)
+            if attempt < attempts - 1:
+                time.sleep(backoff_seconds * (2**attempt))
+                continue
+            return _error(last_error)
+        except json.JSONDecodeError as exc:
+            return _error(str(exc))
+
+        try:
+            text = extract_text(body)
+            usage = body.get("usage") if isinstance(body, dict) else None
+            usage = usage if isinstance(usage, dict) else {}
+            return _success(
+                text,
+                input_tokens=usage.get("input_tokens") or usage.get("prompt_tokens"),
+                output_tokens=usage.get("output_tokens") or usage.get("completion_tokens"),
+            )
+        except (KeyError, TypeError, IndexError) as exc:
+            return _error(f"Unexpected LLM response structure: {exc}")
+
+    return _error(last_error or "API request failed")
 
 
-def _anthropic_api_complete(prompt, model, api_key, timeout=30):
+def _anthropic_extract_text(body):
+    content = body.get("content", [])
+    for part in content:
+        if part.get("type") == "tool_use" and "input" in part:
+            return json.dumps(part["input"])
+    return "".join(part.get("text", "") for part in content if part.get("type") == "text")
+
+
+def _anthropic_api_complete(
+    prompt,
+    model,
+    api_key,
+    timeout=30,
+    max_tokens=4096,
+    attempts=3,
+    backoff_seconds=1.0,
+    json_schema=None,
+    json_tool_name="emit_json",
+):
+    payload = {
+        "model": model,
+        "max_tokens": max(1, _as_int(max_tokens, 4096)),
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if json_schema:
+        tool_name = json_tool_name or "emit_json"
+        payload["tools"] = [
+            {
+                "name": tool_name,
+                "description": "Return the requested structured JSON result.",
+                "input_schema": json_schema,
+            }
+        ]
+        payload["tool_choice"] = {"type": "tool", "name": tool_name}
+
     return _api_complete(
         "https://api.anthropic.com/v1/messages",
         {
@@ -272,13 +384,11 @@ def _anthropic_api_complete(prompt, model, api_key, timeout=30):
             "x-api-key": api_key or "",
             "anthropic-version": "2023-06-01",
         },
-        {
-            "model": model,
-            "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        lambda body: "".join(part.get("text", "") for part in body.get("content", []) if part.get("type") == "text"),
+        payload,
+        _anthropic_extract_text,
         timeout=timeout,
+        attempts=attempts,
+        backoff_seconds=backoff_seconds,
     )
 
 
@@ -322,7 +432,17 @@ def llm_complete(prompt, config=None, timeout=None):
     elif backend == "gemini":
         result = _gemini_complete(prompt, model, timeout=effective_timeout)
     elif backend == "anthropic-api":
-        result = _anthropic_api_complete(prompt, model, resolved.get("llm_api_key"), timeout=effective_timeout)
+        result = _anthropic_api_complete(
+            prompt,
+            model,
+            resolved.get("llm_api_key"),
+            timeout=effective_timeout,
+            max_tokens=resolved.get("llm_max_tokens", 4096),
+            attempts=resolved.get("llm_api_retries", 3),
+            backoff_seconds=resolved.get("llm_api_initial_backoff_seconds", 1.0),
+            json_schema=resolved.get("llm_structured_json_schema"),
+            json_tool_name=resolved.get("llm_structured_json_tool_name", "emit_json"),
+        )
     elif backend == "openai-compat":
         result = _openai_compat_complete(
             prompt, model, resolved.get("llm_api_key"), resolved.get("llm_api_base"), timeout=effective_timeout
@@ -335,6 +455,7 @@ def llm_complete(prompt, config=None, timeout=None):
         backend=backend,
         model=model,
         prompt_bytes=prompt_bytes,
+        output_bytes=result.output_bytes if result.output_bytes is not None else len(result.text.encode("utf-8")),
         duration_ms=int((time.time() - started) * 1000),
     )
 

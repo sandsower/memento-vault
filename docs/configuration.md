@@ -158,6 +158,16 @@ notable_patterns: [plan, design]
 
 The delta-check gate (QMD-powered) prevents duplicate captures regardless of these thresholds. If QMD says the vault already covers a topic and no new files were edited, the agent is not spawned.
 
+**LLM API backend controls** (used when `llm_backend` is `anthropic-api` or another API backend):
+
+```yaml
+llm_max_tokens: 4096
+llm_api_retries: 3
+llm_api_initial_backoff_seconds: 1.0
+```
+
+The Anthropic API backend retries 429/5xx responses and transient network errors with exponential backoff. Structured triage extraction also requests Anthropic tool-choice JSON when this backend is selected.
+
 ## Tenet — retrieval hooks
 
 ### Session briefing
