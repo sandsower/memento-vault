@@ -9,11 +9,32 @@ import json
 import os
 
 from memento.adapters.claude import parse_transcript as _parse_claude
-from memento.adapters.opencode import looks_like_opencode_db
-from memento.adapters.opencode import parse_transcript as _parse_opencode
-from memento.adapters.opencode import render_transcript_text as _render_opencode
 
 _SNIFF_MAX_LINES = 20
+
+
+def _load_opencode():
+    """Import the optional OpenCode SQLite adapter on demand.
+
+    The OpenCode adapter ships as a separate module that may be absent on a
+    Claude-only install. Importing it at module load time turned its absence
+    into a fatal ImportError that took the whole triage hook down before it
+    could process Claude JSONL transcripts. Loading it lazily keeps the Claude
+    path working and surfaces a clear error only if an OpenCode transcript is
+    actually encountered. Returns the module, or None when unavailable.
+    """
+    try:
+        from memento.adapters import opencode
+    except ImportError:
+        return None
+    return opencode
+
+
+_OPENCODE_MISSING = (
+    "OpenCode transcript detected but the OpenCode adapter is not installed. "
+    "Install the memento.adapters.opencode module, or use memento_capture with "
+    "session_summary instead of transcript_path."
+)
 
 
 def detect_agent(transcript_path):
@@ -31,7 +52,8 @@ def detect_agent(transcript_path):
 
     # OpenCode stores sessions in SQLite, so check the binary header first;
     # otherwise opening it as text would just raise UnicodeDecodeError below.
-    if looks_like_opencode_db(transcript_path):
+    opencode = _load_opencode()
+    if opencode is not None and opencode.looks_like_opencode_db(transcript_path):
         return "opencode"
 
     # Sniff transcript format by scanning early records. Claude Code writes
@@ -78,7 +100,10 @@ def render_transcript_text(transcript_path, agent=None, session_id=None):
         agent = detect_agent(transcript_path)
 
     if agent == "opencode":
-        return _render_opencode(transcript_path, session_id=session_id)
+        opencode = _load_opencode()
+        if opencode is None:
+            raise ValueError(_OPENCODE_MISSING)
+        return opencode.render_transcript_text(transcript_path, session_id=session_id)
     return open(transcript_path).read()
 
 
@@ -146,7 +171,10 @@ def parse_transcript(transcript_path, agent=None, session_id=None):
     if agent == "claude":
         meta = _parse_claude(transcript_path)
     elif agent == "opencode":
-        meta = _parse_opencode(transcript_path, session_id=session_id)
+        opencode = _load_opencode()
+        if opencode is None:
+            raise ValueError(_OPENCODE_MISSING)
+        meta = opencode.parse_transcript(transcript_path, session_id=session_id)
     elif agent in ("codex", "cursor", "windsurf"):
         raise ValueError(
             f"Transcript parsing for {agent!r} is not yet implemented. "
