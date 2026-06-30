@@ -2780,7 +2780,14 @@ def _queue_process_status(run_id: str = "") -> dict[str, Any]:
     return _summarize_process_status(payload, lock_active)
 
 
+def _valid_processing_run_id(run_id: str) -> bool:
+    value = str(run_id or "").strip()
+    return bool(value) and value == Path(value).name and value not in {".", ".."}
+
+
 def _queue_process_retry(run_id: str = "", group_ids: list[str] | None = None) -> dict[str, Any]:
+    if run_id and not _valid_processing_run_id(run_id):
+        return {"error": f"invalid processing run id: {run_id}", "reason": "invalid_run_id"}
     return _capture_runtime().plan_retry(_queue_process_status(run_id), run_id, group_ids)
 
 
@@ -2795,6 +2802,8 @@ def _reported_note_exists_in_vault(vault: Path, path: str) -> bool:
 
 
 def _queue_process_finalize(run_id: str) -> dict[str, Any]:
+    if not _valid_processing_run_id(run_id):
+        return {"error": f"invalid processing run id: {run_id}", "reason": "invalid_run_id"}
     return _capture_runtime().finalize(run_id)
 
 

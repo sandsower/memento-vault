@@ -10,6 +10,7 @@ through those same ports.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 import uuid
@@ -158,11 +159,14 @@ class CaptureRuntime:
         if not manifest_path.exists():
             return {"error": f"processing run not found: {run_id}", "reason": "run_not_found"}
 
-        manifest = json.loads(manifest_path.read_text(errors="replace"))
         dequeue_ids: set[str] = set()
         group_results: list[dict[str, Any]] = []
         remaining: list[dict[str, Any]] = []
         try:
+            try:
+                manifest = json.loads(manifest_path.read_text(errors="replace"))
+            except (OSError, json.JSONDecodeError):
+                return {"error": f"invalid processing manifest: {run_id}", "reason": "invalid_manifest"}
             with self.queue.lock():
                 captures = self.queue.load(vault)
                 for group in manifest.get("groups", []):
@@ -233,11 +237,16 @@ class CaptureRuntime:
 
     def _finalize_group(self, vault: Path, group: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
         expected_ids = {str(x) for x in group.get("capture_ids", [])}
-        result_path = Path(str(group.get("result_json") or ""))
-        if not result_path.exists():
+        result_json = str(group.get("result_json") or "").strip()
+        if not result_json:
+            return {"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"}, set()
+        result_path = Path(result_json)
+        if not result_path.is_file():
             return {"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"}, set()
         try:
             result = json.loads(result_path.read_text(errors="replace"))
+        except OSError:
+            return {"group_id": group.get("group_id"), "status": "failed", "reason": "unreadable_result"}, set()
         except json.JSONDecodeError:
             return {"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"}, set()
 
@@ -337,7 +346,10 @@ def select_captures(
 
 def safe_segment(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-._")
-    return cleaned[:120] or uuid.uuid4().hex
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+    if not cleaned:
+        return digest
+    return f"{cleaned[:111]}-{digest}"
 
 
 def group_captures(captures: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -367,16 +379,9 @@ def apply_capture_limit(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not limit or limit <= 0:
         return selected, groups
-    limited_ids: list[str] = []
-    for group in groups:
-        for capture in group.get("captures", []):
-            if len(limited_ids) >= limit:
-                break
-            limited_ids.append(str(capture.get("id")))
-        if len(limited_ids) >= limit:
-            break
-    selected_ids = set(limited_ids)
-    limited_selected = [capture for capture in selected if str(capture.get("id")) in selected_ids]
+    limited_selected = selected[:limit]
+    selected_ids = {str(capture.get("id")) for capture in limited_selected}
+    selected_order = {str(capture.get("id")): index for index, capture in enumerate(limited_selected)}
     limited_groups = []
     for group in groups:
         captures_in_limit = [capture for capture in group.get("captures", []) if str(capture.get("id")) in selected_ids]
@@ -388,6 +393,9 @@ def apply_capture_limit(
                     "capture_ids": [capture.get("id") for capture in captures_in_limit],
                 }
             )
+    limited_groups.sort(
+        key=lambda group: min(selected_order[str(capture.get("id"))] for capture in group.get("captures", []))
+    )
     return limited_selected, limited_groups
 
 
