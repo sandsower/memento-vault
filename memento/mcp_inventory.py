@@ -97,6 +97,12 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
         "Low-level write primitive for sync/automation or agents without skill support; interactive Claude/Codex sessions should prefer `/memento` or local hooks.",
     ),
     McpToolInventoryItem(
+        "memento_replace_note",
+        "Sync",
+        "Replace an existing note at a known path for explicit conflict resolution.",
+        "Use only after a sync client has identified the exact remote path to resolve; it is not a general note creation primitive.",
+    ),
+    McpToolInventoryItem(
         "memento_store_smart",
         "Write",
         "Search for close matches before writing, and return duplicate/update/supersede suggestions.",

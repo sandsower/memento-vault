@@ -247,7 +247,7 @@ def get(path: str, timeout: int = 30) -> dict | None:
     return None
 
 
-def store(
+def _note_args(
     title: str,
     body: str,
     note_type: str = "discovery",
@@ -258,9 +258,7 @@ def store(
     session_id: str | None = None,
     validity_context: str | None = None,
     supersedes: str | None = None,
-    timeout: int = 30,
 ) -> dict:
-    """Store a note in the remote vault."""
     args = {"title": title, "body": body, "note_type": note_type}
     if tags:
         args["tags"] = tags
@@ -276,7 +274,71 @@ def store(
         args["validity_context"] = validity_context
     if supersedes:
         args["supersedes"] = supersedes
+    return args
+
+
+def store(
+    title: str,
+    body: str,
+    note_type: str = "discovery",
+    tags: list[str] | None = None,
+    certainty: int | None = None,
+    project: str | None = None,
+    branch: str | None = None,
+    session_id: str | None = None,
+    validity_context: str | None = None,
+    supersedes: str | None = None,
+    timeout: int = 30,
+) -> dict:
+    """Store a note in the remote vault."""
+    args = _note_args(
+        title,
+        body,
+        note_type,
+        tags,
+        certainty,
+        project,
+        branch,
+        session_id,
+        validity_context,
+        supersedes,
+    )
     return _call_tool("memento_store", args, timeout=timeout)
+
+
+def replace_note(
+    path: str,
+    title: str,
+    body: str,
+    note_type: str = "discovery",
+    tags: list[str] | None = None,
+    certainty: int | None = None,
+    project: str | None = None,
+    branch: str | None = None,
+    session_id: str | None = None,
+    validity_context: str | None = None,
+    supersedes: str | None = None,
+    timeout: int = 30,
+) -> dict:
+    """Replace an existing remote note at a known path.
+
+    This is the explicit conflict-resolution primitive for remote sync. Unlike
+    store(), it does not append a dedupe suffix when the note already exists.
+    """
+    args = _note_args(
+        title,
+        body,
+        note_type,
+        tags,
+        certainty,
+        project,
+        branch,
+        session_id,
+        validity_context,
+        supersedes,
+    )
+    args["path"] = path
+    return _call_tool("memento_replace_note", args, timeout=timeout)
 
 
 def smart_store(
