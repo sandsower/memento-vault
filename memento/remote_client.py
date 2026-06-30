@@ -314,6 +314,30 @@ def smart_store(
     return _call_tool("memento_store_smart", args, timeout=timeout)
 
 
+def synthesize_failures(
+    run_summaries: list[dict] | dict,
+    approve_writes: bool = False,
+    project: str = "",
+    branch: str = "",
+    session_id: str | None = None,
+    max_candidates: int = 20,
+    timeout: int = 30,
+) -> dict:
+    """Synthesize batch failures from sanitized external run summaries."""
+    args = {
+        "run_summaries": run_summaries,
+        "approve_writes": approve_writes,
+        "max_candidates": max_candidates,
+    }
+    if project:
+        args["project"] = project
+    if branch:
+        args["branch"] = branch
+    if session_id:
+        args["session_id"] = session_id
+    return _call_tool("memento_synthesize_failures", args, timeout=timeout)
+
+
 def capture(
     session_summary: str,
     cwd: str = "",

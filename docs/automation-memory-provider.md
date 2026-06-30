@@ -22,7 +22,7 @@ A runner that needs to record what happened during a run (gate results, proofs, 
 | Explicit search | `memento_search` | read | fail-open: miss envelope with structured reason |
 | Explicit get | `memento_get` | read | fail-open: `{"error": ...}` dict, never an exception |
 | Post-run lesson capture | `memento_capture` (session summary), `memento_store` (single atomic lesson) | write | error dict; runner proceeds, surfaces the failure |
-| Batch synthesis | per-run `memento_capture` + Inception consolidation | write | best-effort background work |
+| Batch synthesis | `memento_synthesize_failures` dry-run reports; optional approved lesson writes; per-run `memento_capture` + Inception consolidation remains supported | write | schema error for raw dumps; write errors are surfaced and runner proceeds |
 | Availability check | `memento_status`, `memento-vault health` | read | safe partial dict; never raises, never prints secrets |
 
 ## Provider operations
@@ -105,9 +105,27 @@ Inputs to both MUST already be sanitized by the caller (see Privacy below). Both
 
 ### Batch synthesis from sanitized summaries
 
-What exists today: each run captures its own sanitized summary via `memento_capture`, and Inception (the background consolidation agent) later clusters related notes across runs and writes pattern/synthesis notes. That combination — per-run capture plus asynchronous consolidation — is the supported batch-synthesis path.
+Runners that already have a batch of sanitized post-run summaries MAY call `memento_synthesize_failures` to produce an immediate dry-run learning report:
 
-A dedicated "submit N run summaries, synthesize now" endpoint does not exist and is not part of this contract. If one is added later, it will extend this document; runners MUST NOT emulate it by writing aggregate run-report notes into the vault.
+```json
+memento_synthesize_failures({
+  "run_summaries": [
+    {
+      "run_id": "rondo-2026-06-30-1",
+      "summary": "pytest gate failed because the fixture did not create a vault config",
+      "failures": [
+        {"signal": "pytest gate failed", "command": "pytest tests/test_store.py"}
+      ]
+    }
+  ]
+})
+```
+
+The input schema is summary-shaped by design. It rejects raw run stores, ledgers, event streams, transcripts, proof/evidence dumps, stdout/stderr, log fields, and oversized multiline strings. Accepted summaries are grouped into memory, process, agent, harness, environment, and requirement failures, including repeated gate failures, memory-not-retrieved failures, missing process/gates, ambiguous requirements, harness/environment failures, and proof gaps.
+
+By default the tool is dry-run only: it returns grouped failures plus concrete candidate lessons and advisory note/issue/gate/docs actions, and performs no writes. Passing `approve_writes: true` is the explicit approval boundary for storing candidate lesson notes via the typed note-write path (`origin: mcp_batch_failure_synthesis`, `note_type` discovery/pattern, certainty, tags, project/branch/session metadata). Advisory issue/gate/docs actions are never executed by Memento; the owning runner or project must handle them outside the vault.
+
+Per-run `memento_capture` plus asynchronous Inception consolidation remains supported for background learning. `memento_synthesize_failures` is for sanitized batches where the runner wants an immediate report or approved lesson-note capture without storing aggregate run evidence.
 
 ## Failure behavior
 

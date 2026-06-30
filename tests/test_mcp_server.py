@@ -33,6 +33,7 @@ from memento.mcp_server import (
     memento_search,
     memento_status,
     memento_store,
+    memento_synthesize_failures,
 )
 
 
@@ -808,6 +809,51 @@ class TestContradictionInspectionTool:
 
         assert result == expected
         mock_inspect.assert_called_once_with("redis cache", limit=7, min_certainty=3)
+
+
+# --- memento_synthesize_failures ---
+
+
+class TestMementoSynthesizeFailures:
+    def test_dry_run_does_not_write_candidate_lessons(self, tmp_vault, _use_vault_config):
+        result = memento_synthesize_failures(
+            [
+                {
+                    "run_id": "run-1",
+                    "summary": "pytest gate failed",
+                    "failures": [{"signal": "pytest gate failed", "command": "pytest tests/test_store.py"}],
+                }
+            ]
+        )
+
+        assert result["dry_run"] is True
+        assert result["candidate_lessons"]
+        assert not list((tmp_vault / "notes").glob("automation-*.md"))
+
+    def test_approved_writes_store_typed_lesson_notes(self, tmp_vault, _use_vault_config):
+        result = memento_synthesize_failures(
+            [
+                {
+                    "run_id": "run-1",
+                    "summary": "Memento recall did not retrieve a relevant note",
+                    "failures": [{"signal": "Memento recall did not retrieve a relevant note"}],
+                }
+            ],
+            approve_writes=True,
+            project="/home/vic/Projects/memento-vault",
+            branch="main",
+            session_id="batch-1",
+        )
+
+        assert result["dry_run"] is False
+        assert result["writes_approved"] is True
+        assert result["write_results"][0]["created"] is True
+        note_path = tmp_vault / result["write_results"][0]["path"]
+        content = note_path.read_text()
+        assert "type: discovery" in content
+        assert "origin: mcp_batch_failure_synthesis" in content
+        assert 'tags: ["automation", "batch-failure", "memory", "memory_not_retrieved"]' in content
+        assert "session_id: batch-1" in content
 
 
 # --- memento_store ---
