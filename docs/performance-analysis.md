@@ -204,7 +204,7 @@ For ongoing monitoring:
 retrieval_log: true
 ```
 
-Logs go to `~/.config/memento-vault/retrieval.jsonl`. Analyze with `memento-vault retrieval-report --since 7` (or `python tools/analyze-retrieval.py --since 7`).
+Logs go to `~/.config/memento-vault/retrieval.jsonl`. Analyze with `memento-vault retrieval-report --since 7` (or `python tools/analyze-retrieval.py --since 7`) to review skip reasons, latency, and behavior recommendations for when purpose-built tools or concrete search would help.
 
 ## References
 
