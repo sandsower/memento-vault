@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from memento import sync_ledger  # noqa: E402
-from memento.archive import iter_tombstones  # noqa: E402
+from memento.archive import latest_active_tombstones  # noqa: E402
 from memento.config import get_vault, slugify  # noqa: E402
 from memento.remote_client import get, is_remote, store  # noqa: E402
 
@@ -139,13 +139,8 @@ def _build_ledger_index(vault):
 
 
 def _latest_tombstones_by_path(vault):
-    """Return latest local tombstones keyed by source path."""
-    latest = {}
-    for record in iter_tombstones(vault):
-        path = record.get("path")
-        if path and (path not in latest or str(record.get("ts", "")) >= str(latest[path].get("ts", ""))):
-            latest[path] = record
-    return latest
+    """Return latest active local deletion tombstones keyed by source path."""
+    return latest_active_tombstones(vault)
 
 
 def _is_tombstoned_file(vault, source, path, tombstones):
