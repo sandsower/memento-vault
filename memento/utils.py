@@ -5,29 +5,13 @@ import re
 import sys
 from pathlib import Path
 
+from memento import telemetry
 from memento.config import get_config
 
 # --- Secret sanitization ---
 
-_SECRET_PATTERNS = [
-    # API keys and tokens
-    (r"(sk-[a-zA-Z0-9]{20,})", "[REDACTED_API_KEY]"),
-    (r"(sk-proj-[a-zA-Z0-9_-]{20,})", "[REDACTED_API_KEY]"),
-    (r"(ghp_[a-zA-Z0-9]{36,})", "[REDACTED_GITHUB_TOKEN]"),
-    (r"(gho_[a-zA-Z0-9]{36,})", "[REDACTED_GITHUB_TOKEN]"),
-    (r"(github_pat_[a-zA-Z0-9_]{20,})", "[REDACTED_GITHUB_TOKEN]"),
-    (r"(xoxb-[a-zA-Z0-9\-]+)", "[REDACTED_SLACK_TOKEN]"),
-    (r"(xoxp-[a-zA-Z0-9\-]+)", "[REDACTED_SLACK_TOKEN]"),
-    (r"(AKIA[0-9A-Z]{16})", "[REDACTED_AWS_KEY]"),
-    (r"(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,})", "[REDACTED_JWT]"),
-    # Connection strings
-    (r'((?:postgres|mysql|mongodb|redis)://[^\s"\'`]+)', "[REDACTED_CONNECTION_STRING]"),
-    # Bearer tokens
-    (r"(Bearer\s+[a-zA-Z0-9_\-.]{20,})", "Bearer [REDACTED_TOKEN]"),
-    # Generic high-entropy secrets (env var assignments)
-    (r'(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_PASS)\s*[=:]\s*["\']?([a-zA-Z0-9_\-/.]{20,})["\']?', "[REDACTED_SECRET]"),
-]
-_COMPILED_SECRET_PATTERNS = [(re.compile(p, re.IGNORECASE), r) for p, r in _SECRET_PATTERNS]
+_SECRET_PATTERNS = telemetry.SECRET_PATTERNS
+_COMPILED_SECRET_PATTERNS = telemetry._COMPILED_SECRET_PATTERNS
 
 
 def sanitize_secrets(text):
@@ -36,11 +20,7 @@ def sanitize_secrets(text):
     Returns the sanitized text. Applied to fleeting notes, project indexes,
     and injected into the agent prompt for atomic note generation.
     """
-    if not text:
-        return text
-    for pattern, replacement in _COMPILED_SECRET_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
+    return telemetry.redact_text(text)
 
 
 # --- Tag normalization ---

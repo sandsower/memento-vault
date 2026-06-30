@@ -19,6 +19,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from memento import telemetry
 from memento.config import get_vault
 from memento.store import ACCESS_LOG_PATH, RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, load_access_log_stats
 from memento.utils import sanitize_secrets
@@ -29,27 +30,8 @@ DEFAULT_RETRIEVAL_LOG = Path(RETRIEVAL_LOG_PATH)
 DEFAULT_TRIAGE_HEALTH_LOG = Path(TRIAGE_HEALTH_LOG_PATH)
 DEFAULT_ACCESS_LOG = Path(ACCESS_LOG_PATH)
 
-_TRIAGE_HEALTH_SUCCESS = {"structured_notes_written"}
-_TRIAGE_HEALTH_FAILURE = {
-    "hook_input_failed",
-    "missing_transcript",
-    "parse_transcript_failed",
-    "structured_notes_failed",
-    "structured_notes_llm_failed",
-    "structured_notes_lock_timeout",
-    "structured_notes_parse_empty",
-    "structured_notes_payload_unreadable",
-    "structured_notes_transcript_unreadable",
-}
-
-_RETRIEVAL_REASON_ALIASES = {
-    "broad-project-query": "query_too_broad",
-    "filtered-empty": "no_exact_match",
-    "low-signal-prompt": "query_too_broad",
-    "no-results": "no_exact_match",
-    "project-mismatch-filtered-empty": "project_filter_removed_all",
-    "skipped-prompt": "query_too_broad",
-}
+_TRIAGE_HEALTH_SUCCESS = telemetry.TRIAGE_HEALTH_SUCCESS_ACTIONS
+_TRIAGE_HEALTH_FAILURE = telemetry.TRIAGE_HEALTH_FAILURE_ACTIONS
 
 _CONCRETE_PATTERNS = (
     re.compile(r"(?:[A-Za-z]:)?[\\/][^\s]+"),
@@ -99,25 +81,11 @@ _SEARCH_GET_FOLLOWUP_WINDOW_SECONDS = 15 * 60
 
 
 def _parse_ts(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        ts = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    return ts
+    return telemetry.parse_timestamp_utc(value)
 
 
 def _format_ts(value: Any) -> str:
-    ts = _parse_ts(value)
-    if ts is None:
-        return str(value or "?")
-    return ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    return telemetry.format_timestamp_utc(value)
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -148,23 +116,9 @@ def _load_jsonl(path: Path, since_days: int | None = None) -> list[dict[str, Any
         return []
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=since_days) if since_days is not None else None
-    entries: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as f:
-        for raw in f:
-            if not raw.strip():
-                continue
-            try:
-                entry = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(entry, dict):
-                continue
-            if cutoff is not None:
-                ts = _parse_ts(entry.get("ts"))
-                if ts is None or ts < cutoff:
-                    continue
-            entries.append(entry)
-    return entries
+    if cutoff is not None:
+        return list(telemetry.iter_recent_jsonl(path, cutoff))
+    return list(telemetry.iter_jsonl(path))
 
 
 def load_retrieval_entries(log_path: str | Path | None = None, since_days: int | None = None) -> list[dict[str, Any]]:
@@ -605,8 +559,7 @@ def _entry_text(entry: dict[str, Any]) -> str:
 
 
 def _normalize_retrieval_reason(reason: Any) -> str:
-    text = str(reason or "").strip()
-    return _RETRIEVAL_REASON_ALIASES.get(text, text)
+    return telemetry.normalize_dashboard_retrieval_reason(str(reason or "").strip())
 
 
 def _entry_reason(entry: dict[str, Any]) -> str:

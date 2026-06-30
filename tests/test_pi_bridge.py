@@ -2,12 +2,49 @@ import json
 import os
 import subprocess
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from memento.lifecycle import LifecycleResult
 from memento.llm import LLMResult
 from memento import pi_bridge
+
+
+def test_bridge_health_status_normalizes_offset_aware_timestamps(tmp_path, monkeypatch):
+    path = tmp_path / "triage-health.jsonl"
+    monkeypatch.setattr(pi_bridge.store_module, "TRIAGE_HEALTH_LOG_PATH", str(path))
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": now.isoformat().replace("+00:00", "Z"),
+                        "hook": "pi-bridge",
+                        "action": "recall_failed",
+                        "operation": "recall",
+                        "error": "boom",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": now.astimezone(timezone.utc).isoformat(),
+                        "hook": "pi-bridge",
+                        "action": "triage_missing_transcript",
+                        "operation": "triage",
+                        "error": "missing",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    status = pi_bridge._bridge_health_status()
+
+    assert status["status"] == "warn"
+    assert status["recent_failure_count"] == 2
 
 
 def test_pi_bridge_briefing_disables_deferred_search(capsys):

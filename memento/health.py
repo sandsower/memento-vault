@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from memento import remote_client
+from memento import remote_client, telemetry
 from memento.search_backend import get_backend, reset_backend
 
 
@@ -27,41 +27,18 @@ FAIL = "fail"
 _STATUSES = (PASS, WARN, FAIL)
 _EXPECTED_DIRS = ("notes", "fleeting", "projects", "archive")
 _CORE_DIRS = ("notes", "fleeting", "projects")
-_HEALTH_WINDOW_HOURS = 24
+_HEALTH_WINDOW_HOURS = telemetry.HEALTH_WINDOW_HOURS
 _DEEP_PROBE_TIMEOUT_SECONDS = 5
 _DEEP_PROBE_QUERY = "memento-vault health probe"
 _STALE_LOCK_SECONDS = 600
 _INCEPTION_RECENT_RUNS_LIMIT = 5
 _INCEPTION_ERROR_DETAIL_LIMIT = 500
-_RECENT_FAILURE_ACTION_MARKERS = ("failed", "failure", "error", "unexpected", "unavailable")
-_RETRIEVAL_SKIP_ACTIONS = {
-    "broad-project-query",
-    "deferred-ready",
-    "low-signal-prompt",
-    "query_too_broad",
-    "skipped-prompt",
-}
-_RETRIEVAL_NO_RESULT_REASONS = {
-    "dedup-skip",
-    "duplicate",
-    "filtered-empty",
-    "literal_mode_auto_selected",
-    "no-results",
-    "no_concrete_match",
-    "no_exact_match",
-    "project-mismatch-filtered-empty",
-    "project_filter_removed_all",
-    "threshold_too_high",
-}
-_RETRIEVAL_BACKEND_UNAVAILABLE_REASONS = {
-    "backend_unavailable",
-    "empty_vault",
-    "index_stale_or_missing",
-    "qmd-unavailable",
-    "semantic_mode_not_available",
-}
-_RETRIEVAL_BACKEND_EXCEPTION_ACTIONS = {"extra_collection_failed", "qmd_get_unexpected", "qmd_search_unexpected"}
-_RETRIEVAL_ERROR_DETAIL_LIMIT = 500
+_RECENT_FAILURE_ACTION_MARKERS = telemetry.RECENT_FAILURE_ACTION_MARKERS
+_RETRIEVAL_SKIP_ACTIONS = telemetry.RETRIEVAL_SKIP_ACTIONS
+_RETRIEVAL_NO_RESULT_REASONS = telemetry.RETRIEVAL_NO_RESULT_REASONS
+_RETRIEVAL_BACKEND_UNAVAILABLE_REASONS = telemetry.RETRIEVAL_BACKEND_UNAVAILABLE_REASONS
+_RETRIEVAL_BACKEND_EXCEPTION_ACTIONS = telemetry.RETRIEVAL_BACKEND_EXCEPTION_ACTIONS
+_RETRIEVAL_ERROR_DETAIL_LIMIT = telemetry.RETRIEVAL_ERROR_DETAIL_LIMIT
 _STALE_MCP_HINT = (
     "likely stale headless Claude MCP config; rerun ./install.sh --reinstall; "
     'copied hooks should use {"mcpServers": {}} for --mcp-config'
@@ -108,20 +85,6 @@ INCEPTION_STATE_PATH = str(
 _DEFAULT_RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", Path.home() / ".cache")) / "memento-vault"
 VAULT_WRITE_LOCK_PATH = str(_DEFAULT_RUNTIME_DIR / "vault-write.lock")
 INCEPTION_LOCK_PATH = str(_DEFAULT_RUNTIME_DIR / "inception.lock")
-
-_SECRET_PATTERNS = [
-    (r"(sk-[a-zA-Z0-9]{20,})", "[REDACTED_API_KEY]"),
-    (r"(sk-proj-[a-zA-Z0-9_-]{20,})", "[REDACTED_API_KEY]"),
-    (r"(ghp_[a-zA-Z0-9]{36,})", "[REDACTED_GITHUB_TOKEN]"),
-    (r"(gho_[a-zA-Z0-9]{36,})", "[REDACTED_GITHUB_TOKEN]"),
-    (r"(github_pat_[a-zA-Z0-9_]{20,})", "[REDACTED_GITHUB_TOKEN]"),
-    (r"(xox[bp]-[a-zA-Z0-9\-]+)", "[REDACTED_SLACK_TOKEN]"),
-    (r"(AKIA[0-9A-Z]{16})", "[REDACTED_AWS_KEY]"),
-    (r"(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,})", "[REDACTED_JWT]"),
-    (r'((?:postgres|mysql|mongodb|redis)://[^\s"\'`]+)', "[REDACTED_CONNECTION_STRING]"),
-    (r"(Bearer\s+[a-zA-Z0-9_\-.]{20,})", "Bearer [REDACTED_TOKEN]"),
-    (r'(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_PASS)\s*[=:]\s*["\']?([a-zA-Z0-9_\-/.]{20,})["\']?', "[REDACTED_SECRET]"),
-]
 
 
 @dataclass
@@ -638,7 +601,7 @@ def build_automation_memory_readiness(
             status = WARN
             readiness = "degraded"
         degradations.append("stale_index")
-    if recall["events"] >= 3 and recall["failure_rate"] >= 0.5:
+    if telemetry.failure_rate_warns(recall["failures"], recall["events"]):
         if status != FAIL:
             status = WARN
             readiness = "degraded"
@@ -760,7 +723,7 @@ def _automation_recall_metadata(
     path = Path(RETRIEVAL_LOG_PATH)
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
     diagnostics = _scan_retrieval_logs(path, cutoff)
-    status = WARN if diagnostics["events"] >= 3 and diagnostics["failure_rate"] >= 0.5 else PASS
+    status = WARN if telemetry.failure_rate_warns(diagnostics["failures"], diagnostics["events"]) else PASS
     metadata = {
         "log_path": str(path),
         "events": diagnostics["events"],
@@ -1427,19 +1390,11 @@ def _check_pi_bridge_config() -> CheckResult:
     )
 
 
-_PI_BRIDGE_FAILURE_ACTIONS = {
-    "triage_missing_transcript",
-    "triage_disallowed_transcript",
-    "pi_missing_transcript",
-    "pi_structured_notes_parse_empty",
-    "pi_structured_notes_transcript_unreadable",
-    "pi_structured_notes_lock_timeout",
-}
+_PI_BRIDGE_FAILURE_ACTIONS = telemetry.PI_BRIDGE_FAILURE_ACTIONS
 
 
 def _is_pi_bridge_failure_record(rec: dict[str, Any]) -> bool:
-    action = str(rec.get("action") or "")
-    return action.endswith("_failed") or action in _PI_BRIDGE_FAILURE_ACTIONS
+    return telemetry.is_pi_bridge_failure_record(rec)
 
 
 def _check_pi_bridge_health() -> CheckResult:
@@ -1520,7 +1475,7 @@ def _check_triage_health() -> CheckResult:
         return CheckResult(
             "triage", WARN, "no recent triage health events found", {"window_hours": _HEALTH_WINDOW_HOURS}
         )
-    failure_threshold_met = total >= 3 and failed / total >= 0.5
+    failure_threshold_met = telemetry.failure_rate_warns(failed, total)
     if failure_threshold_met:
         message = f"triage failing {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h"
         if invalid_mcp_failed:
@@ -1633,7 +1588,7 @@ def _check_retrieval_health(
         f"no-results {diagnostics['no_results']}, "
         f"low-signal skips {diagnostics['low_signal_skips']}"
     )
-    if diagnostics["failure_rate"] >= 0.5:
+    if diagnostics["failure_rate"] >= telemetry.HEALTH_WARN_FAILURE_RATIO:
         message = (
             f"recall/search backend failures {failed}/{total} in last {_HEALTH_WINDOW_HOURS}h ({category_summary})"
         )
@@ -1690,51 +1645,16 @@ def _scan_retrieval_logs(path: Path, cutoff: datetime) -> dict[str, Any]:
     diagnostics["failures"] = (
         diagnostics["backend_unavailable"] + diagnostics["backend_exceptions"] + diagnostics["other_failures"]
     )
-    if diagnostics["events"]:
-        diagnostics["failure_rate"] = round(diagnostics["failures"] / diagnostics["events"], 4)
+    diagnostics["failure_rate"] = telemetry.failure_rate(diagnostics["failures"], diagnostics["events"])
     return diagnostics
 
 
 def _classify_retrieval_record(rec: dict[str, Any]) -> str | None:
-    hook = str(rec.get("hook") or "")
-    action = str(rec.get("action") or "")
-    reason = str(rec.get("reason") or "")
-    if hook not in {"recall", "search", "mcp"}:
-        return None
-    if hook == "mcp" and action not in {"search", "search_miss"}:
-        return None
-    if action.startswith("diagnostic-"):
-        return None
-
-    reason_or_action = reason if action == "search_miss" and reason else action
-    normalized = _normalize_retrieval_reason(reason_or_action)
-    if normalized in _RETRIEVAL_SKIP_ACTIONS:
-        return "low_signal_skip"
-    if action in {"inject", "search"} and normalized not in _RETRIEVAL_BACKEND_UNAVAILABLE_REASONS:
-        return "success"
-    if normalized in _RETRIEVAL_BACKEND_UNAVAILABLE_REASONS:
-        return "backend_unavailable"
-    if action in _RETRIEVAL_BACKEND_EXCEPTION_ACTIONS:
-        return "backend_exception"
-    if normalized in _RETRIEVAL_NO_RESULT_REASONS:
-        return "no_result"
-    if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
-        return "backend_exception" if hook == "search" else "other_failure"
-    return None
+    return telemetry.classify_retrieval_record(rec)
 
 
 def _normalize_retrieval_reason(reason: str) -> str:
-    aliases = {
-        "broad-project-query": "query_too_broad",
-        "filtered-empty": "filtered-empty",
-        "low-signal-prompt": "low-signal-prompt",
-        "no-results": "no-results",
-        "project-mismatch-filtered-empty": "project-mismatch-filtered-empty",
-        "qmd-unavailable": "backend_unavailable",
-        "skipped-prompt": "skipped-prompt",
-        "vault-unavailable": "empty_vault",
-    }
-    return aliases.get(reason, reason)
+    return telemetry.normalize_retrieval_reason(reason)
 
 
 def _record_retrieval_error(diagnostics: dict[str, Any], rec: dict[str, Any], kind: str) -> None:
@@ -1746,11 +1666,7 @@ def _record_retrieval_error(diagnostics: dict[str, Any], rec: dict[str, Any], ki
 
 
 def _safe_retrieval_error(value: Any) -> tuple[str, bool]:
-    text = _safe_text(" ".join(str(value or "").split()))
-    truncated = len(text) > _RETRIEVAL_ERROR_DETAIL_LIMIT
-    if truncated:
-        text = text[:_RETRIEVAL_ERROR_DETAIL_LIMIT] + "..."
-    return text, truncated
+    return telemetry.safe_error(value, limit=_RETRIEVAL_ERROR_DETAIL_LIMIT)
 
 
 def _retrieval_remediation(
@@ -2072,38 +1988,15 @@ def _check_inception(config: dict[str, Any]) -> CheckResult:
 
 
 def _iter_jsonl(path: Path):
-    try:
-        with path.open() as handle:
-            for line in handle:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(rec, dict):
-                    yield rec
-    except OSError:
-        return
+    yield from telemetry.iter_jsonl(path)
 
 
 def _iter_recent_jsonl(path: Path, cutoff: datetime):
-    for rec in _iter_jsonl(path):
-        ts = _parse_ts(rec.get("ts"))
-        if ts is None or ts < cutoff:
-            continue
-        yield rec
+    yield from telemetry.iter_recent_jsonl(path, cutoff)
 
 
 def _parse_ts(raw: Any) -> datetime | None:
-    if not raw:
-        return None
-    try:
-        text = str(raw).replace("Z", "+00:00")
-        dt = datetime.fromisoformat(text)
-        if dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)
-        return dt
-    except ValueError:
-        return None
+    return telemetry.parse_timestamp_naive_utc(raw)
 
 
 def _is_invalid_mcp_config_error(message: str) -> bool:
@@ -2112,32 +2005,15 @@ def _is_invalid_mcp_config_error(message: str) -> bool:
 
 
 def _sanitize_secrets(text: str) -> str:
-    import re
-
-    if not text:
-        return text
-    for pattern, replacement in _SECRET_PATTERNS:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    return text
+    return telemetry.redact_text(text)
 
 
 def _safe_text(text: str) -> str:
-    text = _sanitize_secrets(str(text))
-    if len(text) > 1000:
-        return text[:1000] + "..."
-    return text
+    return telemetry.safe_text(text)
 
 
 def _sanitize_obj(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(k): _sanitize_obj(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_sanitize_obj(v) for v in value]
-    if isinstance(value, tuple):
-        return [_sanitize_obj(v) for v in value]
-    if isinstance(value, str):
-        return _safe_text(value)
-    return value
+    return telemetry.sanitize_obj(value)
 
 
 if __name__ == "__main__":  # pragma: no cover
