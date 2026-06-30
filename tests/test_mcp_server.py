@@ -392,12 +392,15 @@ class TestToolSelectionDescriptions:
 
     def test_write_tool_docstrings_separate_low_level_from_interactive_workflows(self):
         store_doc = memento_store.__doc__ or ""
+        smart_store_doc = mcp_server.memento_store_smart.__doc__ or ""
         capture_doc = memento_capture.__doc__ or ""
         daily_snapshot_doc = memento_daily_snapshot.__doc__ or ""
         preserve_doc = memento_preserve.__doc__ or ""
 
         assert "low-level primitive" in store_doc
         assert "/memento" in store_doc
+        assert "Smart-store" in smart_store_doc
+        assert "duplicate/update/supersede" in smart_store_doc
         assert "low-level write primitive" in capture_doc
         assert "ordinary interactive" in capture_doc
         assert "/memento" in capture_doc

@@ -1,7 +1,7 @@
 """HTTP client for connecting to a remote memento vault server.
 
 Used by hooks when MEMENTO_VAULT_URL is set. Provides the same operations
-as the local vault (search, contradictions, store, get, capture, preserve, status)
+as the local vault (search, contradictions, store, smart_store, get, capture, preserve, status)
 but over HTTP, calling the remote MCP server's tools via a simple REST-like wrapper.
 
 The MCP streamable-http transport uses JSON-RPC over HTTP POST. This client
@@ -223,6 +223,41 @@ def store(
     if supersedes:
         args["supersedes"] = supersedes
     return _call_tool("memento_store", args, timeout=timeout)
+
+
+def smart_store(
+    title: str,
+    body: str,
+    note_type: str = "discovery",
+    tags: list[str] | None = None,
+    certainty: int | None = None,
+    project: str | None = None,
+    branch: str | None = None,
+    session_id: str | None = None,
+    validity_context: str | None = None,
+    supersedes: str | None = None,
+    origin: str | None = None,
+    timeout: int = 30,
+) -> dict:
+    """Smart-store a note in the remote vault."""
+    args = {"title": title, "body": body, "note_type": note_type}
+    if tags:
+        args["tags"] = tags
+    if certainty is not None:
+        args["certainty"] = certainty
+    if project:
+        args["project"] = project
+    if branch:
+        args["branch"] = branch
+    if session_id:
+        args["session_id"] = session_id
+    if validity_context:
+        args["validity_context"] = validity_context
+    if supersedes:
+        args["supersedes"] = supersedes
+    if origin:
+        args["origin"] = origin
+    return _call_tool("memento_store_smart", args, timeout=timeout)
 
 
 def capture(

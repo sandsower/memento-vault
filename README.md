@@ -204,7 +204,7 @@ cd memento-vault && git pull && ./install.sh
 The MCP server exposes read, lifecycle, write, and maintenance tools over stdio (local) or HTTP (remote). Any MCP-compatible agent can use them.
 
 <!-- memento-mcp-tools:start -->
-The MCP server currently registers **14 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
+The MCP server currently registers **15 tools**. This table is generated from `memento.mcp_inventory.MCP_TOOL_INVENTORY`; refresh/check it with `memento-vault tools --markdown` or `memento-vault tools --check`.
 
 | Tool | Category | What it does | When to use it |
 |------|----------|--------------|----------------|
@@ -218,6 +218,7 @@ The MCP server currently registers **14 tools**. This table is generated from `m
 | `memento_status` | Operational | Report vault health/status, note counts, project counts, and safe config summary. | Use for operational checks and setup debugging; not for recall, project history, or note content. |
 | `memento_list` | Sync | List notes with optional content hashes for lightweight inventory/sync. | Use for sync/inventory clients; not for topical recall or reading notes. |
 | `memento_store` | Write | Write a single knowledge note with managed frontmatter and project indexing. | Low-level write primitive for sync/automation or agents without skill support; interactive Claude/Codex sessions should prefer `/memento` or local hooks. |
+| `memento_store_smart` | Write | Search for close matches before writing, and return duplicate/update/supersede suggestions. | Use when you want a write decision with candidate paths/reasons before creating a note; it avoids obvious duplicates by default. |
 | `memento_daily_snapshot` | Write | Write a deterministic `notes/daily-<date>-<repo-slug>.md` snapshot with an append-only supersede chain. | Low-level structured daily-snapshot primitive for path-controlled integrations; do not use for ordinary notes, interactive memory capture, or session triage. |
 | `memento_capture` | Write | End-of-session triage from a transcript path or structured summary; writes fleeting session state and optionally an atomic note. | Low-level SessionEnd equivalent for agents without hook support; not a replacement for interactive `/memento` workflows. |
 | `memento_preserve` | Write | Archive a file or directory bundle under `archive/<slug>/` with a manifest, a lightweight index note, and optional project-linking. | Use for evidence packets, screenshots, handoff bundles, or other artifacts that should stay intact; copy by default, move only when explicitly requested. Do not use it for ordinary knowledge capture or atomic notes. |

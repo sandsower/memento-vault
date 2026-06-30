@@ -164,6 +164,7 @@ from memento.store import (
     write_daily_snapshot,
     write_note,
 )
+from memento.smart_store import write_smart_store_note
 from memento.preserve import preserve_bundle
 from memento.utils import sanitize_secrets
 
@@ -283,7 +284,7 @@ def _build_server() -> FastMCP:
             "Writes: if your agent has a `memento` skill or `SessionEnd` hook, "
             "use it — the skill is local-first (writes to the git-backed vault, "
             "commits, then syncs here), which avoids duplicate notes and keeps "
-            "the local vault canonical. memento_store, memento_capture, and "
+            "the local vault canonical. memento_store, memento_store_smart, memento_capture, and "
             "memento_daily_snapshot are low-level primitives intended for automated "
             "sync/scripts, structured daily-snapshot integrations, and agents "
             "without skill/hook support (Windsurf, some Cursor configs). Do not "
@@ -669,6 +670,56 @@ def memento_store(
         log_retrieval("mcp", "store", title=title, path=str(path))
         return {"path": str(path.relative_to(vault)), "title": title.strip()}
 
+    finally:
+        release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_store_smart(
+    title: str,
+    body: str,
+    note_type: str = "discovery",
+    tags: list[str] | None = None,
+    certainty: int | None = None,
+    project: str | None = None,
+    branch: str | None = None,
+    session_id: str | None = None,
+    validity_context: str | None = None,
+    supersedes: str | None = None,
+    origin: str | None = None,
+) -> dict:
+    """Smart-store a note by searching for close matches before writing.
+
+    Use this when the caller wants duplicate/update/supersede suggestions
+    before writing a new note. The tool returns a decision object with the
+    best candidate paths and reasons.
+    """
+    if not title or not title.strip():
+        return {"error": "title is required"}
+    if not body or not body.strip():
+        return {"error": "body is required"}
+
+    vault = get_vault()
+    if not vault.exists():
+        return {"error": f"Vault not found at {vault}"}
+
+    if not acquire_vault_write_lock():
+        return {"error": "Could not acquire vault write lock (another write in progress)"}
+
+    try:
+        return write_smart_store_note(
+            title=title.strip(),
+            body=sanitize_secrets(body),
+            note_type=note_type,
+            tags=tags,
+            certainty=certainty,
+            project=project,
+            branch=branch,
+            session_id=session_id,
+            validity_context=validity_context,
+            supersedes=supersedes,
+            origin=origin,
+        )
     finally:
         release_vault_write_lock()
 
