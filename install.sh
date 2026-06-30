@@ -138,7 +138,7 @@ if [ "$REMOTE_MODE" = true ]; then
     fi
 
     if [ -z "$REMOTE_URL" ]; then
-        if [ -t 0 ]; then
+        if can_prompt; then
             echo ""
             read -rp "Remote vault URL (e.g., https://vault.example.com:8745): " REMOTE_URL || REMOTE_URL=""
         fi
@@ -149,7 +149,7 @@ if [ "$REMOTE_MODE" = true ]; then
     fi
 
     REMOTE_API_KEY="${MEMENTO_API_KEY:-}"
-    if [ -z "$REMOTE_API_KEY" ] && [ -t 0 ]; then
+    if [ -z "$REMOTE_API_KEY" ] && can_prompt; then
         read -rp "API key for remote vault (leave empty if none): " REMOTE_API_KEY || REMOTE_API_KEY=""
     fi
 
@@ -166,7 +166,7 @@ fi
 if [ "$FORCE" = true ]; then
     warn "--force overwrites local edits to memento-managed files. Prefer --reinstall for a safe refresh."
     if [ "${MEMENTO_FORCE:-}" != "1" ]; then
-        if [ -t 0 ]; then
+        if can_prompt; then
             read -rp "Continue with destructive force install? [y/N] " force_confirm
             if [[ ! "$force_confirm" =~ ^[Yy] ]]; then
                 exit 0
@@ -183,7 +183,7 @@ if [ -n "$INSTALLED_VERSION" ]; then
         info "Memento Vault v${NEW_VERSION} is already installed."
         if [ "$REINSTALL" != true ]; then
             reinstall=""
-            if [ -t 0 ]; then
+            if can_prompt; then
                 read -rp "Reinstall safely using local-edit protection? [y/N] " reinstall || reinstall=""
             else
                 info "Non-interactive install: already at v${NEW_VERSION}; rerun with --reinstall to refresh."
@@ -218,7 +218,7 @@ info "python3: $(python3 --version)"
 if ! command -v claude &>/dev/null; then
     warn "Claude Code CLI not found. Hooks and skills require Claude Code to function."
     warn "Install it from: https://docs.anthropic.com/en/docs/claude-code"
-    if [ -t 0 ]; then
+    if can_prompt; then
         echo ""
         read -rp "Continue anyway? [y/N] " cont || cont=""
         if [[ ! "$cont" =~ ^[Yy] ]]; then
@@ -403,23 +403,23 @@ mkdir -p "$MEMENTO_PKG_DIR/adapters"
 PKG_COPIED=0
 PKG_SKIPPED=0
 
-for mod in __init__.py config.py utils.py search.py search_backend.py graph.py store.py llm.py types.py lifecycle.py mcp_server.py pi_bridge.py __main__.py auth.py remote_client.py embedded_search.py embedding.py indexer.py sync_ledger.py archive.py; do
-    if [ -f "$SCRIPT_DIR/memento/$mod" ]; then
-        if safe_copy "$SCRIPT_DIR/memento/$mod" "$MEMENTO_PKG_DIR/$mod" "memento/$mod"; then
-            ((PKG_COPIED++)) || true
-        else
-            ((PKG_SKIPPED++)) || true
-        fi
+for mod_path in "$SCRIPT_DIR"/memento/*.py; do
+    [ -f "$mod_path" ] || continue
+    mod="$(basename "$mod_path")"
+    if safe_copy "$mod_path" "$MEMENTO_PKG_DIR/$mod" "memento/$mod"; then
+        ((PKG_COPIED++)) || true
+    else
+        ((PKG_SKIPPED++)) || true
     fi
 done
 
-for mod in __init__.py claude.py opencode.py pi.py; do
-    if [ -f "$SCRIPT_DIR/memento/adapters/$mod" ]; then
-        if safe_copy "$SCRIPT_DIR/memento/adapters/$mod" "$MEMENTO_PKG_DIR/adapters/$mod" "memento/adapters/$mod"; then
-            ((PKG_COPIED++)) || true
-        else
-            ((PKG_SKIPPED++)) || true
-        fi
+for mod_path in "$SCRIPT_DIR"/memento/adapters/*.py; do
+    [ -f "$mod_path" ] || continue
+    mod="$(basename "$mod_path")"
+    if safe_copy "$mod_path" "$MEMENTO_PKG_DIR/adapters/$mod" "memento/adapters/$mod"; then
+        ((PKG_COPIED++)) || true
+    else
+        ((PKG_SKIPPED++)) || true
     fi
 done
 
@@ -441,6 +441,11 @@ fi
 # edits caused safe_copy to skip the package file. Claude Code 2.1.123 rejects
 # `--mcp-config {}`; the accepted empty config is `{"mcpServers": {}}`.
 repair_stale_headless_mcp_config "$MEMENTO_PKG_DIR/llm.py" "memento/llm.py" || true
+
+# Validate the installed Pi bridge now, while installer context can surface a
+# clear python3/PYTHONPATH error instead of leaving Pi/OpenCode users to hit it
+# later inside a lifecycle hook.
+validate_pi_bridge_environment
 
 # --- Embedded search backend (optional) ---
 

@@ -32,6 +32,7 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[x]${NC} $1"; }
 step()  { echo -e "\n${BOLD}$1${NC}"; }
 skip()  { echo -e "${CYAN}[~]${NC} $1"; }
+can_prompt() { [ "${MEMENTO_NONINTERACTIVE:-}" != "1" ] && [ -t 0 ]; }
 
 # --- Manifest helpers ---
 
@@ -266,6 +267,33 @@ PY
     return 1
 }
 
+validate_pi_bridge_environment() {
+    local package_dir="${MEMENTO_PKG_DIR:-$CLAUDE_DIR/hooks/memento}"
+    if ! command -v python3 &>/dev/null; then
+        error "python3 is required for Pi bridge integration but was not found."
+        exit 1
+    fi
+    if [ ! -f "$package_dir/pi_bridge.py" ]; then
+        error "Pi bridge validation failed: missing $package_dir/pi_bridge.py"
+        exit 1
+    fi
+
+    local output rc
+    set +e
+    output=$(cd / && PYTHONPATH="$CLAUDE_DIR/hooks${PYTHONPATH:+:$PYTHONPATH}" \
+        MEMENTO_VAULT_PATH="$VAULT_PATH" \
+        MEMENTO_SEARCH_BACKEND="${MEMENTO_SEARCH_BACKEND:-grep}" \
+        python3 -m memento.pi_bridge status --cwd "$SCRIPT_DIR" 2>&1)
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        error "Pi bridge validation failed: python3 could not run memento.pi_bridge from $package_dir"
+        printf '%s\n' "$output" | sed 's/^/    /'
+        exit 1
+    fi
+    info "Pi bridge validation: python3 can run memento.pi_bridge"
+}
+
 # --- setup_vault ---
 # Creates the vault directory, git repo, and optionally Obsidian views.
 # Sets global OBSIDIAN_INSTALLED for use by print_summary.
@@ -307,9 +335,11 @@ setup_vault() {
     # Obsidian setup (optional, first install only)
     if [ -z "$INSTALLED_VERSION" ]; then
         obsidian=""
-        if [ -t 0 ]; then
+        if can_prompt; then
             echo ""
             read -rp "Set up Obsidian views? (Base views for browsing notes) [Y/n] " obsidian || obsidian=""
+        else
+            obsidian="n"
         fi
         if [[ ! "$obsidian" =~ ^[Nn] ]]; then
             if [ ! -d "$VAULT_PATH/.obsidian" ]; then
@@ -528,7 +558,7 @@ setup_qmd() {
     # Initial index (first install only)
     if [ -z "$INSTALLED_VERSION" ]; then
         index_now=""
-        if [ -t 0 ]; then
+        if can_prompt; then
             echo ""
             read -rp "Run initial QMD indexing now? [Y/n] " index_now || index_now=""
         else
@@ -581,7 +611,7 @@ PY
             info "Updated QMD model warmup in $shell_rc"
         elif [ "$QMD_AVAILABLE" = true ] && [ "$EXPERIMENTAL" = true ] && [ "$REMOTE_MODE" != true ]; then
             warmup="n"
-            if [ -t 0 ]; then
+            if can_prompt; then
                 echo ""
                 read -rp "Add QMD model warmup to $shell_rc? (faster session briefings) [Y/n] " warmup || warmup="n"
             fi

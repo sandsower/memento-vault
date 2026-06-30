@@ -105,6 +105,133 @@ def test_noninteractive_force_requires_explicit_env():
     assert "Refusing non-interactive --force without MEMENTO_FORCE=1" in result.stdout
 
 
+def test_bootstrap_marks_curl_pipe_mode_noninteractive():
+    bootstrap = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bootstrap.sh",
+    )
+    with open(bootstrap) as f:
+        contents = f.read()
+
+    assert "MEMENTO_NONINTERACTIVE=1" in contents
+    assert "GIT_TERMINAL_PROMPT=0" in contents
+    assert "[ ! -t 0 ]" in contents
+
+
+def test_uninstall_removes_current_installed_payloads(tmp_path):
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    home = tmp_path / "home"
+    claude = home / ".claude"
+    codex = home / ".codex"
+    (claude / "hooks" / "memento").mkdir(parents=True)
+    (claude / "skills").mkdir(parents=True)
+    (claude / "agents").mkdir(parents=True)
+    (codex / "skills").mkdir(parents=True)
+    for file in [
+        "memento-triage.py",
+        "vault-commit.sh",
+        "memento-sweeper.py",
+        "wait-and-commit.py",
+        "_backfill_certainty.py",
+        "memento-remote-sync.py",
+        "memento_utils.py",
+        "vault-briefing.py",
+        "vault-recall.py",
+        "vault-tool-context.py",
+        "memento-inception.py",
+        "tenet_reranker.py",
+    ]:
+        (claude / "hooks" / file).write_text("installed")
+    (claude / "hooks" / "memento" / "pi_bridge.py").write_text("installed")
+    for skill in ["memento", "memento-defrag", "start-fresh", "continue-work", "inception", "orra-init"]:
+        (claude / "skills" / skill).mkdir()
+    for skill in ["memento", "memento-defrag", "start-fresh", "continue-work", "concierge", "inception"]:
+        (codex / "skills" / skill).mkdir()
+    (claude / "agents" / "concierge.md").write_text("installed")
+    (claude / "memento-remote.env").write_text("MEMENTO_VAULT_URL=x")
+    (claude / "mcp-servers.json").write_text(json.dumps({"memento-vault": {"command": "python3"}, "other": {}}))
+    (claude / "settings.json").write_text(json.dumps({"hooks": {}, "permissions": {"allow": []}}))
+    bashrc = home / ".bashrc"
+    bashrc.write_text(
+        "# user content before\n"
+        "# Warm QMD embedding model on shell startup (detached, silent)\n"
+        f"[ -x {repo}/bin/memento-vault ] && {repo}/bin/memento-vault warmup >/dev/null 2>&1\n"
+        "# user content after\n"
+    )
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "memento-vault").symlink_to(os.path.join(repo, "bin", "memento-vault"))
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = "/usr/bin:/bin"
+    result = subprocess.run(
+        [os.path.join(repo, "uninstall.sh")],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (claude / "hooks" / "memento-triage.py").exists()
+    assert not (claude / "hooks" / "memento").exists()
+    assert not (claude / "skills" / "orra-init").exists()
+    assert not (codex / "skills" / "concierge").exists()
+    assert not (claude / "agents" / "concierge.md").exists()
+    assert not (claude / "memento-remote.env").exists()
+    assert not (bin_dir / "memento-vault").exists()
+    assert json.loads((claude / "mcp-servers.json").read_text()) == {"other": {}}
+    assert "Warm QMD embedding" not in bashrc.read_text()
+    assert "memento-vault warmup" not in bashrc.read_text()
+    assert "# user content before" in bashrc.read_text()
+    assert "# user content after" in bashrc.read_text()
+
+
+def test_install_calls_pi_bridge_validation_after_package_copy():
+    installer = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "install.sh",
+    )
+    with open(installer) as f:
+        contents = f.read()
+
+    assert "validate_pi_bridge_environment" in contents
+    with open(os.path.join(os.path.dirname(installer), "lib", "install-lib.sh")) as f:
+        lib_contents = f.read()
+    assert "Pi bridge validation" in lib_contents
+
+
+def test_pi_bridge_validation_fails_when_installed_package_missing(tmp_path):
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = f"""
+set -euo pipefail
+export HOME={tmp_path}
+SCRIPT_DIR={repo}
+CLAUDE_DIR={tmp_path}/.claude
+VAULT_PATH={tmp_path}/memento
+CONFIG_DIR={tmp_path}/.config/memento-vault
+MANIFEST=$CONFIG_DIR/manifest.json
+NEW_VERSION=0.0.0
+FORCE=false
+EXPERIMENTAL=false
+MCP_INSTALL=false
+REMOTE_MODE=false
+REMOTE_URL=
+REMOTE_API_KEY=
+MANIFEST_FILES_JSON='{{}}'
+QMD_AVAILABLE=false
+source {repo}/lib/install-lib.sh >/dev/null
+validate_pi_bridge_environment
+"""
+
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=30)
+
+    assert result.returncode == 1
+    assert "missing" in result.stdout
+    assert "pi_bridge.py" in result.stdout
+
+
 def test_setup_cli_installs_user_local_symlink(tmp_path):
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     script = f"""
@@ -668,6 +795,121 @@ class TestMcpConfig:
 
 
 class TestMergeSettings:
+    def test_corrupt_settings_are_backed_up_and_recovered(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.json"
+        settings_path.write_text("{not json")
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                HELPERS,
+                "merge-settings",
+                str(settings_path),
+                str(claude_dir),
+                str(tmp_path / "vault"),
+                "false",
+                "",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "settings.json was corrupt; backed up to" in result.stdout
+        assert json.loads(settings_path.read_text())["hooks"]
+        backups = list(claude_dir.glob("settings.json.corrupt-*"))
+        assert len(backups) == 1
+        assert backups[0].read_text() == "{not json"
+
+    def test_existing_remote_prefix_updates_only_memento_owned_hooks(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.json"
+        user_hook = f"python3 {claude_dir}/hooks/custom-user-hook.py"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionEnd": [
+                            {
+                                "hooks": [
+                                    {"type": "command", "command": f"python3 {claude_dir}/hooks/memento-triage.py"}
+                                ]
+                            },
+                            {"hooks": [{"type": "command", "command": user_hook}]},
+                        ]
+                    }
+                }
+            )
+        )
+        prefix = "bash -c 'set -a; . /tmp/memento-remote.env; set +a; exec \"$@\"' -- "
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                HELPERS,
+                "merge-settings",
+                str(settings_path),
+                str(claude_dir),
+                str(tmp_path / "vault"),
+                "false",
+                prefix,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        merged = json.loads(settings_path.read_text())
+        commands = [hook["command"] for entry in merged["hooks"]["SessionEnd"] for hook in entry.get("hooks", [entry])]
+        assert prefix + f"python3 {claude_dir}/hooks/memento-triage.py" in commands
+        assert user_hook in commands
+
+    def test_uninstall_settings_removes_only_memento_hooks_and_permissions(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        vault = tmp_path / "vault"
+        settings_path = claude_dir / "settings.json"
+        user_hook = f"python3 {claude_dir}/hooks/custom-user-hook.py"
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionEnd": [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {"type": "command", "command": f"python3 {claude_dir}/hooks/memento-triage.py"},
+                                    {"type": "command", "command": user_hook},
+                                ],
+                            }
+                        ]
+                    },
+                    "permissions": {
+                        "allow": [
+                            f"Read({vault}/**)",
+                            f"Edit({vault}/**)",
+                            f"Write({vault}/**)",
+                            f"Bash({claude_dir}/hooks/vault-commit.sh:*)",
+                            "Read(/tmp/user/**)",
+                        ]
+                    },
+                }
+            )
+        )
+
+        rc, stdout, stderr = _run_helper("uninstall-settings", str(settings_path), str(claude_dir), str(vault))
+
+        assert rc == 0, stderr
+        assert "Removed 1 memento hook(s) and 4 permission rule(s)" in stdout
+        merged = json.loads(settings_path.read_text())
+        assert merged["hooks"]["SessionEnd"][0]["hooks"][0]["command"] == user_hook
+        assert merged["permissions"]["allow"] == ["Read(/tmp/user/**)"]
+
     def test_default_install_adds_retrieval_hooks_and_permissions(self, tmp_path):
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()

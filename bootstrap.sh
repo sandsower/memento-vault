@@ -9,6 +9,14 @@ set -euo pipefail
 REPO="https://github.com/sandsower/memento-vault.git"
 INSTALL_DIR="${MEMENTO_INSTALL_DIR:-$HOME/.local/share/memento-vault}"
 
+# curl|bash leaves stdin attached to the script stream/EOF, so downstream
+# prompts cannot be answered safely. Make that mode explicit and disable git's
+# credential prompts rather than hanging in unattended bootstrap installs.
+if [ ! -t 0 ]; then
+    export MEMENTO_NONINTERACTIVE=1
+    export GIT_TERMINAL_PROMPT=0
+fi
+
 # Colors
 if [ -t 1 ]; then
     BOLD='\033[1m' GREEN='\033[0;32m' NC='\033[0m'
