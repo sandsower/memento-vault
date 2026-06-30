@@ -51,7 +51,7 @@ class TestCallTool:
         results = [
             {"path": "notes/foo.md", "title": "Foo", "score": 0.9, "snippet": "test"},
         ]
-        mock_urlopen.return_value = self._mock_response(results)
+        mock_urlopen.return_value = self._mock_response({"results": results, "metadata": {"detail_level": "summary"}})
 
         found = search("test query")
         assert len(found) == 1
@@ -65,17 +65,33 @@ class TestCallTool:
         assert body["params"]["name"] == "memento_search"
         assert body["params"]["arguments"]["query"] == "test query"
         assert body["params"]["arguments"]["concrete"] == "auto"
+        assert body["params"]["arguments"]["detail_level"] == "summary"
+        assert body["params"]["arguments"]["include_content"] is False
+        assert body["params"]["arguments"]["token_budget"] == 2000
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")
     def test_search_forwards_concrete_option(self, mock_urlopen, mock_url):
-        mock_urlopen.return_value = self._mock_response([])
+        mock_urlopen.return_value = self._mock_response({"results": [], "metadata": {"detail_level": "summary"}})
 
         search("MEMENTO_VAULT_PATH", concrete=True)
 
         req = mock_urlopen.call_args[0][0]
         body = json.loads(req.data)
         assert body["params"]["arguments"]["concrete"] is True
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_search_forwards_response_controls(self, mock_urlopen, mock_url):
+        mock_urlopen.return_value = self._mock_response({"results": [], "metadata": {"detail_level": "full"}})
+
+        search_envelope("MEMENTO_VAULT_PATH", detail_level="full", include_content=True, token_budget=99)
+
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        assert body["params"]["arguments"]["detail_level"] == "full"
+        assert body["params"]["arguments"]["include_content"] is True
+        assert body["params"]["arguments"]["token_budget"] == 99
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")

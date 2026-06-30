@@ -151,6 +151,7 @@ from memento.search import (
     qmd_get,
     qmd_search_with_extras,
     resolve_concrete_mode,
+    shape_search_results,
 )
 from memento.contradictions import inspect_contradictions
 from memento.store import (
@@ -341,6 +342,9 @@ def memento_search(
     min_score: float = 0.0,
     cwd: str = "",
     concrete: str | bool = "auto",
+    detail_level: str = "summary",
+    include_content: bool = False,
+    token_budget: int | None = 2000,
 ) -> object:
     """Search vault notes for prior context before answering from memory.
 
@@ -361,13 +365,18 @@ def memento_search(
         min_score: Minimum relevance score (0.0-1.0).
         cwd: Current working directory -- used to filter results by project scope.
         concrete: true/false/auto literal search mode. Auto detects identifier-like queries.
+        detail_level: Response shape: brief, summary, or full.
+        include_content: Include note content alongside the selected detail level.
+        token_budget: Approximate token budget for returned content, default 2000.
 
     Returns:
-        List of matching notes on hits. On misses, an envelope with
-        results=[] and structured miss metadata.
+        Search envelope with results and metadata. Misses include structured miss metadata.
     """
     if not query or not query.strip():
-        miss = miss_envelope("query_too_broad", details={"query": query})
+        metadata = shape_search_results(
+            [], vault=get_vault(), detail_level=detail_level, include_content=include_content, token_budget=token_budget
+        )["metadata"]
+        miss = miss_envelope("query_too_broad", details={"query": query}, metadata=metadata)
         log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
         return miss
 
@@ -378,13 +387,16 @@ def memento_search(
         limit = 5
 
     vault = get_vault()
+    search_metadata = shape_search_results(
+        [], vault=vault, detail_level=detail_level, include_content=include_content, token_budget=token_budget
+    )["metadata"]
     if not vault.exists() or not any((vault / d).exists() for d in ("notes", "fleeting", "projects")):
-        miss = miss_envelope("empty_vault", details={"vault": str(vault)})
+        miss = miss_envelope("empty_vault", details={"vault": str(vault)}, metadata=search_metadata)
         log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
         return miss
 
     if not has_qmd():
-        miss = miss_envelope("backend_unavailable")
+        miss = miss_envelope("backend_unavailable", metadata=search_metadata)
         log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
         return miss
 
@@ -430,31 +442,19 @@ def memento_search(
         else:
             reason = "no_concrete_match" if concrete_enabled else conceptual_miss_reason
             details = None
-        miss = miss_envelope(reason, details=details)
+        miss = miss_envelope(reason, details=details, metadata=search_metadata)
         log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
         return miss
 
-    output = []
-    for r in results[:limit]:
-        entry = {
-            "path": _vault_relative_access_path(vault, r.get("path", "")),
-            "title": _strip_injection(r.get("title", "")),
-            "score": round(r.get("score", 0.0), 4),
-            "snippet": _strip_injection(r.get("snippet", "")),
-        }
-        # Include full content so callers don't need a separate memento_get
-        # round-trip — eliminates latency gap for remote-only notes.
-        note_path = vault / r.get("path", "")
-        try:
-            resolved = note_path.resolve()
-            resolved.relative_to(vault.resolve())
-            if note_path.exists():
-                entry["content"] = _strip_injection(note_path.read_text(errors="replace"))
-        except (ValueError, OSError, UnicodeDecodeError):
-            pass
-        if "content" not in entry and r.get("content"):
-            entry["content"] = _strip_injection(r["content"])
-        output.append(entry)
+    shaped = shape_search_results(
+        results[:limit],
+        vault=vault,
+        detail_level=detail_level,
+        include_content=include_content,
+        token_budget=token_budget,
+    )
+    output = shaped["results"]
+    metadata = shaped["metadata"]
 
     log_retrieval("mcp", "search", query=query, results=len(output))
     record_access(
@@ -464,7 +464,7 @@ def memento_search(
         query=query,
         result_count=len(output),
     )
-    return output
+    return {"results": output, "metadata": metadata}
 
 
 @mcp.tool()

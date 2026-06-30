@@ -69,9 +69,130 @@ def build_search_miss(reason: str, details: Optional[dict] = None, recovery_hint
     return miss
 
 
-def miss_envelope(reason: str, details: Optional[dict] = None, recovery_hints: Optional[list[str]] = None) -> dict:
+def miss_envelope(
+    reason: str,
+    details: Optional[dict] = None,
+    recovery_hints: Optional[list[str]] = None,
+    metadata: Optional[dict] = None,
+) -> dict:
     """Return the structured empty search envelope used by agent-facing surfaces."""
-    return {"results": [], "miss": build_search_miss(reason, details=details, recovery_hints=recovery_hints)}
+    envelope = {"results": [], "miss": build_search_miss(reason, details=details, recovery_hints=recovery_hints)}
+    if metadata:
+        envelope["metadata"] = metadata
+    return envelope
+
+
+SEARCH_DETAIL_LEVELS = ("brief", "summary", "full")
+_SEARCH_CONTENT_SUFFIX = "\n[vault] content truncated; use memento_get for full note"
+
+
+def _strip_injection(text: str):
+    """Strip instruction-like patterns from content (defense-in-depth)."""
+    if not text:
+        return text
+    text = re.sub(r"(?i)(ignore\s+(all\s+)?previous\s+instructions)", "[filtered]", text)
+    text = re.sub(r"(?i)(you\s+are\s+now\s+|you\s+must\s+now\s+)", "[filtered]", text)
+    text = re.sub(r"(?i)^(system|assistant)\s*:", "[filtered]:", text, flags=re.MULTILINE)
+    text = re.sub(r"</?s>", "", text)
+    return text
+
+
+def normalize_search_detail_level(detail_level: object = "summary") -> str:
+    """Normalize search detail levels onto the supported set."""
+    if detail_level is None:
+        return "summary"
+    normalized = str(detail_level).strip().lower()
+    return normalized if normalized in SEARCH_DETAIL_LEVELS else "summary"
+
+
+def _approximate_token_budget(token_budget: Optional[int]) -> Optional[int]:
+    if token_budget is None:
+        return None
+    try:
+        budget = max(0, int(token_budget))
+    except (TypeError, ValueError):
+        return None
+    return budget * 4
+
+
+def _search_result_content(vault: Path, result: dict) -> str:
+    content = result.get("content", "")
+    if isinstance(content, str) and content.strip():
+        return content
+    path = str(result.get("path", "")).strip()
+    if not path:
+        return ""
+    try:
+        note_path = (vault / path).resolve()
+        vault_resolved = vault.resolve()
+        if note_path.exists() and note_path != vault_resolved and vault_resolved in note_path.parents:
+            return note_path.read_text(errors="replace")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
+    return ""
+
+
+def shape_search_results(
+    results: list[dict],
+    *,
+    vault: Path,
+    detail_level: object = "summary",
+    include_content: bool = False,
+    token_budget: Optional[int] = 2000,
+) -> dict:
+    """Shape search results into a token-aware response envelope."""
+    normalized_detail = normalize_search_detail_level(detail_level)
+    effective_include_content = bool(include_content) or normalized_detail == "full"
+    remaining_chars = _approximate_token_budget(token_budget) if effective_include_content else None
+    shaped: list[dict] = []
+    expandable_paths: list[str] = []
+    truncated = False
+
+    for result in results:
+        path = _strip_injection(str(result.get("path", "")))
+        entry = {
+            "path": path,
+            "title": _strip_injection(str(result.get("title", ""))),
+            "score": round(result.get("score", 0.0), 4),
+        }
+        snippet = _strip_injection(str(result.get("snippet", "")).strip())
+        if normalized_detail in ("summary", "full") and snippet:
+            entry["snippet"] = snippet[:160] if normalized_detail == "summary" else snippet
+
+        if effective_include_content:
+            content = _strip_injection(_search_result_content(vault, result).strip())
+            if content:
+                if remaining_chars is None:
+                    entry["content"] = content
+                elif remaining_chars <= 0:
+                    truncated = True
+                    if path:
+                        expandable_paths.append(path)
+                elif len(content) <= remaining_chars:
+                    entry["content"] = content
+                    remaining_chars -= len(content)
+                else:
+                    cutoff = max(0, remaining_chars - len(_SEARCH_CONTENT_SUFFIX))
+                    entry["content"] = content[:cutoff].rstrip() + _SEARCH_CONTENT_SUFFIX
+                    truncated = True
+                    if path:
+                        expandable_paths.append(path)
+                    remaining_chars = 0
+            elif path:
+                expandable_paths.append(path)
+        elif path:
+            expandable_paths.append(path)
+
+        shaped.append(entry)
+
+    metadata = {
+        "detail_level": normalized_detail,
+        "include_content": effective_include_content,
+        "token_budget": token_budget,
+        "truncated": truncated,
+        "expandable_paths": list(dict.fromkeys(expandable_paths)),
+    }
+    return {"results": shaped, "metadata": metadata}
 
 
 def is_literal_like_query(query: str) -> bool:

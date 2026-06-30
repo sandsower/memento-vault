@@ -129,6 +129,9 @@ def search_envelope(
     min_score: float = 0.0,
     cwd: str = "",
     concrete: object = "auto",
+    detail_level: str = "summary",
+    include_content: bool = False,
+    token_budget: int = 2000,
     timeout: int = 30,
 ) -> dict:
     """Search the remote vault, preserving structured miss metadata when present."""
@@ -141,6 +144,9 @@ def search_envelope(
             "min_score": min_score,
             "cwd": cwd,
             "concrete": concrete,
+            "detail_level": detail_level,
+            "include_content": include_content,
+            "token_budget": token_budget,
         },
         timeout=timeout,
     )
@@ -165,11 +171,23 @@ def search(
     min_score: float = 0.0,
     cwd: str = "",
     concrete: object = "auto",
+    detail_level: str = "summary",
+    include_content: bool = False,
+    token_budget: int = 2000,
     timeout: int = 30,
 ) -> list[dict]:
     """Search the remote vault, returning only results for legacy callers."""
     envelope = search_envelope(
-        query=query, limit=limit, semantic=semantic, min_score=min_score, cwd=cwd, concrete=concrete, timeout=timeout
+        query=query,
+        limit=limit,
+        semantic=semantic,
+        min_score=min_score,
+        cwd=cwd,
+        concrete=concrete,
+        detail_level=detail_level,
+        include_content=include_content,
+        token_budget=token_budget,
+        timeout=timeout,
     )
     results = envelope.get("results")
     return results if isinstance(results, list) else []

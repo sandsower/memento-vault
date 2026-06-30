@@ -37,6 +37,7 @@ from memento.search import (
     qmd_get,
     qmd_search_with_extras,
     resolve_concrete_mode,
+    shape_search_results,
 )
 from memento.contradictions import inspect_contradictions
 from memento import store as store_module
@@ -772,32 +773,103 @@ def _status(cwd: str = "") -> dict[str, Any]:
     }
 
 
-def _search_miss(reason: str, details: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    payload = miss_envelope(reason, details=details)
+def _search_miss(
+    reason: str,
+    details: Optional[dict[str, Any]] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    payload = miss_envelope(reason, details=details, metadata=metadata)
     payload["reason"] = reason
     return payload
 
 
-def _search(query: str, limit: int, cwd: str = "", concrete: object = "auto") -> dict[str, Any]:
+def _search(
+    query: str,
+    limit: int,
+    cwd: str = "",
+    concrete: object = "auto",
+    detail_level: str = "summary",
+    include_content: bool = False,
+    token_budget: int | None = 2000,
+) -> dict[str, Any]:
     if not query.strip():
-        return _search_miss("query_too_broad", {"query": query})
+        metadata = shape_search_results(
+            [], vault=get_vault(), detail_level=detail_level, include_content=include_content, token_budget=token_budget
+        )["metadata"]
+        return _search_miss("query_too_broad", {"query": query}, metadata=metadata)
     if not has_qmd():
         if is_remote():
-            envelope = remote_search_envelope(query=query, limit=limit, cwd=cwd, concrete=concrete)
+            envelope = remote_search_envelope(
+                query=query,
+                limit=limit,
+                cwd=cwd,
+                concrete=concrete,
+                detail_level=detail_level,
+                include_content=include_content,
+                token_budget=token_budget,
+            )
             if envelope.get("error"):
-                return _search_miss("backend_unavailable", {"error": envelope["error"]})
+                metadata = shape_search_results(
+                    [],
+                    vault=get_vault(),
+                    detail_level=detail_level,
+                    include_content=include_content,
+                    token_budget=token_budget,
+                )["metadata"]
+                return _search_miss("backend_unavailable", {"error": envelope["error"]}, metadata=metadata)
             results = envelope.get("results", [])
             if results:
-                return {"results": results, "source": "remote"}
+                sanitized = []
+                for result in results:
+                    if isinstance(result, dict):
+                        sanitized.append(
+                            {
+                                "path": strip_injection(str(result.get("path", ""))),
+                                "title": strip_injection(str(result.get("title", ""))),
+                                "score": round(result.get("score", 0.0), 4),
+                                **(
+                                    {"snippet": strip_injection(str(result.get("snippet", "")))}
+                                    if result.get("snippet")
+                                    else {}
+                                ),
+                                **(
+                                    {"content": strip_injection(str(result.get("content", "")))}
+                                    if result.get("content")
+                                    else {}
+                                ),
+                            }
+                        )
+                    else:
+                        sanitized.append(result)
+                envelope["results"] = sanitized
+                return envelope
             if isinstance(envelope.get("miss"), dict):
+                miss = dict(envelope["miss"])
+                if isinstance(miss.get("details"), dict):
+                    miss["details"] = {
+                        key: strip_injection(str(value)) if isinstance(value, str) else value
+                        for key, value in miss["details"].items()
+                    }
                 payload = {
                     "results": [],
-                    "miss": envelope["miss"],
-                    "reason": envelope["miss"].get("reason", "no_exact_match"),
+                    "miss": miss,
+                    "reason": miss.get("reason", "no_exact_match"),
                 }
+                if isinstance(envelope.get("metadata"), dict):
+                    payload["metadata"] = envelope["metadata"]
                 return payload
-            return _search_miss("no_exact_match")
-        return _search_miss("backend_unavailable")
+            metadata = shape_search_results(
+                [],
+                vault=get_vault(),
+                detail_level=detail_level,
+                include_content=include_content,
+                token_budget=token_budget,
+            )["metadata"]
+            return _search_miss("no_exact_match", metadata=metadata)
+        metadata = shape_search_results(
+            [], vault=get_vault(), detail_level=detail_level, include_content=include_content, token_budget=token_budget
+        )["metadata"]
+        return _search_miss("backend_unavailable", metadata=metadata)
     limit = max(1, min(int(limit), 20))
     concrete_enabled, _auto_selected = resolve_concrete_mode(concrete, query)
     concrete_auto_mode = concrete is None or (isinstance(concrete, str) and concrete.strip().lower() in ("", "auto"))
@@ -815,20 +887,20 @@ def _search(query: str, limit: int, cwd: str = "", concrete: object = "auto") ->
     else:
         results = enhance_results(raw_results, cwd=cwd or None) if raw_results else []
     if not results:
+        metadata = shape_search_results(
+            [], vault=get_vault(), detail_level=detail_level, include_content=include_content, token_budget=token_budget
+        )["metadata"]
         if raw_results:
-            return _search_miss("project_filter_removed_all", {"cwd": cwd} if cwd else None)
-        return _search_miss("no_concrete_match" if concrete_enabled else conceptual_miss_reason)
-    sanitized = []
-    for result in results[:limit]:
-        sanitized.append(
-            {
-                "path": result.get("path", ""),
-                "title": strip_injection(result.get("title", "")),
-                "score": round(result.get("score", 0.0), 4),
-                "snippet": strip_injection(result.get("snippet", "")),
-            }
-        )
-    return {"results": sanitized}
+            return _search_miss("project_filter_removed_all", {"cwd": cwd} if cwd else None, metadata=metadata)
+        return _search_miss("no_concrete_match" if concrete_enabled else conceptual_miss_reason, metadata=metadata)
+    shaped = shape_search_results(
+        results[:limit],
+        vault=get_vault(),
+        detail_level=detail_level,
+        include_content=include_content,
+        token_budget=token_budget,
+    )
+    return shaped
 
 
 def _contradictions(topic: str, limit: int, min_certainty: int = 2) -> dict[str, Any]:
@@ -2205,6 +2277,9 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--limit", type=int, default=5)
     search.add_argument("--cwd", default="")
     search.add_argument("--concrete", default="auto", choices=("auto", "true", "false"))
+    search.add_argument("--detail-level", default="summary", choices=("brief", "summary", "full"))
+    search.add_argument("--include-content", action="store_true")
+    search.add_argument("--token-budget", type=int, default=2000)
 
     contradictions = sub.add_parser("contradictions", help="Inspect contradictory or superseded notes")
     contradictions.add_argument("--topic", default="")
@@ -2339,7 +2414,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         return _run_json("status", _status, args.cwd)
     if args.command == "search":
-        return _run_json("search", _search, args.query, args.limit, args.cwd, args.concrete)
+        return _run_json(
+            "search",
+            _search,
+            args.query,
+            args.limit,
+            args.cwd,
+            args.concrete,
+            args.detail_level,
+            args.include_content,
+            args.token_budget,
+        )
     if args.command == "contradictions":
         return _run_json("contradictions", _contradictions, args.topic, args.limit, args.min_certainty)
     if args.command == "get":

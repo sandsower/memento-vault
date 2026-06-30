@@ -150,14 +150,10 @@ def test_build_search_miss_copies_recovery_hints():
 
 class TestMementoSearch:
     def test_empty_query_returns_structured_miss(self):
-        assert memento_search("") == {
-            "results": [],
-            "miss": {
-                "reason": "query_too_broad",
-                "recovery_hints": ["Try a narrower query with concrete terms."],
-                "details": {"query": ""},
-            },
-        }
+        result = memento_search("")
+        assert result["results"] == []
+        assert result["miss"]["reason"] == "query_too_broad"
+        assert result["metadata"]["detail_level"] == "summary"
         assert memento_search("   ")["miss"]["reason"] == "query_too_broad"
 
     @patch("memento.mcp_server.log_retrieval")
@@ -167,6 +163,7 @@ class TestMementoSearch:
         result = memento_search("redis cache")
         assert result["results"] == []
         assert result["miss"]["reason"] == "empty_vault"
+        assert result["metadata"]["expandable_paths"] == []
         assert "memento_status" in result["miss"]["recovery_hints"][1]
 
     @patch("memento.mcp_server.log_retrieval")
@@ -188,10 +185,12 @@ class TestMementoSearch:
         with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
             results = memento_search("redis cache", limit=2)
 
-        assert len(results) == 2
-        assert results[0]["title"] == "Redis cache TTL"
-        assert results[0]["score"] == 0.85
-        assert results[0]["path"] == "notes/redis-cache-ttl.md"
+        assert len(results["results"]) == 2
+        assert results["results"][0]["title"] == "Redis cache TTL"
+        assert results["results"][0]["score"] == 0.85
+        assert results["results"][0]["path"] == "notes/redis-cache-ttl.md"
+        assert "content" not in results["results"][0]
+        assert results["metadata"]["expandable_paths"] == ["notes/redis-cache-ttl.md", "notes/zustand-reset.md"]
 
     @patch("memento.mcp_server.log_retrieval")
     @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
@@ -211,8 +210,9 @@ class TestMementoSearch:
         with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
             results = memento_search("test")
 
-        assert "[filtered]" in results[0]["title"]
-        assert "[filtered]" in results[0]["snippet"]
+        assert "[filtered]" in results["results"][0]["title"]
+        assert "[filtered]" in results["results"][0]["snippet"]
+        assert results["metadata"]["expandable_paths"] == ["notes/evil.md"]
 
     @patch("memento.mcp_server.log_retrieval")
     @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
@@ -222,13 +222,9 @@ class TestMementoSearch:
         with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
             results = memento_search("nonexistent topic xyz")
 
-        assert results == {
-            "results": [],
-            "miss": {
-                "reason": "no_exact_match",
-                "recovery_hints": ["Try a broader or narrower query."],
-            },
-        }
+        assert results["results"] == []
+        assert results["miss"]["reason"] == "no_exact_match"
+        assert results["metadata"]["expandable_paths"] == []
 
     @patch("memento.mcp_server.log_retrieval")
     @patch("memento.mcp_server.has_qmd", return_value=False)
@@ -238,6 +234,7 @@ class TestMementoSearch:
 
         assert result["results"] == []
         assert result["miss"]["reason"] == "backend_unavailable"
+        assert result["metadata"]["detail_level"] == "summary"
         assert "memento_status" in result["miss"]["recovery_hints"][0]
 
     @patch("memento.mcp_server.log_retrieval")
@@ -257,6 +254,7 @@ class TestMementoSearch:
             "recovery_hints": ["Lower min_score."],
             "details": {"min_score": 0.9},
         }
+        assert result["metadata"]["expandable_paths"] == []
         assert mock_search.call_args_list[1].kwargs["min_score"] == 0.0
 
     @patch("memento.mcp_server.log_retrieval")
@@ -273,6 +271,7 @@ class TestMementoSearch:
         assert result["results"] == []
         assert result["miss"]["reason"] == "project_filter_removed_all"
         assert result["miss"]["details"] == {"cwd": "/repo/fundid"}
+        assert result["metadata"]["expandable_paths"] == []
 
     @patch("memento.mcp_server.log_retrieval")
     @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
@@ -284,6 +283,7 @@ class TestMementoSearch:
 
         assert result["results"] == []
         assert result["miss"]["reason"] == "no_concrete_match"
+        assert result["metadata"]["expandable_paths"] == []
         assert "broader" in result["miss"]["recovery_hints"][0]
         assert "memento_get" in result["miss"]["recovery_hints"][1]
 
@@ -298,7 +298,8 @@ class TestMementoSearch:
         with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
             results = memento_search("MEMENTO_VAULT_PATH")
 
-        assert results[0]["path"] == "notes/env.md"
+        assert results["results"][0]["path"] == "notes/env.md"
+        assert results["metadata"]["expandable_paths"] == ["notes/env.md"]
         assert mock_search.call_args.kwargs["concrete"] is True
         assert mock_search.call_args.kwargs["semantic"] is False
         mock_enhance.assert_not_called()
@@ -314,7 +315,7 @@ class TestMementoSearch:
         with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
             results = memento_search("MEMENTO_VAULT_PATH", concrete=False)
 
-        assert results[0]["path"] == "notes/cache.md"
+        assert results["results"][0]["path"] == "notes/cache.md"
         assert mock_search.call_args.kwargs["concrete"] is False
         mock_enhance.assert_called_once()
 
@@ -327,6 +328,48 @@ class TestMementoSearch:
             result = memento_search("MEMENTO_VAULT_PATH", concrete=False)
 
         assert result["miss"]["reason"] == "no_exact_match"
+        assert result["metadata"]["expandable_paths"] == []
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {
+                "path": "notes/redis-cache-ttl.md",
+                "title": "Redis cache TTL",
+                "score": 0.85,
+                "snippet": "Set TTL explicitly",
+            }
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_include_content_adds_content_in_summary_mode(self, _qmd, _search, _enhance, _log, tmp_vault):
+        note = tmp_vault / "notes" / "redis-cache-ttl.md"
+        note.write_text("---\ntitle: Redis cache TTL\n---\nThe cache note body.")
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("redis cache", include_content=True, detail_level="summary")
+
+        assert result["results"][0]["content"] == "---\ntitle: Redis cache TTL\n---\nThe cache note body."
+        assert result["metadata"]["include_content"] is True
+        assert result["metadata"]["expandable_paths"] == []
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[{"path": "notes/long.md", "title": "Long note", "score": 0.9, "snippet": "Long content"}],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_full_detail_level_truncates_content_to_token_budget(self, _qmd, _search, _enhance, _log, tmp_vault):
+        long_content = "Long note body " + ("x" * 500)
+        (tmp_vault / "notes" / "long.md").write_text(f"---\ntitle: Long note\n---\n{long_content}")
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("long note", detail_level="full", token_budget=10)
+
+        assert result["results"][0]["content"].endswith("use memento_get for full note")
+        assert result["metadata"]["truncated"] is True
+        assert result["metadata"]["expandable_paths"] == ["notes/long.md"]
 
 
 # --- MCP tool inventory docs drift ---
