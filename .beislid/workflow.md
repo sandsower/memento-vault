@@ -49,7 +49,7 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
 - name: frontmatter-schema-drift
   command: '.venv/bin/python scripts/check_frontmatter_schema.py'
 - name: targeted-tests
-  command: '.venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py'
+  command: '.venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py'
 - name: retrieval-tests
   command: '.venv/bin/python -m pytest tests/test_tenet_*.py tests/test_multi_hop.py tests/test_deep_recall.py'
 - name: mcp-server-tests
