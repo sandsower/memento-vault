@@ -39,27 +39,193 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
 
 ## Quality gates
 
+The gate list uses Beislið's rich staged metadata while preserving the existing
+pre-PR command surface. Older orchestrators may still treat each entry as a flat
+`name` + `command` gate; current Beislið/Rondo consumers can use `stage`,
+`cost`, selectors, output parsers, and failure policy for automatic work.
+
 ```beislid:gates
 - name: ruff-check
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python -m ruff check .'
+  timeout_seconds: 120
+  cost: cheap
+  mutates: false
+  parallel_safe: true
+  changed_file_selector:
+    include: ['memento/**/*.py', 'hooks/**/*.py', 'scripts/**/*.py', 'tests/**/*.py']
+  output:
+    parser: generic-text
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    hint: 'Fix lint errors before review; do not skip without a documented environment blocker.'
 - name: ruff-format-check
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python -m ruff format --check .'
+  timeout_seconds: 120
+  cost: cheap
+  mutates: false
+  parallel_safe: true
+  changed_file_selector:
+    include: ['memento/**/*.py', 'hooks/**/*.py', 'scripts/**/*.py', 'tests/**/*.py']
+  output:
+    parser: generic-text
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 1
+    hint: 'Run the formatter or make equivalent formatting edits, then rerun the gate.'
 - name: python-compileall
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python -m compileall -q memento hooks scripts'
+  timeout_seconds: 120
+  cost: cheap
+  mutates: false
+  parallel_safe: true
+  changed_file_selector:
+    include: ['memento/**/*.py', 'hooks/**/*.py', 'scripts/**/*.py']
+  output:
+    parser: generic-text
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    hint: 'Fix syntax/import-time compile errors before review.'
 - name: frontmatter-schema-drift
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python scripts/check_frontmatter_schema.py'
+  timeout_seconds: 120
+  cost: cheap
+  mutates: false
+  changed_file_selector:
+    include: ['docs/frontmatter-schema.md', 'memento/types.py', 'scripts/check_frontmatter_schema.py', 'tests/test_frontmatter_schema.py']
+  output:
+    parser: generic-text
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 1
+    hint: 'Keep documented frontmatter schema and generated checks in sync.'
 - name: targeted-tests
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py'
+  timeout_seconds: 300
+  cost: medium
+  mutates: false
+  changed_file_selector:
+    include: ['memento/**/*.py', 'hooks/**/*.py', 'scripts/**/*.py', 'tests/**/*.py']
+  output:
+    parser: pytest
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    stop_if_patterns:
+      - 'No module named'
+    hint: 'Fix deterministic test failures; stop and report dependency/environment gaps.'
 - name: retrieval-tests
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python -m pytest tests/test_tenet_*.py tests/test_multi_hop.py tests/test_deep_recall.py'
+  timeout_seconds: 600
+  cost: expensive
+  mutates: false
+  changed_file_selector:
+    include: ['memento/search*.py', 'memento/embedded_search.py', 'memento/graph.py', 'hooks/tenet_reranker.py', 'tests/test_tenet_*.py', 'tests/test_multi_hop.py', 'tests/test_deep_recall.py']
+  output:
+    parser: pytest
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    stop_if_patterns:
+      - 'No module named'
+    hint: 'Preserve recall quality; stop if vector/search dependencies are unavailable.'
 - name: mcp-server-tests
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python -m pytest tests/test_mcp_server.py tests/test_remote_client.py tests/test_integration_remote.py'
+  timeout_seconds: 600
+  cost: expensive
+  mutates: false
+  changed_file_selector:
+    include: ['memento/mcp_server.py', 'memento/remote_client.py', 'tests/test_mcp_server.py', 'tests/test_remote_client.py', 'tests/test_integration_remote.py']
+  output:
+    parser: pytest
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    stop_if_patterns:
+      - 'No module named'
+    hint: 'Keep local and remote MCP surfaces compatible.'
 - name: install-tests
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py'
+  timeout_seconds: 300
+  cost: medium
+  mutates: false
+  changed_file_selector:
+    include: ['install.sh', 'setup-remote.sh', 'bootstrap.sh', 'lib/**', 'tests/test_install_helpers.py', 'tests/test_install_register_mcp.py']
+  output:
+    parser: pytest
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    hint: 'Preserve install helper behavior and MCP registration compatibility.'
 - name: release-smoke
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python scripts/release_smoke.py'
+  timeout_seconds: 300
+  cost: medium
+  mutates: false
+  changed_file_selector:
+    include: ['VERSION', 'package.json', 'Formula/**', 'scripts/release_smoke.py', 'install.sh', 'lib/**', 'memento/**/*.py']
+  output:
+    parser: generic-text
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 1
+    hint: 'Fix release packaging or smoke-check drift before review.'
 - name: install-exec-smoke
+  stage: pre-pr
+  kind: sensor
+  execution: computational
   command: '.venv/bin/python scripts/release_smoke.py --install-exec'
+  timeout_seconds: 600
+  cost: expensive
+  mutates: false
+  changed_file_selector:
+    include: ['install.sh', 'lib/**', 'scripts/release_smoke.py', 'Formula/**', 'package.json']
+  output:
+    parser: generic-text
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 1
+    stop_if_patterns:
+      - 'Permission denied'
+    hint: 'The gate mutates only a throwaway HOME; stop if the host cannot execute install scripts.'
 ```
 
 ## Action policy

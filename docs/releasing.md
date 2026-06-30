@@ -39,6 +39,10 @@ non-interactive install execution smoke. `claude-sandbox-smoke` stays
 local-only (it needs an authenticated `claude` CLI), and the full pytest job
 is advisory until the embedded vector-search environment issues are fixed.
 
+The Beislið gate definitions in `.beislid/workflow.md` use rich staged
+metadata. See [Beislið gate metadata](beislid-gates.md) for the migration and
+backward-compatibility policy.
+
 ## Version tag
 
 1. Run `python3 scripts/release_smoke.py` and fix any failures.
