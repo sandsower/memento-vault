@@ -37,6 +37,12 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
         "Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path.",
     ),
     McpToolInventoryItem(
+        "memento_query",
+        "Read",
+        "Run typed metadata filters, counts, date buckets, and recent-session listings over note frontmatter without reading full note bodies.",
+        "Use for count/list/filter questions by project, type, tag, certainty, source, date, branch, or session_id; use `memento_search` instead for topical recall or semantic retrieval.",
+    ),
+    McpToolInventoryItem(
         "memento_contradictions",
         "Read",
         "Inspect a topic for disagreements, stale conclusions, supersession chains, and opposite-language hints.",

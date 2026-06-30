@@ -279,6 +279,30 @@ function searchArgsFromParams(params: Record<string, unknown>, cwd: string): str
 	return args;
 }
 
+function queryArgsFromParams(params: Record<string, unknown>): string[] {
+	const args = ["query"];
+	for (const [key, flag] of [
+		["project", "--project"],
+		["note_type", "--note-type"],
+		["tag", "--tag"],
+		["source", "--source"],
+		["date_start", "--date-start"],
+		["date_end", "--date-end"],
+		["branch", "--branch"],
+		["session_id", "--session-id"],
+		["aggregate_by", "--aggregate-by"],
+		["recent_sessions_project", "--recent-sessions-project"],
+	] as const) {
+		const value = params[key];
+		if (typeof value === "string" && value.trim()) args.push(flag, value.trim());
+	}
+	for (const [key, flag] of [["certainty_min", "--certainty-min"], ["certainty_max", "--certainty-max"], ["limit", "--limit"]] as const) {
+		const value = params[key];
+		if (typeof value === "number" && Number.isFinite(value)) args.push(flag, String(Math.floor(value)));
+	}
+	return args;
+}
+
 function withProcessLimit(args: string[], maxCaptures: number): string[] {
 	const capped = Math.max(1, Math.floor(maxCaptures));
 	const next = [...args];
@@ -777,6 +801,40 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const payload = await runJson(pi, ctx, searchArgsFromParams(params as Record<string, unknown>, ctx.cwd));
+			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
+		},
+	});
+
+	pi.registerTool({
+		name: "memento_query",
+		label: "Memento Query",
+		description: "Run typed memento vault metadata filters and aggregations without retrieving full note bodies. Use for count/list/filter questions by project, type, tag, certainty, source, date, branch, or session_id; use memento_search for topical recall or semantic retrieval.",
+		parameters: Type.Object({
+			project: Type.Optional(Type.String({ description: "Exact project frontmatter value to match" })),
+			note_type: Type.Optional(Type.String({ description: "Exact note type to match, e.g. discovery, decision, bugfix" })),
+			tag: Type.Optional(Type.String({ description: "Tag that must be present in frontmatter tags" })),
+			source: Type.Optional(Type.String({ description: "Exact source frontmatter value to match" })),
+			certainty_min: Type.Optional(Type.Integer({ description: "Minimum certainty, 1-5" })),
+			certainty_max: Type.Optional(Type.Integer({ description: "Maximum certainty, 1-5" })),
+			date_start: Type.Optional(Type.String({ description: "Inclusive ISO date/datetime lower bound" })),
+			date_end: Type.Optional(Type.String({ description: "Inclusive ISO date/datetime upper bound" })),
+			branch: Type.Optional(Type.String({ description: "Exact branch frontmatter value to match" })),
+			session_id: Type.Optional(Type.String({ description: "Exact session_id frontmatter value to match" })),
+			aggregate_by: Type.Optional(Type.Union([
+				Type.Literal("project"),
+				Type.Literal("type"),
+				Type.Literal("tag"),
+				Type.Literal("source"),
+				Type.Literal("month"),
+				Type.Literal("date"),
+				Type.Literal("branch"),
+				Type.Literal("session_id"),
+			], { description: "Optional count bucket" })),
+			recent_sessions_project: Type.Optional(Type.String({ description: "When set, list recent sessions for this exact project instead of note rows" })),
+			limit: Type.Optional(Type.Integer({ description: "Maximum rows/buckets/sessions to return, default 20" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const payload = await runJson(pi, ctx, queryArgsFromParams(params as Record<string, unknown>));
 			return { content: [textPart(JSON.stringify(payload, null, 2))], details: payload };
 		},
 	});

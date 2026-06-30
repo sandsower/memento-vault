@@ -131,6 +131,13 @@ class TestRemoteIntegration:
         assert result["title"] == "Integration Test Note"
         assert "xylophone" in result["content"]
 
+    def test_query_aggregates_without_note_bodies(self):
+        from memento.remote_client import query
+
+        result = query(aggregate_by="type")
+        assert {entry["value"]: entry["count"] for entry in result["aggregations"]}["discovery"] >= 1
+        assert "xylophone" not in str(result)
+
     def test_capture_and_dedup(self):
         from memento.remote_client import capture
 

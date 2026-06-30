@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 from memento.remote_client import (
     is_remote,
     list_notes,
+    query,
     search,
     search_envelope,
     get,
@@ -166,6 +167,23 @@ class TestCallTool:
         mock_urlopen.return_value = self._mock_response(miss)
 
         assert search_envelope("test query") == miss
+
+    @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
+    @patch("memento.remote_client.request.urlopen")
+    def test_query(self, mock_urlopen, mock_url):
+        payload = {"aggregations": [{"value": "discovery", "count": 2}], "metadata": {"valid": True}}
+        mock_urlopen.return_value = self._mock_response(payload)
+
+        result = query(project="/repo/api", tag="cache", aggregate_by="type", certainty_min=3)
+
+        assert result == payload
+        req = mock_urlopen.call_args[0][0]
+        body = json.loads(req.data)
+        assert body["params"]["name"] == "memento_query"
+        assert body["params"]["arguments"]["project"] == "/repo/api"
+        assert body["params"]["arguments"]["tag"] == "cache"
+        assert body["params"]["arguments"]["aggregate_by"] == "type"
+        assert body["params"]["arguments"]["certainty_min"] == 3
 
     @patch("memento.remote_client._vault_url", return_value="http://localhost:8745")
     @patch("memento.remote_client.request.urlopen")

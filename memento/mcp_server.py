@@ -153,6 +153,7 @@ from memento.search import (
     resolve_concrete_mode,
     shape_search_results,
 )
+from memento.query import query_notes
 from memento.contradictions import inspect_contradictions
 from memento.store import (
     acquire_vault_write_lock,
@@ -465,6 +466,79 @@ def memento_search(
         result_count=len(output),
     )
     return {"results": output, "metadata": metadata}
+
+
+@mcp.tool()
+def memento_query(
+    project: str = "",
+    note_type: str = "",
+    tag: str = "",
+    source: str = "",
+    certainty_min: int | None = None,
+    certainty_max: int | None = None,
+    date_start: str = "",
+    date_end: str = "",
+    branch: str = "",
+    session_id: str = "",
+    aggregate_by: str = "",
+    recent_sessions_project: str = "",
+    limit: int = 20,
+) -> dict:
+    """Run typed metadata filters and aggregations over vault notes.
+
+    Use this for count/list/filter questions that can be answered from note
+    frontmatter without retrieving full note bodies. This is not a semantic
+    recall tool: use memento_search for topical/past-decision retrieval, and
+    memento_get for full content after a known path is selected.
+
+    Args:
+        project: Exact project frontmatter value to match.
+        note_type: Exact note type to match (for example discovery, decision, bugfix).
+        tag: Tag that must be present in frontmatter tags.
+        source: Exact source frontmatter value to match.
+        certainty_min: Minimum certainty 1-5.
+        certainty_max: Maximum certainty 1-5.
+        date_start: Inclusive ISO date/datetime lower bound.
+        date_end: Inclusive ISO date/datetime upper bound.
+        branch: Exact branch frontmatter value to match.
+        session_id: Exact session_id frontmatter value to match.
+        aggregate_by: Optional count bucket: project, type, tag, source, month, date, branch, or session_id.
+        recent_sessions_project: When set, list recent sessions for this exact project instead of note rows.
+        limit: Maximum rows/buckets/sessions to return.
+
+    Returns:
+        Compact structured results, aggregations, or recent_sessions plus metadata; invalid typed parameters return an error envelope.
+    """
+    payload = query_notes(
+        get_vault(),
+        project=project,
+        note_type=note_type,
+        tag=tag,
+        source=source,
+        certainty_min=certainty_min,
+        certainty_max=certainty_max,
+        date_start=date_start,
+        date_end=date_end,
+        branch=branch,
+        session_id=session_id,
+        aggregate_by=aggregate_by,
+        recent_sessions_project=recent_sessions_project,
+        limit=limit,
+    )
+    action = "query_invalid" if payload.get("error") else "query"
+    log_retrieval("mcp", action, results=payload.get("metadata", {}).get("matched_notes", 0))
+    paths = [entry["path"] for entry in payload.get("results", []) if entry.get("path")]
+    for session in payload.get("recent_sessions", []):
+        paths.extend(path for path in session.get("paths", []) if path)
+    if paths:
+        record_access(
+            paths,
+            hook="mcp",
+            tool="query",
+            query=json.dumps(payload.get("metadata", {}).get("filters", {})),
+            result_count=len(paths),
+        )
+    return payload
 
 
 @mcp.tool()
