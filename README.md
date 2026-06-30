@@ -538,6 +538,8 @@ LLM backend is configurable:
 ```yaml
 llm_backend: claude        # claude, codex, gemini, anthropic-api, openai-compat
 llm_model: sonnet          # model name for the chosen backend
+llm_max_tokens: 4096       # API backend output cap
+llm_api_retries: 3         # retries for retryable API failures
 claude_bare_headless: false # opt into Claude Code --bare for detached workers
 ```
 

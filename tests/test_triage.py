@@ -379,8 +379,9 @@ class TestProcessStructuredNotes:
         )
         captured = {}
 
-        def _llm_complete(prompt):
+        def _llm_complete(prompt, config=None):
             captured["prompt"] = prompt
+            captured["config"] = config
             return LLMResult(text=llm_payload, ok=True, error=None)
 
         with (
@@ -392,6 +393,8 @@ class TestProcessStructuredNotes:
         assert written == 1
         assert "User: Capture the OpenCode fix" in captured["prompt"]
         assert "Assistant: Implemented the adapter fix." in captured["prompt"]
+        assert captured["config"]["llm_structured_json_tool_name"] == "emit_notes"
+        assert captured["config"]["llm_structured_json_schema"]["required"] == ["notes"]
         assert (tmp_vault / "notes" / "opencode-adapter-renders-sqlite-transcripts.md").exists()
 
     def test_triage_structured_extraction_uses_selected_opencode_session(self, tmp_vault, tmp_path):
@@ -425,8 +428,9 @@ class TestProcessStructuredNotes:
         }
         captured = {}
 
-        def _llm_complete(prompt):
+        def _llm_complete(prompt, config=None):
             captured["prompt"] = prompt
+            captured["config"] = config
             return LLMResult(text="[]", ok=True, error=None)
 
         with (
@@ -501,8 +505,9 @@ class TestProcessStructuredNotes:
         captured = {}
         health_events = []
 
-        def _llm_complete(prompt):
+        def _llm_complete(prompt, config=None):
             captured["prompt"] = prompt
+            captured["config"] = config
             return LLMResult(text="[]", ok=True, error=None)
 
         with (
@@ -544,8 +549,9 @@ class TestProcessStructuredNotes:
         }
         captured = {}
 
-        def _llm_complete(prompt):
+        def _llm_complete(prompt, config=None):
             captured["prompt"] = prompt
+            captured["config"] = config
             return LLMResult(text="[]", ok=True, error=None)
 
         with (
@@ -1179,6 +1185,9 @@ class TestTriageLlmTelemetry:
             backend="codex",
             model="gpt-5",
             prompt_bytes=2048,
+            output_bytes=0,
+            input_tokens=100,
+            output_tokens=0,
             duration_ms=1500,
         )
 
@@ -1197,6 +1206,9 @@ class TestTriageLlmTelemetry:
         assert failures[0]["backend"] == "codex"
         assert failures[0]["model"] == "gpt-5"
         assert failures[0]["prompt_bytes"] == 2048
+        assert failures[0]["output_bytes"] == 0
+        assert failures[0]["input_tokens"] == 100
+        assert failures[0]["output_tokens"] == 0
         assert failures[0]["duration_ms"] == 1500
 
     def test_written_health_entry_includes_backend_telemetry(self, tmp_vault, tmp_path):
@@ -1220,6 +1232,9 @@ class TestTriageLlmTelemetry:
             backend="codex",
             model=None,
             prompt_bytes=4096,
+            output_bytes=len(payload.encode("utf-8")),
+            input_tokens=200,
+            output_tokens=50,
             duration_ms=900,
         )
         health_events = []
@@ -1239,6 +1254,9 @@ class TestTriageLlmTelemetry:
         assert len(success) == 1
         assert success[0]["backend"] == "codex"
         assert success[0]["prompt_bytes"] == 4096
+        assert success[0]["output_bytes"] == ok.output_bytes
+        assert success[0]["input_tokens"] == 200
+        assert success[0]["output_tokens"] == 50
 
     def test_parse_empty_health_entry_includes_backend_telemetry(self, tmp_vault, tmp_path):
         transcript = tmp_path / "transcript.jsonl"
@@ -1258,6 +1276,9 @@ class TestTriageLlmTelemetry:
             backend="codex",
             model="gpt-5",
             prompt_bytes=1024,
+            output_bytes=len("not json at all".encode("utf-8")),
+            input_tokens=90,
+            output_tokens=5,
             duration_ms=700,
         )
         health_events = []
@@ -1278,4 +1299,7 @@ class TestTriageLlmTelemetry:
         assert empty[0]["backend"] == "codex"
         assert empty[0]["model"] == "gpt-5"
         assert empty[0]["prompt_bytes"] == 1024
+        assert empty[0]["output_bytes"] == ok_but_unparseable.output_bytes
+        assert empty[0]["input_tokens"] == 90
+        assert empty[0]["output_tokens"] == 5
         assert empty[0]["duration_ms"] == 700

@@ -394,6 +394,30 @@ def _parse_structured_notes_response(raw):
     return [item for item in data if isinstance(item, dict) and item.get("title") and item.get("body")]
 
 
+TRIAGE_NOTES_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "notes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                    "type": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "certainty": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "validity_context": {"type": "string"},
+                    "supersedes": {"type": "string"},
+                },
+                "required": ["title", "body", "type", "tags", "certainty"],
+            },
+        }
+    },
+    "required": ["notes"],
+}
+
+
 def process_structured_notes(session_id, transcript_path, meta, project_slug):
     """Read transcript, call the shared LLM, and write structured notes."""
     vault = get_vault()
@@ -482,11 +506,20 @@ def process_structured_notes(session_id, transcript_path, meta, project_slug):
         f"{transcript_text}"
     )
 
-    result = llm_complete(prompt)
+    result = llm_complete(
+        prompt,
+        config={
+            "llm_structured_json_schema": TRIAGE_NOTES_JSON_SCHEMA,
+            "llm_structured_json_tool_name": "emit_notes",
+        },
+    )
     llm_telemetry = {
         "backend": result.backend,
         "model": result.model,
         "prompt_bytes": result.prompt_bytes,
+        "output_bytes": result.output_bytes,
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
         "duration_ms": result.duration_ms,
     }
     if not result.ok:

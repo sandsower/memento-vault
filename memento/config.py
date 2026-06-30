@@ -147,6 +147,9 @@ DEFAULT_CONFIG = {
     "claude_bare_headless": False,
     "llm_api_key": None,
     "llm_api_base": None,
+    "llm_max_tokens": 4096,
+    "llm_api_retries": 3,
+    "llm_api_initial_backoff_seconds": 1.0,
 }
 
 _CONFIG = None
