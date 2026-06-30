@@ -101,6 +101,8 @@ memento-vault health --deep     # opt-in live integration probes
 
 Exit codes: failures always exit 1; warnings exit 0 unless `--strict` is set. The command never repairs state or prints secrets. `--deep` stays read-only but may contact configured integrations with bounded timeouts.
 
+Legacy structural checker: `tools/vault-health-check.sh` is still supported for direct callers that need vault-content validation (`fleeting`/`notes`/`projects`/`archive` directories, note frontmatter, wikilinks, filename conventions, and git presence). It is intentionally not a replacement for `memento-vault health`; prefer the CLI health/doctor command for operational install/runtime diagnostics, and keep using the legacy script only for those low-level structural checks.
+
 The JSON form includes an `automation_memory` readiness object with probe metadata for automated runners: search availability, recent recall/search failure rate, stale embedded-index hints, local sync-ledger divergence when a remote is configured, last successful automation-memory packet, and common failure reasons. It does not contact the remote vault by default.
 
 Automated runners consuming the vault as memory should read the health/status signals section of the [automation MemoryProvider contract](automation-memory-provider.md) for what these surfaces guarantee (read-only, secret-free, fail-open by default).

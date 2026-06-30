@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
-# Vault health check — validates memento vault structure and consistency.
+# Legacy structural vault checker.
+#
 # Usage: bash vault-health-check.sh [path-to-vault]
 # Default: ~/memento
+#
+# This script is intentionally kept for low-level content checks that are not
+# covered by `memento-vault health` (frontmatter, wikilinks, file naming). Use
+# `memento-vault health` or `memento-vault doctor` for operational diagnostics.
 
 set -euo pipefail
 
 VAULT="${1:-$HOME/memento}"
 ERRFILE=$(mktemp)
 echo 0 > "$ERRFILE"
+
+cat <<'EOF'
+Legacy structural vault check: kept for direct callers and low-level vault
+content validation. For operational/install diagnostics, use:
+  memento-vault health
+EOF
+
+echo ""
 
 inc_errors() {
     local count
@@ -45,14 +58,14 @@ fi
 echo "Checking wikilinks..."
 if [ -d "$VAULT/notes" ]; then
     find "$VAULT/notes" -name '*.md' | while read -r file; do
-        grep -oP '\[\[([^\]|]+)' "$file" 2>/dev/null | sed 's/\[\[//' | while read -r link; do
+        while read -r link; do
             target="$VAULT/notes/$link.md"
             archive_target="$VAULT/archive/$link.md"
             if [ ! -f "$target" ] && [ ! -f "$archive_target" ]; then
                 echo "  BROKEN LINK: [[$link]] in $(basename "$file") -> not found"
                 inc_errors
             fi
-        done
+        done < <(grep -Eo '\[\[[^]|]+' "$file" 2>/dev/null | sed 's/\[\[//' || true)
     done
 fi
 
@@ -61,7 +74,7 @@ echo "Checking file naming..."
 if [ -d "$VAULT/notes" ]; then
     find "$VAULT/notes" -name '*.md' | while read -r file; do
         filename=$(basename "$file")
-        if echo "$filename" | grep -qP '[A-Z\s]'; then
+        if echo "$filename" | grep -Eq '[[:upper:][:space:]]'; then
             echo "  NAMING: $filename has uppercase or spaces"
             inc_errors
         fi
