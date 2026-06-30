@@ -11,6 +11,17 @@ import os
 import re
 import sys
 import tempfile
+from datetime import datetime
+from json import JSONDecodeError
+
+
+MEMENTO_HOOK_SCRIPTS = {
+    "memento-triage.py",
+    "vault-briefing.py",
+    "vault-recall.py",
+    "vault-tool-context.py",
+}
+MEMENTO_SERVER_NAME = "memento-vault"
 
 
 # --- Manifest operations ---
@@ -57,6 +68,57 @@ def manifest_save(json_acc, version, vault_path, manifest_path, options_json="{}
 # --- MCP configuration ---
 
 
+def _backup_corrupt_json(path, label):
+    """Move a corrupt JSON file aside and return a fresh object.
+
+    Installers should recover from user-edited/corrupt settings instead of
+    aborting midway. The backup path is deterministic enough for humans while
+    avoiding overwrites across repeated attempts.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = f"{path}.corrupt-{stamp}"
+    suffix = 1
+    while os.path.exists(backup):
+        suffix += 1
+        backup = f"{path}.corrupt-{stamp}-{suffix}"
+    os.replace(path, backup)
+    print(f"{label} was corrupt; backed up to {backup} and starting fresh")
+    return {}
+
+
+def _load_json_object_or_fresh(path, label):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except JSONDecodeError:
+        return _backup_corrupt_json(path, label)
+    if isinstance(data, dict):
+        return data
+    backup = f"{path}.not-object-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    os.replace(path, backup)
+    print(f"{label} did not contain a JSON object; backed up to {backup} and starting fresh")
+    return {}
+
+
+def _command_uses_owned_hook(command, hooks_dir):
+    if not isinstance(command, str) or hooks_dir not in command:
+        return False
+    return any(
+        re.search(r"(?:^|[\s'\"])(?:python3\s+)?" + re.escape(hooks_dir + script) + r"(?:$|[\s'\"])", command)
+        for script in MEMENTO_HOOK_SCRIPTS
+    )
+
+
+def _extract_owned_python_invocation(command, hooks_dir):
+    if not isinstance(command, str):
+        return ""
+    scripts = "|".join(re.escape(script) for script in sorted(MEMENTO_HOOK_SCRIPTS))
+    match = re.search(r"(python3\s+" + re.escape(hooks_dir) + r"(?:" + scripts + r").*)", command)
+    return match.group(1) if match else ""
+
+
 def mcp_config(remote_mode, claude_dir, remote_url, api_key):
     """Build MCP entry and write/merge mcp-servers.json."""
     remote = remote_mode == "true"
@@ -84,8 +146,7 @@ def mcp_config(remote_mode, claude_dir, remote_url, api_key):
         return
 
     if os.path.exists(config_path):
-        with open(config_path) as f:
-            existing = json.load(f)
+        existing = _load_json_object_or_fresh(config_path, "mcp-servers.json")
         existing.update(entry)
         data = existing
     else:
@@ -166,12 +227,10 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
         },
     }
 
-    # Load or create settings
-    if os.path.exists(settings_path):
-        with open(settings_path) as f:
-            cfg = json.load(f)
-    else:
-        cfg = {}
+    # Load or create settings. Corrupt user settings must not abort install;
+    # preserve the original file for manual recovery and continue from a fresh
+    # object with an explicit message.
+    cfg = _load_json_object_or_fresh(settings_path, "settings.json")
 
     hooks = cfg.setdefault("hooks", {})
 
@@ -198,10 +257,9 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
             hook_list = entry.get("hooks", [entry]) if isinstance(entry, dict) else []
             for hook in hook_list:
                 cmd = hook.get("command", "")
-                if hooks_dir not in cmd:
+                if not _command_uses_owned_hook(cmd, hooks_dir):
                     continue
-                match = re.search(r"(python3\s+" + re.escape(hooks_dir) + r".*)", cmd)
-                cleaned = match.group(1) if match else cmd
+                cleaned = _extract_owned_python_invocation(cmd, hooks_dir) or cmd
                 hook["command"] = prefix + cleaned
 
     # Ensure vault permissions exist
@@ -227,6 +285,89 @@ def merge_settings(settings_path, claude_dir, vault_path, experimental, hook_env
         print("Hooks added: " + ", ".join(added))
     else:
         print("All hooks already configured")
+
+
+def uninstall_settings(settings_path, claude_dir, vault_path):
+    """Remove memento-owned hooks and permissions from Claude settings.json."""
+    if not os.path.exists(settings_path):
+        print("settings.json not found; nothing to update")
+        return
+
+    cfg = _load_json_object_or_fresh(settings_path, "settings.json")
+    hooks_dir = claude_dir + "/hooks/"
+    removed_hooks = 0
+    hooks = cfg.get("hooks")
+    if isinstance(hooks, dict):
+        for event in list(hooks.keys()):
+            entries = hooks.get(event)
+            if not isinstance(entries, list):
+                continue
+            kept_entries = []
+            for entry in entries:
+                if isinstance(entry, dict) and isinstance(entry.get("hooks"), list):
+                    kept_hook_list = []
+                    for hook in entry["hooks"]:
+                        if isinstance(hook, dict) and _command_uses_owned_hook(hook.get("command", ""), hooks_dir):
+                            removed_hooks += 1
+                        else:
+                            kept_hook_list.append(hook)
+                    if kept_hook_list:
+                        new_entry = dict(entry)
+                        new_entry["hooks"] = kept_hook_list
+                        kept_entries.append(new_entry)
+                elif isinstance(entry, dict) and _command_uses_owned_hook(entry.get("command", ""), hooks_dir):
+                    removed_hooks += 1
+                else:
+                    kept_entries.append(entry)
+            if kept_entries:
+                hooks[event] = kept_entries
+            else:
+                del hooks[event]
+        if not hooks:
+            cfg.pop("hooks", None)
+
+    removed_perms = 0
+    perms = cfg.get("permissions")
+    allow = perms.get("allow") if isinstance(perms, dict) else None
+    if isinstance(allow, list):
+        base_dir = hooks_dir.rstrip("/").rsplit("/", 1)[0]
+        owned_rules = {
+            "Read(" + vault_path + "/**)",
+            "Edit(" + vault_path + "/**)",
+            "Write(" + vault_path + "/**)",
+            "Bash(" + base_dir + "/hooks/vault-commit.sh:*)",
+        }
+        new_allow = []
+        for rule in allow:
+            if rule in owned_rules:
+                removed_perms += 1
+            else:
+                new_allow.append(rule)
+        perms["allow"] = new_allow
+
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(settings_path), suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, settings_path)
+    print(f"Removed {removed_hooks} memento hook(s) and {removed_perms} permission rule(s) from settings.json")
+
+
+def uninstall_mcp_config(claude_dir):
+    """Remove only the memento-vault entry from generic MCP config."""
+    config_path = os.path.join(claude_dir, "mcp-servers.json")
+    if not os.path.exists(config_path):
+        print("mcp-servers.json not found; nothing to update")
+        return
+    cfg = _load_json_object_or_fresh(config_path, "mcp-servers.json")
+    if MEMENTO_SERVER_NAME in cfg:
+        del cfg[MEMENTO_SERVER_NAME]
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(config_path), suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, config_path)
+        print("Removed memento-vault from mcp-servers.json")
+    else:
+        print("memento-vault not present in mcp-servers.json")
 
 
 # --- MCP URL helper (for bash to capture) ---
@@ -331,6 +472,8 @@ COMMANDS = {
         sys.argv[5],
         sys.argv[6] if len(sys.argv) > 6 else "",
     ),
+    "uninstall-settings": lambda: uninstall_settings(sys.argv[2], sys.argv[3], sys.argv[4]),
+    "uninstall-mcp-config": lambda: uninstall_mcp_config(sys.argv[2]),
     "remote-env": lambda: remote_env(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else ""),
     "mcp-url": lambda: mcp_url(sys.argv[2]),
     "warmup": lambda: warmup(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ""),
