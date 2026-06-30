@@ -888,6 +888,15 @@ def test_explicit_project_filter_noops_without_explicit_project():
     assert decisions == []
 
 
+def test_explicit_project_filter_does_not_treat_sentence_initial_caps_as_projects():
+    results = [{"path": "notes/dala.md", "title": "Dala scheduling", "score": 0.8, "project": "dala-care"}]
+
+    filtered, decisions = filter_recall_results_by_explicit_project("How should lifecycle capture work?", results)
+
+    assert filtered == results
+    assert decisions == []
+
+
 def test_explicit_project_filter_does_not_treat_acronyms_as_projects():
     results = [{"path": "notes/mcp.md", "title": "MCP lifecycle", "score": 0.8, "project": "memento-vault"}]
 

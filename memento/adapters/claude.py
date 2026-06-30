@@ -10,6 +10,33 @@ import re
 from memento.utils import sanitize_secrets
 
 
+def _is_tool_result_content(content):
+    """Return True when a Claude ``user`` record is only tool output.
+
+    Claude Code records tool results as ``type: user`` JSONL entries between
+    assistant continuations. Those are transport round-trips, not human turns,
+    so they must not inflate exchange counts or first-prompt extraction.
+    """
+    if not isinstance(content, list) or not content:
+        return False
+    return all(isinstance(block, dict) and block.get("type") in {"tool_result", "toolResult"} for block in content)
+
+
+def _extract_user_text(content):
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") in {"tool_result", "toolResult"}:
+            continue
+        text = block.get("text") or block.get("content")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n".join(parts)
+
+
 def parse_transcript(transcript_path):
     """Parse a Claude Code JSONL transcript file.
 
@@ -37,12 +64,14 @@ def parse_transcript(transcript_path):
             git_branch = git_branch or entry.get("gitBranch")
 
             if msg_type == "user":
-                user_count += 1
                 msg = entry.get("message", {})
                 content = msg.get("content", "")
-                if isinstance(content, str) and not first_user_prompt:
+                if _is_tool_result_content(content):
+                    continue
+                user_count += 1
+                if not first_user_prompt:
                     # Strip system tags from prompt text
-                    cleaned = re.sub(r"<[^>]+>.*?</[^>]+>", "", content, flags=re.DOTALL).strip()
+                    cleaned = re.sub(r"<[^>]+>.*?</[^>]+>", "", _extract_user_text(content), flags=re.DOTALL).strip()
                     if cleaned:
                         first_user_prompt = sanitize_secrets(cleaned[:200])
 
