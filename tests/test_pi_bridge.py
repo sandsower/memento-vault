@@ -16,7 +16,7 @@ def test_pi_bridge_briefing_disables_deferred_search(capsys):
         code = pi_bridge.main(["briefing", "--cwd", "/repo", "--session-id", "s1"])
 
     assert code == 0
-    mock_build.assert_called_once_with("/repo", "s1", allow_deferred=False)
+    mock_build.assert_called_once_with("/repo", "s1", allow_deferred=False, host_id="pi")
     assert json.loads(capsys.readouterr().out) == result.to_dict()
 
 
@@ -27,7 +27,7 @@ def test_pi_bridge_recall_outputs_lifecycle_json(capsys):
         code = pi_bridge.main(["recall", "--prompt", "What changed?", "--cwd", "/repo", "--session-id", "s1"])
 
     assert code == 0
-    mock_build.assert_called_once_with("What changed?", "/repo", "s1")
+    mock_build.assert_called_once_with("What changed?", "/repo", "s1", host_id="pi")
     assert json.loads(capsys.readouterr().out) == result.to_dict()
 
 
@@ -50,7 +50,7 @@ def test_pi_bridge_tool_context_outputs_lifecycle_json(capsys):
         )
 
     assert code == 0
-    mock_build.assert_called_once_with("bash", "src/a.py", "/repo", "s1")
+    mock_build.assert_called_once_with("bash", "src/a.py", "/repo", "s1", host_id="pi")
     assert json.loads(capsys.readouterr().out) == result.to_dict()
 
 
@@ -82,7 +82,7 @@ def test_pi_bridge_session_context_outputs_json(capsys):
 
     assert code == 0
     assert json.loads(capsys.readouterr().out) == expected
-    mock_build.assert_called_once_with("/repo", "cache", "s1", 500, True, True, True, True)
+    mock_build.assert_called_once_with("/repo", "cache", "s1", 500, True, True, True, True, host_id="pi")
 
 
 def test_pi_bridge_status_outputs_json(capsys, tmp_path, monkeypatch):

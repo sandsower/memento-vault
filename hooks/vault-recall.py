@@ -36,13 +36,14 @@ def main() -> None:
 
     cwd = hook_input.get("cwd", "")
     session_id = hook_input.get("session_id", "unknown")
-    deferred_lines = consume_deferred_briefing(cwd, session_id)
+    deferred_lines = consume_deferred_briefing(cwd, session_id, host_id="claude")
     deep_recall_lines = consume_deep_recall()
 
     result = build_recall(
         hook_input.get("prompt", ""),
         cwd,
         session_id,
+        host_id="claude",
     )
 
     output = deferred_lines + deep_recall_lines

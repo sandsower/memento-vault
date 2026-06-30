@@ -142,8 +142,8 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     assert "[vault] WARN: Pi bridge failing" in payload["content"]
     assert payload["metadata"]["expandable_paths"] == ["notes/cache.md"]
     assert payload["metadata"]["truncated"] is False
-    mock_briefing.assert_called_once_with("/repo", "s1", allow_deferred=False)
-    mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1", record=False)
+    mock_briefing.assert_called_once_with("/repo", "s1", allow_deferred=False, host_id="unknown-host")
+    mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1", record=False, host_id="unknown-host")
 
 
 def test_build_session_context_explicitly_reports_legacy_queue_fallback(tmp_path, monkeypatch):
@@ -379,7 +379,7 @@ def test_build_session_context_records_recall_only_after_final_payload_includes_
         payload = build_session_context("/repo", "cache", "s1", token_budget=2000)
 
     assert "Cache policy" in payload["content"]
-    mock_record.assert_called_once_with(["notes/cache.md"], "s1")
+    mock_record.assert_called_once_with(["notes/cache.md"], "s1", cwd="/repo", host_id="unknown-host")
 
 
 def test_build_session_context_does_not_record_recall_when_final_payload_drops_content(tmp_path):
@@ -1304,11 +1304,12 @@ def test_load_cache_drops_pre_schema_dir_entries(tmp_path, monkeypatch):
     cache = lifecycle_module.load_cache()
 
     # Pre-schema dir entries may be poisoned by the relative-path cwd bug;
-    # they are dropped while session injection state survives the migration.
+    # pre-v5 injection entries were unscoped and must be dropped to avoid
+    # cross-host/project suppression.
     assert cache["schema"] == lifecycle_module.TOOL_CONTEXT_CACHE_SCHEMA
     assert cache["dirs"] == {}
     assert cache["last_qmd_call"] == 123.0
-    assert cache["injections"] == {"s1": {"count": 2, "paths": ["notes/a.md"]}}
+    assert cache["injections"] == {}
 
 
 def test_load_cache_keeps_current_schema_entries(tmp_path, monkeypatch):
@@ -1319,7 +1320,7 @@ def test_load_cache_keeps_current_schema_entries(tmp_path, monkeypatch):
         json.dumps(
             {
                 "schema": lifecycle_module.TOOL_CONTEXT_CACHE_SCHEMA,
-                "dirs": {"/project/docs": {"results": [{"path": "notes/good.md"}]}},
+                "dirs": {"/project/docs": {"results": [{"path": "notes/good.md"}], "ts": time.time()}},
                 "last_qmd_call": 5.0,
                 "injections": {},
             }
@@ -1329,7 +1330,7 @@ def test_load_cache_keeps_current_schema_entries(tmp_path, monkeypatch):
 
     cache = lifecycle_module.load_cache()
 
-    assert cache["dirs"] == {"/project/docs": {"results": [{"path": "notes/good.md"}]}}
+    assert cache["dirs"]["/project/docs"]["results"] == [{"path": "notes/good.md"}]
 
 
 @patch("memento.lifecycle.log_retrieval")
@@ -1434,7 +1435,9 @@ def test_tool_context_hook_adapter_outputs_claude_json(capsys):
         with patch.object(module, "build_tool_context", return_value=result) as mock_build:
             module.main()
 
-    mock_build.assert_called_once_with("Read", "src/server/authMiddleware.ts", "/repo", "s1", lineage_id=None)
+    mock_build.assert_called_once_with(
+        "Read", "src/server/authMiddleware.ts", "/repo", "s1", lineage_id=None, host_id="claude"
+    )
     output = json.loads(capsys.readouterr().out)
     assert output == {
         "hookSpecificOutput": {
@@ -1470,6 +1473,7 @@ def test_tool_context_hook_adapter_derives_lineage_from_transcript(capsys):
         "/repo",
         "resumed-session-2",
         lineage_id="original-session",
+        host_id="claude",
     )
 
 
@@ -1732,17 +1736,19 @@ class TestDeferredWorkerResolution:
 
         assert lifecycle_module._find_hook_script("vault-briefing.py") is None
 
-    def test_deferred_briefing_path_is_scoped_by_project_and_session(self, tmp_path, monkeypatch):
+    def test_deferred_briefing_path_is_scoped_by_project_session_and_host(self, tmp_path, monkeypatch):
         import memento.lifecycle as lifecycle_module
 
         monkeypatch.setattr(lifecycle_module, "DEFERRED_BRIEFING_PATH", str(tmp_path / "deferred.json"))
 
-        first = lifecycle_module.deferred_briefing_path("api-service", "session-a", "/repo/api")
-        second = lifecycle_module.deferred_briefing_path("api-service", "session-b", "/repo/api")
-        third = lifecycle_module.deferred_briefing_path("web-app", "session-a", "/repo/web")
+        first = lifecycle_module.deferred_briefing_path("api-service", "session-a", "/repo/api", host_id="claude")
+        second = lifecycle_module.deferred_briefing_path("api-service", "session-b", "/repo/api", host_id="claude")
+        third = lifecycle_module.deferred_briefing_path("web-app", "session-a", "/repo/web", host_id="claude")
+        fourth = lifecycle_module.deferred_briefing_path("api-service", "session-a", "/repo/api", host_id="pi")
 
         assert first != second
         assert first != third
+        assert first != fourth
         assert Path(first).parent == tmp_path
         assert Path(first).name.startswith("deferred-")
 
@@ -2038,6 +2044,34 @@ class TestRecallDedupPerSessionMultiPath:
         assert m.recently_injected_paths("pi-session") == set()
         assert m.recently_injected_paths("claude-session") == {"notes/a.md"}
 
+    def test_same_session_id_is_isolated_across_projects_and_hosts(self):
+        m = self._engine()
+        m.record_recall(["notes/api.md"], "shared-session", cwd="/repo/api", host_id="claude")
+        m.record_recall(["notes/web.md"], "shared-session", cwd="/repo/web", host_id="claude")
+
+        assert m.recently_injected_paths("shared-session", cwd="/repo/api", host_id="claude") == {"notes/api.md"}
+        assert m.recently_injected_paths("shared-session", cwd="/repo/web", host_id="claude") == {"notes/web.md"}
+        assert m.recently_injected_paths("shared-session", cwd="/repo/api", host_id="pi") == set()
+
+    def test_concurrent_recall_dedup_updates_do_not_corrupt_state(self):
+        import threading
+
+        m = self._engine()
+
+        def worker(i):
+            m.record_recall([f"notes/{i}.md"], f"session-{i % 8}", cwd=f"/repo/{i % 3}", host_id="claude")
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(32)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        with open(m.RECALL_DEDUP_PATH) as f:
+            state = json.load(f)
+        assert state["schema"] == 2
+        assert state["sessions"]
+
     def test_bumping_one_session_does_not_age_another(self):
         m = self._engine()
         m.record_recall(["notes/a.md"], "s1")
@@ -2310,19 +2344,55 @@ class TestToolContextCacheTTLAndScoping:
         assert key_b.endswith("::/workspace/src/server")
 
     def test_injection_cap_keyed_by_lineage_survives_resume(self):
-        cache = {
-            "schema": 3,
-            "dirs": {},
-            "last_qmd_call": 0,
-            "injections": {"original-session": {"count": 5, "paths": []}},
-        }
+        import memento.lifecycle as lifecycle_module
+
+        cache = lifecycle_module._empty_tool_context_cache()
+        lifecycle_module.record_injection(
+            cache,
+            "original-session",
+            [f"notes/{i}.md" for i in range(5)],
+            cwd="/repo",
+            host_id="unknown-host",
+        )
 
         result, mock_search, _, _, _ = self._call(cache, session_id="resumed-session-2", lineage_id="original-session")
 
         assert result.reason == "cap-reached"
         mock_search.assert_not_called()
 
-    def test_injection_cap_falls_back_to_session_id(self):
+    def test_injection_state_is_isolated_by_host_and_project(self):
+        import memento.lifecycle as lifecycle_module
+
+        cache = {"schema": lifecycle_module.TOOL_CONTEXT_CACHE_SCHEMA, "dirs": {}, "last_qmd_call": 0, "injections": {}}
+        lifecycle_module.record_injection(cache, "shared-session", ["notes/a.md"], cwd="/repo/api", host_id="claude")
+
+        assert lifecycle_module.session_injection_count(cache, "shared-session", cwd="/repo/api", host_id="claude") == 1
+        assert lifecycle_module.session_injection_count(cache, "shared-session", cwd="/repo/api", host_id="pi") == 0
+        assert lifecycle_module.session_injection_count(cache, "shared-session", cwd="/repo/web", host_id="claude") == 0
+
+    def test_concurrent_tool_context_cache_saves_merge_without_corruption(self, tmp_path, monkeypatch):
+        import threading
+
+        import memento.lifecycle as lifecycle_module
+
+        monkeypatch.setattr(lifecycle_module, "CACHE_PATH", str(tmp_path / "tool-context-cache.json"))
+
+        def worker(i):
+            cache = lifecycle_module._empty_tool_context_cache()
+            lifecycle_module.record_injection(cache, f"session-{i}", [f"notes/{i}.md"], cwd="/repo", host_id="pi")
+            lifecycle_module.save_cache(cache)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        cache = lifecycle_module.load_cache()
+        injected_paths = {path for entry in cache["injections"].values() for path in entry.get("paths", [])}
+        assert injected_paths == {f"notes/{i}.md" for i in range(16)}
+
+    def test_legacy_unscoped_injection_cap_is_ignored(self):
         cache = {
             "schema": 3,
             "dirs": {},
@@ -2330,28 +2400,43 @@ class TestToolContextCacheTTLAndScoping:
             "injections": {"s1": {"count": 5, "paths": []}},
         }
 
-        result, _, _, _, _ = self._call(cache, session_id="s1")
+        result, mock_search, _, _, _ = self._call(cache, session_id="s1")
 
-        assert result.reason == "cap-reached"
+        assert result.reason != "cap-reached"
+        mock_search.assert_called_once()
 
     def test_duplicate_paths_keyed_by_lineage_survive_resume(self):
         import time as _time
 
+        import memento.lifecycle as lifecycle_module
         from memento.lifecycle import _tool_context_dir_key
 
         key = _tool_context_dir_key("/repo", "/workspace/src/server/authMiddleware.ts")
-        cache = {
-            "schema": 3,
-            "dirs": {
-                key: {
-                    "results": [{"path": "notes/auth.md", "title": "Auth note", "score": 0.8, "snippet": ""}],
-                    "ts": _time.time(),
-                }
-            },
-            "last_qmd_call": 0,
-            "injections": {"original-session": {"count": 1, "paths": ["notes/auth.md"]}},
+        cache = lifecycle_module._empty_tool_context_cache()
+        cache["dirs"][key] = {
+            "results": [{"path": "notes/auth.md", "title": "Auth note", "score": 0.8, "snippet": ""}],
+            "ts": _time.time(),
         }
+        lifecycle_module.record_injection(
+            cache, "original-session", ["notes/auth.md"], cwd="/repo", host_id="unknown-host"
+        )
 
         result, _, _, _, _ = self._call(cache, session_id="resumed-session-2", lineage_id="original-session")
 
         assert result.reason == "duplicate"
+
+    def test_cache_merge_keeps_newest_dir_entry_for_same_key(self):
+        import memento.lifecycle as lifecycle_module
+
+        existing = lifecycle_module._empty_tool_context_cache()
+        incoming = lifecycle_module._empty_tool_context_cache()
+        now = time.time()
+        existing["dirs"]["pi::/repo::/repo/src"] = {"results": [{"path": "notes/new.md"}], "ts": now + 200}
+        incoming["dirs"]["pi::/repo::/repo/src"] = {"results": [{"path": "notes/old.md"}], "ts": now + 100}
+
+        merged = lifecycle_module._merge_tool_context_cache(existing, incoming)
+        assert merged["dirs"]["pi::/repo::/repo/src"]["results"] == [{"path": "notes/new.md"}]
+
+        incoming["dirs"]["pi::/repo::/repo/src"] = {"results": [{"path": "notes/newer.md"}], "ts": now + 300}
+        merged = lifecycle_module._merge_tool_context_cache(existing, incoming)
+        assert merged["dirs"]["pi::/repo::/repo/src"]["results"] == [{"path": "notes/newer.md"}]

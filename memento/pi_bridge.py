@@ -2761,7 +2761,7 @@ def _run_json(
 
 def _build_pi_briefing(cwd: str, session_id: str) -> Any:
     """Build Pi briefing without spawning Claude-style deferred work Pi cannot consume."""
-    return build_briefing(cwd, session_id, allow_deferred=False)
+    return build_briefing(cwd, session_id, allow_deferred=False, host_id="pi")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2933,7 +2933,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "recall":
         return _run_lifecycle(
             "recall",
-            build_recall,
+            lambda prompt, cwd, session_id: build_recall(prompt, cwd, session_id, host_id="pi"),
             args.prompt,
             args.cwd,
             args.session_id,
@@ -2942,7 +2942,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "session-context":
         return _run_json(
             "session-context",
-            build_session_context,
+            lambda cwd, prompt, session_id, token_budget, include_status, include_recent, include_recall, include_preview: (
+                build_session_context(
+                    cwd,
+                    prompt,
+                    session_id,
+                    token_budget,
+                    include_status,
+                    include_recent,
+                    include_recall,
+                    include_preview,
+                    host_id="pi",
+                )
+            ),
             args.cwd,
             args.prompt,
             args.session_id,
@@ -2955,7 +2967,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "tool-context":
         return _run_lifecycle(
             "tool-context",
-            build_tool_context,
+            lambda tool_name, file_path, cwd, session_id: build_tool_context(
+                tool_name, file_path, cwd, session_id, host_id="pi"
+            ),
             args.tool_name,
             args.file_path,
             args.cwd,

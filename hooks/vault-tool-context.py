@@ -47,6 +47,7 @@ def main() -> None:
         hook_input.get("cwd", ""),
         hook_input.get("session_id", "unknown"),
         lineage_id=lineage_id,
+        host_id="claude",
     )
     if result.should_inject:
         output_context(result.content)
