@@ -858,8 +858,7 @@ def _coerce_certainty(certainty):
     return None
 
 
-def write_note(
-    vault_path,
+def _render_note_markdown(
     title,
     body,
     note_type,
@@ -873,20 +872,6 @@ def write_note(
     branch=None,
     session_id=None,
 ):
-    """Write an atomic note with normalized frontmatter to notes/ using an atomic rename."""
-    notes_dir = Path(vault_path) / "notes"
-    notes_dir.mkdir(parents=True, exist_ok=True)
-
-    slug = slugify(title)
-    target = notes_dir / f"{slug}.md"
-    if target.exists():
-        # Avoid overwriting — append a numeric suffix
-        for i in range(2, 100):
-            candidate = notes_dir / f"{slug}-{i}.md"
-            if not candidate.exists():
-                target = candidate
-                break
-    tmp = notes_dir / f".tmp-{slug}.md"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
     # Sanitize and normalize all contract fields to prevent frontmatter injection.
@@ -935,11 +920,10 @@ def write_note(
         lines.extend(["---", "", body_stripped, ""])
     else:
         lines.extend(["---", "", body_stripped, "", "## Related", ""])
+    return "\n".join(lines)
 
-    tmp.write_text("\n".join(lines))
-    os.replace(tmp, target)
 
-    # Index in embedded search backend if active
+def _index_written_note(vault_path, target):
     try:
         from memento.search_backend import get_backend
         from memento.embedded_search import EmbeddedSearchBackend
@@ -951,6 +935,106 @@ def write_note(
     except Exception:
         pass  # Indexing failure must not block note storage
 
+
+def write_note(
+    vault_path,
+    title,
+    body,
+    note_type,
+    tags,
+    certainty=None,
+    source="session",
+    origin=None,
+    validity_context=None,
+    supersedes=None,
+    project=None,
+    branch=None,
+    session_id=None,
+):
+    """Write an atomic note with normalized frontmatter to notes/ using an atomic rename."""
+    notes_dir = Path(vault_path) / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = slugify(title)
+    target = notes_dir / f"{slug}.md"
+    if target.exists():
+        # Avoid overwriting — append a numeric suffix
+        for i in range(2, 100):
+            candidate = notes_dir / f"{slug}-{i}.md"
+            if not candidate.exists():
+                target = candidate
+                break
+    tmp = notes_dir / f".tmp-{slug}.md"
+    tmp.write_text(
+        _render_note_markdown(
+            title,
+            body,
+            note_type,
+            tags,
+            certainty=certainty,
+            source=source,
+            origin=origin,
+            validity_context=validity_context,
+            supersedes=supersedes,
+            project=project,
+            branch=branch,
+            session_id=session_id,
+        )
+    )
+    os.replace(tmp, target)
+    _index_written_note(vault_path, target)
+    return target
+
+
+def replace_note_at_path(
+    vault_path,
+    path,
+    title,
+    body,
+    note_type,
+    tags,
+    certainty=None,
+    source="mcp",
+    origin=None,
+    validity_context=None,
+    supersedes=None,
+    project=None,
+    branch=None,
+    session_id=None,
+):
+    """Replace an existing note at a vault-relative path using managed frontmatter."""
+    vault = Path(vault_path).resolve()
+    target = (vault / path).resolve()
+    if target != vault and vault not in target.parents:
+        raise ValueError("Invalid path: traversal outside vault")
+    try:
+        rel = target.relative_to(vault)
+    except ValueError as exc:
+        raise ValueError("Invalid path: traversal outside vault") from exc
+    if not rel.parts or rel.parts[0] != "notes" or target.suffix != ".md":
+        raise ValueError("Invalid path: replacement must target notes/*.md")
+    if not target.exists():
+        raise FileNotFoundError(str(rel))
+
+    tmp = target.with_name(f".tmp-{target.stem}.md")
+    tmp.write_text(
+        _render_note_markdown(
+            title,
+            body,
+            note_type,
+            tags,
+            certainty=certainty,
+            source=source,
+            origin=origin,
+            validity_context=validity_context,
+            supersedes=supersedes,
+            project=project,
+            branch=branch,
+            session_id=session_id,
+        )
+    )
+    os.replace(tmp, target)
+    _index_written_note(vault_path, target)
     return target
 
 

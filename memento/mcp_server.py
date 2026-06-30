@@ -163,6 +163,7 @@ from memento.store import (
     normalize_note_contract,
     record_access,
     release_vault_write_lock,
+    replace_note_at_path,
     update_project_index,
     write_daily_snapshot,
     write_note,
@@ -773,6 +774,78 @@ def memento_store(
         log_retrieval("mcp", "store", title=title, path=str(path))
         return {"path": str(path.relative_to(vault)), "title": title.strip()}
 
+    finally:
+        release_vault_write_lock()
+
+
+@mcp.tool()
+def memento_replace_note(
+    path: str,
+    title: str,
+    body: str,
+    note_type: str = "discovery",
+    tags: list[str] | None = None,
+    certainty: int | None = None,
+    project: str | None = None,
+    branch: str | None = None,
+    session_id: str | None = None,
+    validity_context: str | None = None,
+    supersedes: str | None = None,
+    origin: str | None = None,
+) -> dict:
+    """Replace an existing note at a known vault-relative path.
+
+    This low-level sync primitive is intentionally path-scoped: callers must
+    first identify the remote note they are resolving. It is used by remote
+    sync's explicit local-wins conflict resolution path and will not create a
+    new note when the path is missing.
+    """
+    if not path or not path.strip():
+        return {"error": "path is required"}
+    if not title or not title.strip():
+        return {"error": "title is required"}
+    if not body or not body.strip():
+        return {"error": "body is required"}
+
+    vault = get_vault()
+    if not vault.exists():
+        return {"error": f"Vault not found at {vault}"}
+
+    if not acquire_vault_write_lock():
+        return {"error": "Could not acquire vault write lock (another write in progress)"}
+
+    try:
+        target = replace_note_at_path(
+            vault,
+            path.strip(),
+            title=title.strip(),
+            body=sanitize_secrets(body),
+            note_type=note_type,
+            tags=tags or [],
+            certainty=certainty,
+            source="mcp",
+            origin=origin or "mcp_replace_note",
+            validity_context=validity_context,
+            supersedes=supersedes,
+            project=project,
+            branch=branch,
+            session_id=session_id,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        release_vault_write_lock()
+        return {"error": str(exc)}
+    except Exception as exc:
+        release_vault_write_lock()
+        return {"error": f"replace failed: {exc}"}
+
+    try:
+        rel_path = str(target.relative_to(vault))
+        project_slug = slugify(Path(project).name) if project else None
+        if project_slug:
+            summary = f"MCP replace: {title.strip()[:80]}"
+            update_project_index(vault, project_slug, target.stem, summary)
+        log_retrieval("mcp", "replace_note", title=title, path=rel_path)
+        return {"path": rel_path, "title": title.strip(), "replaced": True}
     finally:
         release_vault_write_lock()
 

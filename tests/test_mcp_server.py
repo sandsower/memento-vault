@@ -30,6 +30,7 @@ from memento.mcp_server import (
     memento_list,
     memento_preserve,
     memento_query,
+    memento_replace_note,
     memento_reindex,
     memento_search,
     memento_status,
@@ -1265,6 +1266,42 @@ class TestMementoGet:
 
         assert result["title"] == "QMD note"
         assert result["content"] == "From QMD"
+
+
+# --- memento_replace_note ---
+
+
+class TestMementoReplaceNote:
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_replaces_existing_note_without_suffix(self, tmp_vault):
+        first = memento_store(title="Replace Me", body="Old body.", tags=["sync"], certainty=2)
+
+        result = memento_replace_note(
+            path=first["path"],
+            title="Replace Me",
+            body="New body.",
+            tags=["sync"],
+            certainty=4,
+        )
+
+        assert "error" not in result
+        assert result["path"] == first["path"]
+        content = (tmp_vault / first["path"]).read_text()
+        assert "New body." in content
+        assert "Old body." not in content
+        assert "certainty: 4" in content
+        assert not (tmp_vault / "notes" / "replace-me-2.md").exists()
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_missing_path_returns_error(self, tmp_vault):
+        result = memento_replace_note(path="notes/missing.md", title="Missing", body="Body")
+        assert "error" in result
+
+    @pytest.mark.usefixtures("_use_vault_config")
+    def test_traversal_blocked(self, tmp_vault):
+        result = memento_replace_note(path="../outside.md", title="Bad", body="Body")
+        assert "error" in result
+        assert "traversal" in result["error"].lower()
 
 
 # --- memento_capture ---
