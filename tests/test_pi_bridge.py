@@ -1531,6 +1531,145 @@ def test_pi_bridge_process_start_includes_small_cleaned_transcript(capsys, tmp_p
     assert "Important decision" in packet
 
 
+def test_pi_bridge_process_start_includes_oversize_cleaned_transcript_with_quality_limits(
+    capsys, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    transcript_root = tmp_path / "sessions"
+    monkeypatch.setenv("MEMENTO_PI_TRANSCRIPT_ROOTS", str(transcript_root))
+    session_file = transcript_root / "session.jsonl"
+    transcript_root.mkdir()
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "message",
+                "timestamp": "t1",
+                "message": {"role": "user", "content": [{"type": "text", "text": "Important oversize decision"}]},
+            }
+        )
+        + "\n"
+    )
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "One",
+                "body": "Body",
+                "metadata": {"project": "repo", "branch": "b", "cwd": "/repo", "session_id": str(session_file)},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo", "--transcript-max-bytes", "1"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    assert started["oversize_transcript_group_count"] == 1
+    assert started["missing_transcript_group_count"] == 0
+    run_dir = tmp_path / "state" / "processing" / started["run_id"]
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    group = manifest["groups"][0]
+    assert group["transcript"]["included"] is True
+    assert group["transcript"]["reason"] == "over_size_cap"
+    assert group["transcript"]["partial"] is True
+    packet = (run_dir / "inputs" / f"{group['group_id']}.md").read_text()
+    assert "partial cleaned transcript from an oversize source" in packet
+    assert "Important oversize decision" in packet
+    assert "return processed_no_notes" in packet
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-status", "--run-id", started["run_id"]])
+    assert code == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["oversize_transcript_group_count"] == 1
+    assert status["transcript_partial_group_count"] == 1
+
+
+def test_pi_bridge_transcript_context_distinguishes_cleaning_cap_from_oversize():
+    lines = pi_bridge._transcript_context_lines(
+        {
+            "included": True,
+            "reason": "included",
+            "partial": True,
+            "size_bytes": 100,
+            "cleaned_char_count": 40,
+            "cleaned_cap_chars": 40,
+        }
+    )
+    text = "\n".join(lines)
+
+    assert "partial cleaned transcript capped during transcript cleaning" in text
+    assert "oversize source" not in text
+    assert "explaining the partial transcript" in text
+
+
+def test_pi_bridge_transcript_context_authorizes_before_filesystem_probe(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_TRANSCRIPT_ROOTS", str(tmp_path / "allowed"))
+    outside = tmp_path / "outside.jsonl"
+
+    with patch.object(Path, "exists", side_effect=AssertionError("exists() should not run for outside roots")):
+        info, transcript = pi_bridge._transcript_context_for_group({"session_id": str(outside)}, 1)
+
+    assert transcript == ""
+    assert info["included"] is False
+    assert info["reason"] == "outside_allowed_roots"
+
+
+def test_pi_bridge_process_start_marks_missing_transcript_fallbacks(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    transcript_root = tmp_path / "sessions"
+    monkeypatch.setenv("MEMENTO_PI_TRANSCRIPT_ROOTS", str(transcript_root))
+    missing_file = transcript_root / "missing.jsonl"
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "Missing file",
+                "body": "Queued capture from a missing transcript.",
+                "metadata": {"project": "repo", "branch": "b", "cwd": "/repo", "session_id": str(missing_file)},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "q2",
+                "title": "No session",
+                "body": "Queued capture without a session id.",
+                "metadata": {"project": "repo", "branch": "b", "cwd": "/repo"},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    assert started["missing_transcript_group_count"] == 2
+    assert started["transcript_fallback_group_count"] == 2
+    assert started["transcript_reason_counts"]["missing"] == 1
+    assert started["transcript_reason_counts"]["no_session_id"] == 1
+    run_dir = tmp_path / "state" / "processing" / started["run_id"]
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    packets = [(run_dir / "inputs" / f"{group['group_id']}.md").read_text() for group in manifest["groups"]]
+    assert all("explicit fallback; no cleaned session transcript is available" in packet for packet in packets)
+    assert any("recorded session transcript path does not exist" in packet for packet in packets)
+    assert any("did not include a session transcript path" in packet for packet in packets)
+    assert all("Quality limit: queued captures are lifecycle fragments" in packet for packet in packets)
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-status", "--run-id", started["run_id"]])
+    assert code == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["missing_transcript_group_count"] == 2
+    assert status["transcript_fallback_group_count"] == 2
+
+
 def test_pi_bridge_process_start_writes_deterministic_dedup_context(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     notes = tmp_path / "notes"
@@ -1778,6 +1917,8 @@ def test_pi_bridge_process_start_skips_transcript_outside_allowed_roots(capsys, 
     run_dir = tmp_path / "state" / "processing" / started["run_id"]
     manifest = json.loads((run_dir / "manifest.json").read_text())
     group = manifest["groups"][0]
+    assert started["missing_transcript_group_count"] == 1
+    assert started["transcript_fallback_group_count"] == 1
     assert group["transcript"]["included"] is False
     assert group["transcript"]["reason"] == "outside_allowed_roots"
     packet = (run_dir / "inputs" / f"{group['group_id']}.md").read_text()
@@ -2135,6 +2276,43 @@ def test_pi_bridge_clean_transcript_drops_thinking_and_caps_tool_results(tmp_pat
     assert "secret reasoning" not in cleaned
     assert "thinkingSignature" not in cleaned
     assert "encrypted_content" not in cleaned
+
+
+def test_pi_bridge_clean_transcript_skips_non_object_json_lines(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        json.dumps(["not", "an", "object"])
+        + "\n"
+        + json.dumps(
+            {
+                "type": "message",
+                "message": {"role": "user", "content": [{"type": "text", "text": "usable content"}]},
+            }
+        )
+        + "\n"
+    )
+
+    cleaned = pi_bridge._clean_transcript(session_file)
+    assert "usable content" in cleaned
+
+
+def test_pi_bridge_clean_transcript_caps_before_appending_current_block(tmp_path):
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "message",
+                "message": {"role": "user", "content": [{"type": "text", "text": "x" * 100}]},
+            }
+        )
+        + "\n"
+    )
+
+    cleaned = pi_bridge._clean_transcript(session_file, total_cap=40)
+    body, marker = cleaned.split("[transcript truncated by memento processor]")
+    assert marker == ""
+    assert len(body.rstrip()) <= 40
+    assert "x" * 100 not in cleaned
 
 
 def test_pi_bridge_process_finalize_rejects_created_note_paths_outside_vault(capsys, tmp_path, monkeypatch):

@@ -245,6 +245,12 @@ export function formatProcessLines(payload?: Record<string, unknown>, options: {
 		payload.dry_run ? "Process preview" : `Process ${status}`,
 		`Selected: ${numberValue(payload.selected_capture_count)} capture(s) · Groups: ${groupCount}${status === "running" ? ` · Progress: ${completed}/${groupCount}` : ""}`,
 	];
+	const oversizeTranscripts = numberValue(payload.oversize_transcript_group_count);
+	const missingTranscripts = numberValue(payload.missing_transcript_group_count);
+	const fallbackTranscripts = numberValue(payload.transcript_fallback_group_count);
+	if (oversizeTranscripts || missingTranscripts || fallbackTranscripts) {
+		lines.push(`Transcripts: ${missingTranscripts} missing · ${oversizeTranscripts} oversize · ${fallbackTranscripts} fallback`);
+	}
 	if (payload.run_id) lines.push(`Run: ${String(payload.run_id)}${payload.current_group_id ? ` · current: ${String(payload.current_group_id)}` : ""}`);
 	for (const [index, group] of groups.slice(0, 10).entries()) {
 		const project = String(group.project ?? "unknown");
