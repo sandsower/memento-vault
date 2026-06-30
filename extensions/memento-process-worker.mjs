@@ -3,13 +3,13 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, '..');
-const RESULT_START = '<<<MEMENTO_PROCESS_RESULT_START>>>';
-const RESULT_END = '<<<MEMENTO_PROCESS_RESULT_END>>>';
+export const RESULT_START = '<<<MEMENTO_PROCESS_RESULT_START>>>';
+export const RESULT_END = '<<<MEMENTO_PROCESS_RESULT_END>>>';
 
 function runBridge(args) {
   const result = spawnSync('python3', ['-m', 'memento.pi_bridge', ...args], {
@@ -34,7 +34,7 @@ function writeResultFile(path, payload) {
   renameSync(tempPath, path);
 }
 
-function parseCuratorResult(groupId, stdout) {
+export function parseCuratorResult(groupId, stdout) {
   const raw = String(stdout ?? '');
   const trimmed = raw.trim();
   if (!trimmed) {
@@ -290,7 +290,9 @@ async function main() {
   console.log(JSON.stringify({ ...finalized, run_id: start.run_id, run_dir: start.run_dir, processed_groups: processed }, null, 2));
 }
 
-main().catch((error) => {
-  console.log(JSON.stringify({ error: String(error?.message ?? error), stack: error?.stack }, null, 2));
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.log(JSON.stringify({ error: String(error?.message ?? error), stack: error?.stack }, null, 2));
+    process.exitCode = 1;
+  });
+}

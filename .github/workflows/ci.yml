@@ -44,12 +44,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
       - name: Install package and test deps
         run: python -m pip install -e ".[mcp]" pytest pyyaml numpy networkx scipy
       - name: frontmatter-schema-drift
         run: python scripts/check_frontmatter_schema.py
       - name: targeted-tests
-        run: python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py
+        run: python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py
       - name: retrieval-tests
         run: python -m pytest tests/test_tenet_*.py tests/test_multi_hop.py tests/test_deep_recall.py
       - name: mcp-server-tests
