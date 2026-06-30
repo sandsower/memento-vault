@@ -408,6 +408,51 @@ def test_automation_memory_reports_remote_sync_pending_retries(tmp_path, monkeyp
     assert remote["pending_kinds"] == ["capture"]
 
 
+def test_health_reports_local_extraction_retry_backlog_and_dead_letters(tmp_path):
+    vault = _make_vault(tmp_path / "local-retry-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    ledger.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:s1",
+                        "status": "error",
+                        "error": "llm timed out",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:s2",
+                        "status": "dead-letter",
+                        "error": "attempts exhausted",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    retry_check = health._check_local_extraction_retries(vault)
+    readiness = health.build_automation_memory_readiness(
+        config={"vault_path": str(vault), "search_backend": "grep", "search_db_path": ".search/search.db"},
+        vault=vault,
+    )
+
+    assert retry_check.status == "warn"
+    assert retry_check.details["pending_retry_count"] == 1
+    assert retry_check.details["dead_letter_count"] == 1
+    local = readiness["metadata"]["local_extraction_retries"]
+    assert readiness["status"] == "warn"
+    assert local["pending_retry_count"] == 1
+    assert local["dead_letter_count"] == 1
+
+
 def test_inception_health_warns_when_state_missing(monkeypatch):
     monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
 

@@ -183,6 +183,7 @@ def build_report(*, deep: bool = False, probe_timeout_seconds: int = _DEEP_PROBE
     checks.append(_check_pi_bridge_config())
     checks.append(_check_pi_bridge_health())
     checks.append(_check_triage_health())
+    checks.append(_check_local_extraction_retries(vault))
     checks.append(_check_retrieval_health(config=config, search_check=search_check))
     checks.append(_check_locks())
     checks.append(_check_inception(config))
@@ -612,6 +613,7 @@ def build_automation_memory_readiness(
     search = _automation_search_metadata(vault, config, search_check, qmd_available=qmd_available)
     recall = _automation_recall_metadata(config=config, search_check=search_check)
     remote_sync = _automation_remote_sync_metadata(vault)
+    local_extraction_retries = _local_extraction_retry_metadata(vault)
     last_packet = _last_successful_automation_packet()
     common_failure_reasons = _common_automation_failure_reasons(vault)
 
@@ -646,6 +648,16 @@ def build_automation_memory_readiness(
             status = WARN
             readiness = "degraded"
         degradations.append("remote_sync_pending_retries")
+    if local_extraction_retries.get("pending_retry_count", 0):
+        if status != FAIL:
+            status = WARN
+            readiness = "degraded"
+        degradations.append("local_extraction_pending_retries")
+    if local_extraction_retries.get("dead_letter_count", 0):
+        if status != FAIL:
+            status = WARN
+            readiness = "degraded"
+        degradations.append("local_extraction_dead_letters")
 
     message = f"automation memory {readiness}"
     if degradations:
@@ -664,6 +676,7 @@ def build_automation_memory_readiness(
         "search": search,
         "recall": recall,
         "remote_sync": remote_sync,
+        "local_extraction_retries": local_extraction_retries,
         "last_successful_packet": last_packet,
         "common_failure_reasons": common_failure_reasons,
         "probe": {
@@ -766,6 +779,73 @@ def _automation_recall_metadata(
     if remediation:
         metadata["remediation"] = remediation
     return metadata
+
+
+def _local_extraction_retry_metadata(vault: Path) -> dict[str, Any]:
+    ledger = vault / ".sync" / "ledger.jsonl"
+    metadata: dict[str, Any] = {
+        "checked": True,
+        "check": "local_sync_ledger",
+        "ledger_path": str(ledger),
+        "pending_retry_count": 0,
+        "dead_letter_count": 0,
+    }
+    if not ledger.exists():
+        metadata["reason"] = "sync_ledger_missing"
+        return metadata
+
+    current: dict[tuple[str, str], dict[str, Any]] = {}
+    error_count = dead_letter_count = ok_count = 0
+    last_error = last_dead_letter = None
+    for rec in _iter_jsonl(ledger):
+        if rec.get("kind") != "local-extraction":
+            continue
+        source = str(rec.get("source") or "")
+        if not source:
+            continue
+        status = rec.get("status")
+        if status == "ok":
+            ok_count += 1
+        elif status == "error":
+            error_count += 1
+            last_error = rec.get("ts") or last_error
+        elif status == "dead-letter":
+            dead_letter_count += 1
+            last_dead_letter = rec.get("ts") or last_dead_letter
+        current[("local-extraction", source)] = rec
+
+    pending = [rec for rec in current.values() if rec.get("status") == "error"]
+    dead_letters = [rec for rec in current.values() if rec.get("status") == "dead-letter"]
+    metadata.update(
+        {
+            "ok_count": ok_count,
+            "error_count": error_count,
+            "dead_letter_event_count": dead_letter_count,
+            "pending_retry_count": len(pending),
+            "dead_letter_count": len(dead_letters),
+            "last_error_at": last_error,
+            "last_dead_letter_at": last_dead_letter,
+            "pending_sources": sorted(str(rec.get("source")) for rec in pending)[:20],
+            "dead_letter_sources": sorted(str(rec.get("source")) for rec in dead_letters)[:20],
+        }
+    )
+    return metadata
+
+
+def _check_local_extraction_retries(vault: Path) -> CheckResult:
+    metadata = _local_extraction_retry_metadata(vault)
+    pending = int(metadata.get("pending_retry_count") or 0)
+    dead_letters = int(metadata.get("dead_letter_count") or 0)
+    if dead_letters:
+        status = WARN
+        message = f"local extraction retry backlog has {pending} pending and {dead_letters} dead-lettered item(s)"
+    elif pending:
+        status = WARN
+        message = f"local extraction retry backlog has {pending} pending item(s)"
+    else:
+        status = PASS
+        message = "local extraction retry backlog is empty"
+    return CheckResult("local extraction retries", status, message, metadata)
 
 
 def _automation_remote_sync_metadata(vault: Path) -> dict[str, Any]:
