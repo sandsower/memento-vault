@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "description": "Static memento-vault benchmark task set for future Rondo clean evaluators and agent-development experiments.",
   "tasks": [
     {
@@ -48,7 +48,13 @@
         "memento_queries": [
           "memento-vault Rondo Beislið harness research benchmark task set",
           "checkpoint memento-vault rondo beisli harness research"
-        ]
+        ],
+        "expected_query_intent": "Recall prior Rondo and Beislið harness research so the benchmark task fixture captures evaluator categories, gates, and failure-mode rubrics.",
+        "useful_note_refs": [
+          "benchmark/rondo/tasks.json",
+          "benchmark/rondo/README.md"
+        ],
+        "memory_token_budget": 1200
       },
       "rubric": {
         "success": "A clean evaluator can parse the fixture, select representative tasks, and understand expected files, gates, risks, and failure classification without reading the live issue tracker.",
@@ -101,7 +107,10 @@
           "README.md",
           "pyproject.toml"
         ],
-        "memento_queries": []
+        "memento_queries": [],
+        "expected_query_intent": "No vault memory required; use repository CI and Beislið gate documentation only.",
+        "useful_note_refs": [],
+        "memory_token_budget": 0
       },
       "rubric": {
         "success": "A GitHub Actions workflow provides fast safe checks with clear logs and no mandatory optional-heavy setup.",
@@ -157,7 +166,10 @@
           "package.json",
           "VERSION"
         ],
-        "memento_queries": []
+        "memento_queries": [],
+        "expected_query_intent": "No vault memory required; use repository release, install, and packaging surfaces only.",
+        "useful_note_refs": [],
+        "memory_token_budget": 0
       },
       "rubric": {
         "success": "The repo gains a documented fast smoke path that exercises help/version/install metadata and clearly marks heavy checks optional.",
@@ -209,7 +221,10 @@
           "memento/store.py",
           "tests/test_store.py"
         ],
-        "memento_queries": []
+        "memento_queries": [],
+        "expected_query_intent": "No vault memory required; use current frontmatter docs and writer implementations only.",
+        "useful_note_refs": [],
+        "memory_token_budget": 0
       },
       "rubric": {
         "success": "A drift check fails when documented frontmatter diverges from implemented writers while allowing legitimate optional fields.",
@@ -261,7 +276,10 @@
           "docs/configuration.md",
           "memento/mcp_server.py"
         ],
-        "memento_queries": []
+        "memento_queries": [],
+        "expected_query_intent": "No vault memory required; use current MCP server and documentation surfaces only.",
+        "useful_note_refs": [],
+        "memory_token_budget": 0
       },
       "rubric": {
         "success": "A repeatable check or generator keeps public MCP docs synchronized with the registered tool surface.",
@@ -315,7 +333,13 @@
         "memento_queries": [
           "recall search failures health diagnostics no-results backend unavailable low-signal",
           "issue 36 memento-vault health report semantics"
-        ]
+        ],
+        "expected_query_intent": "Recall prior health-report semantics and retrieval degradation decisions so diagnostics classify no-results, backend failures, and low-signal skips consistently.",
+        "useful_note_refs": [
+          "docs/configuration.md",
+          "memento/health.py"
+        ],
+        "memory_token_budget": 1200
       },
       "rubric": {
         "success": "Health diagnostics identify degraded recall/search behavior with sanitized, actionable detail in JSON/verbose output.",
@@ -366,7 +390,10 @@
           "memento/search.py",
           "README.md"
         ],
-        "memento_queries": []
+        "memento_queries": [],
+        "expected_query_intent": "No vault memory required; use current MCP search response contract and docs only.",
+        "useful_note_refs": [],
+        "memory_token_budget": 0
       },
       "rubric": {
         "success": "memento_search supports explicit detail/budget controls while existing default behavior remains backward compatible.",
@@ -423,7 +450,13 @@
         ],
         "memento_queries": [
           "Pi auto-capture parity Claude triage SessionEnd queued captures"
-        ]
+        ],
+        "expected_query_intent": "Recall Pi auto-capture parity decisions so SessionEnd queued-capture behavior matches Claude triage semantics without duplicating run evidence.",
+        "useful_note_refs": [
+          "memento/pi_bridge.py",
+          "memento/lifecycle.py"
+        ],
+        "memory_token_budget": 1200
       },
       "rubric": {
         "success": "Pi capture behavior follows the same triage intent as Claude SessionEnd without unbounded opaque queue growth.",
@@ -475,7 +508,10 @@
           "hooks/vault-recall.py",
           "docs/configuration.md"
         ],
-        "memento_queries": []
+        "memento_queries": [],
+        "expected_query_intent": "No vault memory required; use current hook and wrapper behavior only.",
+        "useful_note_refs": [],
+        "memory_token_budget": 0
       },
       "rubric": {
         "success": "Headless workers can opt into stricter non-interactive behavior without regressing normal interactive sessions.",
@@ -529,7 +565,13 @@
         ],
         "memento_queries": [
           "Pi auto-capture parity with Claude triage provenance source pi session note"
-        ]
+        ],
+        "expected_query_intent": "Recall Pi and Claude triage provenance decisions so source, session, and note metadata remain comparable across agents.",
+        "useful_note_refs": [
+          "memento/pi_bridge.py",
+          "hooks/memento-triage.py"
+        ],
+        "memory_token_budget": 1200
       },
       "rubric": {
         "success": "Pi and Claude capture paths have documented, tested parity for durable knowledge extraction semantics.",

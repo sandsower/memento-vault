@@ -343,6 +343,42 @@ def test_build_report_adds_behavior_recommendations_without_leaking_queries(tmp_
     assert "Recommendations" in html
 
 
+def test_retrieval_report_consumes_benchmark_memory_outcomes(tmp_path):
+    outcomes = [
+        {
+            "task_id": "mv-a",
+            "memory_used": True,
+            "memory_classification": "used_relevant_memory",
+            "memory_contribution_measurable": True,
+            "retrieval_latency_ms": 120,
+            "memory_token_budget": 900,
+        },
+        {
+            "task_id": "mv-b",
+            "memory_used": True,
+            "memory_classification": "irrelevant_memory",
+            "memory_failure_type": "irrelevant_memory",
+            "retrieval_latency_ms": 240,
+            "memory_token_budget": 1200,
+        },
+    ]
+    outcome_path = tmp_path / "outcomes.jsonl"
+    outcome_path.write_text("\n".join(json.dumps(item) for item in outcomes) + "\n", encoding="utf-8")
+
+    loaded = retrieval_dashboard.load_benchmark_outcomes(outcome_path)
+    report = retrieval_dashboard.build_report([], vault_path=tmp_path, benchmark_outcomes=loaded)
+    text = retrieval_dashboard.render_text_report(report)
+    html = retrieval_dashboard.render_html_report(report)
+
+    assert report["benchmark_outcomes"]["count"] == 2
+    assert report["benchmark_outcomes"]["memory_used"] == 2
+    assert report["benchmark_outcomes"]["memory_contribution_measurable"] == 1
+    assert report["benchmark_outcomes"]["failures"] == {"irrelevant_memory": 1}
+    assert "Benchmark memory outcomes" in text
+    assert "irrelevant_memory: 1" in text
+    assert "Benchmark memory outcomes" in html
+
+
 def test_main_writes_html_dashboard(tmp_path, capsys, monkeypatch):
     vault = tmp_path / "vault"
     vault.mkdir()

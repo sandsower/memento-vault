@@ -181,6 +181,36 @@ def load_access_entries(log_path: str | Path | None = None, since_days: int | No
     return _load_jsonl(Path(log_path or DEFAULT_ACCESS_LOG), since_days=since_days)
 
 
+def load_benchmark_outcomes(path: str | Path | None = None) -> list[dict[str, Any]]:
+    """Load sanitized benchmark outcome/classification summaries for report enrichment."""
+    if path is None:
+        return []
+    source = Path(path).expanduser()
+    if not source.exists():
+        return []
+    text = source.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+    try:
+        if text.startswith("[") or text.startswith("{"):
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                values = [json.loads(line) for line in text.splitlines() if line.strip()]
+            else:
+                if isinstance(payload, dict):
+                    values = payload.get("classifications") or payload.get("outcomes") or payload.get("summaries") or []
+                else:
+                    values = payload
+        else:
+            values = [json.loads(line) for line in text.splitlines() if line.strip()]
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(values, list):
+        return []
+    return [value for value in values if isinstance(value, dict)]
+
+
 def _query_digest(entry: dict[str, Any]) -> str | None:
     for key in ("query", "prompt", "topic", "body"):
         value = entry.get(key)
@@ -356,7 +386,8 @@ def _note_insights(vault: Path, entries: list[dict[str, Any]], access_stats: dic
         lookup_keys = (key, rel_path, resolved.name, resolved.stem)
         bucket = next((access_stats[k] for k in lookup_keys if k in access_stats), None)
         events = bucket.get("events", []) if isinstance(bucket, dict) else []
-        last_access = max((_parse_ts(event.get("ts")) for event in events), default=None)
+        parsed_accesses = [ts for ts in (_parse_ts(event.get("ts")) for event in events) if ts is not None]
+        last_access = max(parsed_accesses, default=None)
         insights.append(
             {
                 "path": rel_path,
@@ -830,6 +861,56 @@ def _retrieval_recommendations(
     return recommendations
 
 
+def _benchmark_outcomes_section(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+    classifications = Counter(
+        str(item.get("memory_classification") or item.get("classification") or "unknown") for item in outcomes
+    )
+    failures = Counter(
+        str(item.get("memory_failure_type") or item.get("failure_type"))
+        for item in outcomes
+        if item.get("memory_failure_type") or item.get("failure_type")
+    )
+    latencies = [
+        _safe_int(item.get("retrieval_latency_ms") or item.get("latency_ms"))
+        for item in outcomes
+        if item.get("retrieval_latency_ms") is not None or item.get("latency_ms") is not None
+    ]
+    token_budgets = [
+        _safe_int(item.get("memory_token_budget") or item.get("token_budget"))
+        for item in outcomes
+        if item.get("memory_token_budget") is not None or item.get("token_budget") is not None
+    ]
+    memory_used = sum(1 for item in outcomes if item.get("memory_used") is True)
+    measurable = sum(1 for item in outcomes if item.get("memory_contribution_measurable") is True)
+    return {
+        "count": len(outcomes),
+        "memory_used": memory_used,
+        "memory_contribution_measurable": measurable,
+        "classifications": dict(sorted(classifications.items())),
+        "failures": dict(sorted(failures.items())),
+        "latency_avg_ms": round(_avg(latencies), 1) if latencies else None,
+        "latency_p95_ms": round(_p95(latencies), 1) if latencies else None,
+        "token_budget_avg": round(_avg(token_budgets), 1) if token_budgets else None,
+        "token_budget_p95": round(_p95(token_budgets), 1) if token_budgets else None,
+        "recent_failures": [
+            _summarize_benchmark_outcome(item)
+            for item in outcomes
+            if item.get("memory_failure_type") or item.get("failure_type")
+        ][-DEFAULT_NOTE_LIMIT:],
+    }
+
+
+def _summarize_benchmark_outcome(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": str(item.get("task_id") or item.get("id") or "?"),
+        "classification": str(item.get("memory_classification") or item.get("classification") or "unknown"),
+        "failure_type": str(item.get("memory_failure_type") or item.get("failure_type") or ""),
+        "memory_used": bool(item.get("memory_used")),
+        "retrieval_latency_ms": item.get("retrieval_latency_ms") or item.get("latency_ms"),
+        "memory_token_budget": item.get("memory_token_budget") or item.get("token_budget"),
+    }
+
+
 def build_report(
     entries: list[dict[str, Any]],
     *,
@@ -838,12 +919,14 @@ def build_report(
     access_stats: dict[str, Any] | None = None,
     access_entries: list[dict[str, Any]] | None = None,
     triage_health_entries: list[dict[str, Any]] | None = None,
+    benchmark_outcomes: list[dict[str, Any]] | None = None,
     event_limit: int = DEFAULT_EVENT_LIMIT,
     note_limit: int = DEFAULT_NOTE_LIMIT,
 ) -> dict[str, Any]:
     vault = Path(vault_path or get_vault()).expanduser()
     access_stats = access_stats if access_stats is not None else load_access_log_stats()
     triage_health = triage_health_entries if triage_health_entries is not None else load_triage_health_entries()
+    benchmark_outcomes = benchmark_outcomes or []
     tool_context = _tool_context_section(entries)
     recent_entries = entries[-max(1, event_limit) :]
 
@@ -869,6 +952,7 @@ def build_report(
         "inception": _inception_section(entries),
         "recent_events": [_summarize_entry(entry, include_sensitive=include_sensitive) for entry in recent_entries],
         "candidate_snapshots": tool_context["candidate_snapshots"],
+        "benchmark_outcomes": _benchmark_outcomes_section(benchmark_outcomes),
         "top_notes": _note_insights(vault, entries, access_stats)[:note_limit],
     }
 
@@ -935,6 +1019,32 @@ def render_text_report(report: dict[str, Any]) -> str:
     else:
         for rec in recommendations:
             lines.append(f"  • {rec['title']}: {rec['summary']}")
+    lines.append("")
+
+    benchmark = report.get("benchmark_outcomes", {})
+    lines += ["--- Benchmark memory outcomes ---"]
+    if not benchmark or benchmark.get("count", 0) == 0:
+        lines.append("  No benchmark outcome file supplied.")
+    else:
+        lines += [
+            f"  Outcomes: {benchmark['count']}",
+            f"  Memory used: {benchmark['memory_used']} ({_pct(benchmark['memory_used'], benchmark['count'])})",
+            f"  Measurable contribution: {benchmark['memory_contribution_measurable']} ({_pct(benchmark['memory_contribution_measurable'], benchmark['count'])})",
+        ]
+        if benchmark.get("latency_avg_ms") is not None:
+            lines.append(
+                f"  Retrieval latency: avg {benchmark['latency_avg_ms']}ms, p95 {benchmark['latency_p95_ms']}ms"
+            )
+        if benchmark.get("token_budget_avg") is not None:
+            lines.append(f"  Token budget: avg {benchmark['token_budget_avg']}, p95 {benchmark['token_budget_p95']}")
+        if benchmark.get("classifications"):
+            lines.append("  Classification distribution:")
+            for name, count in sorted(benchmark["classifications"].items(), key=lambda item: (-item[1], item[0])):
+                lines.append(f"    {name}: {count}")
+        if benchmark.get("failures"):
+            lines.append("  Memory failure distribution:")
+            for name, count in sorted(benchmark["failures"].items(), key=lambda item: (-item[1], item[0])):
+                lines.append(f"    {name}: {count}")
     lines.append("")
 
     briefing = report["briefing"]
@@ -1048,6 +1158,7 @@ def render_html_report(report: dict[str, Any]) -> str:
     briefing = report["briefing"]
     triage_health = report["triage_health"]
     inception = report["inception"]
+    benchmark = report.get("benchmark_outcomes", {})
 
     summary = _html_grid(
         [
@@ -1063,6 +1174,7 @@ def render_html_report(report: dict[str, Any]) -> str:
             if tool_context["calls"]
             else ("Tool context injected", "0 / 0"),
             ("Privacy", "sensitive previews enabled" if privacy["include_sensitive"] else "redacted by default"),
+            ("Benchmark outcomes", benchmark.get("count", 0)),
         ]
     )
 
@@ -1080,6 +1192,14 @@ def render_html_report(report: dict[str, Any]) -> str:
     ]
     candidate_rows = [
         [c["path"], c["title"], c["score"], c["decision"]] for c in tool_context.get("candidate_snapshots", [])
+    ]
+    benchmark_rows = [
+        [name, count]
+        for name, count in sorted(benchmark.get("classifications", {}).items(), key=lambda item: (-item[1], item[0]))
+    ]
+    benchmark_failure_rows = [
+        [name, count]
+        for name, count in sorted(benchmark.get("failures", {}).items(), key=lambda item: (-item[1], item[0]))
     ]
     event_rows = []
     for event in report["recent_events"]:
@@ -1162,6 +1282,29 @@ def render_html_report(report: dict[str, Any]) -> str:
             ),
             _section(
                 "Recommendations", _html_bullets([f"{rec['title']}: {rec['summary']}" for rec in recommendations])
+            ),
+            _section(
+                "Benchmark memory outcomes",
+                _html_grid(
+                    [
+                        ("Outcomes", benchmark.get("count", 0)),
+                        ("Memory used", f"{benchmark.get('memory_used', 0)} / {benchmark.get('count', 0)}"),
+                        (
+                            "Measurable contribution",
+                            f"{benchmark.get('memory_contribution_measurable', 0)} / {benchmark.get('count', 0)}",
+                        ),
+                        (
+                            "Latency avg / p95",
+                            f"{benchmark.get('latency_avg_ms') or '-'} / {benchmark.get('latency_p95_ms') or '-'} ms",
+                        ),
+                        (
+                            "Token budget avg / p95",
+                            f"{benchmark.get('token_budget_avg') or '-'} / {benchmark.get('token_budget_p95') or '-'}",
+                        ),
+                    ]
+                )
+                + _html_table(["Classification", "Count"], benchmark_rows, empty="No benchmark outcomes supplied")
+                + _html_table(["Failure type", "Count"], benchmark_failure_rows, empty="No benchmark memory failures"),
             ),
             _section("Triage health", triage_health_body),
             _section(
@@ -1258,6 +1401,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--include-sensitive", action="store_true", help="Include sanitized query/body previews")
     parser.add_argument("--retrieval-log", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--triage-health-log", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--benchmark-outcomes",
+        type=str,
+        default=None,
+        help="Optional sanitized Rondo benchmark outcome report (JSON/JSONL) to summarize",
+    )
     parser.add_argument("--access-log", type=str, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
@@ -1267,11 +1416,13 @@ def main(argv: list[str] | None = None) -> int:
     entries = load_retrieval_entries(retrieval_log, since_days=args.since)
     triage_health_entries = load_triage_health_entries(triage_health_log, since_days=args.since)
     access_entries = load_access_entries(access_log, since_days=args.since)
+    benchmark_outcomes = load_benchmark_outcomes(args.benchmark_outcomes)
     report = build_report(
         entries,
         include_sensitive=args.include_sensitive,
         triage_health_entries=triage_health_entries,
         access_entries=access_entries,
+        benchmark_outcomes=benchmark_outcomes,
         event_limit=max(1, args.limit),
         note_limit=max(1, args.note_limit),
     )

@@ -229,7 +229,7 @@ python tools/analyze-retrieval.py
 python tools/analyze-retrieval.py --since 7
 ```
 
-Alerts when avg recall latency crosses 700ms or P95 crosses 1.5s.
+Alerts when avg recall latency crosses 700ms or P95 crosses 1.5s. Rondo benchmark memory outcome reports from `benchmark/rondo/evaluation.py` can be included with `memento-vault retrieval-report --benchmark-outcomes /path/to/rondo-memory-report.json` to summarize memory-use classifications, memory-not-retrieved vs irrelevant-memory failures, retrieval latency, and token budgets.
 
 ## Parameter space
 
