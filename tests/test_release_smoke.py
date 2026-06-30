@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -7,6 +8,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "release_smoke.py"
+
+spec = importlib.util.spec_from_file_location("release_smoke", SCRIPT)
+release_smoke = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = release_smoke
+assert spec.loader is not None
+spec.loader.exec_module(release_smoke)
 
 
 def run_smoke(*args, cwd=REPO_ROOT):
@@ -39,6 +46,26 @@ def test_release_smoke_default_safe_subset_passes():
     assert "PASS version consistency" in result.stdout
     assert "PASS cli help" in result.stdout
     assert "PASS python module help" in result.stdout
+
+
+def test_release_smoke_reports_python_runtime_below_declared_requirement(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.10"\n')
+
+    result = release_smoke.check_python_runtime_requirement(tmp_path, version_info=(3, 9, 6))
+
+    assert result.status == "FAIL"
+    assert "requires Python >=3.10" in result.detail
+    assert "running Python 3.9.6" in result.detail
+    assert "Rebuild .venv" in result.detail
+
+
+def test_release_smoke_accepts_python_runtime_matching_declared_requirement(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.10"\n')
+
+    result = release_smoke.check_python_runtime_requirement(tmp_path, version_info=(3, 10, 0))
+
+    assert result.status == "PASS"
+    assert "satisfies" in result.detail
 
 
 def test_release_smoke_reports_actionable_version_mismatch(tmp_path):
