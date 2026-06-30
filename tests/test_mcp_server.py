@@ -715,7 +715,7 @@ class TestLifecycleRetrievalTools:
         result = mcp_server.memento_briefing(cwd="/home/vic/Projects/memento-vault", session_id="s1")
 
         assert result == expected
-        mock_build_briefing.assert_called_once_with("/home/vic/Projects/memento-vault", "s1")
+        mock_build_briefing.assert_called_once_with("/home/vic/Projects/memento-vault", "s1", host_id="mcp")
 
     @patch("memento.mcp_server.build_recall")
     def test_recall_delegates_to_lifecycle(self, mock_build_recall):
@@ -734,7 +734,9 @@ class TestLifecycleRetrievalTools:
         )
 
         assert result == expected
-        mock_build_recall.assert_called_once_with("How should we handle Redis cache invalidation?", "/repo", "s1")
+        mock_build_recall.assert_called_once_with(
+            "How should we handle Redis cache invalidation?", "/repo", "s1", host_id="mcp"
+        )
 
     @patch("memento.mcp_server.build_tool_context")
     def test_tool_context_delegates_to_lifecycle(self, mock_build_tool_context):
@@ -754,7 +756,9 @@ class TestLifecycleRetrievalTools:
         )
 
         assert result == expected
-        mock_build_tool_context.assert_called_once_with("read", "src/server/authMiddleware.ts", "/repo", "s1")
+        mock_build_tool_context.assert_called_once_with(
+            "read", "src/server/authMiddleware.ts", "/repo", "s1", host_id="mcp"
+        )
 
     @patch("memento.mcp_server.build_session_context")
     def test_session_context_delegates_to_lifecycle(self, mock_build_session_context):
@@ -789,6 +793,7 @@ class TestLifecycleRetrievalTools:
             True,
             True,
             True,
+            host_id="mcp",
         )
 
 

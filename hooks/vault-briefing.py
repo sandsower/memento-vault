@@ -36,6 +36,7 @@ def main() -> None:
     result = build_briefing(
         hook_input.get("cwd", ""),
         hook_input.get("session_id", "unknown"),
+        host_id="claude",
     )
     if result.should_inject:
         print(result.content)

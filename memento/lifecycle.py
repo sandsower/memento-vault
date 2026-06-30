@@ -517,21 +517,109 @@ def _find_hook_script(name):
     return None
 
 
-def _deferred_scope(project_slug: str, session_id: str, cwd: str = "") -> dict:
-    return {
+def _safe_scope_part(value: object, default: str = "unknown") -> str:
+    text = str(value or default).strip() or default
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", text)[:120]
+
+
+def runtime_host_id(host_id: str | None = None) -> str:
+    """Return a stable runtime host identifier for shared hook state scoping."""
+    if host_id:
+        return _safe_scope_part(host_id)
+    for env_name in ("MEMENTO_HOST_ID", "MEMENTO_HOST", "MEMENTO_CLIENT", "MEMENTO_ADAPTER"):
+        value = os.environ.get(env_name)
+        if value:
+            return _safe_scope_part(value)
+    return "unknown-host"
+
+
+def _runtime_scope(
+    session_id: str = "unknown",
+    cwd: str = "",
+    project_slug: str | None = None,
+    host_id: str | None = None,
+) -> dict:
+    if project_slug is None:
+        if cwd:
+            try:
+                project_slug, _ = detect_project(cwd, None)
+            except Exception:
+                project_slug = "unknown"
+        else:
+            project_slug = "unknown"
+    try:
+        normalized_cwd = os.path.realpath(os.path.expanduser(cwd)).rstrip("/") if cwd else ""
+    except (OSError, ValueError):
+        normalized_cwd = str(Path(cwd).expanduser()) if cwd else ""
+    scope = {
+        "host_id": runtime_host_id(host_id),
         "project_slug": project_slug or "unknown",
         "session_id": session_id or "unknown",
-        "cwd": str(Path(cwd).expanduser()) if cwd else "",
+        "cwd": normalized_cwd,
     }
+    raw = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+    scope["scope_id"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return scope
 
 
-def deferred_briefing_path(project_slug: str = "unknown", session_id: str = "unknown", cwd: str = "") -> str:
-    """Return the session/project-scoped deferred briefing file path."""
-    scope = _deferred_scope(project_slug, session_id, cwd)
-    raw = "\0".join([scope["project_slug"], scope["session_id"], scope["cwd"]])
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+def _scope_storage_key(scope: dict) -> str:
+    return ":".join(
+        [
+            _safe_scope_part(scope.get("host_id")),
+            _safe_scope_part(scope.get("project_slug")),
+            _safe_scope_part(scope.get("session_id")),
+            _safe_scope_part(scope.get("scope_id")),
+        ]
+    )
+
+
+def _deferred_scope(project_slug: str, session_id: str, cwd: str = "", host_id: str | None = None) -> dict:
+    return _runtime_scope(session_id, cwd, project_slug, host_id)
+
+
+def deferred_briefing_path(
+    project_slug: str = "unknown", session_id: str = "unknown", cwd: str = "", host_id: str | None = None
+) -> str:
+    """Return the host/session/project-scoped deferred briefing file path."""
+    scope = _deferred_scope(project_slug, session_id, cwd, host_id)
     base = Path(DEFERRED_BRIEFING_PATH)
-    return str(base.with_name(f"{base.stem}-{digest}{base.suffix}"))
+    return str(base.with_name(f"{base.stem}-{scope['scope_id']}{base.suffix}"))
+
+
+def _lock_file(file_obj) -> None:
+    try:
+        import fcntl
+
+        fcntl.flock(file_obj, fcntl.LOCK_EX)
+    except (ImportError, OSError):
+        pass
+
+
+def _read_json_locked(path: str, default=None):
+    try:
+        with open(path, "a+") as f:
+            _lock_file(f)
+            f.seek(0)
+            raw = f.read()
+            if not raw.strip():
+                return default
+            return json.loads(raw)
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+def _write_json_locked(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a+") as f:
+        _lock_file(f)
+        f.seek(0)
+        f.truncate()
+        json.dump(payload, f)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
 
 
 def _deferred_is_expired(data: dict, ttl_seconds: int = 60) -> bool:
@@ -543,13 +631,44 @@ def _deferred_is_expired(data: dict, ttl_seconds: int = 60) -> bool:
     return (time.time() - timestamp_float) > ttl_seconds
 
 
-def _deferred_scope_matches(data: dict, project_slug: str, session_id: str) -> bool:
+def _deferred_scope_matches(data: dict, project_slug: str, session_id: str, host_id: str | None = None) -> bool:
     scope = data.get("scope") or data.get("params", {}).get("scope") or {}
     if not isinstance(scope, dict):
         return False
-    return scope.get("project_slug") == (project_slug or "unknown") and scope.get("session_id") == (
-        session_id or "unknown"
+    expected = _deferred_scope(project_slug or "unknown", session_id or "unknown", scope.get("cwd", ""), host_id)
+    return (
+        scope.get("project_slug") == expected["project_slug"]
+        and scope.get("session_id") == expected["session_id"]
+        and scope.get("host_id", "unknown-host") == expected["host_id"]
     )
+
+
+def cleanup_deferred_briefings(max_files: int = 100) -> None:
+    """Remove expired/corrupt deferred files and cap scoped deferred state."""
+    base = Path(DEFERRED_BRIEFING_PATH)
+    parent = base.parent
+    if not parent.exists():
+        return
+    candidates = [p for p in parent.glob(f"{base.stem}-*{base.suffix}") if p != base]
+    live: list[tuple[float, Path]] = []
+    for path in candidates:
+        data = _read_json_locked(str(path), default=None)
+        if not isinstance(data, dict) or _deferred_is_expired(data, DEFERRED_BRIEFING_TTL_SECONDS):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        timestamp = data.get("timestamp") or data.get("params", {}).get("timestamp") or 0
+        try:
+            live.append((float(timestamp), path))
+        except (TypeError, ValueError):
+            live.append((0.0, path))
+    for _ts, path in sorted(live, reverse=True)[max_files:]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _cleanup_legacy_deferred_briefing(scoped_path: str) -> None:
@@ -569,8 +688,10 @@ def _cleanup_legacy_deferred_briefing(scoped_path: str) -> None:
             pass
 
 
-def spawn_deferred_search(project_slug, git_branch, linked_notes, config, session_id="unknown"):
-    """Spawn a background subprocess to run QMD search and write results."""
+def spawn_deferred_search(
+    project_slug, git_branch, linked_notes, config, session_id="unknown", host_id: str | None = None
+):
+    """Spawn a background subprocess to run QMD search and write scoped results."""
     max_notes = config.get("briefing_max_notes", 5)
     min_score = config.get("briefing_min_score", 0.3)
 
@@ -581,8 +702,9 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config, sessio
         query_parts.append(branch_words)
 
     cwd = config.get("_cwd", "")
-    scope = _deferred_scope(project_slug, session_id, cwd)
-    deferred_path = deferred_briefing_path(project_slug, session_id, cwd)
+    scope = _deferred_scope(project_slug, session_id, cwd, host_id)
+    deferred_path = deferred_briefing_path(project_slug, session_id, cwd, host_id)
+    cleanup_deferred_briefings()
 
     # Write the search params for the background worker
     params = {
@@ -607,8 +729,10 @@ def spawn_deferred_search(project_slug, git_branch, linked_notes, config, sessio
         return
 
     try:
-        with open(deferred_path, "w") as f:
-            json.dump({"status": "pending", "params": params, "scope": scope, "timestamp": params["timestamp"]}, f)
+        _write_json_locked(
+            deferred_path,
+            {"status": "pending", "params": params, "scope": scope, "timestamp": params["timestamp"]},
+        )
 
         # Spawn background worker — the same script with --deferred flag
         _subprocess.Popen(
@@ -630,8 +754,7 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
     """Background worker: run QMD search and write results to the scoped deferred file."""
     path = deferred_path or DEFERRED_BRIEFING_PATH
     try:
-        with open(path) as f:
-            data = json.load(f)
+        data = _read_json_locked(path, default={})
 
         if data.get("status") != "pending" or _deferred_is_expired(data, DEFERRED_BRIEFING_TTL_SECONDS):
             try:
@@ -694,17 +817,16 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
                 session_id=params.get("session_id", "unknown"),
                 result_count=len(final_paths),
             )
-        with open(path, "w") as f:
-            json.dump(
-                {
-                    "status": "ready",
-                    "note_lines": final_notes,
-                    "timestamp": time.time(),
-                    "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
-                    "scope": scope,
-                },
-                f,
-            )
+        _write_json_locked(
+            path,
+            {
+                "status": "ready",
+                "note_lines": final_notes,
+                "timestamp": time.time(),
+                "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
+                "scope": scope,
+            },
+        )
 
         injected_chars = sum(len(line) for line in final_notes)
         log_retrieval(
@@ -724,7 +846,7 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
             pass
 
 
-def run_remote_briefing(cwd, config, session_id="unknown"):
+def run_remote_briefing(cwd, config, session_id="unknown", host_id: str | None = None):
     """Run briefing via the remote vault client. Returns content or None."""
     from memento.remote_client import status as remote_status, search as remote_search
 
@@ -753,28 +875,30 @@ def run_remote_briefing(cwd, config, session_id="unknown"):
             title = result.get("title", "")
             note_lines.append(f"  - {title}")
 
-        scope = _deferred_scope(project_slug, session_id, cwd)
-        deferred_path = deferred_briefing_path(project_slug, session_id, cwd)
-        with open(deferred_path, "w") as f:
-            json.dump(
-                {
-                    "status": "ready",
-                    "note_lines": note_lines,
-                    "timestamp": time.time(),
-                    "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
-                    "source": "remote",
-                    "scope": scope,
-                },
-                f,
-            )
+        scope = _deferred_scope(project_slug, session_id, cwd, host_id)
+        deferred_path = deferred_briefing_path(project_slug, session_id, cwd, host_id)
+        _write_json_locked(
+            deferred_path,
+            {
+                "status": "ready",
+                "note_lines": note_lines,
+                "timestamp": time.time(),
+                "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
+                "source": "remote",
+                "scope": scope,
+            },
+        )
 
     return summary
 
 
-def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: bool = True) -> LifecycleResult:
+def build_briefing(
+    cwd: str, session_id: str = "unknown", *, allow_deferred: bool = True, host_id: str | None = None
+) -> LifecycleResult:
     """Build session-start briefing content."""
     config = get_config()
-    metadata = {"cwd": cwd, "session_id": session_id}
+    host_id = runtime_host_id(host_id)
+    metadata = {"cwd": cwd, "session_id": session_id, "host_id": host_id}
 
     def no_briefing(reason: str) -> LifecycleResult:
         return LifecycleResult(False, "", "briefing", reason=reason, metadata=metadata)
@@ -788,7 +912,7 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
 
     if is_remote() and allow_deferred:
         try:
-            remote_content = run_remote_briefing(cwd, config, session_id)
+            remote_content = run_remote_briefing(cwd, config, session_id, host_id=host_id)
             if remote_content:
                 return LifecycleResult(True, remote_content, "briefing", metadata={**metadata, "remote": True})
         except Exception as exc:
@@ -839,19 +963,18 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
                     title = note.get("title", "")
                     note_lines.append(f"  - {title}")
                 record_access_hits("briefing", "project-maps", map_notes[:max_notes], session_id=session_id)
-                scope = _deferred_scope(project_slug, session_id, cwd)
-                with open(deferred_briefing_path(project_slug, session_id, cwd), "w") as f:
-                    json.dump(
-                        {
-                            "status": "ready",
-                            "note_lines": note_lines,
-                            "timestamp": time.time(),
-                            "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
-                            "source": "project-maps",
-                            "scope": scope,
-                        },
-                        f,
-                    )
+                scope = _deferred_scope(project_slug, session_id, cwd, host_id)
+                _write_json_locked(
+                    deferred_briefing_path(project_slug, session_id, cwd, host_id),
+                    {
+                        "status": "ready",
+                        "note_lines": note_lines,
+                        "timestamp": time.time(),
+                        "ttl_seconds": DEFERRED_BRIEFING_TTL_SECONDS,
+                        "source": "project-maps",
+                        "scope": scope,
+                    },
+                )
                 log_retrieval(
                     "briefing", "project-maps-fast-path", project=project_slug, injected_count=len(note_lines)
                 )
@@ -866,7 +989,7 @@ def build_briefing(cwd: str, session_id: str = "unknown", *, allow_deferred: boo
 
     if allow_deferred and has_qmd():
         config["_cwd"] = cwd
-        spawn_deferred_search(project_slug, git_branch, linked_notes, config, session_id=session_id)
+        spawn_deferred_search(project_slug, git_branch, linked_notes, config, session_id=session_id, host_id=host_id)
 
     return LifecycleResult(True, "\n".join(lines), "briefing", metadata=metadata)
 
@@ -1191,8 +1314,18 @@ def _recall_dedup_prompts():
         return 3
 
 
+def _recall_scope_key(
+    session_id: str = "unknown",
+    cwd: str = "",
+    project_slug: str | None = None,
+    host_id: str | None = None,
+) -> tuple[str, dict]:
+    scope = _runtime_scope(session_id, cwd, project_slug, host_id)
+    return _scope_storage_key(scope), scope
+
+
 def _prune_recall_dedup(state):
-    """Bound dedup state: drop idle sessions, cap total session count."""
+    """Bound dedup state: drop idle scoped sessions, cap total scope count."""
     sessions = state.get("sessions", {})
     cutoff = time.time() - RECALL_DEDUP_SESSION_TTL_HOURS * 3600
     sessions = {sid: s for sid, s in sessions.items() if isinstance(s, dict) and s.get("updated", 0) >= cutoff}
@@ -1200,6 +1333,7 @@ def _prune_recall_dedup(state):
         newest = sorted(sessions.items(), key=lambda kv: kv[1].get("updated", 0), reverse=True)
         sessions = dict(newest[:RECALL_DEDUP_MAX_SESSIONS])
     state["sessions"] = sessions
+    state["schema"] = 2
     return state
 
 
@@ -1213,12 +1347,7 @@ def _mutate_recall_dedup(mutator):
     try:
         os.makedirs(os.path.dirname(RECALL_DEDUP_PATH), exist_ok=True)
         with open(RECALL_DEDUP_PATH, "a+") as f:
-            try:
-                import fcntl
-
-                fcntl.flock(f, fcntl.LOCK_EX)
-            except (ImportError, OSError):
-                pass
+            _lock_file(f)
             f.seek(0)
             raw = f.read()
             try:
@@ -1238,22 +1367,36 @@ def _mutate_recall_dedup(mutator):
         return None
 
 
-def recently_injected_paths(session_id):
-    """Paths recall injected into this session within the dedup window."""
+def recently_injected_paths(
+    session_id: str = "unknown",
+    cwd: str = "",
+    project_slug: str | None = None,
+    host_id: str | None = None,
+):
+    """Paths recall injected into this host/session/project scope within the dedup window."""
+    key, _scope = _recall_scope_key(session_id, cwd, project_slug, host_id)
 
     def read(state):
-        entry = state.get("sessions", {}).get(session_id or "unknown", {})
+        entry = state.get("sessions", {}).get(key, {})
         return set((entry.get("injected") or {}).keys())
 
     return _mutate_recall_dedup(read) or set()
 
 
-def record_recall(paths, session_id="unknown"):
-    """Remember every injected path for this session for N prompts."""
+def record_recall(
+    paths,
+    session_id: str = "unknown",
+    cwd: str = "",
+    project_slug: str | None = None,
+    host_id: str | None = None,
+):
+    """Remember every injected path for this host/session/project scope for N prompts."""
     prompts = _recall_dedup_prompts()
+    key, scope = _recall_scope_key(session_id, cwd, project_slug, host_id)
 
     def write(state):
-        entry = state.setdefault("sessions", {}).setdefault(session_id or "unknown", {})
+        entry = state.setdefault("sessions", {}).setdefault(key, {"scope": scope})
+        entry["scope"] = scope
         injected = entry.setdefault("injected", {})
         for path in paths if isinstance(paths, (list, tuple, set)) else [paths]:
             if path:
@@ -1273,11 +1416,17 @@ def record_access_hits(
     record_access(paths, hook=hook, tool=tool, query=query, session_id=session_id, result_count=len(paths))
 
 
-def bump_prompts_since(session_id="unknown"):
-    """Age this session's dedup entries by one prompt; drop expired paths."""
+def bump_prompts_since(
+    session_id: str = "unknown",
+    cwd: str = "",
+    project_slug: str | None = None,
+    host_id: str | None = None,
+):
+    """Age this scoped session's dedup entries by one prompt; drop expired paths."""
+    key, _scope = _recall_scope_key(session_id, cwd, project_slug, host_id)
 
     def write(state):
-        entry = state.get("sessions", {}).get(session_id or "unknown")
+        entry = state.get("sessions", {}).get(key)
         if not entry:
             return
         injected = entry.get("injected") or {}
@@ -1324,11 +1473,13 @@ def format_result(result):
     return line
 
 
-def consume_deferred_briefing(cwd: str = "", session_id: str = "unknown", project_slug: str | None = None):
-    """Check for this session/project's deferred briefing and consume it.
+def consume_deferred_briefing(
+    cwd: str = "", session_id: str = "unknown", project_slug: str | None = None, host_id: str | None = None
+):
+    """Check for this host/session/project's deferred briefing and consume it.
 
     Returns formatted lines to prepend, or empty list. Results are scoped by
-    project and session and expire after ``DEFERRED_BRIEFING_TTL_SECONDS``.
+    host, project, and session and expire after ``DEFERRED_BRIEFING_TTL_SECONDS``.
     Pending files are left intact until they expire; ready files are deleted on
     successful consumption or rejected when stale/corrupt.
     """
@@ -1336,15 +1487,16 @@ def consume_deferred_briefing(cwd: str = "", session_id: str = "unknown", projec
         git_branch = get_git_branch(cwd) if cwd else ""
         project_slug, _ticket = detect_project(cwd, git_branch) if cwd else ("unknown", None)
 
-    path = deferred_briefing_path(project_slug or "unknown", session_id or "unknown", cwd)
+    host_id = runtime_host_id(host_id)
+    cleanup_deferred_briefings()
+    path = deferred_briefing_path(project_slug or "unknown", session_id or "unknown", cwd, host_id)
     _cleanup_legacy_deferred_briefing(path)
 
     try:
         if not os.path.exists(path):
             return []
 
-        with open(path) as f:
-            data = json.load(f)
+        data = _read_json_locked(path, default={})
 
         status = data.get("status", "")
 
@@ -1352,7 +1504,7 @@ def consume_deferred_briefing(cwd: str = "", session_id: str = "unknown", projec
             os.unlink(path)
             return []
 
-        if not _deferred_scope_matches(data, project_slug or "unknown", session_id or "unknown"):
+        if not _deferred_scope_matches(data, project_slug or "unknown", session_id or "unknown", host_id):
             os.unlink(path)
             return []
 
@@ -1628,7 +1780,7 @@ def consume_deep_recall():
         return []
 
 
-def run_remote_recall(prompt, cwd, config, session_id="unknown", concrete: bool = False):
+def run_remote_recall(prompt, cwd, config, session_id="unknown", concrete: bool = False, host_id: str | None = None):
     """Run recall via the remote vault client.
 
     Returns (lines, top_path, results, reason, project_decisions). A non-terminal
@@ -1664,7 +1816,7 @@ def run_remote_recall(prompt, cwd, config, session_id="unknown", concrete: bool 
             reason = "no-results"
         return [], None, [], reason, project_decisions
 
-    recent = recently_injected_paths(session_id)
+    recent = recently_injected_paths(session_id, cwd=cwd, host_id=host_id)
     if recent:
         fresh = [r for r in results if r.get("path", "") not in recent]
         if not fresh:
@@ -1680,9 +1832,10 @@ def run_remote_recall(prompt, cwd, config, session_id="unknown", concrete: bool 
     return lines, top_path, injected_results, None, project_decisions
 
 
-def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
+def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown", host_id: str | None = None):
     """Run the recall search. Returns (lines, top_path, results, reason)."""
     config = get_config()
+    host_id = runtime_host_id(host_id)
     project_slug = "unknown"
     if cwd:
         try:
@@ -1715,7 +1868,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         return [], None, [], "empty-prompt"
     # Each recall invocation is one user prompt: age this session's dedup
     # entries exactly once, regardless of which branch we take below.
-    bump_prompts_since(session_id)
+    bump_prompts_since(session_id, cwd=cwd, project_slug=project_slug, host_id=host_id)
     if should_skip_recall(prompt, config, concrete=concrete_enabled):
         if not concrete_enabled and config.get("recall_skip_low_signal", True) and is_low_signal_recall_prompt(prompt):
             reason = "low-signal-prompt"
@@ -1994,7 +2147,7 @@ def _run_recall_lines(prompt: str, cwd: str = "", session_id: str = "unknown"):
         log_recall_diagnostic(config, "decision", decision="skipped", reason=reason, latency_ms=latency_ms)
         return [], None, [], reason
 
-    recent = recently_injected_paths(session_id)
+    recent = recently_injected_paths(session_id, cwd=cwd, project_slug=project_slug, host_id=host_id)
     if recent:
         fresh = [r for r in results if r.get("path", "") not in recent]
         if not fresh:
@@ -2057,9 +2210,17 @@ def run_recall():
     return lines, top_path
 
 
-def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown", *, record: bool = True) -> LifecycleResult:
+def build_recall(
+    prompt: str,
+    cwd: str = "",
+    session_id: str = "unknown",
+    *,
+    record: bool = True,
+    host_id: str | None = None,
+) -> LifecycleResult:
     """Build prompt recall content."""
-    lines, top_path, results, reason = _run_recall_lines(prompt, cwd, session_id)
+    host_id = runtime_host_id(host_id)
+    lines, top_path, results, reason = _run_recall_lines(prompt, cwd, session_id, host_id=host_id)
     if not lines:
         if reason in ("broad-project-query", "skipped-prompt", "low-signal-prompt"):
             return empty_result("recall", reason)
@@ -2077,7 +2238,7 @@ def build_recall(prompt: str, cwd: str = "", session_id: str = "unknown", *, rec
         return empty_result("recall", reason or "no-results")
     content = "\n".join(lines)
     if top_path and record:
-        record_recall([r.get("path", "") for r in results], session_id)
+        record_recall([r.get("path", "") for r in results], session_id, cwd=cwd, host_id=host_id)
         record_access_hits("recall", "inject", results, query=prompt, session_id=session_id)
     return LifecycleResult(
         should_inject=True,
@@ -2316,8 +2477,10 @@ def build_session_context(
     include_recent: bool = True,
     include_recall: bool = True,
     include_tool_context_preview: bool = False,
+    host_id: str | None = None,
 ) -> dict:
     """Build a one-call, budgeted session initialization/context packet."""
+    host_id = runtime_host_id(host_id)
     token_budget, char_budget = _session_context_char_budget(token_budget)
     packet_char_budget = char_budget + 1200
     sections: dict[str, object] = {}
@@ -2326,7 +2489,7 @@ def build_session_context(
     warnings: list[str] = []
 
     if include_recent:
-        briefing = build_briefing(cwd, session_id, allow_deferred=False)
+        briefing = build_briefing(cwd, session_id, allow_deferred=False, host_id=host_id)
         sections["briefing"] = _compact_lifecycle_section(briefing)
         if briefing.content:
             content_blocks.append(briefing.content)
@@ -2335,7 +2498,7 @@ def build_session_context(
     recall_top_path = None
     recall_content_marker = None
     if include_recall and prompt:
-        recall = build_recall(prompt, cwd, session_id, record=False)
+        recall = build_recall(prompt, cwd, session_id, record=False, host_id=host_id)
         sections["recall"] = _compact_lifecycle_section(recall)
         recall_top_path = recall.metadata.get("top_path") if isinstance(recall.metadata, dict) else None
         if recall.content:
@@ -2425,6 +2588,7 @@ def build_session_context(
         "metadata": {
             "cwd": cwd,
             "session_id": session_id,
+            "host_id": host_id,
             "token_budget": token_budget,
             "char_budget": char_budget,
             "packet_char_budget": packet_char_budget,
@@ -2437,7 +2601,7 @@ def build_session_context(
     }
     payload = _fit_session_context_payload(payload, packet_char_budget)
     if recall_top_path and recall_content_marker and recall_content_marker in payload.get("content", ""):
-        record_recall([recall_top_path], session_id)
+        record_recall([recall_top_path], session_id, cwd=cwd, host_id=host_id)
     log_automation_memory_health(
         "packet_success",
         source="session-context",
@@ -2669,39 +2833,171 @@ def extract_tool_context_keywords(file_path: str, cwd: str = "") -> str:
 # TTL expiry; pre-v3 keys are shape-incompatible, so drop them once.
 # v4: query extraction became cwd-relative; old dir entries may be poisoned by
 # checkout/worktree path terms and must be recomputed.
-TOOL_CONTEXT_CACHE_SCHEMA = 4
+# v5: injection/session state and directory entries are scoped by host/project,
+# writes are locked/merged, and stale/bulky entries are pruned.
+TOOL_CONTEXT_CACHE_SCHEMA = 5
+TOOL_CONTEXT_CACHE_MAX_DIRS = 500
+TOOL_CONTEXT_CACHE_MAX_INJECTION_SCOPES = 100
+TOOL_CONTEXT_INJECTION_TTL_HOURS = 48
 
 
-def load_cache() -> dict:
-    """Load the tool-context cache from disk."""
-    try:
-        if os.path.exists(CACHE_PATH):
-            with open(CACHE_PATH) as f:
-                cache = json.load(f)
-            if cache.get("schema") != TOOL_CONTEXT_CACHE_SCHEMA:
-                return {
-                    "schema": TOOL_CONTEXT_CACHE_SCHEMA,
-                    "dirs": {},
-                    "last_qmd_call": cache.get("last_qmd_call", 0),
-                    "injections": cache.get("injections", {}),
-                }
-            return cache
-    except (json.JSONDecodeError, OSError):
-        pass
+def _empty_tool_context_cache() -> dict:
     return {"schema": TOOL_CONTEXT_CACHE_SCHEMA, "dirs": {}, "last_qmd_call": 0, "injections": {}}
 
 
-def save_cache(cache: dict) -> None:
-    """Write the tool-context cache to disk."""
+def _tool_context_cache_ttl_hours(config: dict | None = None) -> float:
     try:
-        with open(CACHE_PATH, "w") as f:
-            json.dump(cache, f)
+        return float((config or get_config()).get("tool_context_cache_ttl_hours", 24))
+    except (TypeError, ValueError):
+        return 24.0
+
+
+def _prune_tool_context_cache(cache: dict, config: dict | None = None) -> dict:
+    normalized = _empty_tool_context_cache()
+    if not isinstance(cache, dict):
+        return normalized
+    normalized["last_qmd_call"] = cache.get("last_qmd_call", 0)
+
+    ttl_hours = _tool_context_cache_ttl_hours(config)
+    now = time.time()
+    dirs = cache.get("dirs", {}) if isinstance(cache.get("dirs"), dict) else {}
+    kept_dirs = {}
+    for key, entry in dirs.items():
+        if not isinstance(entry, dict):
+            continue
+        if ttl_hours > 0:
+            try:
+                if now - float(entry.get("ts", 0)) >= ttl_hours * 3600:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        kept_dirs[str(key)] = entry
+    if len(kept_dirs) > TOOL_CONTEXT_CACHE_MAX_DIRS:
+        newest = sorted(kept_dirs.items(), key=lambda kv: kv[1].get("ts", 0), reverse=True)
+        kept_dirs = dict(newest[:TOOL_CONTEXT_CACHE_MAX_DIRS])
+    normalized["dirs"] = kept_dirs
+
+    injection_ttl = float((config or {}).get("tool_context_injection_ttl_hours", TOOL_CONTEXT_INJECTION_TTL_HOURS))
+    injections = cache.get("injections", {}) if isinstance(cache.get("injections"), dict) else {}
+    kept_injections = {}
+    cutoff = now - injection_ttl * 3600 if injection_ttl > 0 else None
+    for key, entry in injections.items():
+        if not isinstance(entry, dict):
+            continue
+        updated = entry.get("updated")
+        if updated is not None and cutoff is not None:
+            try:
+                if float(updated) < cutoff:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        paths = [str(path) for path in entry.get("paths", []) if path]
+        kept_injections[str(key)] = {
+            "count": max(int(entry.get("count", 0) or 0), len(paths)),
+            "paths": paths,
+            "updated": float(updated or now),
+            "scope": entry.get("scope", {}),
+        }
+    if len(kept_injections) > TOOL_CONTEXT_CACHE_MAX_INJECTION_SCOPES:
+        newest = sorted(kept_injections.items(), key=lambda kv: kv[1].get("updated", 0), reverse=True)
+        kept_injections = dict(newest[:TOOL_CONTEXT_CACHE_MAX_INJECTION_SCOPES])
+    normalized["injections"] = kept_injections
+    return normalized
+
+
+def _merge_tool_context_cache(existing: dict, incoming: dict, config: dict | None = None) -> dict:
+    merged = _prune_tool_context_cache(existing, config)
+    incoming = _prune_tool_context_cache(incoming, config)
+    merged["last_qmd_call"] = max(
+        float(merged.get("last_qmd_call", 0) or 0), float(incoming.get("last_qmd_call", 0) or 0)
+    )
+    dirs = merged.setdefault("dirs", {})
+    for key, entry in incoming.get("dirs", {}).items():
+        current = dirs.get(key)
+        if not current:
+            dirs[key] = entry
+            continue
+        try:
+            incoming_ts = float(entry.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            incoming_ts = 0.0
+        try:
+            current_ts = float(current.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            current_ts = 0.0
+        if incoming_ts >= current_ts:
+            dirs[key] = entry
+    for key, entry in incoming.get("injections", {}).items():
+        current = merged.setdefault("injections", {}).get(key)
+        if not current:
+            merged["injections"][key] = entry
+            continue
+        paths = []
+        seen = set()
+        for path in list(current.get("paths", [])) + list(entry.get("paths", [])):
+            if path and path not in seen:
+                seen.add(path)
+                paths.append(path)
+        current["paths"] = paths
+        current["count"] = max(int(current.get("count", 0) or 0), int(entry.get("count", 0) or 0), len(paths))
+        current["updated"] = max(float(current.get("updated", 0) or 0), float(entry.get("updated", 0) or 0))
+        current["scope"] = current.get("scope") or entry.get("scope", {})
+    return _prune_tool_context_cache(merged, config)
+
+
+def load_cache() -> dict:
+    """Load the tool-context cache from disk under a best-effort file lock."""
+    try:
+        if os.path.exists(CACHE_PATH):
+            with open(CACHE_PATH, "a+") as f:
+                _lock_file(f)
+                f.seek(0)
+                raw = f.read()
+            cache = json.loads(raw) if raw.strip() else {}
+            if cache.get("schema") != TOOL_CONTEXT_CACHE_SCHEMA:
+                return _prune_tool_context_cache(
+                    {
+                        "schema": TOOL_CONTEXT_CACHE_SCHEMA,
+                        "dirs": {},
+                        "last_qmd_call": cache.get("last_qmd_call", 0) if isinstance(cache, dict) else 0,
+                        # Pre-v5 injection entries were keyed only by session id;
+                        # preserving them would let one host/project suppress another.
+                        "injections": {},
+                    }
+                )
+            return _prune_tool_context_cache(cache)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return _empty_tool_context_cache()
+
+
+def save_cache(cache: dict) -> None:
+    """Merge and write the tool-context cache under an exclusive file lock."""
+    try:
+        os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+        with open(CACHE_PATH, "a+") as f:
+            _lock_file(f)
+            f.seek(0)
+            raw = f.read()
+            try:
+                existing = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError:
+                existing = {}
+            state = _merge_tool_context_cache(existing, cache)
+            f.seek(0)
+            f.truncate()
+            json.dump(state, f)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
     except OSError:
         pass
 
 
-def _tool_context_dir_key(cwd: str, normalized_path: str) -> str:
-    """Scope cache entries by project (cwd) as well as directory.
+def _tool_context_dir_key(cwd: str, normalized_path: str, host_id: str | None = None) -> str:
+    """Scope cache entries by host/project (cwd) as well as directory.
 
     A directory shared between checkouts (or a mis-resolved path) must not
     replay one project's cached results into another project's sessions.
@@ -2710,7 +3006,7 @@ def _tool_context_dir_key(cwd: str, normalized_path: str) -> str:
         scope = os.path.realpath(os.path.expanduser(cwd)).rstrip("/") if cwd else "-"
     except (OSError, ValueError):
         scope = "-"
-    return f"{scope}::{Path(normalized_path).parent}"
+    return f"{runtime_host_id(host_id)}::{scope}::{Path(normalized_path).parent}"
 
 
 def _tool_context_entry_fresh(entry: dict, config: dict) -> bool:
@@ -2723,26 +3019,49 @@ def _tool_context_entry_fresh(entry: dict, config: dict) -> bool:
     return (time.time() - float(entry.get("ts", 0))) < ttl_hours * 3600
 
 
-def get_recall_paths(session_id: str = "unknown") -> set[str]:
-    """Paths recently injected by prompt recall in this session (for dedup)."""
-    return recently_injected_paths(session_id)
+def get_recall_paths(
+    session_id: str = "unknown",
+    cwd: str = "",
+    project_slug: str | None = None,
+    host_id: str | None = None,
+) -> set[str]:
+    """Paths recently injected by prompt recall in this scoped session."""
+    return recently_injected_paths(session_id, cwd=cwd, project_slug=project_slug, host_id=host_id)
 
 
-def session_injection_count(cache: dict, session_id: str) -> int:
-    return cache.get("injections", {}).get(session_id, {}).get("count", 0)
+def _tool_context_session_key(
+    session_id: str = "unknown", cwd: str = "", host_id: str | None = None
+) -> tuple[str, dict]:
+    scope = _runtime_scope(session_id, cwd, host_id=host_id)
+    return _scope_storage_key(scope), scope
 
 
-def session_injected_paths(cache: dict, session_id: str) -> set[str]:
-    return set(cache.get("injections", {}).get(session_id, {}).get("paths", []))
+def session_injection_count(cache: dict, session_id: str, cwd: str = "", host_id: str | None = None) -> int:
+    key, _scope = _tool_context_session_key(session_id, cwd, host_id)
+    injections = cache.get("injections", {})
+    entry = injections.get(key, {})
+    return entry.get("count", 0)
 
 
-def record_injection(cache: dict, session_id: str, note_paths: list[str]) -> None:
+def session_injected_paths(cache: dict, session_id: str, cwd: str = "", host_id: str | None = None) -> set[str]:
+    key, _scope = _tool_context_session_key(session_id, cwd, host_id)
+    injections = cache.get("injections", {})
+    entry = injections.get(key, {})
+    return set(entry.get("paths", []))
+
+
+def record_injection(
+    cache: dict, session_id: str, note_paths: list[str], cwd: str = "", host_id: str | None = None
+) -> None:
     if "injections" not in cache:
         cache["injections"] = {}
-    if session_id not in cache["injections"]:
-        cache["injections"][session_id] = {"count": 0, "paths": []}
+    key, scope = _tool_context_session_key(session_id, cwd, host_id)
+    if key not in cache["injections"]:
+        cache["injections"][key] = {"count": 0, "paths": [], "scope": scope, "updated": time.time()}
 
-    entry = cache["injections"][session_id]
+    entry = cache["injections"][key]
+    entry["scope"] = scope
+    entry["updated"] = time.time()
     entry["count"] += len(note_paths)
     entry["paths"].extend(note_paths)
 
@@ -2827,6 +3146,7 @@ def build_tool_context(
     cwd: str = "",
     session_id: str = "unknown",
     lineage_id: str | None = None,
+    host_id: str | None = None,
 ) -> LifecycleResult:
     """Build context for a file-read tool result.
 
@@ -2835,8 +3155,15 @@ def build_tool_context(
     and caps keyed on the transient id reset on every resume.
     """
     config = get_config()
+    host_id = runtime_host_id(host_id)
     lineage = lineage_id or session_id
-    metadata = {"cwd": cwd, "session_id": session_id, "tool_name": tool_name, "file_path": file_path}
+    metadata = {
+        "cwd": cwd,
+        "session_id": session_id,
+        "host_id": host_id,
+        "tool_name": tool_name,
+        "file_path": file_path,
+    }
     if lineage_id:
         metadata["lineage_id"] = lineage_id
 
@@ -2872,10 +3199,10 @@ def build_tool_context(
 
     cache = load_cache()
     max_injections = config.get("tool_context_max_injections", 5)
-    if session_injection_count(cache, lineage) >= max_injections:
+    if session_injection_count(cache, lineage, cwd=cwd, host_id=host_id) >= max_injections:
         return no_context("cap-reached", max_injections=max_injections)
 
-    dir_key = _tool_context_dir_key(cwd, normalized_path)
+    dir_key = _tool_context_dir_key(cwd, normalized_path, host_id=host_id)
     search_query = None
     latency_ms = 0
     source = "search"
@@ -2976,8 +3303,8 @@ def build_tool_context(
                 min_score=min_score,
             )
 
-    recall_paths = get_recall_paths(session_id)
-    already_injected = session_injected_paths(cache, lineage)
+    recall_paths = get_recall_paths(session_id, cwd=cwd, host_id=host_id)
+    already_injected = session_injected_paths(cache, lineage, cwd=cwd, host_id=host_id)
     exclude = recall_paths | already_injected
     filtered = [r for r in results if r.get("path", "") not in exclude]
     if not filtered:
@@ -3029,7 +3356,7 @@ def build_tool_context(
         enhanced_result_count=enhanced_result_count,
     )
 
-    record_injection(cache, lineage, injected_paths)
+    record_injection(cache, lineage, injected_paths, cwd=cwd, host_id=host_id)
     save_cache(cache)
     return LifecycleResult(
         should_inject=True,
