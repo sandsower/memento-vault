@@ -163,12 +163,12 @@ pre-PR command surface. Older orchestrators may still treat each entry as a flat
   stage: pre-pr
   kind: sensor
   execution: computational
-  command: '.venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py'
+  command: '.venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py tests/test_beislid_workflow_gates.py'
   timeout_seconds: 300
   cost: medium
   mutates: false
   changed_file_selector:
-    include: ['memento/**/*.py', 'hooks/**/*.py', 'scripts/**/*.py', 'tests/**/*.py']
+    include: ['.beislid/**', 'WORKFLOW.md', 'docs/**', 'memento/**/*.py', 'hooks/**/*.py', 'scripts/**/*.py', 'tests/**/*.py']
   output:
     parser: pytest
     agent_summary: true
@@ -206,7 +206,7 @@ pre-PR command surface. Older orchestrators may still treat each entry as a flat
   cost: expensive
   mutates: false
   changed_file_selector:
-    include: ['memento/mcp_server.py', 'memento/remote_client.py', 'tests/test_mcp_server.py', 'tests/test_remote_client.py', 'tests/test_integration_remote.py']
+    include: ['memento/mcp_server.py', 'memento/remote_client.py', 'memento/auth.py', 'tests/test_mcp_server.py', 'tests/test_remote_client.py', 'tests/test_integration_remote.py']
   output:
     parser: pytest
     agent_summary: true
