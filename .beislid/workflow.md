@@ -206,7 +206,7 @@ pre-PR command surface. Older orchestrators may still treat each entry as a flat
   cost: expensive
   mutates: false
   changed_file_selector:
-    include: ['memento/mcp_server.py', 'memento/remote_client.py', 'tests/test_mcp_server.py', 'tests/test_remote_client.py', 'tests/test_integration_remote.py']
+    include: ['memento/mcp_server.py', 'memento/remote_client.py', 'memento/auth.py', 'tests/test_mcp_server.py', 'tests/test_remote_client.py', 'tests/test_integration_remote.py']
   output:
     parser: pytest
     agent_summary: true

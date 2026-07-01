@@ -129,6 +129,9 @@ def test_beislid_gates_are_rich_pre_pr_sensors() -> None:
             assert "docs/**" in body
             assert "tests/test_beislid_workflow_gates.py" in body
 
+        if name == "mcp-server-tests":
+            assert "memento/auth.py" in body
+
 
 def test_beislid_process_artifact_and_workflow_wiring() -> None:
     artifact = _artifact()
@@ -167,7 +170,7 @@ def test_beislid_process_artifact_and_workflow_wiring() -> None:
     )
     assert "tests/test_beislid_workflow_gates.py" in rondo_workflow
     assert (
-        "command: .venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_beislid_workflow_gates.py"
+        "command: .venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py tests/test_beislid_workflow_gates.py"
         in rondo_workflow
     )
     assert "rondo-process-artifact.json" in docs
@@ -181,6 +184,13 @@ def test_beislid_process_artifact_and_workflow_wiring() -> None:
     }
     assert set(_artifact_gate_names(["hooks/vault-commit.sh"])) == {"targeted-tests"}
     assert set(_artifact_gate_names(["memento/mcp_server.py"])) == {
+        "ruff-check",
+        "ruff-format-check",
+        "python-compileall",
+        "targeted-tests",
+        "mcp-server-tests",
+    }
+    assert set(_artifact_gate_names(["memento/auth.py"])) == {
         "ruff-check",
         "ruff-format-check",
         "python-compileall",
