@@ -86,7 +86,7 @@ model_routing:
 action_policy:
   command: beislid
   run_mode: unattended-auto
-  policy_file: .beislid/action-policy.json
+  policy_file: /Users/vicvalenzuela/Personal/memento-vault/.beislid/action-policy.json
 process_provider:
   kind: beislid
   required: false
