@@ -21,6 +21,11 @@ from typing import Any
 
 from memento import telemetry
 from memento.config import get_vault
+from memento.retrieval_policy import (
+    DEEP_PIPELINE_MARKERS,
+    SEARCH_MISS_REASONS,
+    TOOL_CONTEXT_MISS_REASONS,
+)
 from memento.store import ACCESS_LOG_PATH, RETRIEVAL_LOG_PATH, TRIAGE_HEALTH_LOG_PATH, load_access_log_stats
 from memento.utils import sanitize_secrets
 
@@ -54,25 +59,6 @@ _PROJECT_HISTORY_MARKERS = (
     "current state",
     "roadmap",
 )
-
-_MISS_REASONS = {
-    "no_concrete_match",
-    "no_exact_match",
-    "project_filter_removed_all",
-    "query_too_broad",
-    "threshold_too_high",
-}
-
-_TOOL_CONTEXT_MISS_REASONS = {
-    "duplicate",
-    "ignored",
-    "no-results",
-    "no_results",
-    "no_exact_match",
-    "skipped",
-}
-
-_DEEP_PIPELINE_MARKERS = {"prf", "ce", "rerank", "multi_hop", "deep"}
 
 _RECOMMENDATION_MIN_COUNT = 3
 _RECOMMENDATION_MIN_SHARE = 0.3
@@ -600,10 +586,10 @@ def _is_miss_like(entry: dict[str, Any]) -> bool:
     if hook in {"recall", "search", "mcp"}:
         if action in {"search_miss", "no-results", "no_results"}:
             return True
-        return reason in _MISS_REASONS
+        return reason in SEARCH_MISS_REASONS
     if hook == "tool-context":
         decision = str(entry.get("decision") or reason or action)
-        return decision in _TOOL_CONTEXT_MISS_REASONS or reason in _TOOL_CONTEXT_MISS_REASONS
+        return decision in TOOL_CONTEXT_MISS_REASONS or reason in TOOL_CONTEXT_MISS_REASONS
     return False
 
 
@@ -611,7 +597,7 @@ def _is_deep_pipeline(entry: dict[str, Any]) -> bool:
     pipeline = str(entry.get("pipeline") or "")
     if pipeline:
         parts = {part.strip().lower() for part in pipeline.split("+") if part.strip()}
-        if parts & _DEEP_PIPELINE_MARKERS:
+        if parts & DEEP_PIPELINE_MARKERS:
             return True
         if len(parts) > 1:
             return True

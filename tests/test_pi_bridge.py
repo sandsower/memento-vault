@@ -2465,6 +2465,22 @@ def test_pi_bridge_process_retry_filters_single_group(capsys, tmp_path, monkeypa
     assert payload["selected_capture_count"] == 2
 
 
+def test_pi_bridge_process_retry_rejects_path_traversal_run_id(capsys):
+    code = pi_bridge.main(["queue", "process-retry", "--run-id", "../run1"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"error": "invalid processing run id: ../run1", "reason": "invalid_run_id"}
+
+
+def test_pi_bridge_process_finalize_rejects_path_traversal_run_id(capsys):
+    code = pi_bridge.main(["queue", "process-finalize", "--run-id", "../run1"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"error": "invalid processing run id: ../run1", "reason": "invalid_run_id"}
+
+
 def test_pi_bridge_process_finalize_dequeues_no_note_results_with_discard_reason(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"

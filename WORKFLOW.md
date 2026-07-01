@@ -11,6 +11,7 @@ tracker:
   active_states:
     - Todo
     - In Progress
+    - In Review
   terminal_states:
     - Done
     - Closed
@@ -24,8 +25,14 @@ workspace:
 hooks:
   after_create: |
     git clone --depth 1 git@github.com:sandsower/memento-vault.git .
+    git checkout -B rondo/{{ issue.identifier }}
     python3 -m venv .venv
-    .venv/bin/pip install --quiet -e '.[mcp]' pytest ruff
+    .venv/bin/python -m pip install --quiet --upgrade pip
+    .venv/bin/python -m pip install --quiet -e '.[mcp]' pytest ruff
+  before_run: |
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git checkout -B rondo/{{ issue.identifier }}
+    fi
   timeout_ms: 300000
 gates:
   - name: ruff-check
@@ -50,10 +57,36 @@ pi:
   command: pi
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
+model_routing:
+  defaults:
+    tier: standard
+    mode: prefer
+  profiles:
+    bulk_implementation:
+      tier: light
+      mode: prefer
+      adapter: pi
+  tiers:
+    light:
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-chat
+    standard:
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-v4-pro
+      - adapter: pi
+        model: openai-codex/gpt-5.4-mini
+    heavy:
+      - adapter: pi
+        model: openai-codex/gpt-5.5
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-v4-pro
+    frontier:
+      - adapter: pi
+        model: openai-codex/gpt-5.5
 action_policy:
   command: beislid
   run_mode: unattended-auto
-  policy_file: .beislid/action-policy.json
+  policy_file: /Users/vicvalenzuela/Personal/memento-vault/.beislid/action-policy.json
 process_provider:
   kind: beislid
   required: false
