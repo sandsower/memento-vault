@@ -2,12 +2,49 @@ import json
 import os
 import subprocess
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from memento.lifecycle import LifecycleResult
 from memento.llm import LLMResult
 from memento import pi_bridge
+
+
+def test_bridge_health_status_normalizes_offset_aware_timestamps(tmp_path, monkeypatch):
+    path = tmp_path / "triage-health.jsonl"
+    monkeypatch.setattr(pi_bridge.store_module, "TRIAGE_HEALTH_LOG_PATH", str(path))
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": now.isoformat().replace("+00:00", "Z"),
+                        "hook": "pi-bridge",
+                        "action": "recall_failed",
+                        "operation": "recall",
+                        "error": "boom",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": now.astimezone(timezone.utc).isoformat(),
+                        "hook": "pi-bridge",
+                        "action": "triage_missing_transcript",
+                        "operation": "triage",
+                        "error": "missing",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    status = pi_bridge._bridge_health_status()
+
+    assert status["status"] == "warn"
+    assert status["recent_failure_count"] == 2
 
 
 def test_pi_bridge_briefing_disables_deferred_search(capsys):
@@ -2426,6 +2463,22 @@ def test_pi_bridge_process_retry_filters_single_group(capsys, tmp_path, monkeypa
     assert payload["selected_group_ids"] == ["g2"]
     assert payload["selected_capture_ids"] == ["q2", "q3"]
     assert payload["selected_capture_count"] == 2
+
+
+def test_pi_bridge_process_retry_rejects_path_traversal_run_id(capsys):
+    code = pi_bridge.main(["queue", "process-retry", "--run-id", "../run1"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"error": "invalid processing run id: ../run1", "reason": "invalid_run_id"}
+
+
+def test_pi_bridge_process_finalize_rejects_path_traversal_run_id(capsys):
+    code = pi_bridge.main(["queue", "process-finalize", "--run-id", "../run1"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"error": "invalid processing run id: ../run1", "reason": "invalid_run_id"}
 
 
 def test_pi_bridge_process_finalize_dequeues_no_note_results_with_discard_reason(capsys, tmp_path, monkeypatch):

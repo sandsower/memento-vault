@@ -1,9 +1,31 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from memento import retrieval_dashboard
+
+
+def test_load_jsonl_normalizes_offset_aware_timestamps(tmp_path):
+    path = tmp_path / "retrieval.jsonl"
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now.replace(year=now.year - 1)
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": old.isoformat(), "action": "old"}),
+                json.dumps({"ts": now.isoformat().replace("+00:00", "Z"), "action": "zulu"}),
+                json.dumps({"ts": now.astimezone(timezone.utc).isoformat(), "action": "aware"}),
+                json.dumps({"ts": now.replace(tzinfo=None).isoformat(), "action": "naive"}),
+            ]
+        )
+        + "\n"
+    )
+
+    loaded = retrieval_dashboard._load_jsonl(path, since_days=1)
+
+    assert [entry["action"] for entry in loaded] == ["zulu", "aware", "naive"]
 
 
 def _write_note(vault: Path, name: str, *, date: str, certainty: int, project: str, body: str = "body") -> Path:
