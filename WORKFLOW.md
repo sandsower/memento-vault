@@ -35,7 +35,7 @@ gates:
   - name: python-compileall
     command: .venv/bin/python -m compileall -q memento hooks scripts
   - name: targeted-tests
-    command: .venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py
+    command: .venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_beislid_workflow_gates.py
     timeout_ms: 600000
 agent:
   adapter: pi
@@ -56,7 +56,8 @@ action_policy:
   policy_file: .beislid/action-policy.json
 process_provider:
   kind: beislid
-  required: false
+  required: true
+  artifact_path: .beislid/rondo-process-artifact.json
 ---
 
 You are working on Linear ticket `{{ issue.identifier }}` in the memento-vault

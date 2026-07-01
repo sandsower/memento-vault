@@ -1,0 +1,239 @@
+{
+  "schema": "beislid-process-artifact-v1",
+  "id": "rondo-mem-20-process-artifact",
+  "status": "approved",
+  "gates": [],
+  "gate_sets": [
+    {
+      "id": "frontmatter-schema",
+      "paths": [
+        "docs/frontmatter-schema.md",
+        "memento/types.py",
+        "scripts/check_frontmatter_schema.py",
+        "tests/test_frontmatter_schema.py"
+      ],
+      "reason": "matched frontmatter schema paths",
+      "gates": [
+        {
+          "name": "frontmatter-schema-drift",
+          "command": ".venv/bin/python scripts/check_frontmatter_schema.py",
+          "timeout_ms": 120000,
+          "action_id": "gate.frontmatter-schema-drift",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for frontmatter schema drift checks"
+        },
+        {
+          "name": "targeted-tests",
+          "command": ".venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py tests/test_beislid_workflow_gates.py",
+          "timeout_ms": 300000,
+          "action_id": "gate.targeted-tests",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for frontmatter schema and workflow proof"
+        }
+      ]
+    },
+    {
+      "id": "workflow-docs-tooling",
+      "paths": [".beislid/", "WORKFLOW.md", "docs/", "tests/test_beislid_workflow_gates.py"],
+      "reason": "matched workflow and docs paths",
+      "gates": [
+        {
+          "name": "targeted-tests",
+          "command": ".venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py tests/test_beislid_workflow_gates.py",
+          "timeout_ms": 300000,
+          "action_id": "gate.targeted-tests",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for workflow and docs metadata proof"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle-bridges",
+      "paths": [
+        "memento/lifecycle.py",
+        "memento/adapters/",
+        "memento/pi_bridge.py",
+        "hooks/memento-*.py",
+        "hooks/vault-*.py",
+        "hooks/agent-wrapper.py",
+        "hooks/vault-commit.sh",
+        "hooks/vault-recall.py",
+        "hooks/vault-tool-context.py",
+        "hooks/wait-and-commit.py",
+        "tests/test_lifecycle.py",
+        "tests/test_triage.py",
+        "tests/test_script_harnesses.py",
+        "tests/test_pi_bridge.py",
+        "tests/test_pi_bridge_config.py"
+      ],
+      "reason": "matched lifecycle and bridge paths",
+      "gates": [
+        {
+          "name": "targeted-tests",
+          "command": ".venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py tests/test_beislid_workflow_gates.py",
+          "timeout_ms": 300000,
+          "action_id": "gate.targeted-tests",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for lifecycle bridge coverage"
+        }
+      ]
+    },
+    {
+      "id": "mcp-remote",
+      "paths": [
+        "memento/mcp_server.py",
+        "memento/remote_client.py",
+        "memento/auth.py",
+        "tests/test_mcp_server.py",
+        "tests/test_remote_client.py",
+        "tests/test_integration_remote.py"
+      ],
+      "reason": "matched MCP and remote paths",
+      "gates": [
+        {
+          "name": "mcp-server-tests",
+          "command": ".venv/bin/python -m pytest tests/test_mcp_server.py tests/test_remote_client.py tests/test_integration_remote.py",
+          "timeout_ms": 600000,
+          "action_id": "gate.mcp-server-tests",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for MCP and remote compatibility"
+        }
+      ]
+    },
+    {
+      "id": "retrieval",
+      "paths": [
+        "memento/search*.py",
+        "memento/embedded_search.py",
+        "memento/graph.py",
+        "hooks/tenet_reranker.py",
+        "tests/test_tenet_*.py",
+        "tests/test_multi_hop.py",
+        "tests/test_deep_recall.py"
+      ],
+      "reason": "matched retrieval and Tenet paths",
+      "gates": [
+        {
+          "name": "retrieval-tests",
+          "command": ".venv/bin/python -m pytest tests/test_tenet_*.py tests/test_multi_hop.py tests/test_deep_recall.py",
+          "timeout_ms": 600000,
+          "action_id": "gate.retrieval-tests",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for retrieval and Tenet coverage"
+        }
+      ]
+    },
+    {
+      "id": "install-release",
+      "paths": [
+        "install.sh",
+        "setup-remote.sh",
+        "bootstrap.sh",
+        "lib/",
+        "Formula/",
+        "package.json",
+        "VERSION",
+        "scripts/release_smoke.py",
+        "tests/test_install_helpers.py",
+        "tests/test_install_register_mcp.py",
+        "tests/test_release_smoke.py"
+      ],
+      "reason": "matched install and release paths",
+      "gates": [
+        {
+          "name": "install-tests",
+          "command": ".venv/bin/python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py",
+          "timeout_ms": 300000,
+          "action_id": "gate.install-tests",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for install helper coverage"
+        },
+        {
+          "name": "release-smoke",
+          "command": ".venv/bin/python scripts/release_smoke.py",
+          "timeout_ms": 300000,
+          "action_id": "gate.release-smoke",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for release smoke coverage"
+        },
+        {
+          "name": "install-exec-smoke",
+          "command": ".venv/bin/python scripts/release_smoke.py --install-exec",
+          "timeout_ms": 600000,
+          "action_id": "gate.install-exec-smoke",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for install execution smoke coverage"
+        }
+      ]
+    },
+    {
+      "id": "python-core",
+      "paths": [
+        "memento/**/*.py",
+        "hooks/**/*.py",
+        "scripts/**/*.py",
+        "tests/**/*.py"
+      ],
+      "reason": "matched core Python paths",
+      "gates": [
+        {
+          "name": "ruff-check",
+          "command": ".venv/bin/python -m ruff check .",
+          "timeout_ms": 120000,
+          "action_id": "gate.ruff-check",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for Python lint coverage"
+        },
+        {
+          "name": "ruff-format-check",
+          "command": ".venv/bin/python -m ruff format --check .",
+          "timeout_ms": 120000,
+          "action_id": "gate.ruff-format-check",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for Python formatting coverage"
+        },
+        {
+          "name": "python-compileall",
+          "command": ".venv/bin/python -m compileall -q memento hooks scripts",
+          "timeout_ms": 120000,
+          "action_id": "gate.python-compileall",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for Python import-time validation"
+        },
+        {
+          "name": "targeted-tests",
+          "command": ".venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py tests/test_beislid_workflow_gates.py",
+          "timeout_ms": 300000,
+          "action_id": "gate.targeted-tests",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for core Python proof"
+        }
+      ]
+    }
+  ],
+  "skipped": [],
+  "warnings": [],
+  "guides": [],
+  "proof_requirements": [],
+  "metadata": {
+    "artifact_ref": "rondo-mem-20-process-artifact",
+    "source_kind": "workflow",
+    "selector_mode": "changed_files"
+  },
+  "action_policy": {
+    "decision": "allow"
+  }
+}
