@@ -3,12 +3,13 @@ import importlib.util
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from memento import health, store
+from memento import health, lifecycle, store
 from memento.config import DEFAULT_CONFIG
 from memento.lifecycle import (
     LifecycleResult,
@@ -41,6 +42,29 @@ def isolate_pi_queue_state(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "memento.lifecycle.PI_BRIDGE_WARN_STATE_PATH", str(tmp_path / "pi-bridge-warn-state.json"), raising=False
     )
+
+
+def test_scan_triage_health_log_normalizes_offset_aware_timestamps(tmp_path):
+    path = tmp_path / "triage-health.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": "2026-06-30T11:59:00", "hook": "triage", "action": "structured_notes_written"}),
+                json.dumps({"ts": "2026-06-30T12:00:00Z", "hook": "triage", "action": "structured_notes_written"}),
+                json.dumps(
+                    {
+                        "ts": "2026-06-30T08:01:00-04:00",
+                        "hook": "triage",
+                        "action": "structured_notes_llm_failed",
+                        "error": "boom",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    assert lifecycle._scan_triage_health_log(str(path), datetime(2026, 6, 30, 12, 0))[:2] == (2, 1)
 
 
 def test_lifecycle_result_to_dict_includes_required_fields():

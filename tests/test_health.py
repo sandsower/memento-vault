@@ -236,6 +236,24 @@ def test_automation_memory_reports_recall_failure_rate_and_reasons():
     assert any(reason["reason"] == "auth failed [REDACTED_API_KEY]" for reason in reasons)
 
 
+def test_health_recent_jsonl_normalizes_offset_aware_timestamps(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"ts": "2026-06-30T11:59:00", "action": "old"}),
+                json.dumps({"ts": "2026-06-30T12:00:00Z", "action": "zulu"}),
+                json.dumps({"ts": "2026-06-30T08:01:00-04:00", "action": "offset"}),
+            ]
+        )
+        + "\n"
+    )
+
+    cutoff = datetime(2026, 6, 30, 12, 0)
+
+    assert [rec["action"] for rec in health._iter_recent_jsonl(path, cutoff)] == ["zulu", "offset"]
+
+
 def test_retrieval_health_distinguishes_failures_misses_and_low_signal_skips():
     Path(health.RETRIEVAL_LOG_PATH).write_text(
         "\n".join(

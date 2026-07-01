@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generator, Optional
 
+from memento import telemetry
 from memento.capture_runtime import CaptureProcessRequest, CaptureRuntime
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context, strip_injection
@@ -399,15 +400,7 @@ def _safe_hook_session_id(session_id: str, transcript_path: str) -> str:
 
 
 def _parse_utc_timestamp(value: object) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return telemetry.parse_timestamp_utc(value)
 
 
 def _triage_active_until(started_at: str) -> str:
@@ -751,17 +744,7 @@ def _commit_and_reindex_locked(vault: Path, commit_message: str, collection: str
 
 
 def _iter_jsonl(path: Path):
-    try:
-        with path.open() as handle:
-            for line in handle:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(rec, dict):
-                    yield rec
-    except OSError:
-        return
+    yield from telemetry.iter_jsonl(path)
 
 
 def _bridge_health_status() -> dict[str, Any]:
@@ -770,14 +753,6 @@ def _bridge_health_status() -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
     latest: dict[str, Any] | None = None
     latest_ts: datetime | None = None
-    failure_actions = {
-        "triage_missing_transcript",
-        "triage_disallowed_transcript",
-        "pi_missing_transcript",
-        "pi_structured_notes_parse_empty",
-        "pi_structured_notes_transcript_unreadable",
-        "pi_structured_notes_lock_timeout",
-    }
     if log_path.exists():
         for rec in _iter_jsonl(log_path):
             if rec.get("hook") != "pi-bridge":
@@ -789,7 +764,7 @@ def _bridge_health_status() -> dict[str, Any]:
             if ts < cutoff:
                 continue
             action = str(rec.get("action") or "")
-            if not (action.endswith("_failed") or action in failure_actions):
+            if not telemetry.is_pi_bridge_failure_action(action):
                 continue
             failure = {
                 "ts": rec.get("ts"),

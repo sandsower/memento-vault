@@ -16,6 +16,7 @@ from pathlib import Path
 
 from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, slugify
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
+from memento import telemetry
 from memento.health import build_automation_memory_readiness
 from memento.llm import is_invalid_mcp_config_error, llm_complete
 from memento.retrieval_policy import PromptRecallRequest, PromptRecallRuntime
@@ -41,11 +42,11 @@ from memento.store import (
     log_retrieval,
     record_access,
 )
-from memento.utils import read_hook_input, sanitize_secrets
+from memento.utils import read_hook_input
 
-TRIAGE_HEALTH_WINDOW_HOURS = 24
-TRIAGE_HEALTH_MIN_EVENTS = 3
-TRIAGE_HEALTH_FAIL_RATIO = 0.5
+TRIAGE_HEALTH_WINDOW_HOURS = telemetry.HEALTH_WINDOW_HOURS
+TRIAGE_HEALTH_MIN_EVENTS = telemetry.HEALTH_MIN_EVENTS_FOR_RATE
+TRIAGE_HEALTH_FAIL_RATIO = telemetry.HEALTH_WARN_FAILURE_RATIO
 _STALE_CERTAINTY_HINT = (
     "likely stale installed memento package; rerun ./install.sh --reinstall; "
     "current triage accepts certainty labels like confirmed"
@@ -109,18 +110,8 @@ def empty_result(source: str, reason: str = "no-results") -> LifecycleResult:
     )
 
 
-TRIAGE_HEALTH_SUCCESS_ACTIONS = {"structured_notes_written"}
-TRIAGE_HEALTH_FAILURE_ACTIONS = {
-    "hook_input_failed",
-    "missing_transcript",
-    "parse_transcript_failed",
-    "structured_notes_failed",
-    "structured_notes_llm_failed",
-    "structured_notes_lock_timeout",
-    "structured_notes_parse_empty",
-    "structured_notes_payload_unreadable",
-    "structured_notes_transcript_unreadable",
-}
+TRIAGE_HEALTH_SUCCESS_ACTIONS = telemetry.TRIAGE_HEALTH_SUCCESS_ACTIONS
+TRIAGE_HEALTH_FAILURE_ACTIONS = telemetry.TRIAGE_HEALTH_FAILURE_ACTIONS
 
 
 def _is_stale_certainty_error(error):
@@ -139,47 +130,33 @@ def _scan_triage_health_log(path, cutoff, mode="health"):
     invalid_mcp_failed = False
     stale_certainty_failed = False
     last_error = ""
-    with open(path) as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
+    for rec in telemetry.iter_recent_jsonl(Path(path), cutoff):
+        if rec.get("hook") != "triage":
+            continue
+        action = rec.get("action") or ""
+        if mode == "legacy":
+            if action not in ("decision", "parse_transcript_failed", "structured_notes_llm_failed"):
                 continue
-            if rec.get("hook") != "triage":
-                continue
-            ts_raw = rec.get("ts")
-            if not ts_raw:
-                continue
-            try:
-                ts = datetime.fromisoformat(ts_raw)
-            except ValueError:
-                continue
-            if ts < cutoff:
-                continue
-            action = rec.get("action") or ""
-            if mode == "legacy":
-                if action not in ("decision", "parse_transcript_failed", "structured_notes_llm_failed"):
-                    continue
-                total += 1
-                if action != "decision":
-                    failed += 1
-                    error = rec.get("error", "")
-                    if error:
-                        last_error = error
-                    invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(error)
-                    stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
-                continue
-
-            if action in TRIAGE_HEALTH_SUCCESS_ACTIONS:
-                total += 1
-            elif action in TRIAGE_HEALTH_FAILURE_ACTIONS:
-                total += 1
+            total += 1
+            if action != "decision":
                 failed += 1
                 error = rec.get("error", "")
                 if error:
                     last_error = error
                 invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(error)
                 stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
+            continue
+
+        if action in TRIAGE_HEALTH_SUCCESS_ACTIONS:
+            total += 1
+        elif action in TRIAGE_HEALTH_FAILURE_ACTIONS:
+            total += 1
+            failed += 1
+            error = rec.get("error", "")
+            if error:
+                last_error = error
+            invalid_mcp_failed = invalid_mcp_failed or is_invalid_mcp_config_error(error)
+            stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
     return total, failed, invalid_mcp_failed, stale_certainty_failed, last_error
 
 
@@ -222,36 +199,20 @@ def _mark_pi_bridge_warn_shown():
 
 
 def _health_error_excerpt(error: object, limit: int = 140) -> str:
-    text = sanitize_secrets(" ".join(str(error or "").split()))
+    text = telemetry.redact_text(" ".join(str(error or "").split()))
     text = _strip_injection(text)
     return text[:limit]
 
 
-_PI_BRIDGE_FAILURE_ACTIONS = {
-    "triage_missing_transcript",
-    "triage_disallowed_transcript",
-    "pi_missing_transcript",
-    "pi_structured_notes_parse_empty",
-    "pi_structured_notes_transcript_unreadable",
-    "pi_structured_notes_lock_timeout",
-}
+_PI_BRIDGE_FAILURE_ACTIONS = telemetry.PI_BRIDGE_FAILURE_ACTIONS
 
 
 def _is_pi_bridge_failure_record(rec: dict[str, object]) -> bool:
-    action = str(rec.get("action") or "")
-    return action.endswith("_failed") or action in _PI_BRIDGE_FAILURE_ACTIONS
+    return telemetry.is_pi_bridge_failure_record(rec)
 
 
 def _parse_health_timestamp(raw: object) -> datetime | None:
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is not None:
-        return parsed.replace(tzinfo=None)
-    return parsed
+    return telemetry.parse_timestamp_naive_utc(raw)
 
 
 def _scan_pi_bridge_health_log(path: str, cutoff: datetime) -> tuple[str | None, int, dict[str, object] | None]:
@@ -350,7 +311,7 @@ def triage_health_warning(rate_limited=False):
 
         if total < TRIAGE_HEALTH_MIN_EVENTS:
             return None
-        if (failed / total) < TRIAGE_HEALTH_FAIL_RATIO:
+        if telemetry.failure_rate(failed, total) < TRIAGE_HEALTH_FAIL_RATIO:
             return None
         if rate_limited:
             if _triage_warn_shown_today():
