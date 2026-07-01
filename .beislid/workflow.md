@@ -37,11 +37,12 @@ reply_command: 'gh api repos/{owner}/{repo}/pulls/{number}/comments --method POS
 rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewers --method POST --input {json_file}'
 ```
 
-CodeRabbit is a scarce final-review resource. Do not trigger it for WIP or routine iteration; run local gates and Beislið review first, then opt in by adding the `coderabbit-ready` label or `coderabbit:review` PR body keyword.
+AgenticReviewer is a scarce final-review role; CodeRabbit is this repo's current provider. Do not trigger it for WIP or routine iteration; run local gates and Beislið review first, then opt in by adding the configured label or PR body keyword.
 
 ```beislid:review_policy
-coderabbit:
+agentic_reviewer:
   mode: opt_in_final_review
+  provider: coderabbit
   label: coderabbit-ready
   description_keyword: coderabbit:review
 risk:
