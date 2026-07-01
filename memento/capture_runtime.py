@@ -236,32 +236,40 @@ class CaptureRuntime:
         return f"{stamp}-{self.clock.uuid_hex()[:8]}"
 
     def _finalize_group(self, vault: Path, group: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
-        expected_ids = {str(x) for x in group.get("capture_ids", [])}
+        capture_ids = list(group.get("capture_ids", []))
+        expected_ids = {str(x) for x in capture_ids}
+
+        def failed(reason: str, result_state: str = "") -> tuple[dict[str, Any], set[str]]:
+            payload = {
+                "group_id": group.get("group_id"),
+                "capture_ids": capture_ids,
+                "status": "failed",
+                "reason": reason,
+            }
+            if result_state:
+                payload["result_state"] = result_state
+            return payload, set()
+
         result_json = str(group.get("result_json") or "").strip()
         if not result_json:
-            return {"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"}, set()
+            return failed("missing_result")
         result_path = Path(result_json)
         if not result_path.is_file():
-            return {"group_id": group.get("group_id"), "status": "failed", "reason": "missing_result"}, set()
+            return failed("missing_result")
         try:
             result = json.loads(result_path.read_text(errors="replace"))
         except OSError:
-            return {"group_id": group.get("group_id"), "status": "failed", "reason": "unreadable_result"}, set()
+            return failed("unreadable_result")
         except json.JSONDecodeError:
-            return {"group_id": group.get("group_id"), "status": "failed", "reason": "invalid_result_json"}, set()
+            return failed("invalid_result_json")
 
         processed_ids = {str(x) for x in result.get("processed_capture_ids", [])}
         status = str(result.get("status") or "")
         result_state = str(result.get("result_state") or "")
         if status == "failed":
-            return (
-                {
-                    "group_id": group.get("group_id"),
-                    "status": "failed",
-                    "reason": result_state or str(result.get("reason") or "failed_result"),
-                    "result_state": result_state or "failed",
-                },
-                set(),
+            return failed(
+                result_state or str(result.get("reason") or "failed_result"),
+                result_state or "failed",
             )
 
         valid = processed_ids == expected_ids and status in {"processed", "processed_no_notes"}
@@ -294,15 +302,7 @@ class CaptureRuntime:
                 },
                 expected_ids,
             )
-        return (
-            {
-                "group_id": group.get("group_id"),
-                "status": "failed",
-                "reason": reason,
-                "result_state": result_state or "invalid_result",
-            },
-            set(),
-        )
+        return failed(reason, result_state or "invalid_result")
 
 
 def capture_created_at(capture: dict[str, Any]) -> str:

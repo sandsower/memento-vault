@@ -192,6 +192,10 @@ def test_finalize_dequeues_successes_and_preserves_failed_captures(tmp_path):
     assert finalized["dequeued"] == 1
     assert [capture["id"] for capture in queue.captures] == ["q2"]
     assert {group["status"] for group in finalized["groups"]} == {"processed_no_notes", "failed"}
+    failed_group = next(group for group in finalized["groups"] if group["status"] == "failed")
+    assert failed_group["capture_ids"] == ["q2"]
+    retry = runtime.plan_retry(finalized)
+    assert retry["selected_capture_ids"] == ["q2"]
     assert writer.dequeued == [(started["run_id"], {"q1"})]
     assert processing.released == [started["run_id"]]
 
@@ -217,7 +221,7 @@ def test_finalize_releases_lock_for_invalid_manifest(tmp_path):
     assert processing.released == ["bad-run"]
 
 
-def test_finalize_missing_result_json_is_failed_group_not_current_directory(tmp_path):
+def test_finalize_missing_result_json_marks_group_failed(tmp_path):
     runtime, queue, processing, _writer = _runtime(
         tmp_path,
         [{"id": "q1", "metadata": {"project": "repo", "session_id": "s1"}}],
@@ -235,7 +239,9 @@ def test_finalize_missing_result_json_is_failed_group_not_current_directory(tmp_
 
     assert payload["dequeued"] == 0
     assert queue.captures == [{"id": "q1", "metadata": {"project": "repo", "session_id": "s1"}}]
-    assert payload["groups"] == [{"group_id": "g1", "status": "failed", "reason": "missing_result"}]
+    assert payload["groups"] == [
+        {"group_id": "g1", "capture_ids": ["q1"], "status": "failed", "reason": "missing_result"}
+    ]
     assert processing.released == ["run-with-missing-result"]
 
 
