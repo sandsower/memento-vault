@@ -1,0 +1,28 @@
+# CodeRabbit is a scarce final-review resource for this repo.
+# Keep automatic reviews off by default and opt in only after local gates and
+# Beislið review policy have marked the PR ready for final AI review.
+reviews:
+  profile: chill
+  review_details: true
+  auto_review:
+    enabled: false
+    description_keyword: "coderabbit:review"
+    labels:
+      - "coderabbit-ready"
+    auto_incremental_review: false
+    auto_pause_after_reviewed_commits: 1
+    drafts: false
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+      - "[skip review]"
+      - "[skip coderabbit]"
+  path_filters:
+    - "!**/_build/**"
+    - "!**/deps/**"
+    - "!**/tmp/**"
+    - "!**/coverage/**"
+    - "!**/.beislid/exports/**"
+    - "!**/.scratch/**"
+    - "!**/memento_vault.egg-info/**"
+    - "!**/*.log"
