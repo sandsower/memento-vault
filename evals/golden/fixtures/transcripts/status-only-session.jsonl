@@ -1,0 +1,6 @@
+{"type": "user", "cwd": "/home/user/fixture-project", "gitBranch": "main", "message": {"content": "Where are we with the release PR?"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "PR #42 is open, CI is green, waiting for review."}]}}
+{"type": "user", "cwd": "/home/user/fixture-project", "gitBranch": "main", "message": {"content": "Mark the ticket in review and ping me when merged."}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Moved ticket ABC-7 to In Review. The PR is marked ready for review. Nothing else changed."}]}}
+{"type": "user", "cwd": "/home/user/fixture-project", "gitBranch": "main", "message": {"content": "thanks"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "Will do. Current status: PR #42 ready for review, ticket ABC-7 In Review."}]}}

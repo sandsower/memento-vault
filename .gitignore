@@ -13,3 +13,7 @@ sweep*.db
 sweep_results*.json
 .env
 .worktrees/
+.scratch/
+log/
+memento_vault.egg-info/
+vic-mem-*/

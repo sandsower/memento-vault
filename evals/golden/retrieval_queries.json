@@ -1,0 +1,73 @@
+{
+  "_comment": "Golden retrieval queries against the LIVE vault. Positive queries phrase a question the way an agent would, and expect_any lists path substrings that count as a hit. Negative queries describe topics that do NOT exist in the vault; anything scoring above recall_min_score is a false injection. Maintenance: when a golden note is archived or superseded, update expect_any to the successor note instead of deleting the query. Add roughly 2 new positive queries per month from real recall misses you noticed. Keep queries phrased as natural prompts, not keyword soup.",
+  "positive": [
+    {
+      "id": "bearer-token-hashing",
+      "query": "how should we store bearer tokens that appear in URLs",
+      "expect_any": ["bearer-token-in-url-store-sha256-hash"]
+    },
+    {
+      "id": "rls-force-trap",
+      "query": "postgres row level security enable force without policies",
+      "expect_any": ["rls-enable-force-without-policies-is-a-trap"]
+    },
+    {
+      "id": "proxy-5xx-mapping",
+      "query": "what status code should a proxy return when upstream fails with 5xx",
+      "expect_any": ["proxy-handlers-should-map-upstream-5xx-to-502"]
+    },
+    {
+      "id": "posthog-funnels",
+      "query": "why do posthog funnels underreport anonymous user conversion",
+      "expect_any": ["posthog-person-based-funnels-break"]
+    },
+    {
+      "id": "ecs-iam-queue-scope",
+      "query": "agenticfootball ecs task iam permissions for sqs queues",
+      "expect_any": ["agenticfootball-ecs-task-iam-scoped-to-main-queue"]
+    },
+    {
+      "id": "mcp-registry-publish",
+      "query": "how to publish an mcp server to the registry",
+      "expect_any": ["mcp-registry-publish-flow-via-mcp-publisher"]
+    },
+    {
+      "id": "installer-flag-persistence",
+      "query": "memento installer remembering flags between upgrades",
+      "expect_any": ["installer-flag-persistence-in-manifest"]
+    },
+    {
+      "id": "grid-col-span",
+      "query": "css grid child column span instead of changing parent grid",
+      "expect_any": ["grid-col-span-over-parent-grid-override"]
+    },
+    {
+      "id": "skills-vs-memory-enforcement",
+      "query": "should tone rules live in skills or in memory",
+      "expect_any": ["skill-enforces-tone-not-memory"]
+    },
+    {
+      "id": "workflow-artifacts-git",
+      "query": "should workflow checkpoints and plan artifacts be committed to git",
+      "expect_any": ["agenticfootball-workflow-artifacts-are-local-not-committed"]
+    }
+  ],
+  "negative": [
+    {
+      "id": "nonexistent-kafka",
+      "query": "kafka consumer group rebalancing strategy for the payments cluster"
+    },
+    {
+      "id": "nonexistent-rust-gc",
+      "query": "tuning the rust garbage collector nursery size"
+    },
+    {
+      "id": "nonexistent-kubernetes-mesh",
+      "query": "istio sidecar mtls certificate rotation in the staging mesh"
+    },
+    {
+      "id": "nonexistent-embedded",
+      "query": "stm32 dma double buffering for the motor controller firmware"
+    }
+  ]
+}

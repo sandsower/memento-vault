@@ -1,0 +1,102 @@
+# Thresholds for the memento quality evals.
+# Every metric has a warn and a fail bound.
+# Direction is fixed in code per metric; this file only tunes the bounds.
+# Rates are fractions between 0 and 1 unless the comment says otherwise.
+#
+# Tuning guidance:
+# - Tighten a bound only after the metric has passed it for two consecutive weeks.
+# - Never loosen a bound to make a run green; fix the underlying capture or retrieval issue instead.
+# - Record every change to this file in docs/eval-baselines.md with a one-line reason.
+
+vault_content:
+  frontmatter_parse_rate:      # notes whose YAML frontmatter parses
+    warn: 0.99
+    fail: 0.95
+  required_fields_rate:        # notes carrying title, type, tags, source, date
+    warn: 0.98
+    fail: 0.90
+  certainty_present_rate:      # notes that carry a certainty value at all
+    warn: 0.90
+    fail: 0.75
+  certainty_valid_rate:        # of notes with certainty, share inside the 1-5 scale
+    warn: 0.999
+    fail: 0.98
+  canonical_type_rate:         # notes typed with a canonical type
+    warn: 0.85
+    fail: 0.70
+  project_slug_rate:           # project values that are slugs, not filesystem paths
+    warn: 0.90
+    fail: 0.60
+  ephemeral_note_rate:         # notes that look like transient run state (lower is better)
+    warn: 0.05
+    fail: 0.15
+  near_duplicate_rate:         # notes in near-duplicate title groups (lower is better)
+    warn: 0.02
+    fail: 0.05
+  wikilink_rate:               # notes with at least one outgoing wikilink
+    warn: 0.50
+    fail: 0.25
+  dangling_wikilink_rate:      # wikilinks pointing at notes that do not exist (lower is better)
+    warn: 0.10
+    fail: 0.25
+  stub_note_rate:              # notes with a body under 200 chars (lower is better)
+    warn: 0.05
+    fail: 0.15
+  oversized_note_rate:         # notes with a body over 8000 chars (lower is better)
+    warn: 0.02
+    fail: 0.05
+  supersedes_integrity_rate:   # supersedes targets that resolve to an existing note
+    warn: 0.95
+    fail: 0.80
+  growth_ratio:                # last-7-day daily capture rate vs prior-30-day rate (lower is better)
+    warn: 2.0
+    fail: 4.0
+
+capture_health:
+  window_days: 30              # telemetry window for all capture_health metrics
+  llm_failure_rate:            # structured-note LLM calls that failed (lower is better)
+    warn: 0.10
+    fail: 0.25
+  parse_empty_rate:            # LLM responses that parsed to zero notes (lower is better)
+    warn: 0.05
+    fail: 0.15
+  missing_transcript_rate:     # triage runs that could not find their transcript (lower is better)
+    warn: 0.05
+    fail: 0.15
+  truncation_rate:             # note-writing prompts that hit the transcript cap (lower is better)
+    warn: 0.15
+    fail: 0.40
+  notes_per_attempt:           # notes written per successful extraction attempt
+    warn: 0.80
+    fail: 0.50
+  spawn_storm_ratio:           # busiest day vs median day for triage spawns (lower is better)
+    warn: 5.0
+    fail: 20.0
+  bridge_failures_per_day:     # pi-bridge status/tool-context failures per day (lower is better)
+    warn: 3.0
+    fail: 10.0
+
+retrieval_accuracy:
+  golden_recall_at_5:          # share of golden queries whose expected note appears in top 5
+    warn: 0.70
+    fail: 0.40
+  golden_mrr:                  # mean reciprocal rank over golden queries
+    warn: 0.60
+    fail: 0.30
+  negative_query_pass_rate:    # share of negative queries that correctly return nothing relevant
+    warn: 0.99
+    fail: 0.70
+  policy_pass_rate:            # hermetic ranking-policy unit checks that pass
+    warn: 1.00
+    fail: 0.75
+
+capture_e2e:
+  schema_valid_rate:           # LLM note batches that satisfy the triage JSON schema
+    warn: 1.00
+    fail: 0.50
+  ephemeral_suppression_rate:  # status-only fixture sessions that produced no ephemeral notes
+    warn: 1.00
+    fail: 0.50
+  durable_capture_rate:        # insight-bearing fixture sessions that produced a well-formed note
+    warn: 1.00
+    fail: 0.50

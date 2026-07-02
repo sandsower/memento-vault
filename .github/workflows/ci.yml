@@ -59,6 +59,8 @@ jobs:
         run: python -m pytest tests/test_mcp_server.py tests/test_remote_client.py tests/test_integration_remote.py
       - name: install-tests
         run: python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py
+      - name: eval-framework-tests
+        run: python -m pytest tests/test_evals.py
 
   full-pytest:
     name: Full pytest (advisory)

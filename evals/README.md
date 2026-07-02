@@ -1,0 +1,132 @@
+# Memento quality evals
+
+One command that grades the whole memory system: what gets recorded (input quality), what gets found (retrieval accuracy), what the pipeline costs (model use and token spend), and whether the machinery is healthy.
+
+```bash
+python3 evals/run_evals.py              # all deterministic suites, ~1-2 minutes, zero tokens
+python3 evals/run_evals.py --llm        # adds LLM extraction checks (exactly 2 LLM calls)
+python3 evals/run_evals.py --json       # machine-readable scorecard
+python3 evals/run_evals.py --strict     # warnings also fail the exit code
+python3 evals/run_evals.py --suite vault_content   # one suite only (repeatable flag)
+```
+
+Exit code 0 means no failures.
+Everything is read-only against the vault and telemetry logs.
+Only `--llm` spends tokens.
+
+## How to read the scorecard
+
+Every check prints a status, a value, the threshold it was graded against, up to 8 offending examples, and a `fix:` line saying what to do about it.
+
+- `PASS` - healthy.
+- `WARN` - degrading; investigate when convenient.
+- `FAIL` - actively hurting memory quality; fix soon.
+- `SKIP` - the check could not run (missing backend, no telemetry); the details say why.
+
+Checks labeled `informational` or `known gaps` never fail the run.
+Known-gap checks encode desired behavior the system does not implement yet (for example: superseded notes are not demoted in ranking).
+They exist so progress is visible: when one flips to FIXED, promote it to a core check (see maintenance below).
+
+## The four suites
+
+### vault_content - what we recorded
+
+Scans every note in the vault and grades structure and substance: frontmatter validity, certainty presence and scale, canonical types, project-field hygiene, ephemeral run-state notes, near-duplicates, wikilink health, note sizes, supersedes integrity, and capture-volume spikes.
+This is the input-quality suite: if capture writes junk, it shows up here first.
+
+### capture_health - the write path
+
+Parses `~/.config/memento-vault/triage-health.jsonl` over a 30-day window (tunable in `thresholds.yml`).
+Grades LLM failure rate, parse-empty rate, missing transcripts, transcript truncation, notes-per-attempt yield, spawn storms, and pi-bridge failures.
+Also prints an informational spend report: LLM calls, prompt/output bytes, token totals where available, average duration, and backend/model mix.
+Token counts are only recorded for API backends; CLI backends (claude, codex) report bytes and duration only.
+
+### retrieval_accuracy - the read path
+
+Two layers:
+
+1. Hermetic policy checks run the real ranking functions from `memento/search.py` against a rendered fixture vault (`golden/fixtures/vault/`) with the grep backend forced, in a subprocess so nothing leaks.
+They verify temporal decay, certainty immunity, session-type and low-certainty penalties, fleeting-path dropping, project scoping, and archive exclusion.
+2. Live golden queries run natural-language questions from `golden/retrieval_queries.json` against the real vault and backend, grading recall@5, MRR, and negative-query leakage.
+Each positive query is also run through semantic search so the scorecard shows when vector search would have rescued a BM25 miss.
+
+### capture_e2e - the triage gate and extraction
+
+Always runs the real `is_substantial()` gate against labeled fixture sessions.
+With `--llm`, feeds two fixture transcripts (`golden/fixtures/transcripts/`) through the real structured-notes prompt and the configured LLM backend, then grades the output deterministically: schema validity, canonical type, certainty in 1-5, no ephemeral run-state language, and, crucially, that the status-only transcript produces zero notes.
+No LLM judge is used; the rubric is plain string and schema checks so results are reproducible.
+
+## Maintenance guide
+
+This section is written for any agent, including ones weaker than the one that built this.
+Follow it mechanically; no design judgment is needed for routine upkeep.
+
+### Weekly routine
+
+1. Run `python3 evals/run_evals.py --json > /tmp/evals.json` and read the summary.
+2. Compare against the previous run (keep them in `docs/eval-baselines.md`, newest first, one line per run: date, pass/warn/fail counts, and any metric that changed status).
+3. For every NEW failure, read the `fix:` line and the details.
+Fix the cause, never the threshold.
+4. Once a month, run with `--llm` to check extraction quality (2 LLM calls).
+
+### When a golden query starts missing
+
+First check whether the expected note was renamed, archived, or superseded: `rg <slug> ~/memento/notes ~/memento/archive`.
+
+- Renamed or superseded: update `expect_any` in `golden/retrieval_queries.json` to the new path substring.
+- Still exists but not found: retrieval regressed.
+Do not touch the golden file; investigate the search pipeline (start with `memento-vault retrieval-report`).
+
+### Adding golden queries (do this ~2 per month)
+
+When you notice a real recall miss during a session (you knew a note existed but recall did not surface it), add it:
+
+1. Find the note path in the vault.
+2. Add an entry to the `positive` list: an `id`, the query phrased as a natural prompt (the way a user would type it, not keyword soup), and `expect_any` with a distinctive path substring.
+3. Run `python3 evals/run_evals.py --suite retrieval_accuracy` to confirm the entry is well-formed.
+
+Negative queries should describe topics genuinely absent from the vault.
+If a negative query starts leaking because the vault legitimately gained that topic, replace the query, do not delete it.
+
+### Changing thresholds
+
+All bounds live in `thresholds.yml` with comments.
+Rules:
+
+- Tighten only after two consecutive weeks of passing at the tighter bound.
+- Never loosen to silence a failure; that hides regressions permanently.
+- Record every change in `docs/eval-baselines.md` with a one-line reason.
+
+### Promoting a known-gap check
+
+When a known-gap check reports FIXED (someone implemented the behavior):
+
+1. In `evals/retrieval_probe.py` or `evals/suites/capture_e2e.py`, find the check and remove its `known_gap=True` flag (probe) or move the case out of the known-gap branch (gate cases).
+2. Run the suite; the check must pass as a core check.
+3. Note the promotion in `docs/eval-baselines.md`.
+
+### Adding a new check
+
+1. Pick the suite by subject: note content -> `suites/vault_content.py`, telemetry -> `suites/capture_health.py`, search behavior -> `evals/retrieval_probe.py` (hermetic) or `golden/retrieval_queries.json` (live), triage behavior -> `suites/capture_e2e.py`.
+2. Copy the shape of an existing `check(...)` call: id, plain-English title, value, direction, details with concrete examples, and a `remediation` string that tells a future reader exactly what to do.
+3. Add warn/fail bounds to `thresholds.yml` with a comment.
+4. Keep it deterministic and read-only.
+If it needs an LLM, gate it behind `context["llm"]` and make the grading itself deterministic (string/schema checks, not judge opinions).
+
+### Extending the fixture vault
+
+Fixture notes live in `golden/fixtures/vault/` and support two placeholders: `{{DAYS_AGO_N}}` renders a date N days ago, and `{{ROOT}}` renders the temp root (used for project paths).
+Give each new fixture note a unique nonsense token (like `zephyrcache`) so grep-backend queries are unambiguous.
+
+### Things this suite deliberately does not do
+
+- No LLM-as-judge: judge models drift and are not reproducible; every grading rule here is a string or schema check.
+- No writes to the vault: safe to run from any session, including CI.
+- No network calls (except the optional `--llm` extraction, which uses the locally configured backend).
+- Latency/scale benchmarking stays in `benchmark/` (LongMemEval, optuna sweeps, scale lifecycle); this suite is about quality, not speed.
+
+## Relationship to other tooling
+
+- `memento-vault health` checks install/runtime wiring; this suite checks knowledge quality.
+- `memento-vault retrieval-report` aggregates live retrieval telemetry (needs `retrieval_log: true`); this suite actively probes with known-answer queries.
+- `benchmark/` measures performance and parameter tuning against external datasets; this suite measures YOUR vault and YOUR pipeline behavior.
