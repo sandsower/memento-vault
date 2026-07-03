@@ -79,7 +79,7 @@
     ]
   },
   "process_provider": {
-    "name": "claude_code"
+    "name": "codex"
   },
   "runner_extensions": {
     "model_routing": {
@@ -106,7 +106,9 @@
       "tier": "standard",
       "mode": "prefer",
       "candidates": [
-        "sonnet"
+        "openai:gpt-5.1-codex",
+        "anthropic:claude-sonnet-4.6",
+        "google:gemini-2.5-pro"
       ]
     }
   }
