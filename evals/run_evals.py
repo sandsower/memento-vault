@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from evals.common import FAIL, PASS, SKIP, WARN, find_vault  # noqa: E402
+from evals.common import FAIL, PASS, SKIP, WARN, find_vault, iter_notes  # noqa: E402
 from evals.common import now as eval_now, set_now  # noqa: E402
 from evals.suites import (  # noqa: E402
     capture_e2e,
@@ -80,6 +80,56 @@ def render_text(results):
     return "\n".join(lines)
 
 
+def build_baseline(results, effective_now, vault_note_count):
+    """Shape a scorecard run into the small, git-diffable baseline schema
+    (MEM-136): one entry per suite, one entry per check, sorted so that
+    re-running against an unchanged vault produces an unchanged file.
+
+    `known_gap` is derived from the check id, not carried on CheckResult
+    itself: the known-gap aggregate checks the suites already emit
+    (`<suite>.known_gaps`, `capture_e2e.gate_known_gaps`) are the only
+    checks whose id ends in `known_gaps`, and their grade already encodes
+    fixed-vs-open (PASS = all tracked gaps fixed, WARN = at least one
+    still open). diff_baselines.py treats a WARN -> PASS transition on
+    one of these as a promotion prompt rather than an ordinary improvement.
+    """
+    by_suite: dict[str, list] = {}
+    for r in results:
+        by_suite.setdefault(r.suite, []).append(r)
+
+    suites = []
+    for suite_name in sorted(by_suite):
+        checks = [
+            {
+                "name": r.id,
+                "grade": r.status,
+                "value": r.value,
+                "threshold": r.threshold,
+                "known_gap": r.id.endswith("known_gaps"),
+            }
+            for r in sorted(by_suite[suite_name], key=lambda r: r.id)
+        ]
+        suites.append({"suite": suite_name, "checks": checks})
+
+    return {
+        "effective_now": effective_now,
+        "vault_note_count": vault_note_count,
+        "suites": suites,
+    }
+
+
+def _resolve_baseline_path(baseline_out: str, effective_now) -> Path:
+    """--baseline-out accepts either a full file path (the ticket's own
+    example: evals/baselines/2026-07-03.json) or a directory, in which case
+    the filename date is derived from the effective eval clock (--now if
+    given, else evals/common.now()) -- never a bare datetime.now()/date.today()
+    call, so a weekly-scheduler invocation stays reproducible under --now."""
+    path = Path(baseline_out).expanduser()
+    if path.suffix == ".json" and not path.is_dir():
+        return path
+    return path / f"{effective_now.date().isoformat()}.json"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--suite", choices=sorted(SUITES), action="append", help="run only these suites (repeatable)")
@@ -90,6 +140,11 @@ def main():
     parser.add_argument(
         "--now",
         help="ISO-8601 UTC timestamp to freeze the eval clock for reproducible runs (env fallback: MEMENTO_EVAL_NOW)",
+    )
+    parser.add_argument(
+        "--baseline-out",
+        help="write a small baseline scorecard JSON (see evals/diff_baselines.py) to this path, or "
+        "into this directory named <effective-clock-date>.json if the path is not a .json file",
     )
     args = parser.parse_args()
 
@@ -133,6 +188,15 @@ def main():
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(render_text(results))
+
+    if args.baseline_out:
+        vault = context["vault"]
+        vault_note_count = sum(1 for _ in iter_notes(vault)) if vault else 0
+        baseline = build_baseline(results, effective_now.isoformat(), vault_note_count)
+        baseline_path = _resolve_baseline_path(args.baseline_out, effective_now)
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"baseline written: {baseline_path}", file=sys.stderr)
 
     has_fail = any(r.status == FAIL for r in results)
     has_warn = any(r.status == WARN for r in results)

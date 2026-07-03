@@ -108,3 +108,6 @@ capture_retrieve_loop:
   llm_extraction_rate:         # --llm tier: fixture transcripts whose real triage extraction passed the rubric
     warn: 1.00
     fail: 0.50
+
+diffing:                       # evals/diff_baselines.py (MEM-136): baseline-to-baseline comparison
+  noise_floor: 0.02            # minimum |new_value - old_value| worth reporting as a metric delta

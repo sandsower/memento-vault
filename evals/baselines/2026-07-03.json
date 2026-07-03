@@ -1,0 +1,269 @@
+{
+  "effective_now": "2026-07-03T00:00:00+00:00",
+  "suites": [
+    {
+      "checks": [
+        {
+          "grade": "warn",
+          "known_gap": true,
+          "name": "capture_e2e.gate_known_gaps",
+          "threshold": "",
+          "value": "0/1"
+        },
+        {
+          "grade": "skip",
+          "known_gap": false,
+          "name": "capture_e2e.llm_extraction",
+          "threshold": "",
+          "value": null
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "capture_e2e.triage_gate_accuracy",
+          "threshold": "all labeled cases must classify correctly",
+          "value": 1.0
+        }
+      ],
+      "suite": "capture_e2e"
+    },
+    {
+      "checks": [
+        {
+          "grade": "fail",
+          "known_gap": false,
+          "name": "capture_health.bridge_failures_per_day",
+          "threshold": "warn > 3.0, fail > 10.0",
+          "value": 27.37
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "capture_health.llm_failure_rate",
+          "threshold": "warn > 0.1, fail > 0.25",
+          "value": 0.0858
+        },
+        {
+          "grade": "warn",
+          "known_gap": false,
+          "name": "capture_health.missing_transcript_rate",
+          "threshold": "warn > 0.05, fail > 0.15",
+          "value": 0.0504
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "capture_health.notes_per_attempt",
+          "threshold": "warn < 0.8, fail < 0.5",
+          "value": 2.65
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "capture_health.parse_empty_rate",
+          "threshold": "warn > 0.05, fail > 0.15",
+          "value": 0.0026
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "capture_health.retrieval_log_enabled",
+          "threshold": "",
+          "value": 6
+        },
+        {
+          "grade": "fail",
+          "known_gap": false,
+          "name": "capture_health.spawn_storm_ratio",
+          "threshold": "warn > 5.0, fail > 20.0",
+          "value": 210.4
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "capture_health.spend_report",
+          "threshold": "",
+          "value": 1165
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "capture_health.truncation_rate",
+          "threshold": "warn > 0.15, fail > 0.4",
+          "value": 0.109
+        }
+      ],
+      "suite": "capture_health"
+    },
+    {
+      "checks": [
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "capture_retrieve_loop.blocking_recall_rate",
+          "threshold": "warn < 1.0, fail < 0.67",
+          "value": 1.0
+        },
+        {
+          "grade": "skip",
+          "known_gap": false,
+          "name": "capture_retrieve_loop.llm_loop",
+          "threshold": "",
+          "value": null
+        }
+      ],
+      "suite": "capture_retrieve_loop"
+    },
+    {
+      "checks": [
+        {
+          "grade": "fail",
+          "known_gap": false,
+          "name": "retrieval_accuracy.golden_mrr",
+          "threshold": "warn < 0.6, fail < 0.3",
+          "value": 0.2
+        },
+        {
+          "grade": "fail",
+          "known_gap": false,
+          "name": "retrieval_accuracy.golden_recall_at_5",
+          "threshold": "warn < 0.7, fail < 0.4",
+          "value": 0.2
+        },
+        {
+          "grade": "warn",
+          "known_gap": true,
+          "name": "retrieval_accuracy.known_gaps",
+          "threshold": "",
+          "value": "0/3"
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "retrieval_accuracy.negative_query_pass_rate",
+          "threshold": "warn < 0.99, fail < 0.7",
+          "value": 1.0
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "retrieval_accuracy.policy_pass_rate",
+          "threshold": "warn < 1.0, fail < 0.75",
+          "value": 1.0
+        },
+        {
+          "grade": "warn",
+          "known_gap": false,
+          "name": "retrieval_accuracy.semantic_rescue",
+          "threshold": "",
+          "value": "6 rescued, 8/10 semantic hits"
+        }
+      ],
+      "suite": "retrieval_accuracy"
+    },
+    {
+      "checks": [
+        {
+          "grade": "warn",
+          "known_gap": false,
+          "name": "vault_content.canonical_type_rate",
+          "threshold": "warn < 0.85, fail < 0.7",
+          "value": 0.7875
+        },
+        {
+          "grade": "warn",
+          "known_gap": false,
+          "name": "vault_content.certainty_present_rate",
+          "threshold": "warn < 0.9, fail < 0.75",
+          "value": 0.8655
+        },
+        {
+          "grade": "warn",
+          "known_gap": false,
+          "name": "vault_content.certainty_valid_rate",
+          "threshold": "warn < 0.999, fail < 0.98",
+          "value": 0.9966
+        },
+        {
+          "grade": "warn",
+          "known_gap": false,
+          "name": "vault_content.dangling_wikilink_rate",
+          "threshold": "warn > 0.1, fail > 0.25",
+          "value": 0.101
+        },
+        {
+          "grade": "fail",
+          "known_gap": false,
+          "name": "vault_content.ephemeral_note_rate",
+          "threshold": "warn > 0.05, fail > 0.15",
+          "value": 0.1897
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "vault_content.frontmatter_parse_rate",
+          "threshold": "warn < 0.99, fail < 0.95",
+          "value": 0.9998
+        },
+        {
+          "grade": "fail",
+          "known_gap": false,
+          "name": "vault_content.growth_ratio",
+          "threshold": "warn > 2.0, fail > 4.0",
+          "value": 5.07
+        },
+        {
+          "grade": "warn",
+          "known_gap": false,
+          "name": "vault_content.near_duplicate_rate",
+          "threshold": "warn > 0.02, fail > 0.05",
+          "value": 0.0255
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "vault_content.oversized_note_rate",
+          "threshold": "warn > 0.02, fail > 0.05",
+          "value": 0.0011
+        },
+        {
+          "grade": "fail",
+          "known_gap": false,
+          "name": "vault_content.project_slug_rate",
+          "threshold": "warn < 0.9, fail < 0.6",
+          "value": 0.1428
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "vault_content.required_fields_rate",
+          "threshold": "warn < 0.98, fail < 0.9",
+          "value": 0.9962
+        },
+        {
+          "grade": "pass",
+          "known_gap": false,
+          "name": "vault_content.stub_note_rate",
+          "threshold": "warn > 0.05, fail > 0.15",
+          "value": 0.0
+        },
+        {
+          "grade": "warn",
+          "known_gap": false,
+          "name": "vault_content.supersedes_integrity_rate",
+          "threshold": "warn < 0.95, fail < 0.8",
+          "value": 0.913
+        },
+        {
+          "grade": "warn",
+          "known_gap": false,
+          "name": "vault_content.wikilink_rate",
+          "threshold": "warn < 0.5, fail < 0.25",
+          "value": 0.4002
+        }
+      ],
+      "suite": "vault_content"
+    }
+  ],
+  "vault_note_count": 4475
+}

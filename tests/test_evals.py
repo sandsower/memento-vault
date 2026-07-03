@@ -7,10 +7,12 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from evals import common  # noqa: E402
+from evals import common, diff_baselines, run_evals  # noqa: E402
 from evals.suites import capture_health, vault_content  # noqa: E402
 
 
@@ -515,3 +517,307 @@ class TestRunner:
         assert payload["results"]
         for item in payload["results"]:
             assert {"id", "suite", "title", "status"} <= set(item)
+
+
+class TestBaselineEmitter:
+    """MEM-136: evals/run_evals.py --baseline-out."""
+
+    def test_build_baseline_shape_and_ordering(self):
+        results = [
+            common.CheckResult(
+                id="vault_content.stub_note_rate", suite="vault_content", title="t", status=common.WARN, value=0.06
+            ),
+            common.CheckResult(
+                id="vault_content.frontmatter_parse_rate",
+                suite="vault_content",
+                title="t",
+                status=common.PASS,
+                value=1.0,
+            ),
+            common.CheckResult(
+                id="retrieval_accuracy.known_gaps",
+                suite="retrieval_accuracy",
+                title="t",
+                status=common.WARN,
+                value="1/3",
+            ),
+        ]
+        baseline = run_evals.build_baseline(results, "2026-07-03T00:00:00+00:00", 42)
+        assert baseline["effective_now"] == "2026-07-03T00:00:00+00:00"
+        assert baseline["vault_note_count"] == 42
+        # suites sorted alphabetically
+        assert [s["suite"] for s in baseline["suites"]] == ["retrieval_accuracy", "vault_content"]
+        vc = next(s for s in baseline["suites"] if s["suite"] == "vault_content")
+        # checks sorted by name within a suite
+        assert [c["name"] for c in vc["checks"]] == [
+            "vault_content.frontmatter_parse_rate",
+            "vault_content.stub_note_rate",
+        ]
+        gap_check = baseline["suites"][0]["checks"][0]
+        assert gap_check["name"] == "retrieval_accuracy.known_gaps"
+        assert gap_check["known_gap"] is True
+        assert vc["checks"][0]["known_gap"] is False
+
+    def test_baseline_out_full_path_writes_expected_schema(self, tmp_path):
+        (tmp_path / "vault" / "notes").mkdir(parents=True)
+        _write_note(tmp_path / "vault", "solo-note", certainty=4)
+        out = tmp_path / "baselines" / "explicit.json"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "evals" / "run_evals.py"),
+                "--suite",
+                "vault_content",
+                "--vault",
+                str(tmp_path / "vault"),
+                "--now",
+                "2026-07-03T00:00:00Z",
+                "--baseline-out",
+                str(out),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode in (0, 1), proc.stderr[-1000:]
+        assert out.exists()
+        baseline = json.loads(out.read_text())
+        assert baseline["effective_now"] == "2026-07-03T00:00:00+00:00"
+        assert baseline["vault_note_count"] == 1
+        assert baseline["suites"]
+        for suite in baseline["suites"]:
+            for check in suite["checks"]:
+                assert {"name", "grade", "value", "threshold", "known_gap"} <= set(check)
+        # keys sorted, trailing newline, matching evals JSON style elsewhere
+        raw = out.read_text()
+        assert raw.endswith("\n")
+        assert list(json.loads(raw).keys()) == sorted(json.loads(raw).keys())
+
+    def test_baseline_out_directory_derives_filename_from_effective_now(self, tmp_path):
+        (tmp_path / "vault" / "notes").mkdir(parents=True)
+        out_dir = tmp_path / "baselines"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "evals" / "run_evals.py"),
+                "--suite",
+                "vault_content",
+                "--vault",
+                str(tmp_path / "vault"),
+                "--now",
+                "2026-07-03T00:00:00Z",
+                "--baseline-out",
+                str(out_dir),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode in (0, 1), proc.stderr[-1000:]
+        expected = out_dir / "2026-07-03.json"
+        assert expected.exists()
+
+    def test_baseline_reproducible_same_now_same_vault_is_byte_identical(self, tmp_path):
+        """The determinism contract this ticket calls out explicitly: the
+        same --now against the same vault must produce byte-identical
+        baseline JSON, so a committed baseline is a stable diff target."""
+        (tmp_path / "vault" / "notes").mkdir(parents=True)
+        _write_note(tmp_path / "vault", "note-a", certainty=4)
+        _write_note(tmp_path / "vault", "note-b", certainty=2)
+
+        def run(out_path):
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "evals" / "run_evals.py"),
+                    "--vault",
+                    str(tmp_path / "vault"),
+                    "--suite",
+                    "vault_content",
+                    "--now",
+                    "2026-07-03T12:00:00Z",
+                    "--baseline-out",
+                    str(out_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            assert proc.returncode in (0, 1), proc.stderr[-1000:]
+            return out_path.read_bytes()
+
+        first = run(tmp_path / "first.json")
+        second = run(tmp_path / "second.json")
+        assert first == second
+
+
+class TestDiffBaselines:
+    """MEM-136: evals/diff_baselines.py transition classes."""
+
+    def _check(self, name, grade, value=0.9, threshold="warn < 0.9, fail < 0.7", known_gap=False):
+        return {"name": name, "grade": grade, "value": value, "threshold": threshold, "known_gap": known_gap}
+
+    def _baseline(self, checks, suite="vault_content", now="2026-07-02T00:00:00+00:00", note_count=10):
+        return {
+            "effective_now": now,
+            "vault_note_count": note_count,
+            "suites": [{"suite": suite, "checks": checks}],
+        }
+
+    def test_new_fail_check_did_not_exist_before(self):
+        old = self._baseline([])
+        new = self._baseline([self._check("vault_content.new_check", common.FAIL, value=0.1)])
+        entries = diff_baselines.diff(old, new, noise_floor=0.02)
+        assert len(entries) == 1
+        assert entries[0]["category"] == "new_fail"
+        assert entries[0]["category"] in diff_baselines.REGRESSION_CATEGORIES
+
+    def test_pass_to_warn_is_a_regression(self):
+        old = self._baseline([self._check("vault_content.x", common.PASS, value=0.95)])
+        new = self._baseline([self._check("vault_content.x", common.WARN, value=0.92)])
+        entries = [e for e in diff_baselines.diff(old, new, noise_floor=0.02) if e["category"] != "metric_delta"]
+        assert len(entries) == 1
+        assert entries[0]["category"] == "regression"
+        assert entries[0]["old_grade"] == common.PASS
+        assert entries[0]["new_grade"] == common.WARN
+
+    def test_warn_to_fail_is_a_regression(self):
+        old = self._baseline([self._check("vault_content.x", common.WARN, value=0.6)])
+        new = self._baseline([self._check("vault_content.x", common.FAIL, value=0.4)])
+        entries = [e for e in diff_baselines.diff(old, new, noise_floor=0.02) if e["category"] != "metric_delta"]
+        assert len(entries) == 1
+        assert entries[0]["category"] == "regression"
+        assert entries[0]["old_grade"] == common.WARN
+        assert entries[0]["new_grade"] == common.FAIL
+
+    def test_improvement_is_reported_but_not_a_regression(self):
+        old = self._baseline([self._check("vault_content.x", common.WARN, value=0.6)])
+        new = self._baseline([self._check("vault_content.x", common.PASS, value=0.95)])
+        entries = [e for e in diff_baselines.diff(old, new, noise_floor=0.02) if e["category"] != "metric_delta"]
+        assert len(entries) == 1
+        assert entries[0]["category"] == "improvement"
+        assert entries[0]["category"] not in diff_baselines.REGRESSION_CATEGORIES
+
+    def test_known_gap_fixed_is_a_promotion_prompt_not_a_regression(self):
+        old = self._baseline(
+            [self._check("retrieval_accuracy.known_gaps", common.WARN, value="1/3", known_gap=True)],
+            suite="retrieval_accuracy",
+        )
+        new = self._baseline(
+            [self._check("retrieval_accuracy.known_gaps", common.PASS, value="3/3", known_gap=True)],
+            suite="retrieval_accuracy",
+        )
+        entries = diff_baselines.diff(old, new, noise_floor=0.02)
+        assert len(entries) == 1
+        assert entries[0]["category"] == "known_gap_fixed"
+        assert entries[0]["category"] not in diff_baselines.REGRESSION_CATEGORIES
+        rendered = diff_baselines.render_text(entries, 0.02, "old.json", "new.json")
+        assert "promotion prompt" in rendered
+
+    def test_known_gap_reopened_is_a_regression(self):
+        old = self._baseline(
+            [self._check("retrieval_accuracy.known_gaps", common.PASS, value="3/3", known_gap=True)],
+            suite="retrieval_accuracy",
+        )
+        new = self._baseline(
+            [self._check("retrieval_accuracy.known_gaps", common.WARN, value="2/3", known_gap=True)],
+            suite="retrieval_accuracy",
+        )
+        entries = diff_baselines.diff(old, new, noise_floor=0.02)
+        assert len(entries) == 1
+        assert entries[0]["category"] == "known_gap_reopened"
+        assert entries[0]["category"] in diff_baselines.REGRESSION_CATEGORIES
+
+    def test_metric_delta_over_noise_floor_is_reported(self):
+        old = self._baseline([self._check("vault_content.x", common.PASS, value=0.90)])
+        new = self._baseline([self._check("vault_content.x", common.PASS, value=0.95)])
+        entries = diff_baselines.diff(old, new, noise_floor=0.02)
+        assert len(entries) == 1
+        assert entries[0]["category"] == "metric_delta"
+        assert entries[0]["delta"] == pytest.approx(0.05)
+        assert entries[0]["category"] not in diff_baselines.REGRESSION_CATEGORIES
+
+    def test_metric_delta_under_noise_floor_is_not_reported(self):
+        old = self._baseline([self._check("vault_content.x", common.PASS, value=0.90)])
+        new = self._baseline([self._check("vault_content.x", common.PASS, value=0.905)])
+        entries = diff_baselines.diff(old, new, noise_floor=0.02)
+        assert entries == []
+
+    def test_non_numeric_values_never_produce_a_metric_delta(self):
+        old = self._baseline(
+            [self._check("retrieval_accuracy.known_gaps", common.PASS, value="1/1", known_gap=True)],
+            suite="retrieval_accuracy",
+        )
+        new = self._baseline(
+            [self._check("retrieval_accuracy.known_gaps", common.PASS, value="1/1", known_gap=True)],
+            suite="retrieval_accuracy",
+        )
+        assert diff_baselines.diff(old, new, noise_floor=0.02) == []
+
+    def test_new_check_and_removed_check_are_informational(self):
+        old = self._baseline([self._check("vault_content.gone", common.PASS)])
+        new = self._baseline([self._check("vault_content.arrived", common.PASS)])
+        entries = diff_baselines.diff(old, new, noise_floor=0.02)
+        categories = {e["category"] for e in entries}
+        assert categories == {"new_check", "removed_check"}
+        assert not (categories & diff_baselines.REGRESSION_CATEGORIES)
+
+    def test_diff_output_is_deterministic(self):
+        old = self._baseline(
+            [
+                self._check("vault_content.b", common.PASS),
+                self._check("vault_content.a", common.PASS),
+            ]
+        )
+        new = self._baseline(
+            [
+                self._check("vault_content.b", common.FAIL, value=0.1),
+                self._check("vault_content.a", common.WARN, value=0.5),
+            ]
+        )
+        first = diff_baselines.render_text(diff_baselines.diff(old, new, 0.02), 0.02, "o", "n")
+        second = diff_baselines.render_text(diff_baselines.diff(old, new, 0.02), 0.02, "o", "n")
+        assert first == second
+
+    def test_noise_floor_read_from_thresholds_yml(self):
+        assert diff_baselines._noise_floor() == 0.02
+
+    def test_cli_exits_1_on_regression_and_0_when_clean(self, tmp_path):
+        old_path = tmp_path / "old.json"
+        new_regressed = tmp_path / "new_regressed.json"
+        new_clean = tmp_path / "new_clean.json"
+        old_path.write_text(json.dumps(self._baseline([self._check("vault_content.x", common.PASS, value=0.95)])))
+        new_regressed.write_text(json.dumps(self._baseline([self._check("vault_content.x", common.FAIL, value=0.4)])))
+        new_clean.write_text(json.dumps(self._baseline([self._check("vault_content.x", common.PASS, value=0.96)])))
+
+        regressed_proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "evals" / "diff_baselines.py"), str(old_path), str(new_regressed)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert regressed_proc.returncode == 1
+
+        clean_proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "evals" / "diff_baselines.py"), str(old_path), str(new_clean)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert clean_proc.returncode == 0
+
+    def test_cli_json_output_shape(self, tmp_path):
+        old_path = tmp_path / "old.json"
+        new_path = tmp_path / "new.json"
+        old_path.write_text(json.dumps(self._baseline([self._check("vault_content.x", common.PASS, value=0.95)])))
+        new_path.write_text(json.dumps(self._baseline([self._check("vault_content.x", common.WARN, value=0.85)])))
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "evals" / "diff_baselines.py"), str(old_path), str(new_path), "--json"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 1
+        payload = json.loads(proc.stdout)
+        assert payload["regression_count"] == 1
+        assert {"old", "new", "noise_floor", "entries", "regression_count"} <= set(payload)

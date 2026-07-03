@@ -9,6 +9,8 @@ python3 evals/run_evals.py --json       # machine-readable scorecard
 python3 evals/run_evals.py --strict     # warnings also fail the exit code
 python3 evals/run_evals.py --suite vault_content   # one suite only (repeatable flag)
 python3 evals/run_evals.py --now 2026-06-15T00:00:00Z   # freeze the clock (env fallback: MEMENTO_EVAL_NOW)
+python3 evals/run_evals.py --baseline-out evals/baselines/   # also write a small dated scorecard for weekly diffing
+python3 evals/diff_baselines.py old.json new.json       # compare two baselines (see "Weekly routine" below)
 ```
 
 Exit code 0 means no failures.
@@ -89,11 +91,39 @@ Follow it mechanically; no design judgment is needed for routine upkeep.
 
 ### Weekly routine
 
-1. Run `python3 evals/run_evals.py --json > /tmp/evals.json` and read the summary.
-2. Compare against the previous run (keep them in `docs/eval-baselines.md`, newest first, one line per run: date, pass/warn/fail counts, and any metric that changed status).
-3. For every NEW failure, read the `fix:` line and the details.
+1. Emit a fresh baseline and diff it against last week's committed one:
+
+   ```bash
+   python3 evals/run_evals.py --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --baseline-out evals/baselines/
+   python3 evals/diff_baselines.py evals/baselines/<last-committed-date>.json evals/baselines/<today>.json
+   ```
+
+   `--baseline-out` given a directory (as above) names the file `<date>.json` from the *effective eval
+   clock* (the `--now` you passed, threaded through `evals/common.now()`), never a bare
+   `datetime.now()`/`date.today()` call -- so the filename date and every time-window metric inside the
+   file always agree.
+   Pass an explicit filename instead of a directory (`--baseline-out evals/baselines/2026-07-10.json`)
+   if you want to control the name directly.
+2. Read `diff_baselines.py`'s output.
+It calls out, per check: new FAILs, grade transitions (`PASS -> WARN`, `WARN -> FAIL`, and improvements),
+metric moves beyond the noise floor (`thresholds.yml: diffing.noise_floor`, default 0.02), and known-gap
+flips.
+A known-gap check flipping to FIXED is a promotion prompt, not routine noise -- see "Promoting a
+known-gap check" below.
+Exit code 1 means a regression was found (a new FAIL, a `PASS -> WARN`/`WARN -> FAIL` transition, or a
+known gap reopening); 0 means the run is at least as healthy as last time.
+3. Commit the new baseline file (`evals/baselines/<date>.json`) once you've read the diff -- it is the
+next `old.json` for next week.
+4. For every regression, read the `fix:` line and the details in the full `run_evals.py --json` output.
 Fix the cause, never the threshold.
-4. Once a month, run with `--llm` to check extraction quality (2 LLM calls).
+5. Once a month, run with `--llm` to check extraction quality (2 LLM calls).
+
+This is a LOCAL routine, not a CI job: it needs the real vault and the real telemetry log, neither of
+which exist in CI.
+Run it by hand, or wire the two commands above into a `launchd`/`cron` job that runs weekly and leaves
+its output somewhere you'll actually read it (a log file, a memento capture, a calendar reminder --
+whatever habit sticks). `evals/diff_baselines.py`'s exit code is designed for exactly that: a cron
+wrapper can alert only when it's non-zero.
 
 ### When a golden query starts missing
 
@@ -140,11 +170,39 @@ Rules:
 
 ### Promoting a known-gap check
 
-When a known-gap check reports FIXED (someone implemented the behavior):
+When a known-gap check reports FIXED (someone implemented the behavior) -- the weekly `diff_baselines.py`
+run will flag this as a `KNOWN GAP FIXED` entry the moment it happens:
 
 1. In `evals/retrieval_probe.py` or `evals/suites/capture_e2e.py`, find the check and remove its `known_gap=True` flag (probe) or move the case out of the known-gap branch (gate cases).
 2. Run the suite; the check must pass as a core check.
 3. Note the promotion in `docs/eval-baselines.md`.
+
+### Baseline files and diffing (MEM-136)
+
+`evals/run_evals.py --baseline-out <path>` writes a small, git-diffable scorecard to `evals/baselines/`:
+
+```json
+{
+  "effective_now": "2026-07-03T00:00:00+00:00",
+  "vault_note_count": 4475,
+  "suites": [
+    {"suite": "vault_content", "checks": [
+      {"name": "vault_content.frontmatter_parse_rate", "grade": "pass", "value": 0.998, "threshold": "warn < 0.99, fail < 0.95", "known_gap": false}
+    ]}
+  ]
+}
+```
+
+Suites and checks are sorted (suite name, then check name) so two runs against an unchanged vault
+produce an unchanged file, and a real change produces a small, readable git diff.
+`known_gap` is true only for the `<suite>.known_gaps` / `capture_e2e.gate_known_gaps` aggregate checks
+the suites already emit -- it is not a field you set per-check.
+
+`evals/diff_baselines.py <old.json> <new.json>` compares two of these files. It never runs the evals
+itself and never touches the vault; it is pure JSON-to-JSON comparison, so it is fast and safe to run
+as often as you like. See "Weekly routine" above for the intended usage and "Promoting a known-gap
+check" for what a `KNOWN GAP FIXED` entry means. `--json` gives machine-readable output with the same
+shape (`entries`, `regression_count`).
 
 ### Adding a new check
 
