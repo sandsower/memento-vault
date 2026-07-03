@@ -252,6 +252,76 @@ class TestRetrievalProbe:
         assert payload["effective_now"] == fixed_now
 
 
+class TestRankedOrderChecks:
+    """MEM-133: golden top-5 ranked-order regression in fixture mode."""
+
+    GOLDEN_PATH = REPO_ROOT / "evals" / "golden" / "ranked_order.json"
+
+    def _run_fixture(self, env=None, extra_args=None):
+        import os
+
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "evals" / "retrieval_probe.py"), "--mode", "fixture"] + (extra_args or []),
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env={**os.environ, **(env or {})},
+        )
+        return proc
+
+    def test_ranked_order_checks_present_and_passing(self):
+        proc = self._run_fixture()
+        assert proc.returncode == 0, proc.stderr[-500:]
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        ranked = [c for c in payload["checks"] if c["id"].startswith("ranked_order_")]
+        # One per entry in retrieval_probe.RANKED_ORDER_QUERIES.
+        assert len(ranked) >= 4, ranked
+        failed = [c for c in ranked if not c["ok"]]
+        assert not failed, failed
+        assert all(not c["known_gap"] for c in ranked)
+
+    def test_ranked_order_checks_are_part_of_strict_gate(self):
+        proc = self._run_fixture(extra_args=["--strict"])
+        assert proc.returncode == 0, proc.stderr[-500:]
+
+    def test_vector_advisory_absent_by_default(self):
+        """Opt-in only: never present unless MEMENTO_EVAL_VECTOR_ADVISORY=1
+        (also keeps default output ONNX-jitter-free, see
+        test_fixture_mode_same_now_is_byte_identical)."""
+        proc = self._run_fixture()
+        assert proc.returncode == 0, proc.stderr[-500:]
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert "vector_advisory" not in payload
+
+    def test_golden_file_committed_and_well_formed(self):
+        assert self.GOLDEN_PATH.exists()
+        golden = json.loads(self.GOLDEN_PATH.read_text())
+        assert len(golden) >= 4
+        for entry in golden.values():
+            assert isinstance(entry["query"], str) and entry["query"]
+            assert isinstance(entry["top5"], list) and entry["top5"]
+
+    def test_regen_golden_rewrites_file_and_matches_current_pipeline(self, tmp_path):
+        """MEMENTO_REGEN_GOLDEN=1 must rewrite the committed golden file with
+        exactly what the current pipeline produces (so a plain fixture run
+        right after a regen is green). Restores the original file afterward
+        so this test never permanently mutates the committed golden."""
+        original = self.GOLDEN_PATH.read_text()
+        try:
+            regen_proc = self._run_fixture(env={"MEMENTO_REGEN_GOLDEN": "1"})
+            assert regen_proc.returncode == 0, regen_proc.stderr[-500:]
+            regenerated = json.loads(self.GOLDEN_PATH.read_text())
+            assert len(regenerated) >= 4
+
+            verify_proc = self._run_fixture(extra_args=["--strict"])
+            assert verify_proc.returncode == 0, verify_proc.stderr[-500:]
+            payload = json.loads(verify_proc.stdout.strip().splitlines()[-1])
+            ranked = [c for c in payload["checks"] if c["id"].startswith("ranked_order_")]
+            assert all(c["ok"] for c in ranked), ranked
+        finally:
+            self.GOLDEN_PATH.write_text(original)
+
+
 class TestRunner:
     def test_help_exits_zero(self):
         proc = subprocess.run(

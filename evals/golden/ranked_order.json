@@ -1,0 +1,48 @@
+{
+  "briar_duplicate_title_certainty_tiebreak": {
+    "query": "briarconfig",
+    "top5": [
+      "briar-config-migration-verified",
+      "briar-config-migration-unverified",
+      "falcon-deploy-successor",
+      "falcon-deploy-superseded",
+      "vortex-migration-fresh"
+    ]
+  },
+  "nimbus_quality_signals_stack": {
+    "query": "nimbusauth",
+    "top5": [
+      "nimbus-auth-typed",
+      "nimbus-auth-session",
+      "nimbus-auth-lowcert"
+    ]
+  },
+  "orchid_general_and_scoped_notes_rank": {
+    "query": "orchidrouting",
+    "top5": [
+      "orchid-routing-project-beta",
+      "orchid-routing-general",
+      "orchid-routing-gamma-slug",
+      "orchid-routing-project-alpha"
+    ]
+  },
+  "quasar_certainty_immunity_vs_undated": {
+    "query": "quasarretry",
+    "top5": [
+      "quasar-retry-policy-high-certainty",
+      "quasar-retry-policy-undated",
+      "falcon-deploy-superseded",
+      "vortex-migration-fresh",
+      "orchid-routing-project-beta"
+    ]
+  },
+  "vortex_certainty_beats_age": {
+    "query": "vortexmigration",
+    "top5": [
+      "vortex-migration-fresh",
+      "vortex-migration-highcert-old",
+      "vortex-migration-lowcert",
+      "vortex-migration-old"
+    ]
+  }
+}

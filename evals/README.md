@@ -50,10 +50,13 @@ Two layers:
 
 1. Hermetic policy checks run the real ranking functions from `memento/search.py` against a rendered fixture vault (`golden/fixtures/vault/`) with the grep backend forced, in a subprocess so nothing leaks.
 They verify temporal decay, certainty immunity, session-type and low-certainty penalties, fleeting-path dropping, project scoping, and archive exclusion.
+This layer also includes a golden **ranked-order** regression (`ranked_order_checks()` in `retrieval_probe.py`, MEM-133): for a fixed set of queries it runs the real FTS5/BM25 + PRF + RRF fusion + policy path (embedded backend, no embedding provider, so no vector index and no ONNX/network dependency) and asserts the exact top-5 note-path order against `golden/ranked_order.json`.
+Where the pairwise checks above only prove a signal moves scores in the right *direction*, this proves a real query's *order* has not silently shifted -- the gap a fusion or reranker weight change can slip through.
+When the `embedded` extra's dependencies are installed AND the local ONNX embedding model is already cached AND `MEMENTO_EVAL_VECTOR_ADVISORY=1` is set, the same queries also run through the embedded backend with a real embedding provider (FTS5 + vector, RRF-fused) and the resulting order is printed under the `vector_advisory` JSON key for information only; it is opt-in (ONNX CPU inference is not bit-reproducible run to run) and never gates anything.
 2. Live golden queries run natural-language questions from `golden/retrieval_queries.json` against the real vault and backend, grading recall@5, MRR, and negative-query leakage.
 Each positive query is also run through semantic search so the scorecard shows when vector search would have rescued a BM25 miss.
 
-Layer 1 is a blocking CI gate: `python3 evals/retrieval_probe.py --mode fixture --strict` exits non-zero if any core (non-known-gap) check fails.
+Layer 1 is a blocking CI gate: `python3 evals/retrieval_probe.py --mode fixture --strict` exits non-zero if any core (non-known-gap) check fails -- this includes the ranked-order checks.
 Layer 2 never runs in CI; it needs the real vault.
 
 ### capture_e2e - the triage gate and extraction
@@ -84,6 +87,21 @@ First check whether the expected note was renamed, archived, or superseded: `rg 
 - Renamed or superseded: update `expect_any` in `golden/retrieval_queries.json` to the new path substring.
 - Still exists but not found: retrieval regressed.
 Do not touch the golden file; investigate the search pipeline (start with `memento-vault retrieval-report`).
+
+### When a ranked-order golden check starts failing
+
+This means the exact top-5 order for one of the fixed queries in `RANKED_ORDER_QUERIES` (`retrieval_probe.py`) changed.
+Treat that as a real signal, not noise: something in FTS5/BM25 relevance, PRF expansion, RRF fusion, temporal decay, or quality signals moved.
+
+1. Run `python3 evals/retrieval_probe.py --mode fixture` directly and read the failing check's `details` (`expected` vs `got`).
+2. Decide whether the new order is *better*, *worse*, or *neutral* given the fixture scenario the query was engineered for (each query's comment in `RANKED_ORDER_QUERIES` names the scenario).
+3. If the change was intentional (you changed a ranking parameter or fixed a bug), regenerate: `MEMENTO_REGEN_GOLDEN=1 python3 evals/retrieval_probe.py --mode fixture`.
+This rewrites `golden/ranked_order.json` in place.
+4. **Review the diff like a code review, never auto-accept it.** `git diff evals/golden/ranked_order.json` and confirm every path that moved makes sense.
+If you cannot explain a change, do not commit it -- investigate the pipeline instead.
+5. If the change was NOT intentional, do not regenerate: investigate `memento/search.py` (or, for the deep pipeline, `memento/retrieval_policy.py`) for the regression.
+
+SQLite/FTS5 version changes are a known regen trigger: if a golden fails right after an environment upgrade (new Python, new OS image, new SQLite), suspect the scorer version before the ranking code -- and still review the regen diff.
 
 ### Adding golden queries (do this ~2 per month)
 
@@ -125,6 +143,7 @@ If it needs an LLM, gate it behind `context["llm"]` and make the grading itself 
 
 Fixture notes live in `golden/fixtures/vault/` and support two placeholders: `{{DAYS_AGO_N}}` renders a date N days ago, and `{{ROOT}}` renders the temp root (used for project paths).
 Give each new fixture note a unique nonsense token (like `zephyrcache`) so grep-backend queries are unambiguous.
+If a new note changes what a `RANKED_ORDER_QUERIES` query in `retrieval_probe.py` matches, its golden top-5 will need regenerating (see above) -- run the fixture probe and check for `ranked_order_*` failures before committing.
 
 ### Things this suite deliberately does not do
 

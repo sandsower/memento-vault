@@ -13,6 +13,52 @@ behavior with the actual functions from memento.search.
 Checks marked known_gap=true encode DESIRED behavior the system does not
 implement yet. They are reported separately so they inform instead of
 alarm; when one starts passing, promote it to a normal check.
+
+Golden ranked-order checks (MEM-133)
+-------------------------------------
+`fixture_checks()` above is pairwise: it proves individual signals move
+scores in the right direction, but it never proves a real query's top-5
+*order* is what it was yesterday. A fusion/reranker weight change can
+silently reorder real results without failing any pairwise assertion.
+
+`ranked_order_checks()` closes that gap: for a fixed set of queries it runs
+the real FTS5/BM25 (`memento.embedded_search.EmbeddedSearchBackend`, no
+embedding provider so no vector index and no ONNX/network dependency) +
+PRF query expansion + RRF fusion + policy (`memento.search.enhance_results`)
+path against the deterministic fixture vault, with every tunable parameter
+(RRF k, PRF term/doc counts, temporal decay half-life/floor, quality-signal
+factors) pinned explicitly in-process rather than read from the ambient
+config. It then asserts the exact top-5 note-path order against a golden
+list committed at `evals/golden/ranked_order.json`.
+
+Deliberately excluded from this v0 blocking path, and why:
+  - reranker (cross-encoder, ONNX): downloads a model from Hugging Face on
+    first use (see hooks/tenet_reranker.py) -- a network dependency with no
+    place in a hermetic gate.
+  - live embedding / vector search: same class of problem (model weights),
+    plus it is the dodge this ticket explicitly calls for. When the
+    `embedded` extra is installed locally, `vector_ordering_advisory_checks()`
+    below runs the same queries through the embedded backend WITH a real
+    embedding provider and reports the resulting order for information
+    only -- it never fails the run and never gates CI.
+  - PPR/graph expansion, wikilink expansion, access-log boost: the first
+    two are no-ops today (networkx isn't a project dependency) and the
+    third reads a machine-global runtime log outside the fixture vault, so
+    all three are pinned off to keep the check's inputs fully self
+    contained.
+
+Golden regeneration is deliberate, not automatic drift-following: set
+`MEMENTO_REGEN_GOLDEN=1` to rewrite `evals/golden/ranked_order.json` with
+whatever the current pipeline produces. A regenerated golden is a diff to
+be read and understood before it is committed -- if you cannot explain
+every path that moved, do not accept it. See evals/README.md.
+
+A ranked order pinned here is not a claim that the order is *correct* --
+only that it is *current*. Where MEM-135 already found real bugs in the
+deep-pipeline gating (`memento/retrieval_policy.py`: vector search never
+fuses when BM25 is empty; confidence gating uses an absolute score), the
+affected golden entries are pinned to today's (arguably wrong) output on
+purpose, fix-forward: when MEM-135 lands a fix, regenerate and review.
 """
 
 from __future__ import annotations
@@ -234,6 +280,261 @@ def fixture_checks(root: Path) -> list[dict]:
     return checks
 
 
+# --- Golden ranked-order regression (MEM-133) --------------------------------
+
+RANKED_ORDER_GOLDEN = EVALS_DIR / "golden" / "ranked_order.json"
+
+# (check_id, query). Each query is engineered to pull in multiple fixture
+# notes sharing a nonsense token so real ranking tension (age, certainty,
+# note type, raw BM25 relevance) decides the order -- see the fixture notes
+# under evals/golden/fixtures/vault/notes/ for the engineered scenario each
+# query exercises.
+RANKED_ORDER_QUERIES = [
+    (
+        "vortex_certainty_beats_age",
+        "vortexmigration",
+    ),  # decay-immune old cert-5 note vs. fresh cert-3 vs. fresh low-cert vs. decayed cert-3
+    (
+        "briar_duplicate_title_certainty_tiebreak",
+        "briarconfig",
+    ),  # two near-duplicate titles, identical age, differ only by certainty
+    (
+        "nimbus_quality_signals_stack",
+        "nimbusauth",
+    ),  # typed decision vs. penalized session note vs. penalized low-certainty note
+    (
+        "orchid_general_and_scoped_notes_rank",
+        "orchidrouting",
+    ),  # four notes at equal age/similar certainty: mostly BM25/fusion-driven order
+    (
+        "quasar_certainty_immunity_vs_undated",
+        "quasarretry",
+    ),  # decay-immune cert-5 vs. undated low-certainty note (known_gap: undated notes never decay)
+]
+
+
+def _pinned_ranked_order_config(base_config: dict) -> dict:
+    """Pin every parameter the ranked-order path depends on, explicitly.
+
+    A copy of the ambient config, not a mutation of it, so this check can
+    never perturb (or be perturbed by) fixture_checks() running in the same
+    process. Values matching current DEFAULT_CONFIG are still restated here
+    on purpose: an accidental default change in memento/config.py must not
+    silently move these goldens, only a deliberate MEMENTO_REGEN_GOLDEN=1
+    run should.
+    """
+    config = dict(base_config)
+    config.update(
+        {
+            "prf_enabled": True,
+            "prf_top_docs": 3,
+            "prf_max_terms": 5,
+            "rrf_k": 60,
+            "temporal_decay": True,
+            "temporal_decay_half_life": 90,
+            "temporal_decay_certainty_floor": 4,
+            "quality_signals_enabled": True,
+            "quality_session_note_factor": 0.85,
+            "quality_untyped_factor": 0.95,
+            "quality_low_certainty_factor": 0.9,
+            # Excluded from the v0 blocking path -- see module docstring.
+            "reranker_enabled": False,
+            "ppr_enabled": False,
+            "wikilink_expansion": False,
+            "multi_hop_enabled": False,
+            "deep_recall_enabled": False,
+            "access_log_enabled": False,
+        }
+    )
+    return config
+
+
+def _make_fts5_backend(vault: Path, db_path: Path):
+    """A pure FTS5/BM25 EmbeddedSearchBackend: no embedding provider, so no
+    vector table and no onnxruntime/sqlite-vec dependency at all."""
+    from memento.embedded_search import EmbeddedSearchBackend
+
+    return EmbeddedSearchBackend(vault_path=vault, db_path=db_path, embedding_provider=None)
+
+
+def _ranked_order_top5(search_module, query: str, config: dict, limit: int = 5) -> list[str]:
+    """Run one query through the real BM25 + PRF + RRF-fusion + policy path.
+
+    Mirrors the production stages in memento.search / memento.retrieval_policy
+    at the function level (this repo's fixture checks test at that same
+    granularity): an initial BM25 pass, a PRF-expanded second pass, RRF
+    fusion of the two (real memento.search.rrf_fuse, the same function the
+    live pipeline uses to fuse text + vector), then temporal decay and
+    quality signals (memento.search.apply_temporal_decay /
+    apply_quality_signals) with the parameters above pinned.
+
+    Deliberately calls those two policy functions directly rather than the
+    enhance_results() orchestrator: enhance_results also runs a PageRank
+    boost stage that is unconditional whenever `networkx` happens to be
+    importable (it is not gated by ppr_enabled -- that config key only
+    gates a *later* PPR-expansion stage). networkx is not a project
+    dependency, so its presence differs by environment (observed: absent
+    in a plain `pip install -e '.[mcp,embedded]'` venv, present in this
+    repo's CI `gate-tests` job, which installs it for unrelated graph
+    tests). Going through enhance_results made two of these five golden
+    queries flip order purely based on whether networkx happened to be on
+    sys.path -- exactly the kind of environment-dependent drift this ticket
+    exists to catch, not create. Calling the two sub-stages directly keeps
+    this check's inputs deterministic regardless of what else is installed.
+    """
+    pool = limit + 5
+    primary = search_module.qmd_search(query, limit=pool)
+    expanded_query = search_module.prf_expand_query(query, config=config, initial_results=primary)
+    expanded = search_module.qmd_search(expanded_query, limit=pool) if expanded_query != query else []
+    fused = search_module.rrf_fuse([primary, expanded], k=config.get("rrf_k", 60))
+    decayed = search_module.apply_temporal_decay(fused, config)
+    enhanced = search_module.apply_quality_signals(decayed, config)
+    return _paths(enhanced)[:limit]
+
+
+def ranked_order_checks(root: Path) -> list[dict]:
+    """Golden ranked-order regression: pins the exact top-5 order for a
+    fixed query set through the real FTS5/BM25 + fusion + policy path.
+    See the module docstring for scope, exclusions, and the regeneration
+    contract (MEMENTO_REGEN_GOLDEN=1).
+    """
+    from memento import search, search_backend
+    from memento.config import get_config
+
+    vault = root / "vault"
+    config = _pinned_ranked_order_config(get_config())
+
+    backend = _make_fts5_backend(vault, root / ".search-ranked" / "search.db")
+    previous_backend = search_backend.get_backend()
+    search_backend.set_backend(backend)
+    try:
+        actual_by_id = {check_id: _ranked_order_top5(search, query, config) for check_id, query in RANKED_ORDER_QUERIES}
+    finally:
+        search_backend.set_backend(previous_backend)
+
+    regen = bool(os.environ.get("MEMENTO_REGEN_GOLDEN"))
+    golden = {}
+    if RANKED_ORDER_GOLDEN.exists():
+        golden = json.loads(RANKED_ORDER_GOLDEN.read_text())
+
+    checks = []
+    new_golden = {}
+    for check_id, query in RANKED_ORDER_QUERIES:
+        actual = actual_by_id[check_id]
+        new_golden[check_id] = {"query": query, "top5": actual}
+        expected = (golden.get(check_id) or {}).get("top5")
+        checks.append(
+            {
+                "id": f"ranked_order_{check_id}",
+                "title": f"Golden top-5 order pinned for query {query!r}",
+                "ok": True if regen else actual == expected,
+                "details": str({"expected": expected, "got": actual})[:300],
+                "known_gap": False,
+            }
+        )
+
+    if regen:
+        RANKED_ORDER_GOLDEN.write_text(json.dumps(new_golden, indent=2, sort_keys=True) + "\n")
+
+    return checks
+
+
+def vector_ordering_advisory_checks(root: Path) -> list[dict]:
+    """Advisory, local-only: re-run the ranked-order queries through the
+    embedded backend WITH a real embedding provider (FTS5 BM25 + vector,
+    RRF-fused inside EmbeddedSearchBackend._hybrid_search) and report the
+    resulting order for information only.
+
+    Opt-in only: requires MEMENTO_EVAL_VECTOR_ADVISORY=1. Discovered while
+    validating this check: ONNX CPU inference is not bit-reproducible
+    across runs (near-tied cosine similarities occasionally swap rank), so
+    this can never be part of the default `--mode fixture` output without
+    breaking retrieval_probe.py's byte-for-byte reproducibility contract
+    (tests/test_evals.py::TestRetrievalProbe::test_fixture_mode_same_now_is_byte_identical).
+    That nondeterminism is fine for an informational, never-asserted signal
+    -- it would not be fine as ambient default behavior.
+
+    Beyond the opt-in flag, silently returns [] unless ALL of: the
+    `embedded` extra's dependencies are installed, the configured provider
+    is the local ONNX provider (API providers call out over the network on
+    every embed() call -- never "local-only"), and that provider's model
+    files are already cached on disk. That last check is deliberate and NOT
+    the same gate memento.search_backend._make_embedded uses
+    (`provider.is_available()` there only checks that onnxruntime imports;
+    it does not check the model is cached, because in production triggering
+    a first-time download is the intended behavior). An eval/gate script
+    must never surprise a CI run or a contributor's `--strict` invocation
+    with a multi-hundred-MB Hugging Face download, so this function checks
+    the cache directly and never calls embed()/embed_query() unless the
+    model is already there.
+
+    Deliberately kept out of the `checks` list entirely (see main():
+    reported under the separate "vector_advisory" JSON key) so it can never
+    affect --strict or the retrieval_accuracy.policy_pass_rate metric.
+    CI never runs this (the blocking gate installs without the `embedded`
+    extra, so the first import already fails closed; the opt-in flag is
+    belt-and-suspenders).
+    """
+    if not os.environ.get("MEMENTO_EVAL_VECTOR_ADVISORY"):
+        return []
+
+    try:
+        import onnxruntime  # noqa: F401
+        import sqlite_vec  # noqa: F401
+        import tokenizers  # noqa: F401
+    except ImportError:
+        return []
+
+    from memento import search, search_backend
+    from memento.config import get_config
+    from memento.embedded_search import EmbeddedSearchBackend
+
+    config = _pinned_ranked_order_config(get_config())
+    if config.get("embedding_provider", "local") != "local":
+        return []  # API-backed providers call out over the network per query
+
+    cache_dir = Path(os.environ.get("MEMENTO_MODEL_CACHE_DIR") or (Path.home() / ".cache" / "memento-vault" / "models"))
+    model_dir = cache_dir / str(config.get("embedding_model", "nomic-embed-text-v1.5"))
+    if not (model_dir / "model_quantized.onnx").exists() or not (model_dir / "tokenizer.json").exists():
+        return []  # model not cached locally; never trigger a download from here
+
+    from memento.embedding import get_embedding_provider
+
+    try:
+        provider = get_embedding_provider(config)
+        if not provider.is_available():
+            return []
+    except Exception:
+        return []
+
+    vault = root / "vault"
+    backend = EmbeddedSearchBackend(
+        vault_path=vault, db_path=root / ".search-vector-advisory" / "search.db", embedding_provider=provider
+    )
+    previous_backend = search_backend.get_backend()
+    search_backend.set_backend(backend)
+    try:
+        checks = []
+        for check_id, query in RANKED_ORDER_QUERIES:
+            try:
+                actual = _ranked_order_top5(search, query, config)
+            except Exception as exc:
+                actual = None
+                error = str(exc)
+            else:
+                error = None
+            checks.append(
+                {
+                    "id": f"vector_advisory_{check_id}",
+                    "title": f"Advisory (non-blocking) embedded/vector order for query {query!r}",
+                    "details": str({"got": actual, "error": error})[:300],
+                }
+            )
+        return checks
+    finally:
+        search_backend.set_backend(previous_backend)
+
+
 def live_checks(queries_path: Path) -> dict:
     from memento import search
     from memento.config import get_config
@@ -321,7 +622,12 @@ def main():
 
             reset_config()
             checks = fixture_checks(Path(tmp))
-            print(json.dumps({"effective_now": effective_now, "checks": checks}, sort_keys=True))
+            checks += ranked_order_checks(Path(tmp))
+            vector_advisory = vector_ordering_advisory_checks(Path(tmp))
+            payload = {"effective_now": effective_now, "checks": checks}
+            if vector_advisory:
+                payload["vector_advisory"] = vector_advisory
+            print(json.dumps(payload, sort_keys=True))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         if args.strict and any(not c["ok"] and not c["known_gap"] for c in checks):
