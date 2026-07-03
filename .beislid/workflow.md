@@ -270,6 +270,63 @@ pre-PR command surface. Older orchestrators may still treat each entry as a flat
     stop_if_patterns:
       - 'Permission denied'
     hint: 'The gate mutates only a throwaway HOME; stop if the host cannot execute install scripts.'
+- name: eval-framework-tests
+  stage: pre-pr
+  kind: sensor
+  execution: computational
+  command: '.venv/bin/python -m pytest tests/test_evals.py'
+  timeout_seconds: 300
+  cost: medium
+  mutates: false
+  changed_file_selector:
+    include: ['evals/**', 'tests/test_evals.py']
+  output:
+    parser: pytest
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    stop_if_patterns:
+      - 'No module named'
+    hint: 'Keep the eval framework itself healthy; fix the cause, never the thresholds.'
+- name: retrieval-probe-fixture
+  stage: pre-pr
+  kind: sensor
+  execution: computational
+  command: '.venv/bin/python evals/retrieval_probe.py --mode fixture --strict'
+  timeout_seconds: 300
+  cost: medium
+  mutates: false
+  changed_file_selector:
+    include: ['memento/search*.py', 'memento/embedded_search.py', 'memento/config.py', 'evals/retrieval_probe.py', 'evals/golden/fixtures/vault/**']
+  output:
+    parser: generic-text
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    stop_if_patterns:
+      - 'No module named'
+    hint: 'Hermetic ranking-policy regression; the failing check id in the JSON output names the behavior in memento/search.py that broke. Never run --mode live in gates.'
+- name: capture-e2e-hermetic
+  stage: pre-pr
+  kind: sensor
+  execution: computational
+  command: '.venv/bin/python evals/run_evals.py --suite capture_e2e'
+  timeout_seconds: 300
+  cost: medium
+  mutates: false
+  changed_file_selector:
+    include: ['hooks/memento-triage.py', 'evals/suites/capture_e2e.py', 'evals/thresholds.yml']
+  output:
+    parser: generic-text
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    stop_if_patterns:
+      - 'No module named'
+    hint: 'The triage substantiality gate misclassified a labeled session; check hooks/memento-triage.py and its thresholds. Never run with --llm in gates.'
 ```
 
 ## Action policy

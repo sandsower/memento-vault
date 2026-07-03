@@ -21,6 +21,9 @@ EXPECTED_COMMANDS = {
     "install-tests": ".venv/bin/python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py",
     "release-smoke": ".venv/bin/python scripts/release_smoke.py",
     "install-exec-smoke": ".venv/bin/python scripts/release_smoke.py --install-exec",
+    "eval-framework-tests": ".venv/bin/python -m pytest tests/test_evals.py",
+    "retrieval-probe-fixture": ".venv/bin/python evals/retrieval_probe.py --mode fixture --strict",
+    "capture-e2e-hermetic": ".venv/bin/python evals/run_evals.py --suite capture_e2e",
 }
 
 

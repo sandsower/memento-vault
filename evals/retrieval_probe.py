@@ -288,6 +288,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["fixture", "live"], required=True)
     parser.add_argument("--queries", default=str(EVALS_DIR / "golden" / "retrieval_queries.json"))
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 1 if any non-known-gap fixture check fails (for CI gates)",
+    )
     args = parser.parse_args()
 
     sys.path.insert(0, str(REPO_ROOT))
@@ -302,9 +307,12 @@ def main():
             from memento.config import reset_config
 
             reset_config()
-            print(json.dumps({"checks": fixture_checks(Path(tmp))}))
+            checks = fixture_checks(Path(tmp))
+            print(json.dumps({"checks": checks}))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+        if args.strict and any(not c["ok"] and not c["known_gap"] for c in checks):
+            sys.exit(1)
     else:
         print(json.dumps(live_checks(Path(args.queries))))
 

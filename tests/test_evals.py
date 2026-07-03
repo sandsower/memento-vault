@@ -120,6 +120,15 @@ class TestRetrievalProbe:
         assert not failed, failed
         assert len(core) >= 10
 
+    def test_fixture_mode_strict_exits_zero_when_core_checks_pass(self):
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "evals" / "retrieval_probe.py"), "--mode", "fixture", "--strict"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert proc.returncode == 0, proc.stderr[-500:]
+
 
 class TestRunner:
     def test_help_exits_zero(self):

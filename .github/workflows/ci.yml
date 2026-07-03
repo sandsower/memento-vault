@@ -4,6 +4,9 @@
 # Deliberately not in CI:
 # - claude-sandbox-smoke: runs a real completion through an authenticated
 #   `claude` CLI; remains a local-only gate.
+# - the eval live-vault and --llm layers (retrieval_probe.py --mode live,
+#   run_evals.py --llm or without a suite filter): they need a real vault
+#   and a configured LLM backend; CI runs only the hermetic layers.
 # - full pytest is advisory (continue-on-error) until the embedded vector
 #   search environment issues are fixed; the blocking jobs run the same
 #   suites the Beislið gates run.
@@ -61,6 +64,10 @@ jobs:
         run: python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py
       - name: eval-framework-tests
         run: python -m pytest tests/test_evals.py
+      - name: retrieval-probe-fixture
+        run: python evals/retrieval_probe.py --mode fixture --strict
+      - name: capture-e2e-hermetic
+        run: python evals/run_evals.py --suite capture_e2e
 
   full-pytest:
     name: Full pytest (advisory)

@@ -50,11 +50,16 @@ They verify temporal decay, certainty immunity, session-type and low-certainty p
 2. Live golden queries run natural-language questions from `golden/retrieval_queries.json` against the real vault and backend, grading recall@5, MRR, and negative-query leakage.
 Each positive query is also run through semantic search so the scorecard shows when vector search would have rescued a BM25 miss.
 
+Layer 1 is a blocking CI gate: `python3 evals/retrieval_probe.py --mode fixture --strict` exits non-zero if any core (non-known-gap) check fails.
+Layer 2 never runs in CI; it needs the real vault.
+
 ### capture_e2e - the triage gate and extraction
 
 Always runs the real `is_substantial()` gate against labeled fixture sessions.
 With `--llm`, feeds two fixture transcripts (`golden/fixtures/transcripts/`) through the real structured-notes prompt and the configured LLM backend, then grades the output deterministically: schema validity, canonical type, certainty in 1-5, no ephemeral run-state language, and, crucially, that the status-only transcript produces zero notes.
 No LLM judge is used; the rubric is plain string and schema checks so results are reproducible.
+
+The hermetic layer is a blocking CI gate: `python3 evals/run_evals.py --suite capture_e2e` (without `--llm`, so the extraction layer is skipped and no tokens are spent).
 
 ## Maintenance guide
 
