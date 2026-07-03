@@ -370,17 +370,17 @@ def _ranked_order_top5(search_module, query: str, config: dict, limit: int = 5) 
 
     Deliberately calls those two policy functions directly rather than the
     enhance_results() orchestrator: enhance_results also runs a PageRank
-    boost stage that is unconditional whenever `networkx` happens to be
-    importable (it is not gated by ppr_enabled -- that config key only
-    gates a *later* PPR-expansion stage). networkx is not a project
-    dependency, so its presence differs by environment (observed: absent
-    in a plain `pip install -e '.[mcp,embedded]'` venv, present in this
-    repo's CI `gate-tests` job, which installs it for unrelated graph
-    tests). Going through enhance_results made two of these five golden
-    queries flip order purely based on whether networkx happened to be on
-    sys.path -- exactly the kind of environment-dependent drift this ticket
-    exists to catch, not create. Calling the two sub-stages directly keeps
-    this check's inputs deterministic regardless of what else is installed.
+    boost + PPR-expansion stage gated by ppr_enabled, plus an access-log
+    boost stage, both excluded from this v0 blocking path (see
+    _pinned_ranked_order_config above). Before MEM-138, the PageRank boost
+    was *not* actually gated by ppr_enabled -- it applied unconditionally
+    whenever `networkx` happened to be importable, so going through
+    enhance_results made two of these five golden queries flip order purely
+    based on whether networkx happened to be on sys.path. MEM-138 fixed the
+    gate, but this check still calls the two sub-stages directly rather than
+    enhance_results, to keep its inputs deterministic and scoped to exactly
+    the stages this golden set pins, independent of PPR/graph/access-log
+    behavior.
     """
     pool = limit + 5
     primary = search_module.qmd_search(query, limit=pool)

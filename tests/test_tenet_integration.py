@@ -6,7 +6,7 @@ PageRank boost, PPR expansion, temporal decay, project filtering.
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -192,6 +192,73 @@ class TestEnhanceResultsPipeline:
         # without a real vault, but should not crash)
         assert len(enhanced) >= 1
         assert enhanced[0]["path"] == "notes/note-a.md"
+
+    def test_ppr_disabled_never_loads_graph(self, integration_config):
+        """MEM-138: with ppr_enabled=False, enhance_results must not even attempt
+        to load the wikilink graph -- networkx's mere importability must not
+        matter when the feature is off."""
+        integration_config["ppr_enabled"] = False
+        results = [{"path": "notes/note-a.md", "title": "Core arch", "score": 0.9}]
+
+        with patch("memento.search.load_or_build_graph") as mock_load:
+            enhance_results(results, config=integration_config)
+
+        mock_load.assert_not_called()
+
+    def test_ppr_disabled_output_identical_regardless_of_networkx(self, linked_vault, integration_config):
+        """MEM-138: with ppr_enabled=False, ranking output must be identical
+        whether or not networkx (and a buildable graph) is present in the
+        environment. Simulates "networkx present" via a real graph/pagerank
+        return and "networkx absent" via ImportError from load_or_build_graph,
+        both gated off by the same config flag."""
+        integration_config["ppr_enabled"] = False
+        results = [
+            {"path": "notes/note-a.md", "title": "Core arch", "score": 0.9},
+            {"path": "notes/note-e.md", "title": "Isolated", "score": 0.85},
+        ]
+
+        graph = build_wikilink_graph(linked_vault)
+        pagerank = compute_pagerank(graph)
+
+        with patch("memento.search.load_or_build_graph", return_value=(graph, pagerank)):
+            with_networkx = enhance_results(
+                [dict(r) for r in results],
+                config=integration_config,
+                cwd="/home/vic/Projects/test-project",
+            )
+
+        with patch("memento.search.load_or_build_graph", side_effect=ImportError("no networkx")):
+            without_networkx = enhance_results(
+                [dict(r) for r in results],
+                config=integration_config,
+                cwd="/home/vic/Projects/test-project",
+            )
+
+        assert with_networkx == without_networkx
+
+    def test_ppr_enabled_true_still_boosts_when_graph_available(self, linked_vault, integration_config):
+        """MEM-138 regression guard: the fix must not disturb the ppr_enabled=True
+        path -- boost + expansion should still apply when networkx/graph are
+        available, exactly as before."""
+        integration_config["ppr_enabled"] = True
+        results = [
+            {"path": "notes/note-a.md", "title": "Core arch", "score": 0.9},
+            {"path": "notes/note-e.md", "title": "Isolated", "score": 0.85},
+        ]
+
+        graph = build_wikilink_graph(linked_vault)
+        pagerank = compute_pagerank(graph)
+        mock_load = MagicMock(return_value=(graph, pagerank))
+
+        with patch("memento.search.load_or_build_graph", mock_load):
+            enhanced = enhance_results(
+                [dict(r) for r in results],
+                config=integration_config,
+                cwd="/home/vic/Projects/test-project",
+            )
+
+        mock_load.assert_called_once()
+        assert len(enhanced) > 2, f"Expected PPR expansion, got {len(enhanced)} results"
 
     def test_enhance_results_project_filter_still_works(self, linked_vault, integration_config):
         """Project filtering should still exclude notes from other projects."""

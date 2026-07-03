@@ -932,16 +932,21 @@ def enhance_results(results, config=None, cwd=None, require_project_match=False)
     results = apply_temporal_decay(results, config)
     results = apply_quality_signals(results, config)
 
-    # PageRank boost + PPR expansion (requires networkx + graph)
+    # PageRank boost + PPR expansion (requires networkx + graph).
+    # Both are gated by ppr_enabled: when disabled, skip graph loading
+    # entirely so networkx's mere presence in the environment can never
+    # change ranking (MEM-138 -- previously the boost below applied
+    # unconditionally whenever networkx happened to be importable).
     graph = None
     pagerank = None
-    try:
-        vault = get_vault()
-        graph, pagerank = load_or_build_graph(vault)
-    except ImportError:
-        pass  # networkx unavailable
-    except Exception as exc:
-        log_retrieval("search", "graph_load_failed", error=str(exc))
+    if config.get("ppr_enabled", True):
+        try:
+            vault = get_vault()
+            graph, pagerank = load_or_build_graph(vault)
+        except ImportError:
+            pass  # networkx unavailable
+        except Exception as exc:
+            log_retrieval("search", "graph_load_failed", error=str(exc))
 
     if pagerank:
         results = apply_pagerank_boost(results, pagerank, config)
