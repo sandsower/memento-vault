@@ -35,7 +35,16 @@ DEFAULT_CONFIG = {
     "recall_concrete_mode": False,
     "recall_min_score": 0.6,
     "recall_max_notes": 3,
+    # No longer read by the deep-pipeline gate in retrieval_policy.py (MEM-135
+    # replaced the absolute-score gate with recall_confidence_margin below,
+    # since an absolute cutoff cannot hold across un-normalized backend score
+    # scales - see confidence_margin() in retrieval_policy.py). Kept only for
+    # the benchmark/optuna_sweep.py tuning harness and longmemeval_adapter.py.
     "recall_high_confidence": 0.55,
+    # Relative rank-1-vs-rank-2 score gap (fraction of the top score) the
+    # deep-pipeline gate requires before treating a result set as confident
+    # enough to skip PRF/RRF/multi-hop/deep-recall/reranker expansion.
+    "recall_confidence_margin": 0.30,
     "recall_dedup_prompts": 3,  # suppress re-injection of a path for N prompts per session
     "recall_diagnostics": False,
     "recall_diagnostics_include_candidates": False,

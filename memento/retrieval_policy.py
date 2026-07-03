@@ -171,6 +171,39 @@ TOOL_CONTEXT_MISS_REASONS = {
 
 DEEP_PIPELINE_MARKERS = {"prf", "ce", "rerank", "multi_hop", "deep"}
 
+# Default relative gap (fraction of the top score) the leading result must
+# hold over the runner-up before the deep pipeline treats it as confident
+# enough to skip expansion. See confidence_margin() below for why this
+# replaces a single absolute score threshold.
+DEFAULT_RECALL_CONFIDENCE_MARGIN = 0.30
+
+
+def confidence_margin(results: list[dict]) -> float:
+    """Relative score gap between the top result and the runner-up.
+
+    A single absolute score threshold (the old `top_score < high_conf`
+    gate) breaks down across un-normalized, per-backend score scales
+    (MEM-127 is the deferred fix for that at the source): QMD's correct
+    hits commonly score 0.96-0.97 while a barely-related catch-all note
+    scores 0.87-0.89 - both comfortably above any absolute "confident"
+    cutoff tuned for this backend, and neither number is meaningful next
+    to another backend's scale. A relative margin sidesteps that: it only
+    reads as confident when the leader is decisively clear of the field,
+    which holds regardless of the backend's absolute scale.
+
+    Fewer than two results can never establish a margin - including zero
+    results, and a single result with no runner-up to compare against -
+    so both read as "not confident" by construction and fall through to
+    expansion rather than being treated as a trivially safe pick.
+    """
+    if len(results) < 2:
+        return 0.0
+    top = results[0].get("score") or 0
+    if top <= 0:
+        return 0.0
+    second = results[1].get("score") or 0
+    return (top - second) / top
+
 
 def recall_signal_terms(prompt: str) -> list[str]:
     tokens = re.findall(r"[a-z0-9][a-z0-9-]+", (prompt or "").lower())
@@ -776,7 +809,7 @@ class PromptRecallRuntime:
 
         min_score = config.get("recall_min_score", 0.4)
         max_notes = config.get("recall_max_notes", 3)
-        high_conf = config.get("recall_high_confidence", 0.55)
+        confidence_margin_threshold = config.get("recall_confidence_margin", DEFAULT_RECALL_CONFIDENCE_MARGIN)
         query = prompt
         appended_project = False
         if (
@@ -806,11 +839,19 @@ class PromptRecallRuntime:
             concrete=concrete_enabled,
         )
         latency_ms = int((self.now() - t0) * 1000)
-        top_score = results[0]["score"] if results else 0
         pipeline_depth = "concrete" if concrete_enabled else "bm25"
         self._log_candidates(config, results, "bm25", query=query)
 
-        if not concrete_enabled and top_score < high_conf and results:
+        # Confident is a relative rank-1-vs-rank-2 gap, not an absolute score
+        # threshold (see confidence_margin() docstring for why): computed once
+        # from the initial BM25 pass and reused at every expansion gate below,
+        # matching the original design's "one confidence call decides how much
+        # deeper to go" shape. Crucially, it is never confident on empty or
+        # single-result BM25 output, so vector search below always gets a
+        # chance to answer instead of being short-circuited by "and results".
+        confident = confidence_margin(results) >= confidence_margin_threshold
+
+        if not concrete_enabled and not confident:
             expanded_query = self.prf_expand(query, config=config, initial_results=results)
             if expanded_query != query:
                 prf_results = self.qmd_search(
@@ -865,7 +906,7 @@ class PromptRecallRuntime:
                 except Exception:
                     pass
 
-            multi_hop_gate = top_score < high_conf and config.get("multi_hop_enabled", False)
+            multi_hop_gate = not confident and config.get("multi_hop_enabled", False)
             if multi_hop_gate and results:
                 try:
                     pre_hop_count = len(results)
@@ -877,7 +918,7 @@ class PromptRecallRuntime:
                     pass
 
             if (
-                top_score < high_conf
+                not confident
                 and config.get("deep_recall_enabled", False)
                 and results
                 and not self.deep_recall_pending_exists()
@@ -943,7 +984,7 @@ class PromptRecallRuntime:
                     config, "candidates", stage="project-filter", candidates=project_decisions, query=query
                 )
 
-            if top_score < high_conf and config.get("reranker_enabled", True) and len(results) > 1:
+            if not confident and config.get("reranker_enabled", True) and len(results) > 1:
                 try:
                     if self.rerank_results is None:
                         from tenet_reranker import rerank
