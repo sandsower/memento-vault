@@ -117,6 +117,33 @@ def _paths(results):
     return [Path(r["path"]).stem for r in results]
 
 
+def _stable_order(hits: list[dict]) -> list[dict]:
+    """Canonicalize search-backend hits for deterministic probe output (MEM-139).
+
+    fixture_checks() runs its "end-to-end fixture retrieval" queries and its
+    archive-exclusion query against the real search backend (GrepBackend in
+    --mode fixture: MEMENTO_SEARCH_BACKEND is forced to "grep"). GrepBackend
+    sorts primarily by mtime and only then by score, but a stable sort never
+    disturbs *ties* -- when two fixture notes tie on score, the surviving
+    order falls back to whatever order the filesystem enumerated them in
+    (Path.rglob under the hood), which is not guaranteed byte-identical
+    across two separate process runs against freshly-rendered temp-dir
+    copies of the same content, even though both runs use the same --now.
+    Confirmed via MEM-139: 'nimbusauth token rotation' and 'zephyrcache
+    invalidation write-through' both hit exact score ties (0.666.../1.0) in
+    the fixture vault, and the resulting hit order flips at roughly the
+    reported 50-66% rate in a Linux container while never on macOS.
+
+    This does not change GrepBackend's real ranking behavior (or any other
+    backend's) -- it only fixes how *this probe* renders a hit list into its
+    reproducibility-checked output, by imposing a deterministic secondary
+    key (path) so equal-score ties can never depend on backend/filesystem
+    return order. Required for
+    tests/test_evals.py::TestRetrievalProbe::test_fixture_mode_same_now_is_byte_identical.
+    """
+    return sorted(hits, key=lambda r: (-r.get("score", 0.0), r.get("path", "")))
+
+
 def fixture_checks(root: Path) -> list[dict]:
     from memento import search
     from memento.config import get_config
@@ -239,7 +266,7 @@ def fixture_checks(root: Path) -> list[dict]:
     )
 
     # --- archive exclusion --------------------------------------------------------
-    hits = search.qmd_search("krakenarchive retired", limit=5)
+    hits = _stable_order(search.qmd_search("krakenarchive retired", limit=5))
     check(
         "archive_never_surfaces",
         "Archived notes never surface through qmd_search",
@@ -269,7 +296,7 @@ def fixture_checks(root: Path) -> list[dict]:
         ("falcondeploy canary releases", "falcon-deploy-successor"),
     ]
     for query, expected in golden:
-        hits = search.qmd_search(query, limit=3)
+        hits = _stable_order(search.qmd_search(query, limit=3))
         check(
             f"fixture_query_{expected}",
             f"Fixture query {query!r} finds {expected} in top 3",
