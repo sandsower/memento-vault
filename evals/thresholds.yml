@@ -100,3 +100,11 @@ capture_e2e:
   durable_capture_rate:        # insight-bearing fixture sessions that produced a well-formed note
     warn: 1.00
     fail: 0.50
+
+capture_retrieve_loop:
+  blocking_recall_rate:        # fixture capture-then-retrieve cases whose stored note surfaced in top-5
+    warn: 1.00
+    fail: 0.67
+  llm_extraction_rate:         # --llm tier: fixture transcripts whose real triage extraction passed the rubric
+    warn: 1.00
+    fail: 0.50

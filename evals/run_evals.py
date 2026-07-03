@@ -13,12 +13,14 @@ Usage:
 Exit codes: 0 = no failures (warnings allowed unless --strict), 1 = failures.
 
 Suites:
-    vault_content       what we RECORDED: note structure, ephemerality, duplication
-    capture_health      the WRITE path: failure rates, spend, anomalies (telemetry)
-    retrieval_accuracy  the READ path: ranking policies, golden queries
-    capture_e2e         the triage gate, plus LLM extraction with --llm
+    vault_content         what we RECORDED: note structure, ephemerality, duplication
+    capture_health        the WRITE path: failure rates, spend, anomalies (telemetry)
+    retrieval_accuracy    the READ path: ranking policies, golden queries
+    capture_e2e           the triage gate, plus LLM extraction with --llm
+    capture_retrieve_loop does a freshly captured note become retrievable? (store -> index -> search)
 
-Everything is read-only. Only --llm spends tokens (2 LLM calls).
+Everything is read-only against the real vault: capture_retrieve_loop writes only to its own
+temp vaults, never the configured one. Only --llm spends tokens (up to 4 LLM calls total).
 """
 
 from __future__ import annotations
@@ -33,13 +35,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evals.common import FAIL, PASS, SKIP, WARN, find_vault  # noqa: E402
 from evals.common import now as eval_now, set_now  # noqa: E402
-from evals.suites import capture_e2e, capture_health, retrieval_accuracy, vault_content  # noqa: E402
+from evals.suites import (  # noqa: E402
+    capture_e2e,
+    capture_health,
+    capture_retrieve_loop,
+    retrieval_accuracy,
+    vault_content,
+)
 
 SUITES = {
     "vault_content": vault_content,
     "capture_health": capture_health,
     "retrieval_accuracy": retrieval_accuracy,
     "capture_e2e": capture_e2e,
+    "capture_retrieve_loop": capture_retrieve_loop,
 }
 
 _ICONS = {PASS: "PASS", WARN: "WARN", FAIL: "FAIL", SKIP: "SKIP"}

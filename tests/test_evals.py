@@ -1,6 +1,7 @@
 """Smoke tests for the quality eval framework (evals/)."""
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -320,6 +321,167 @@ class TestRankedOrderChecks:
             assert all(c["ok"] for c in ranked), ranked
         finally:
             self.GOLDEN_PATH.write_text(original)
+
+
+class TestCaptureRetrieveProbe:
+    """MEM-134: capture-then-retrieve loop probe (real store -> index ->
+    search pipeline, run as a subprocess for the same isolation reasons as
+    retrieval_probe.py)."""
+
+    PROBE = REPO_ROOT / "evals" / "capture_retrieve_probe.py"
+
+    def _run(self, extra_args=None, timeout=180, env=None):
+        return subprocess.run(
+            [sys.executable, str(self.PROBE), "--mode", "fixture"] + (extra_args or []),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+
+    def test_fixture_mode_all_blocking_cases_pass(self):
+        proc = self._run()
+        assert proc.returncode == 0, proc.stderr[-1000:]
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        checks = payload["checks"]
+        assert len(checks) == 3
+        failed = [c for c in checks if not c["ok"]]
+        assert not failed, failed
+        assert {c["id"] for c in checks} == {
+            "typed_note_with_project_slug",
+            "session_note",
+            "title_differs_from_query_wording",
+        }
+
+    def test_broken_handoff_is_detected_as_a_miss(self):
+        """A deliberately broken store-to-index handoff (skip the explicit
+        index rebuild after storing) must be reported as a miss, not a
+        false-positive PASS -- this is the failure-direction proof the
+        suite's grading is asserting a real thing, not always green."""
+        proc = self._run(["--break-handoff"])
+        assert proc.returncode == 0, proc.stderr[-1000:]
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        checks = payload["checks"]
+        assert len(checks) == 1
+        assert checks[0]["ok"] is False
+        assert "skip_index_build=True" in checks[0]["details"]
+
+    def test_llm_mode_rejects_break_handoff(self):
+        proc = self._run_llm(["--break-handoff"])
+        assert proc.returncode != 0
+        assert "--break-handoff only applies to --mode fixture" in proc.stderr
+
+    def _run_llm(self, extra_args=None, timeout=300, env=None):
+        return subprocess.run(
+            [sys.executable, str(self.PROBE), "--mode", "llm"] + (extra_args or []),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+
+    def test_no_vault_content_written_outside_its_own_temp_vault(self, tmp_path):
+        """Isolation contract (tests/conftest.py convention): give the
+        subprocess a throwaway $HOME with no MEMENTO_VAULT_PATH/XDG
+        overrides, and confirm no note content lands there. Every note this
+        probe writes must live in its own tempfile.mkdtemp() vault (OS temp
+        dir, independent of $HOME), never a home-directory vault fallback.
+
+        A small `.cache/memento-vault/` runtime dir may still appear under
+        the fake home (memento.config.RUNTIME_DIR's pid-lock housekeeping,
+        unrelated to vault content and out of scope for this ticket) -- the
+        assertion that matters is that no markdown note ever lands there.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        env = dict(os.environ)
+        env["HOME"] = str(fake_home)
+        env.pop("MEMENTO_VAULT_PATH", None)
+        env.pop("XDG_CONFIG_HOME", None)
+
+        proc = self._run(env=env)
+        assert proc.returncode == 0, proc.stderr[-1000:]
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert all(c["ok"] for c in payload["checks"])
+        assert list(fake_home.rglob("*.md")) == []
+
+    def test_llm_mode_skips_cleanly_without_a_configured_backend(self):
+        """No LLM backend configured must produce a clean skip, never a
+        crash or a hang. Uses the test-only MEMENTO_EVAL_FORCE_LLM_BACKEND
+        override so this assertion is deterministic regardless of what CLI
+        binaries happen to be installed on the machine running the test."""
+        env = dict(os.environ)
+        env["MEMENTO_EVAL_FORCE_LLM_BACKEND"] = "does-not-exist"
+        proc = self._run_llm(env=env)
+        assert proc.returncode == 0, proc.stderr[-1000:]
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert payload["skipped"] is True
+        assert payload["reason"]
+
+
+class TestCaptureRetrieveLoopSuite:
+    """MEM-134: suite-level grading logic for capture_retrieve_loop.py.
+    Exercises grade directions against a stubbed probe so this file never
+    needs to spend real subprocess time (or LLM tokens) to prove PASS/FAIL/
+    SKIP wiring is correct."""
+
+    def _suite(self):
+        from evals.suites import capture_retrieve_loop
+
+        return capture_retrieve_loop
+
+    def test_all_cases_found_is_a_pass_and_llm_tier_skips_by_default(self, monkeypatch):
+        suite = self._suite()
+        monkeypatch.setattr(
+            suite,
+            "_run_probe",
+            lambda mode, now_iso=None, timeout=120: {
+                "effective_now": "2026-06-15T00:00:00+00:00",
+                "checks": [{"id": cid, "ok": True, "details": "found it"} for cid in ("a", "b", "c")],
+            },
+        )
+        results = suite.run({"now": "2026-06-15T00:00:00+00:00", "llm": False})
+        by_id = {r.id: r for r in results}
+        assert by_id[f"{suite.SUITE}.blocking_recall_rate"].status == common.PASS
+        assert by_id[f"{suite.SUITE}.blocking_recall_rate"].value == 1.0
+        assert by_id[f"{suite.SUITE}.llm_loop"].status == common.SKIP
+
+    def test_a_single_miss_fails_the_blocking_gate(self, monkeypatch):
+        """Grade-direction proof at the suite level (mirrors
+        TestCaptureRetrieveProbe.test_broken_handoff_is_detected_as_a_miss,
+        one layer up): a miss reported by the probe must turn into a FAIL,
+        naming the missing case, never a silent PASS."""
+        suite = self._suite()
+        monkeypatch.setattr(
+            suite,
+            "_run_probe",
+            lambda mode, now_iso=None, timeout=120: {
+                "effective_now": "2026-06-15T00:00:00+00:00",
+                "checks": [
+                    {"id": "a", "ok": True, "details": "found it"},
+                    {"id": "b", "ok": False, "details": "missed it"},
+                    {"id": "c", "ok": True, "details": "found it"},
+                ],
+            },
+        )
+        results = suite.run({"now": "2026-06-15T00:00:00+00:00", "llm": False})
+        recall = {r.id: r for r in results}[f"{suite.SUITE}.blocking_recall_rate"]
+        assert recall.status == common.FAIL
+        assert any("MISS b" in d for d in recall.details)
+
+    def test_llm_tier_skips_cleanly_when_probe_reports_no_backend(self, monkeypatch):
+        suite = self._suite()
+
+        def fake_run_probe(mode, now_iso=None, timeout=120):
+            if mode == "fixture":
+                return {"checks": [{"id": cid, "ok": True, "details": "x"} for cid in ("a", "b", "c")]}
+            return {"skipped": True, "reason": "claude: command not found"}
+
+        monkeypatch.setattr(suite, "_run_probe", fake_run_probe)
+        results = suite.run({"now": None, "llm": True})
+        llm_check = {r.id: r for r in results}[f"{suite.SUITE}.llm_loop"]
+        assert llm_check.status == common.SKIP
+        assert "claude: command not found" in llm_check.details[0]
 
 
 class TestRunner:

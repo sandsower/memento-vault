@@ -68,6 +68,8 @@ jobs:
         run: python evals/retrieval_probe.py --mode fixture --strict
       - name: capture-e2e-hermetic
         run: python evals/run_evals.py --suite capture_e2e
+      - name: capture-retrieve-loop-hermetic
+        run: python evals/run_evals.py --suite capture_retrieve_loop
 
   full-pytest:
     name: Full pytest (advisory)

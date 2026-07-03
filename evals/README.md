@@ -30,7 +30,7 @@ Checks labeled `informational` or `known gaps` never fail the run.
 Known-gap checks encode desired behavior the system does not implement yet (for example: superseded notes are not demoted in ranking).
 They exist so progress is visible: when one flips to FIXED, promote it to a core check (see maintenance below).
 
-## The four suites
+## The five suites
 
 ### vault_content - what we recorded
 
@@ -66,6 +66,21 @@ With `--llm`, feeds two fixture transcripts (`golden/fixtures/transcripts/`) thr
 No LLM judge is used; the rubric is plain string and schema checks so results are reproducible.
 
 The hermetic layer is a blocking CI gate: `python3 evals/run_evals.py --suite capture_e2e` (without `--llm`, so the extraction layer is skipped and no tokens are spent).
+
+### capture_retrieve_loop - does a captured note become retrievable?
+
+capture_e2e grades capture quality; retrieval_accuracy grades retrieval accuracy.
+Neither asserts the thing a user actually relies on: that a note captured right now can be found a moment later.
+This suite drives the real pipeline end to end -- store, index, search -- against a hermetic temp vault (`evals/capture_retrieve_probe.py`, run as a subprocess for the same isolation reasons as `retrieval_probe.py`).
+
+Two layers:
+
+1. Blocking, non-LLM: three pre-authored structured note payloads (fixture shapes mirroring what triage extraction produces) pushed through the real `memento_store`/`memento_store_smart` MCP entry points into a temp vault, a real `EmbeddedSearchBackend` (FTS5, no embedding provider) index build, then the real `memento.search.qmd_search()` entry point.
+Each case asserts its golden query returns the stored note in the top 5: a typed note carrying a project slug, a note carrying session metadata, and a note whose title shares no vocabulary with its query (forcing a content match, not a title match).
+2. Manual, `--llm` tier: the same loop starting from capture_e2e's insight fixture transcript through real triage extraction (max 2 LLM calls, graded by capture_e2e's existing deterministic rubric), then store, then retrieve.
+Skips cleanly when no LLM backend is configured.
+
+The blocking layer is a blocking CI gate: `python3 evals/run_evals.py --suite capture_retrieve_loop` (writes only to its own temp vaults, never the configured one).
 
 ## Maintenance guide
 
@@ -133,7 +148,7 @@ When a known-gap check reports FIXED (someone implemented the behavior):
 
 ### Adding a new check
 
-1. Pick the suite by subject: note content -> `suites/vault_content.py`, telemetry -> `suites/capture_health.py`, search behavior -> `evals/retrieval_probe.py` (hermetic) or `golden/retrieval_queries.json` (live), triage behavior -> `suites/capture_e2e.py`.
+1. Pick the suite by subject: note content -> `suites/vault_content.py`, telemetry -> `suites/capture_health.py`, search behavior -> `evals/retrieval_probe.py` (hermetic) or `golden/retrieval_queries.json` (live), triage behavior -> `suites/capture_e2e.py`, whether a captured note becomes retrievable -> `evals/capture_retrieve_probe.py`.
 2. Copy the shape of an existing `check(...)` call: id, plain-English title, value, direction, details with concrete examples, and a `remediation` string that tells a future reader exactly what to do.
 3. Add warn/fail bounds to `thresholds.yml` with a comment.
 4. Keep it deterministic and read-only.
@@ -148,7 +163,7 @@ If a new note changes what a `RANKED_ORDER_QUERIES` query in `retrieval_probe.py
 ### Things this suite deliberately does not do
 
 - No LLM-as-judge: judge models drift and are not reproducible; every grading rule here is a string or schema check.
-- No writes to the vault: safe to run from any session, including CI.
+- No writes to the configured vault: safe to run from any session, including CI. `capture_retrieve_loop` writes notes, but only into its own throwaway temp vaults, never the vault `MEMENTO_VAULT_PATH`/config points at.
 - No network calls (except the optional `--llm` extraction, which uses the locally configured backend).
 - Latency/scale benchmarking stays in `benchmark/` (LongMemEval, optuna sweeps, scale lifecycle); this suite is about quality, not speed.
 

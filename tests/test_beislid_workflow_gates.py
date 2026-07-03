@@ -24,6 +24,7 @@ EXPECTED_COMMANDS = {
     "eval-framework-tests": ".venv/bin/python -m pytest tests/test_evals.py",
     "retrieval-probe-fixture": ".venv/bin/python evals/retrieval_probe.py --mode fixture --strict",
     "capture-e2e-hermetic": ".venv/bin/python evals/run_evals.py --suite capture_e2e",
+    "capture-retrieve-loop-hermetic": ".venv/bin/python evals/run_evals.py --suite capture_retrieve_loop",
 }
 
 

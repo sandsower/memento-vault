@@ -327,6 +327,25 @@ pre-PR command surface. Older orchestrators may still treat each entry as a flat
     stop_if_patterns:
       - 'No module named'
     hint: 'The triage substantiality gate misclassified a labeled session; check hooks/memento-triage.py and its thresholds. Never run with --llm in gates.'
+- name: capture-retrieve-loop-hermetic
+  stage: pre-pr
+  kind: sensor
+  execution: computational
+  command: '.venv/bin/python evals/run_evals.py --suite capture_retrieve_loop'
+  timeout_seconds: 300
+  cost: medium
+  mutates: false
+  changed_file_selector:
+    include: ['memento/store.py', 'memento/smart_store.py', 'memento/mcp_server.py', 'memento/embedded_search.py', 'memento/search.py', 'evals/capture_retrieve_probe.py', 'evals/suites/capture_retrieve_loop.py', 'evals/thresholds.yml']
+  output:
+    parser: generic-text
+    agent_summary: true
+  failure:
+    retryable: true
+    max_fix_iterations: 2
+    stop_if_patterns:
+      - 'No module named'
+    hint: 'A freshly stored note did not surface for its golden query -- check memento/smart_store.py, memento/mcp_server.py (store path) and memento/embedded_search.py (index build) for a broken handoff. Never run with --llm in gates.'
 ```
 
 ## Action policy
