@@ -7,6 +7,8 @@ Usage:
     python3 evals/run_evals.py --llm            # also run LLM extraction checks (spends tokens)
     python3 evals/run_evals.py --json           # machine-readable output
     python3 evals/run_evals.py --strict         # warnings also fail the exit code
+    python3 evals/run_evals.py --now 2026-06-15T00:00:00Z  # freeze the eval clock
+                                                 # (env fallback: MEMENTO_EVAL_NOW)
 
 Exit codes: 0 = no failures (warnings allowed unless --strict), 1 = failures.
 
@@ -23,12 +25,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evals.common import FAIL, PASS, SKIP, WARN, find_vault  # noqa: E402
+from evals.common import now as eval_now, set_now  # noqa: E402
 from evals.suites import capture_e2e, capture_health, retrieval_accuracy, vault_content  # noqa: E402
 
 SUITES = {
@@ -74,11 +78,22 @@ def main():
     parser.add_argument("--strict", action="store_true", help="warnings also fail the exit code")
     parser.add_argument("--llm", action="store_true", help="enable LLM extraction checks (spends tokens)")
     parser.add_argument("--vault", help="override vault path (default: memento config)")
+    parser.add_argument(
+        "--now",
+        help="ISO-8601 UTC timestamp to freeze the eval clock for reproducible runs (env fallback: MEMENTO_EVAL_NOW)",
+    )
     args = parser.parse_args()
+
+    set_now(args.now)
+    effective_now = eval_now()
+    # Propagate to subprocesses (e.g. retrieval_probe.py) that don't receive
+    # an explicit --now, so the whole eval run shares one frozen clock.
+    os.environ["MEMENTO_EVAL_NOW"] = effective_now.isoformat()
 
     context = {
         "vault": Path(args.vault).expanduser() if args.vault else find_vault(),
         "llm": args.llm,
+        "now": effective_now.isoformat(),
     }
 
     selected = args.suite or list(SUITES)
@@ -105,7 +120,8 @@ def main():
             )
 
     if args.json:
-        print(json.dumps({"results": [r.to_dict() for r in results]}, indent=2))
+        payload = {"effective_now": effective_now.isoformat(), "results": [r.to_dict() for r in results]}
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(render_text(results))
 

@@ -8,11 +8,14 @@ python3 evals/run_evals.py --llm        # adds LLM extraction checks (exactly 2 
 python3 evals/run_evals.py --json       # machine-readable scorecard
 python3 evals/run_evals.py --strict     # warnings also fail the exit code
 python3 evals/run_evals.py --suite vault_content   # one suite only (repeatable flag)
+python3 evals/run_evals.py --now 2026-06-15T00:00:00Z   # freeze the clock (env fallback: MEMENTO_EVAL_NOW)
 ```
 
 Exit code 0 means no failures.
 Everything is read-only against the vault and telemetry logs.
 Only `--llm` spends tokens.
+`--now` freezes every suite's time-window math (growth ratios, telemetry windows, retrieval-fixture dates) to one instant, so two runs against the same fixture vault with the same `--now` produce byte-identical JSON output.
+The effective clock is echoed back as `effective_now` in `--json` output.
 
 ## How to read the scorecard
 

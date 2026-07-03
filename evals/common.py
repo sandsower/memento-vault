@@ -56,6 +56,60 @@ class CheckResult:
         }
 
 
+_NOW_OVERRIDE: datetime | None = None
+
+
+def parse_iso_utc(raw: str) -> datetime:
+    """Parse an ISO-8601 timestamp into an aware UTC datetime.
+
+    Accepts a trailing 'Z' as shorthand for +00:00. Naive input (no offset)
+    is assumed to already be UTC; aware input is converted to UTC.
+    """
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def set_now(value) -> None:
+    """Freeze the eval clock returned by now().
+
+    Accepts an aware datetime, an ISO-8601 string, or None. None clears the
+    override, so a subsequent now() falls back to MEMENTO_EVAL_NOW or the
+    real UTC clock.
+    """
+    global _NOW_OVERRIDE
+    if value is None:
+        _NOW_OVERRIDE = None
+    elif isinstance(value, str):
+        _NOW_OVERRIDE = parse_iso_utc(value)
+    elif value.tzinfo is None:
+        _NOW_OVERRIDE = value.replace(tzinfo=timezone.utc)
+    else:
+        _NOW_OVERRIDE = value.astimezone(timezone.utc)
+
+
+def now() -> datetime:
+    """The eval suite's notion of 'now'.
+
+    Resolution order: the clock frozen via set_now()/--now, then the
+    MEMENTO_EVAL_NOW environment variable, then the real UTC clock. Every
+    eval suite must call this instead of datetime.now()/date.today() so a
+    frozen clock makes two runs of the same suite byte-for-byte
+    reproducible regardless of calendar drift. Always returns an
+    aware UTC datetime.
+    """
+    if _NOW_OVERRIDE is not None:
+        return _NOW_OVERRIDE
+    env = os.environ.get("MEMENTO_EVAL_NOW")
+    if env:
+        return parse_iso_utc(env)
+    return datetime.now(timezone.utc)
+
+
 def grade(value, warn, fail, higher_is_better=True):
     """Grade a numeric value against warn/fail thresholds."""
     if value is None:
@@ -220,7 +274,7 @@ def parse_note_date(fm: dict):
     raw = (fm or {}).get("date", "")
     for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(raw[: len(datetime.now().strftime(fmt))], fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(raw[: len(now().strftime(fmt))], fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
     return None
@@ -264,7 +318,7 @@ def parse_event_ts(event: dict):
 
 
 def window_start(days: int) -> datetime:
-    return datetime.now(timezone.utc) - timedelta(days=days)
+    return now() - timedelta(days=days)
 
 
 def pct(numerator, denominator):

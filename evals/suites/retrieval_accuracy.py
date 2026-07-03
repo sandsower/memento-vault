@@ -33,9 +33,12 @@ SUITE = "retrieval_accuracy"
 PROBE = EVALS_DIR / "retrieval_probe.py"
 
 
-def _run_probe(mode: str) -> dict | None:
+def _run_probe(mode: str, now_iso: str | None = None) -> dict | None:
+    cmd = [sys.executable, str(PROBE), "--mode", mode]
+    if now_iso:
+        cmd += ["--now", now_iso]
     proc = subprocess.run(
-        [sys.executable, str(PROBE), "--mode", mode],
+        cmd,
         capture_output=True,
         text=True,
         timeout=300,
@@ -50,9 +53,10 @@ def _run_probe(mode: str) -> dict | None:
 
 def run(context) -> list[CheckResult]:
     results = []
+    now_iso = context.get("now")
 
     # ---------------------------------------------------- hermetic policy
-    fixture = _run_probe("fixture")
+    fixture = _run_probe("fixture", now_iso)
     if not fixture or "_error" in fixture:
         results.append(
             CheckResult(
@@ -106,7 +110,7 @@ def run(context) -> list[CheckResult]:
         )
 
     # ------------------------------------------------------- live golden set
-    live = _run_probe("live")
+    live = _run_probe("live", now_iso)
     if not live or "_error" in live:
         results.append(
             CheckResult(

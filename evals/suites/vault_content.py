@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from datetime import timedelta, timezone, datetime
+from datetime import timedelta
 
 from evals.common import (
     CheckResult,
@@ -17,6 +17,7 @@ from evals.common import (
     SKIP,
     grade,
     iter_notes,
+    now as eval_now,
     parse_note,
     parse_note_date,
     pct,
@@ -292,7 +293,7 @@ def run(context) -> list[CheckResult]:
     )
 
     # --- capture volume -------------------------------------------------------------
-    now = datetime.now(timezone.utc)
+    now = eval_now()
     recent = sum(1 for _, fm, _ in parsed if (d := parse_note_date(fm)) and d >= now - timedelta(days=7))
     prior = sum(
         1

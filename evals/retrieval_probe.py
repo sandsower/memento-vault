@@ -34,12 +34,16 @@ FIXTURE_VAULT = EVALS_DIR / "golden" / "fixtures" / "vault"
 _PLACEHOLDER = re.compile(r"\{\{(DAYS_AGO_(\d+)|ROOT)\}\}")
 
 
-def render_fixture_vault(root: Path) -> Path:
+def render_fixture_vault(root: Path, now: datetime) -> Path:
+    """Render the fixture vault's {{DAYS_AGO_N}}/{{ROOT}} placeholders.
+
+    `now` must be an aware UTC datetime (see evals.common.now()) so that
+    two renders with the same injected clock produce byte-identical notes.
+    """
     vault = root / "vault"
     shutil.copytree(FIXTURE_VAULT, vault)
     (root / "project-alpha").mkdir()
     (root / "project-beta").mkdir()
-    now = datetime.now()
 
     def substitute(match):
         if match.group(1) == "ROOT":
@@ -293,14 +297,23 @@ def main():
         action="store_true",
         help="exit 1 if any non-known-gap fixture check fails (for CI gates)",
     )
+    parser.add_argument(
+        "--now",
+        help="ISO-8601 UTC timestamp to freeze the eval clock for reproducible runs (env fallback: MEMENTO_EVAL_NOW)",
+    )
     args = parser.parse_args()
 
     sys.path.insert(0, str(REPO_ROOT))
 
+    from evals.common import now as eval_now, set_now
+
+    set_now(args.now)
+    effective_now = eval_now().isoformat()
+
     if args.mode == "fixture":
         tmp = tempfile.mkdtemp(prefix="memento-eval-vault-")
         try:
-            vault = render_fixture_vault(Path(tmp))
+            vault = render_fixture_vault(Path(tmp), eval_now())
             os.environ["MEMENTO_VAULT_PATH"] = str(vault)
             os.environ["MEMENTO_SEARCH_BACKEND"] = "grep"
             os.environ.pop("MEMENTO_DEBUG", None)
@@ -308,13 +321,15 @@ def main():
 
             reset_config()
             checks = fixture_checks(Path(tmp))
-            print(json.dumps({"checks": checks}))
+            print(json.dumps({"effective_now": effective_now, "checks": checks}, sort_keys=True))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         if args.strict and any(not c["ok"] and not c["known_gap"] for c in checks):
             sys.exit(1)
     else:
-        print(json.dumps(live_checks(Path(args.queries))))
+        payload = live_checks(Path(args.queries))
+        payload["effective_now"] = effective_now
+        print(json.dumps(payload, sort_keys=True))
 
 
 if __name__ == "__main__":
