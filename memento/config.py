@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -363,7 +364,28 @@ def _iso_now():
 
 
 def _runtime_dir_is_usable(path):
-    """Return True when a runtime directory is writable by this process."""
+    """Return True when a runtime directory could be created and written to.
+
+    This is a pure viability probe: it verifies the candidate is writable but
+    does not leave the directory behind if it did not already exist. Merely
+    resolving a runtime directory path (which happens on import, e.g. via
+    ``RUNTIME_DIR`` below) must not have a persistent filesystem side effect -
+    a caller that never actually needs the directory (a health check probing
+    MCP connectivity, `--help`, etc.) should leave no trace. Callers that do
+    need to persist something are responsible for creating the directory
+    (``os.makedirs(..., exist_ok=True)``) immediately before they write.
+    """
+    # Walk up from `path` to the highest ancestor that does not yet exist, so
+    # we know exactly what we created and can clean it back up afterward.
+    created_root = None
+    ancestor = path
+    while not os.path.exists(ancestor):
+        created_root = ancestor
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            break
+        ancestor = parent
+
     try:
         os.makedirs(path, mode=0o700, exist_ok=True)
         probe = os.path.join(path, ".memento-write-test")
@@ -373,6 +395,9 @@ def _runtime_dir_is_usable(path):
         return True
     except OSError:
         return False
+    finally:
+        if created_root is not None:
+            shutil.rmtree(created_root, ignore_errors=True)
 
 
 def get_runtime_dir():
@@ -381,6 +406,10 @@ def get_runtime_dir():
     Uses $XDG_RUNTIME_DIR (typically /run/user/$UID, mode 0700) with
     fallback to ~/.cache/memento-vault/. If neither location is writable,
     falls back to a per-user temp dir with mode 0700.
+
+    Note: this only *resolves* the path - it does not guarantee the
+    directory exists afterward. Callers that need to persist a file there
+    must create it themselves right before writing.
     """
     candidates = []
     runtime = os.environ.get("XDG_RUNTIME_DIR")

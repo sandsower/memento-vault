@@ -264,6 +264,7 @@ def _serialize_graph(graph, pagerank, cache_path):
         "nodes": list(graph.nodes()),
         "pagerank": pagerank,
     }
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     tmp = cache_path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, separators=(",", ":"))

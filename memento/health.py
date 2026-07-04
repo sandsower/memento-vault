@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -1226,14 +1227,27 @@ def _check_mcp_registration() -> CheckResult:
             results.append({"client": client, "status": "skipped", "reason": "cli not found"})
             continue
         try:
-            completed = subprocess.run(
-                [client, "mcp", "get", "memento-vault"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=3,
-                check=False,
-            )
+            with tempfile.TemporaryDirectory(prefix="memento-health-mcp-check-") as scratch_dir:
+                # `claude`/`codex mcp get` reports live connectivity, which means
+                # it actually spawns the registered MCP server process (memento
+                # itself) to probe it. That spawned process is free to write its
+                # own runtime/cache state; a read-only health check must not let
+                # it land in this machine's real XDG runtime/cache dirs, so give
+                # it an ephemeral scratch directory instead and discard it
+                # afterward. This keeps the check itself side-effect free
+                # regardless of how well-behaved the probed server is.
+                probe_env = os.environ.copy()
+                probe_env["XDG_RUNTIME_DIR"] = scratch_dir
+                probe_env["XDG_CACHE_HOME"] = scratch_dir
+                completed = subprocess.run(
+                    [client, "mcp", "get", "memento-vault"],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=3,
+                    check=False,
+                    env=probe_env,
+                )
         except (OSError, subprocess.SubprocessError) as exc:
             results.append({"client": client, "status": WARN, "reason": type(exc).__name__})
             worst = WARN

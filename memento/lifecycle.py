@@ -173,6 +173,7 @@ def _triage_warn_shown_today():
 
 def _mark_triage_warn_shown():
     try:
+        os.makedirs(os.path.dirname(TRIAGE_WARN_STATE_PATH), exist_ok=True)
         with open(TRIAGE_WARN_STATE_PATH, "w") as f:
             json.dump({"date": datetime.now().strftime("%Y-%m-%d")}, f)
     except OSError:
@@ -192,6 +193,7 @@ def _pi_bridge_warn_shown_today():
 
 def _mark_pi_bridge_warn_shown():
     try:
+        os.makedirs(os.path.dirname(PI_BRIDGE_WARN_STATE_PATH), exist_ok=True)
         with open(PI_BRIDGE_WARN_STATE_PATH, "w") as f:
             json.dump({"date": datetime.now().strftime("%Y-%m-%d")}, f)
     except OSError:
@@ -1538,6 +1540,7 @@ def spawn_deep_recall(prompt, initial_results, config):
 
     try:
         # Write input for the background worker
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
         input_file = tempfile.NamedTemporaryFile(
             mode="w",
             suffix=".json",

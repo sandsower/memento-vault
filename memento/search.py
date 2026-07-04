@@ -540,7 +540,9 @@ def is_vsearch_warm():
 def mark_vsearch_warm():
     """Touch the warm flag so subsequent prompts can use RRF hybrid search."""
     try:
-        Path(VSEARCH_WARM_PATH).touch()
+        warm_path = Path(VSEARCH_WARM_PATH)
+        warm_path.parent.mkdir(parents=True, exist_ok=True)
+        warm_path.touch()
     except OSError:
         pass
 

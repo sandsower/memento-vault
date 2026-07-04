@@ -487,6 +487,7 @@ def save_inception_state(state, state_path=None):
 def _acquire_pid_lock(path):
     """Acquire an exclusive pid lock file, breaking stale locks."""
     lock_path = Path(path)
+    os.makedirs(lock_path.parent, exist_ok=True)
 
     if lock_path.exists():
         try:
