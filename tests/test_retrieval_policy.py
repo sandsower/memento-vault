@@ -151,7 +151,9 @@ def test_prompt_recall_runtime_admits_concept_index_hits_clearing_min_score(tmp_
         remote_available=lambda: False,
         detect_project=lambda _cwd: ("unknown", None),
         qmd_search=lambda *_args, **_kwargs: [],
-        concept_lookup=lambda _prompt: [{"path": "notes/strong-concept.md", "title": "Strong concept match", "score": 0.9}],
+        concept_lookup=lambda _prompt: [
+            {"path": "notes/strong-concept.md", "title": "Strong concept match", "score": 0.9}
+        ],
         enhance_results=lambda results, **_kwargs: results,
         recently_injected_paths=lambda *_args, **_kwargs: set(),
     )
