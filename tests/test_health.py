@@ -23,6 +23,11 @@ def _make_vault(path: Path):
     return path
 
 
+def _write_queue(path: Path, captures: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(capture) for capture in captures) + "\n")
+
+
 @pytest.fixture(autouse=True)
 def isolate_health(monkeypatch, tmp_path):
     home = tmp_path / "home"
@@ -931,6 +936,111 @@ def test_recent_pi_bridge_success_records_do_not_warn():
 
     assert check.status == "pass"
     assert "no recent Pi bridge failures" in check.message
+
+
+def test_queue_health_warns_on_backlog_size(tmp_path, monkeypatch):
+    state_home = tmp_path / "state"
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(state_home))
+    queue_file = state_home / "queue" / "pi-captures.jsonl"
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    _write_queue(
+        queue_file,
+        [
+            {
+                "id": f"q{i}",
+                "created_at": now,
+                "title": f"Queued capture {i}",
+                "body": "capture",
+                "metadata": {"project": "repo", "session_id": f"s{i}"},
+            }
+            for i in range(11)
+        ],
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "queue health")
+
+    assert check.status == "warn"
+    assert check.details["queue_path"] == str(queue_file)
+    assert check.details["queued_capture_count"] == 11
+    assert check.details["oldest_capture_age_hours"] < 1
+
+
+def test_queue_health_fails_on_oldest_entry_age(tmp_path, monkeypatch):
+    state_home = tmp_path / "state"
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(state_home))
+    queue_file = state_home / "queue" / "pi-captures.jsonl"
+    created_at = (datetime.now().astimezone() - timedelta(days=4)).isoformat(timespec="seconds")
+    _write_queue(
+        queue_file,
+        [
+            {
+                "id": "q1",
+                "created_at": created_at,
+                "title": "Old queued capture",
+                "body": "capture",
+                "metadata": {"project": "repo", "session_id": "s1"},
+            }
+        ],
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "queue health")
+
+    assert check.status == "fail"
+    assert check.details["queue_path"] == str(queue_file)
+    assert check.details["queued_capture_count"] == 1
+    assert check.details["oldest_capture_age_hours"] >= 96
+
+
+def test_queue_health_thresholds_are_config_overridable(tmp_path, monkeypatch):
+    state_home = tmp_path / "state"
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(state_home))
+    queue_file = state_home / "queue" / "pi-captures.jsonl"
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    _write_queue(
+        queue_file,
+        [
+            {
+                "id": "q1",
+                "created_at": now,
+                "title": "Queued capture 1",
+                "body": "capture",
+                "metadata": {"project": "repo", "session_id": "s1"},
+            },
+            {
+                "id": "q2",
+                "created_at": now,
+                "title": "Queued capture 2",
+                "body": "capture",
+                "metadata": {"project": "repo", "session_id": "s2"},
+            },
+        ],
+    )
+    vault = _make_vault(tmp_path / "vault")
+    (vault / "memento.yml").write_text(
+        "\n".join(
+            [
+                "queue_backlog_warn_threshold: 2",
+                "queue_backlog_fail_threshold: 3",
+                "queue_oldest_age_warn_hours: 1",
+                "queue_oldest_age_fail_hours: 2",
+            ]
+        )
+        + "\n"
+    )
+
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "queue health")
+
+    assert check.status == "warn"
+    assert check.details["thresholds"] == {
+        "queue_backlog_warn_threshold": 2,
+        "queue_backlog_fail_threshold": 3,
+        "queue_oldest_age_warn_hours": 1,
+        "queue_oldest_age_fail_hours": 2,
+    }
+    assert check.details["queued_capture_count"] == 2
 
 
 def test_stale_headless_mcp_config_static_check_warns(tmp_path):

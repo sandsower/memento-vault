@@ -14,7 +14,7 @@ import tempfile
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +68,10 @@ _DEFAULT_CONFIG = {
     "search_backend": "auto",
     "search_db_path": ".search/search.db",
     "inception_enabled": False,
+    "queue_backlog_warn_threshold": 10,
+    "queue_backlog_fail_threshold": 50,
+    "queue_oldest_age_warn_hours": 24,
+    "queue_oldest_age_fail_hours": 72,
 }
 RETRIEVAL_LOG_PATH = str(
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memento-vault" / "retrieval.jsonl"
@@ -146,6 +150,7 @@ def build_report(*, deep: bool = False, probe_timeout_seconds: int = _DEEP_PROBE
     checks.append(_check_mcp_registration())
     checks.append(_check_pi_bridge_config())
     checks.append(_check_pi_bridge_health())
+    checks.append(_check_queue_health(config))
     checks.append(_check_triage_health())
     checks.append(_check_local_extraction_retries(vault))
     checks.append(_check_retrieval_health(config=config, search_check=search_check))
@@ -1464,6 +1469,111 @@ def _check_pi_bridge_health() -> CheckResult:
         "recent_failures": recent_failures[:5],
     }
     return CheckResult("pi bridge health", WARN, message, details)
+
+
+def _check_queue_health(config: dict[str, Any]) -> CheckResult:
+    queue_path = _pi_queue_file()
+    thresholds = _queue_health_thresholds(config)
+    details: dict[str, Any] = {
+        "queue_path": str(queue_path),
+        "queued_capture_count": 0,
+        "parsed_capture_count": 0,
+        "unparsed_capture_count": 0,
+        "oldest_capture_at": None,
+        "oldest_capture_age_hours": None,
+        "thresholds": thresholds,
+    }
+    if not queue_path.exists():
+        return CheckResult("queue health", PASS, "capture queue is empty", details)
+
+    now = datetime.now(timezone.utc)
+    count = parsed_count = unparsed_count = 0
+    oldest_at: datetime | None = None
+    oldest_capture: dict[str, Any] | None = None
+    for rec in _iter_jsonl(queue_path):
+        count += 1
+        created_at = str(rec.get("created_at") or rec.get("date") or "")
+        ts = telemetry.parse_timestamp_utc(created_at)
+        if ts is None:
+            unparsed_count += 1
+            continue
+        parsed_count += 1
+        if oldest_at is None or ts < oldest_at:
+            oldest_at = ts
+            oldest_capture = rec
+
+    details["queued_capture_count"] = count
+    details["parsed_capture_count"] = parsed_count
+    details["unparsed_capture_count"] = unparsed_count
+    if oldest_at is not None:
+        details["oldest_capture_at"] = telemetry.format_timestamp_utc(oldest_at)
+        details["oldest_capture_age_hours"] = round((now - oldest_at).total_seconds() / 3600, 2)
+        if isinstance(oldest_capture, dict) and oldest_capture.get("id"):
+            details["oldest_capture_id"] = str(oldest_capture["id"])
+
+    backlog_warn = thresholds["queue_backlog_warn_threshold"]
+    backlog_fail = thresholds["queue_backlog_fail_threshold"]
+    age_warn = thresholds["queue_oldest_age_warn_hours"]
+    age_fail = thresholds["queue_oldest_age_fail_hours"]
+    status = PASS
+    reasons: list[str] = []
+    if count >= backlog_fail:
+        status = FAIL
+        reasons.append(f"backlog {count} >= fail threshold {backlog_fail}")
+    elif count >= backlog_warn:
+        status = WARN
+        reasons.append(f"backlog {count} >= warn threshold {backlog_warn}")
+
+    oldest_age_hours = details["oldest_capture_age_hours"]
+    if isinstance(oldest_age_hours, (int, float)):
+        if oldest_age_hours >= age_fail:
+            status = FAIL
+            reasons.append(f"oldest entry {oldest_age_hours:.2f}h >= fail threshold {age_fail}h")
+        elif oldest_age_hours >= age_warn and status != FAIL:
+            status = WARN
+            reasons.append(f"oldest entry {oldest_age_hours:.2f}h >= warn threshold {age_warn}h")
+
+    if count == 0:
+        message = "capture queue is empty"
+    else:
+        message = f"capture queue has {count} queued capture(s)"
+        if oldest_age_hours is None:
+            message += "; oldest capture age unavailable"
+        else:
+            message += f"; oldest {oldest_age_hours:.2f}h old"
+    if reasons:
+        message += f" ({'; '.join(reasons)})"
+    return CheckResult("queue health", status, message, details)
+
+
+def _queue_health_thresholds(config: dict[str, Any]) -> dict[str, int]:
+    return {
+        "queue_backlog_warn_threshold": _config_int(
+            config, "queue_backlog_warn_threshold", _DEFAULT_CONFIG["queue_backlog_warn_threshold"]
+        ),
+        "queue_backlog_fail_threshold": _config_int(
+            config, "queue_backlog_fail_threshold", _DEFAULT_CONFIG["queue_backlog_fail_threshold"]
+        ),
+        "queue_oldest_age_warn_hours": _config_int(
+            config, "queue_oldest_age_warn_hours", _DEFAULT_CONFIG["queue_oldest_age_warn_hours"]
+        ),
+        "queue_oldest_age_fail_hours": _config_int(
+            config, "queue_oldest_age_fail_hours", _DEFAULT_CONFIG["queue_oldest_age_fail_hours"]
+        ),
+    }
+
+
+def _pi_queue_file() -> Path:
+    from memento.pi_bridge import _state_root
+
+    return _state_root() / "queue" / "pi-captures.jsonl"
+
+
+def _config_int(config: dict[str, Any], key: str, default: int) -> int:
+    try:
+        return max(0, int(config.get(key, default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _has_stale_empty_mcp_config(path: Path) -> bool:
