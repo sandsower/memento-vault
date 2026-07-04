@@ -70,6 +70,7 @@ import re
 import shutil
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -562,9 +563,32 @@ def vector_ordering_advisory_checks(root: Path) -> list[dict]:
         search_backend.set_backend(previous_backend)
 
 
+def _production_hits(query_id: str, query: str) -> list[dict]:
+    """Run one golden query through the SAME entry point prompt-time recall
+    uses in production: memento.lifecycle.build_recall(), which wraps
+    PromptRecallRuntime.run() (memento/retrieval_policy.py) with the real
+    qmd_search/enhance_results/PRF/RRF/deep-recall-gating wiring (MEM-140).
+
+    Before this, live_checks() called memento.search.qmd_search() directly:
+    a raw single-pass BM25/vector call with none of that gating, so the
+    golden recall@5/MRR metric measured a code path no user ever hits. See
+    the MEM-140 ticket for the full history.
+
+    Hermetic despite hitting the live vault: session_id is a fresh uuid
+    per call, so PromptRecallRuntime's recently-injected-paths dedup never
+    reads state left behind by an earlier query or an earlier run of this
+    probe, and record=False means the call never writes to the recall-dedup
+    or access-log state on disk. Read-only against the live vault.
+    """
+    from memento.lifecycle import build_recall
+
+    session_id = f"mem140-eval-{query_id}-{uuid.uuid4().hex}"
+    decision = build_recall(query, cwd="", session_id=session_id, record=False)
+    return decision.results
+
+
 def live_checks(queries_path: Path) -> dict:
     from memento import search
-    from memento.config import get_config
     from memento.search_backend import get_backend
 
     backend = get_backend()
@@ -578,8 +602,6 @@ def live_checks(queries_path: Path) -> dict:
         return payload
 
     spec = json.loads(queries_path.read_text())
-    config = get_config()
-    min_score = float(config.get("recall_min_score", 0.4) or 0.4)
 
     def _rank(hits, expect_any):
         for idx, hit in enumerate(hits, start=1):
@@ -588,10 +610,10 @@ def live_checks(queries_path: Path) -> dict:
         return None
 
     for item in spec.get("positive", []):
-        hits = search.qmd_search(item["query"], limit=5)
-        # The default path above mirrors what prompt recall actually does
-        # (BM25-first). The semantic pass is recorded alongside it so the
-        # scorecard can show whether vector search would have rescued a miss.
+        hits = _production_hits(item["id"], item["query"])
+        # This semantic pass stays a raw qmd_search call on purpose: it is a
+        # diagnostic signal ("would vector search alone have rescued this
+        # miss"), never the graded path.
         semantic_hits = search.qmd_search(item["query"], limit=5, semantic=True, timeout=30)
         payload["positive"].append(
             {
@@ -605,12 +627,15 @@ def live_checks(queries_path: Path) -> dict:
         )
 
     for item in spec.get("negative", []):
-        hits = search.qmd_search(item["query"], limit=3, min_score=min_score)
+        # Production's own recall_min_score gating (applied inside
+        # build_recall) decides what would have leaked into a real prompt,
+        # so no separate min_score filter is re-applied here.
+        hits = _production_hits(item["id"], item["query"])
         payload["negative"].append(
             {
                 "id": item["id"],
                 "query": item["query"],
-                "leaked": [f"{h['path']} ({h['score']:.2f})" for h in hits],
+                "leaked": [f"{h['path']} ({h.get('score', 0):.2f})" for h in hits],
             }
         )
     return payload
