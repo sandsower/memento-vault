@@ -26,7 +26,9 @@ hooks:
   after_create: |
     git clone --depth 1 git@github.com:sandsower/memento-vault.git .
     git checkout -B rondo/{{ issue.identifier }}
-    python3 -m venv .venv
+    # Hooks run under `sh -lc`; macOS path_helper puts /usr/bin (python 3.9)
+    # ahead of /opt/homebrew/bin, and memento requires python >=3.10.
+    /opt/homebrew/bin/python3 -m venv .venv
     .venv/bin/python -m pip install --quiet --upgrade pip
     .venv/bin/python -m pip install --quiet -e '.[mcp]' pytest ruff
   before_run: |
