@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -344,6 +344,51 @@ def test_retrieval_health_keeps_no_results_out_of_failure_rate():
     assert check.details["failures"] == 0
     assert check.details["no_results"] == 1
     assert check.details["low_signal_skips"] == 1
+
+
+def test_retrieval_health_uses_utc_cutoff_even_in_non_utc_timezone():
+    original_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "Pacific/Kiritimati"
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+        now = datetime.now(timezone.utc)
+        Path(health.RETRIEVAL_LOG_PATH).write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "ts": (now - timedelta(hours=23)).isoformat(timespec="seconds"),
+                            "hook": "search",
+                            "action": "inject",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "ts": (now - timedelta(hours=25)).isoformat(timespec="seconds"),
+                            "hook": "search",
+                            "action": "inject",
+                        }
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        report = health.build_report()
+        check = next(check for check in report.checks if check.name == "retrieval")
+
+        assert check.status == "pass"
+        assert check.details["events"] == 1
+        assert check.details["failures"] == 0
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
 
 
 def test_retrieval_last_error_is_redacted_and_truncated():

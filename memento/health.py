@@ -736,7 +736,7 @@ def _automation_recall_metadata(
     *, config: dict[str, Any] | None = None, search_check: CheckResult | None = None
 ) -> dict[str, Any]:
     path = Path(RETRIEVAL_LOG_PATH)
-    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_HEALTH_WINDOW_HOURS)
     if not path.exists():
         metadata = {
             "log_path": str(path),
@@ -937,7 +937,7 @@ def _last_successful_automation_packet() -> dict[str, Any] | None:
 
 
 def _common_automation_failure_reasons(vault: Path, limit: int = 5) -> list[dict[str, Any]]:
-    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_HEALTH_WINDOW_HOURS)
     counts: Counter[str] = Counter()
     for path in (Path(RETRIEVAL_LOG_PATH), Path(TRIAGE_HEALTH_LOG_PATH), vault / ".sync" / "ledger.jsonl"):
         try:
@@ -1471,7 +1471,7 @@ def _is_pi_bridge_failure_record(rec: dict[str, Any]) -> bool:
 
 def _check_pi_bridge_health() -> CheckResult:
     path = Path(TRIAGE_HEALTH_LOG_PATH)
-    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_HEALTH_WINDOW_HOURS)
 
     recent_failures: list[dict[str, Any]] = []
     latest_failure: dict[str, Any] | None = None
@@ -1653,7 +1653,7 @@ def _has_stale_empty_mcp_config(path: Path) -> bool:
 
 
 def _check_triage_health() -> CheckResult:
-    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_HEALTH_WINDOW_HOURS)
     log_path, total, failed, invalid_mcp_failed, stale_certainty_failed, last_error = _scan_triage_logs(cutoff)
     if total == 0:
         if last_error:
@@ -1763,7 +1763,7 @@ def _check_retrieval_health(
     *, config: dict[str, Any] | None = None, search_check: CheckResult | None = None
 ) -> CheckResult:
     path = Path(RETRIEVAL_LOG_PATH)
-    cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_HEALTH_WINDOW_HOURS)
     if not path.exists():
         return CheckResult(
             "retrieval", WARN, "retrieval log not found; recall/search failure rate unavailable", {"path": str(path)}
@@ -2182,7 +2182,7 @@ def _check_inception(config: dict[str, Any]) -> CheckResult:
         if status == PASS:
             status = WARN
     else:
-        age_seconds = int(max(0, (datetime.now() - last_run_dt).total_seconds()))
+        age_seconds = int(max(0, (datetime.now(timezone.utc) - last_run_dt).total_seconds()))
         details["last_run_iso"] = last_run_iso
         details["last_run_source"] = last_run_source
         details["last_run_age_seconds"] = age_seconds
@@ -2218,7 +2218,7 @@ def _iter_recent_jsonl(path: Path, cutoff: datetime):
 
 
 def _parse_ts(raw: Any) -> datetime | None:
-    return telemetry.parse_timestamp_naive_utc(raw)
+    return telemetry.parse_timestamp_utc(raw)
 
 
 def _is_invalid_mcp_config_error(message: str) -> bool:
