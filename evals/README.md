@@ -60,6 +60,8 @@ Each positive query is also run through a raw semantic `qmd_search()` call, kept
 
 Layer 1 is a blocking CI gate: `python3 evals/retrieval_probe.py --mode fixture --strict` exits non-zero if any core (non-known-gap) check fails -- this includes the ranked-order checks.
 Layer 2 never runs in CI; it needs the real vault.
+Run it locally with `python3 evals/retrieval_probe.py --mode live`.
+This is a trend instrument for watching recall drift against your real vault, never a gate -- do not wire `--mode live` into a CI job or a pre-PR gate (see `.beislid/workflow.md`'s "Never run --mode live in gates" hint).
 
 ### capture_e2e - the triage gate and extraction
 
@@ -147,6 +149,27 @@ If you cannot explain a change, do not commit it -- investigate the pipeline ins
 5. If the change was NOT intentional, do not regenerate: investigate `memento/search.py` (or, for the deep pipeline, `memento/retrieval_policy.py`) for the regression.
 
 SQLite/FTS5 version changes are a known regen trigger: if a golden fails right after an environment upgrade (new Python, new OS image, new SQLite), suspect the scorer version before the ranking code -- and still review the regen diff.
+See "SQLite/FTS5 slim-container hazard" below for why this happens and how to verify a change before pushing it.
+
+### SQLite/FTS5 slim-container hazard (MEM-133/MEM-134)
+
+The causal chain: a slim container image (this repo's `Dockerfile` uses `python:3.12.11-slim`) bundles a different SQLite build than a macOS dev machine or a full desktop Linux image.
+Different SQLite builds ship different FTS5 tokenizer and BM25 scoring implementations.
+That divergence can silently reorder rows relative to what a golden pinned on one machine expects, even though the ranking code did not change.
+
+Rule of thumb: keep eval assertions to membership and decisive-order checks, never byte-identical full rankings, anywhere the assertion could cross a SQLite version boundary.
+`golden/ranked_order.json` is deliberately scoped to a handful of queries for exactly this reason: a SQLite version bump should only ever require reviewing a small diff, never redesigning the assertion strategy.
+
+Verification step: before pushing a change to golden files or ranking code, run the fixture probe inside a container matching the Dockerfile's base image, not just on your dev machine.
+
+```bash
+docker run --rm -v "$PWD:/app" -w /app python:3.12.11-slim bash -c "pip install -q -e '.[mcp]' && python3 evals/retrieval_probe.py --mode fixture --strict"
+```
+
+If this fails while the same command passes on your host machine, suspect the SQLite/FTS5 version difference first, per the rule of thumb above, and still review any regen diff like a code review before committing it.
+
+Runtime defense: `memento/embedded_search.py::_is_rebuildable_sqlite_error()` treats `"no such module: fts5"` as a rebuildable error and triggers an index rebuild instead of crashing.
+That only covers outright missing capability (an old SQLite build with no FTS5 module at all); it does not paper over a scoring/ordering divergence between two SQLite builds that both support FTS5, which is what the goldens above exist to catch.
 
 ### Adding golden queries (do this ~2 per month)
 

@@ -36,7 +36,10 @@
         "gate.mcp-server-tests": "allow",
         "gate.install-tests": "allow",
         "gate.release-smoke": "allow",
-        "gate.install-exec-smoke": "allow"
+        "gate.install-exec-smoke": "allow",
+        "gate.retrieval-probe-fixture": "allow",
+        "gate.eval-framework-tests": "allow",
+        "gate.capture-retrieve-loop-hermetic": "allow"
       },
       "sandbox": {
         "on_uncommitted_changes": "allow",
@@ -76,7 +79,10 @@
         "gate.mcp-server-tests": "allow",
         "gate.install-tests": "allow",
         "gate.release-smoke": "allow",
-        "gate.install-exec-smoke": "allow"
+        "gate.install-exec-smoke": "allow",
+        "gate.retrieval-probe-fixture": "allow",
+        "gate.eval-framework-tests": "allow",
+        "gate.capture-retrieve-loop-hermetic": "allow"
       },
       "sandbox": {
         "on_uncommitted_changes": "allow",

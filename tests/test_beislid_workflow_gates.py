@@ -161,6 +161,9 @@ def test_beislid_process_artifact_and_workflow_wiring() -> None:
         "gate.install-tests",
         "gate.release-smoke",
         "gate.install-exec-smoke",
+        "gate.retrieval-probe-fixture",
+        "gate.eval-framework-tests",
+        "gate.capture-retrieve-loop-hermetic",
     }
 
     for mode in ("supervised-auto", "unattended-auto"):
@@ -219,6 +222,29 @@ def test_beislid_process_artifact_and_workflow_wiring() -> None:
         "install-tests",
         "release-smoke",
         "install-exec-smoke",
+    }
+    assert set(_artifact_gate_names(["memento/retrieval_policy.py"])) == {
+        "ruff-check",
+        "ruff-format-check",
+        "python-compileall",
+        "targeted-tests",
+        "retrieval-probe-fixture",
+        "eval-framework-tests",
+        "capture-retrieve-loop-hermetic",
+    }
+    assert set(_artifact_gate_names(["memento/lifecycle.py"])) == {
+        "ruff-check",
+        "ruff-format-check",
+        "python-compileall",
+        "targeted-tests",
+        "retrieval-probe-fixture",
+        "eval-framework-tests",
+        "capture-retrieve-loop-hermetic",
+    }
+    assert set(_artifact_gate_names(["evals/retrieval_probe.py"])) == {
+        "retrieval-probe-fixture",
+        "eval-framework-tests",
+        "capture-retrieve-loop-hermetic",
     }
 
     assert "Flat gates are still valid Beislið input" in docs

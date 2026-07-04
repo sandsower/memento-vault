@@ -279,7 +279,7 @@ pre-PR command surface. Older orchestrators may still treat each entry as a flat
   cost: medium
   mutates: false
   changed_file_selector:
-    include: ['evals/**', 'tests/test_evals.py']
+    include: ['evals/**', 'tests/test_evals.py', 'memento/retrieval_policy.py', 'memento/lifecycle.py']
   output:
     parser: pytest
     agent_summary: true
@@ -298,7 +298,7 @@ pre-PR command surface. Older orchestrators may still treat each entry as a flat
   cost: medium
   mutates: false
   changed_file_selector:
-    include: ['memento/search*.py', 'memento/embedded_search.py', 'memento/config.py', 'evals/retrieval_probe.py', 'evals/golden/fixtures/vault/**']
+    include: ['memento/search*.py', 'memento/embedded_search.py', 'memento/config.py', 'memento/retrieval_policy.py', 'memento/lifecycle.py', 'evals/retrieval_probe.py', 'evals/golden/fixtures/vault/**']
   output:
     parser: generic-text
     agent_summary: true
@@ -336,7 +336,7 @@ pre-PR command surface. Older orchestrators may still treat each entry as a flat
   cost: medium
   mutates: false
   changed_file_selector:
-    include: ['memento/store.py', 'memento/smart_store.py', 'memento/mcp_server.py', 'memento/embedded_search.py', 'memento/search.py', 'evals/capture_retrieve_probe.py', 'evals/suites/capture_retrieve_loop.py', 'evals/thresholds.yml']
+    include: ['memento/store.py', 'memento/smart_store.py', 'memento/mcp_server.py', 'memento/embedded_search.py', 'memento/search.py', 'memento/retrieval_policy.py', 'memento/lifecycle.py', 'evals/capture_retrieve_probe.py', 'evals/suites/capture_retrieve_loop.py', 'evals/thresholds.yml']
   output:
     parser: generic-text
     agent_summary: true

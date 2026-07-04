@@ -130,6 +130,44 @@
       ]
     },
     {
+      "id": "evals",
+      "paths": [
+        "memento/retrieval_policy.py",
+        "memento/lifecycle.py",
+        "evals/**"
+      ],
+      "reason": "matched eval framework and retrieval policy/lifecycle paths",
+      "gates": [
+        {
+          "name": "retrieval-probe-fixture",
+          "command": ".venv/bin/python evals/retrieval_probe.py --mode fixture --strict",
+          "timeout_ms": 300000,
+          "action_id": "gate.retrieval-probe-fixture",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for hermetic ranking-policy regression coverage"
+        },
+        {
+          "name": "eval-framework-tests",
+          "command": ".venv/bin/python -m pytest tests/test_evals.py",
+          "timeout_ms": 300000,
+          "action_id": "gate.eval-framework-tests",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for eval framework health coverage"
+        },
+        {
+          "name": "capture-retrieve-loop-hermetic",
+          "command": ".venv/bin/python evals/run_evals.py --suite capture_retrieve_loop",
+          "timeout_ms": 300000,
+          "action_id": "gate.capture-retrieve-loop-hermetic",
+          "action_classes": ["read"],
+          "stage": "post_turn",
+          "reason": "selected for capture-retrieve loop coverage (memento.mcp_server imports memento.lifecycle and memento.retrieval_policy)"
+        }
+      ]
+    },
+    {
       "id": "install-release",
       "paths": [
         "install.sh",
