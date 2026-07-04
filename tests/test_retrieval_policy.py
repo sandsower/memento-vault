@@ -6,6 +6,7 @@ from memento.retrieval_policy import (
     PromptRecallRequest,
     PromptRecallRuntime,
     _candidate_summary,
+    normalized_natural_query,
 )
 
 
@@ -170,6 +171,65 @@ def test_prompt_recall_runtime_admits_concept_index_hits_clearing_min_score(tmp_
     assert decision.top_path == "notes/strong-concept.md"
 
 
+def test_normalized_natural_query_keeps_durable_search_terms():
+    assert normalized_natural_query("how should we store bearer tokens that appear in URLs") == "store bearer token url"
+    assert normalized_natural_query("memento installer remembering flags between upgrades") == (
+        "memento installer remember flag upgrade"
+    )
+    assert normalized_natural_query("what status code should a proxy return when upstream fails with 5xx") == (
+        "proxy upstream fail 5xx"
+    )
+    assert normalized_natural_query("what did we decide about redis caching") == "redis caching"
+
+
+def test_prompt_recall_runtime_uses_query_terms_before_semantic_and_blocks_empty_lexical_leaks(tmp_path):
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    calls = []
+
+    def fake_search(query, **kwargs):
+        calls.append((query, kwargs))
+        if query == "publish mcp server registry" and not kwargs.get("semantic"):
+            return [{"path": "notes/mcp-registry.md", "title": "MCP registry", "score": 0.96}]
+        if kwargs.get("semantic"):
+            return [{"path": "notes/semantic-leak.md", "title": "Semantic leak", "score": 0.9}]
+        return []
+
+    runtime = PromptRecallRuntime(
+        config_loader=lambda: {
+            "prompt_recall": True,
+            "recall_min_score": 0.6,
+            "recall_max_notes": 3,
+            "concept_index_enabled": False,
+            "rrf_enabled": True,
+            "multi_hop_enabled": False,
+            "reranker_enabled": True,
+        },
+        vault_loader=lambda: vault,
+        has_backend=lambda: True,
+        remote_available=lambda: False,
+        detect_project=lambda _cwd: ("unknown", None),
+        qmd_search=fake_search,
+        semantic_warm=lambda: True,
+        enhance_results=lambda results, **_kwargs: results,
+        recently_injected_paths=lambda *_args, **_kwargs: set(),
+    )
+
+    hit = runtime.run(PromptRecallRequest(prompt="how to publish an mcp server to the registry", cwd=str(tmp_path)))
+    assert hit.should_inject is True
+    assert hit.top_path == "notes/mcp-registry.md"
+    assert not any(kwargs.get("semantic") for _query, kwargs in calls)
+
+    calls.clear()
+    miss = runtime.run(
+        PromptRecallRequest(
+            prompt="kafka consumer group rebalancing strategy for the payments cluster", cwd=str(tmp_path)
+        )
+    )
+    assert miss.should_inject is False
+    assert not any(kwargs.get("semantic") for _query, kwargs in calls)
+
+
 def test_prompt_recall_runtime_uses_concrete_auto_for_identifier_lookup(tmp_path):
     """Identifier-shaped prompts bypass low-signal gates and reach literal search mode."""
     vault = tmp_path / "vault"
@@ -245,9 +305,38 @@ def test_explicit_search_runtime_records_access_for_hits(tmp_path):
     result = runtime.search(ExplicitSearchRequest(query="redis cache", limit=1))
 
     assert result["results"][0]["path"] == "notes/redis.md"
+    assert "backend" in result["metadata"]
+    assert result["metadata"]["semantic_used"] is False
+    assert result["metadata"]["concrete_enabled"] is False
     assert accesses == [
         (
             ["notes/redis.md"],
             {"hook": "mcp", "tool": "search", "query": "redis cache", "result_count": 1},
         )
     ]
+
+
+def test_explicit_search_runtime_uses_normalized_query_variant(tmp_path):
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    calls = []
+
+    def fake_search(query, **kwargs):
+        calls.append((query, kwargs))
+        if query == "publish mcp server registry":
+            return [{"path": "notes/mcp-registry.md", "title": "MCP registry", "score": 0.96, "snippet": "publish"}]
+        return []
+
+    runtime = ExplicitSearchRuntime(
+        vault_loader=lambda: vault,
+        has_backend=lambda: True,
+        qmd_search=fake_search,
+        enhance_results=lambda results, **_kwargs: results,
+    )
+
+    result = runtime.search(ExplicitSearchRequest(query="how to publish an mcp server to the registry"))
+
+    assert result["results"][0]["path"] == "notes/mcp-registry.md"
+    assert result["metadata"]["query_variant"] == "publish mcp server registry"
+    assert calls[0][0] == "how to publish an mcp server to the registry"
+    assert calls[1][0] == "publish mcp server registry"

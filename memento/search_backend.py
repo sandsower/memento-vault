@@ -158,6 +158,18 @@ class SearchBackend(ABC):
         """
         ...
 
+    def index_note(self, rel_path: str, collection: str | None = None) -> bool:
+        """Index a single vault-relative note after an official write.
+
+        Backends that cannot update one note may conservatively mark/update the
+        whole collection. The write path treats failures as non-blocking, but
+        official writers should call this hook so MCP, CLI, and hookless users
+        see fresh notes without needing a manual reindex.
+        """
+        from memento.config import get_config
+
+        return self.reindex(collection or get_config().get("qmd_collection", "memento"), embed=False)
+
     @abstractmethod
     def reindex(self, collection: str, embed: bool = True) -> bool:
         """Trigger reindexing of the collection.
@@ -461,6 +473,10 @@ class GrepBackend(SearchBackend):
                 break
 
         return {"path": path, "title": title, "content": content, "score": 0.0}
+
+    def index_note(self, rel_path: str, collection: str | None = None) -> bool:
+        # Grep backend has no index to update; the file is immediately visible.
+        return True
 
     def reindex(self, collection: str, embed: bool = True) -> bool:
         # Grep backend has no index to update

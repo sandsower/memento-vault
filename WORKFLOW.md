@@ -126,4 +126,4 @@ Instructions:
    `.beislid/action-policy.json`; never merge automatically.
 7. Out-of-scope discoveries become new Linear issues in the same project,
    linked `related`, never scope expansion.
-8. Final message reports completed actions and blockers only.
+8. Final response must be only a valid `rondo.final_report/v0` JSON object with required fields `schema`, `summary`, `changed_files`, `gates_run`, `failures`, `risks`, and `next_state`. Use `schema: "rondo.final_report/v0"`; do not use legacy keys such as `version`, `ticket`, `completed_actions`, or `blockers` instead of the required fields.

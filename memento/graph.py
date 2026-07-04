@@ -73,7 +73,7 @@ def read_note_metadata(note_name):
                     elif stripped.startswith("origin:"):
                         origin = stripped[7:].strip().strip('"').strip("'")
                     elif stripped.startswith("supersedes:"):
-                        supersedes = stripped[10:].strip().strip('"').strip("'")
+                        supersedes = stripped[len("supersedes:") :].strip().strip('"').strip("'")
                     elif stripped.startswith("tags:"):
                         raw_tags = stripped[5:].strip()
                         if raw_tags.startswith("[") and raw_tags.endswith("]"):
@@ -114,6 +114,7 @@ def note_is_superseded(note_name):
         return None
 
     target = f"[[{note_name}]]"
+    target_slug = note_name.strip().strip('"').strip("'")
     for note_path in notes_dir.glob("*.md"):
         if note_path.stem == note_name:
             continue
@@ -129,7 +130,8 @@ def note_is_superseded(note_name):
                         else:
                             break  # end of frontmatter
                     if in_frontmatter and stripped.startswith("supersedes:"):
-                        if target in stripped:
+                        value = stripped[len("supersedes:") :].strip().strip('"').strip("'")
+                        if target in stripped or value == target_slug or value == f"notes/{target_slug}.md":
                             return note_path.stem
         except OSError:
             continue

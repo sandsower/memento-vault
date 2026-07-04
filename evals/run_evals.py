@@ -18,6 +18,7 @@ Suites:
     retrieval_accuracy    the READ path: ranking policies, golden queries
     capture_e2e           the triage gate, plus LLM extraction with --llm
     capture_retrieve_loop does a freshly captured note become retrievable? (store -> index -> search)
+    retrieval_surface    user-facing recall/search routes, triggers, backend metadata, local CLI
 
 Everything is read-only against the real vault: capture_retrieve_loop writes only to its own
 temp vaults, never the configured one. Only --llm spends tokens (up to 4 LLM calls total).
@@ -40,6 +41,7 @@ from evals.suites import (  # noqa: E402
     capture_health,
     capture_retrieve_loop,
     retrieval_accuracy,
+    retrieval_surface,
     vault_content,
 )
 
@@ -47,6 +49,7 @@ SUITES = {
     "vault_content": vault_content,
     "capture_health": capture_health,
     "retrieval_accuracy": retrieval_accuracy,
+    "retrieval_surface": retrieval_surface,
     "capture_e2e": capture_e2e,
     "capture_retrieve_loop": capture_retrieve_loop,
 }

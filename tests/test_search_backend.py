@@ -159,6 +159,18 @@ class TestConcreteDetection:
         assert exact > substring
 
 
+class TestBackendIndexHook:
+    def test_qmd_index_note_conservatively_reindexes_collection(self, monkeypatch):
+        backend = QMDBackend()
+        calls = []
+        monkeypatch.setattr(
+            backend, "reindex", lambda collection, embed=True: calls.append((collection, embed)) or True
+        )
+
+        assert backend.index_note("notes/new.md", collection="memento") is True
+        assert calls == [("memento", False)]
+
+
 class TestMockBackend:
     def test_search_delegates_to_backend(self):
         results = [
@@ -231,6 +243,12 @@ class TestMockBackend:
         assert note is not None
         assert note["title"] == "Foo"
         assert mock.get_calls[0]["path"] == "notes/foo.md"
+
+    def test_default_index_note_uses_reindex_without_embeddings(self):
+        mock = MockBackend()
+
+        assert mock.index_note("notes/new.md", collection="memento") is True
+        assert mock.reindex_calls == [{"collection": "memento", "embed": False}]
 
     def test_get_returns_none_for_missing(self):
         mock = MockBackend(results=[])
@@ -332,6 +350,10 @@ class TestEmbeddedBackendDetection:
 
 class TestGrepBackendPathTraversal:
     """Ensure GrepBackend.get rejects paths that escape the vault."""
+
+    def test_index_note_is_noop_success(self):
+        backend = GrepBackend()
+        assert backend.index_note("notes/new.md", collection="memento") is True
 
     def test_traversal_rejected(self, tmp_path):
         vault = tmp_path / "vault"

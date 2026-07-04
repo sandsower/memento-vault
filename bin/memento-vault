@@ -7,6 +7,8 @@
 #   memento-vault uninstall
 #   memento-vault update          # git pull + reinstall
 #   memento-vault warmup          # warm optional local dependencies quietly
+#   memento-vault search "query" # local non-MCP vault search
+#   memento-vault recall "prompt" # local production prompt-recall path
 #   memento-vault tools --markdown # print generated MCP tool inventory
 #   memento-vault tools --check    # check tool inventory against MCP registrations
 #   memento-vault archive export ARCHIVE.zip [--vault PATH]
@@ -47,6 +49,9 @@ usage() {
     echo "  uninstall   Remove memento-vault from Claude Code"
     echo "  update      Pull latest version and reinstall"
     echo "  warmup      Warm optional local dependencies quietly (defaults to QMD)"
+    echo "  search      Search the vault locally without MCP"
+    echo "  recall      Run the production prompt-recall path locally without MCP"
+    echo "  reindex     Rebuild the configured local search backend index"
     echo "  tools       Print or check the generated MCP tool inventory"
     echo "  archive     Export/import portable vault archives"
     echo "  health      Run read-only vault diagnostics"
@@ -106,6 +111,10 @@ case "$cmd" in
 
         nohup "$qmd_path" vsearch "warmup" -c "${MEMENTO_QMD_COLLECTION:-memento}" -n 1 </dev/null >/dev/null 2>&1 &
         exit 0
+        ;;
+    search|recall|reindex)
+        export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+        exec python3 -m memento "$cmd" "$@"
         ;;
     tools)
         export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"

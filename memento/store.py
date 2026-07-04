@@ -927,12 +927,13 @@ def _render_note_markdown(
 def _index_written_note(vault_path, target):
     try:
         from memento.search_backend import get_backend
-        from memento.embedded_search import EmbeddedSearchBackend
 
         backend = get_backend()
-        if isinstance(backend, EmbeddedSearchBackend):
-            rel_path = str(target.relative_to(Path(vault_path)))
+        rel_path = str(target.relative_to(Path(vault_path)))
+        if hasattr(backend, "index_note"):
             backend.index_note(rel_path)
+        else:
+            backend.reindex("memento", embed=False)
     except Exception:
         pass  # Indexing failure must not block note storage
 

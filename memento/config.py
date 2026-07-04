@@ -64,6 +64,7 @@ DEFAULT_CONFIG = {
     "temporal_decay": True,
     "temporal_decay_half_life": 90,
     "temporal_decay_certainty_floor": 4,
+    "temporal_decay_undated_factor": 0.5,
     "wikilink_expansion": True,
     "wikilink_max_hops": 1,
     "wikilink_score_factor": 0.5,
@@ -114,6 +115,7 @@ DEFAULT_CONFIG = {
     "quality_session_note_factor": 0.85,
     "quality_untyped_factor": 0.95,
     "quality_low_certainty_factor": 0.9,
+    "quality_superseded_factor": 0.8,
     # Cross-encoder reranking (Tier 2)
     "reranker_enabled": True,
     "reranker_top_k": 10,

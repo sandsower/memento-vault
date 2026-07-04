@@ -94,6 +94,9 @@ def run(context) -> list[CheckResult]:
         )
 
         gaps_fixed = [c for c in gaps if c["ok"]]
+        gap_details = [f"{'FIXED' if c['ok'] else 'OPEN'}: {c['id']}: {c['title']}" for c in gaps]
+        if not gaps:
+            gap_details = ["no known-gap checks remain; former gaps were promoted to core checks"]
         results.append(
             CheckResult(
                 id=f"{SUITE}.known_gaps",
@@ -102,10 +105,9 @@ def run(context) -> list[CheckResult]:
                 status=PASS if len(gaps_fixed) == len(gaps) else WARN,
                 value=f"{len(gaps_fixed)}/{len(gaps)}",
                 unit="fixed",
-                details=[f"{'FIXED' if c['ok'] else 'OPEN'}: {c['id']}: {c['title']}" for c in gaps],
+                details=gap_details,
                 remediation="These encode desired behavior the pipeline does not implement "
-                "yet (undated-note decay, slug project scoping, superseded-note demotion). "
-                "When one flips to FIXED, move it to a core check in evals/retrieval_probe.py.",
+                "yet. When one flips to FIXED, move it to a core check in evals/retrieval_probe.py.",
             )
         )
 

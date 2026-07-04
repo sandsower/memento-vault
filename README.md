@@ -258,7 +258,20 @@ Common read paths:
 - Disagreements/supersession: `memento_contradictions({"topic": "Redis cache"})`.
 - Reading full content: take a returned `path` such as `notes/cache-policy.md`, then call `memento_get({"path": "notes/cache-policy.md"})`.
 
-Run manually:
+### Local retrieval without MCP
+
+Hookless or tool-limited agents can still route through the same production search/recall policy without an MCP client:
+
+```bash
+memento-vault search "what did we decide about cache invalidation" --limit 5
+memento-vault recall "how should we store bearer tokens that appear in URLs"
+python3 -m memento search "MEMENTO_VAULT_PATH" --concrete auto
+python3 -m memento reindex
+```
+
+`search` returns the explicit search envelope, including backend/index metadata. `recall` runs the prompt-time recall path that host adapters use and is read-only unless `--record` is passed.
+
+Run the MCP server manually:
 
 ```bash
 python -m memento

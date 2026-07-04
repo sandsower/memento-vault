@@ -5,8 +5,8 @@
       "briar-config-migration-verified",
       "briar-config-migration-unverified",
       "falcon-deploy-successor",
-      "falcon-deploy-superseded",
-      "vortex-migration-fresh"
+      "vortex-migration-fresh",
+      "vortex-migration-highcert-old"
     ]
   },
   "nimbus_quality_signals_stack": {
@@ -30,10 +30,10 @@
     "query": "quasarretry",
     "top5": [
       "quasar-retry-policy-high-certainty",
-      "quasar-retry-policy-undated",
-      "falcon-deploy-superseded",
       "vortex-migration-fresh",
-      "orchid-routing-project-beta"
+      "orchid-routing-project-beta",
+      "quasar-retry-policy-undated",
+      "falcon-deploy-superseded"
     ]
   },
   "vortex_certainty_beats_age": {

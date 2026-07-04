@@ -101,6 +101,71 @@ RECALL_CONTROL_WORDS = {
     "is",
 }
 
+NATURAL_QUERY_STOPWORDS = RECALL_CONTROL_WORDS | {
+    "about",
+    "an",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "before",
+    "by",
+    "can",
+    "did",
+    "does",
+    "decide",
+    "decided",
+    "from",
+    "had",
+    "has",
+    "have",
+    "having",
+    "how",
+    "in",
+    "into",
+    "of",
+    "or",
+    "our",
+    "should",
+    "that",
+    "their",
+    "there",
+    "these",
+    "they",
+    "was",
+    "we",
+    "were",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+    "without",
+    "appear",
+    "appears",
+    "between",
+    "changing",
+    "instead",
+    "live",
+    "code",
+    "permission",
+    "permissions",
+    "return",
+    "status",
+}
+
+_SHORT_SEARCH_TERMS = {"api", "aws", "db", "dns", "gcp", "jwt", "mcp", "pr", "rls", "sqs", "ttl", "ui", "url"}
+
+_QUERY_TERM_ALIASES = {
+    "queues": "queues",
+    "remembering": "remember",
+    "upgrades": "upgrade",
+    "urls": "url",
+}
+
 RECALL_DOMAIN_ALLOWLIST = {
     "backend",
     "capture",
@@ -203,6 +268,43 @@ def confidence_margin(results: list[dict]) -> float:
         return 0.0
     second = results[1].get("score") or 0
     return (top - second) / top
+
+
+def _singularize_query_term(token: str) -> str:
+    if token in _QUERY_TERM_ALIASES:
+        return _QUERY_TERM_ALIASES[token]
+    if token in _SHORT_SEARCH_TERMS:
+        return token
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("s") and not token.endswith(("ss", "is")):
+        return token[:-1]
+    return token
+
+
+def normalized_natural_query(prompt: str) -> str:
+    """Return a lexical-search-friendly variant for question-shaped prompts.
+
+    Day-to-day memory requests are often phrased as questions ("how should we
+    store bearer tokens that appear in URLs?"). BM25 backends tend to treat the
+    stopword-heavy raw prompt as either empty or dominated by incidental words,
+    while the relevant note contains the durable concepts ("store bearer token
+    URL"). This helper keeps that deterministic and backend-agnostic before the
+    pipeline falls back to semantic search.
+    """
+    raw_tokens = re.findall(r"[a-z0-9][a-z0-9-]*", (prompt or "").lower())
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for token in raw_tokens:
+        if token in NATURAL_QUERY_STOPWORDS:
+            continue
+        if len(token) <= 2 and token not in _SHORT_SEARCH_TERMS:
+            continue
+        term = _singularize_query_term(token)
+        if term and term not in seen:
+            normalized.append(term)
+            seen.add(term)
+    return " ".join(normalized)
 
 
 def recall_signal_terms(prompt: str) -> list[str]:
@@ -444,14 +546,34 @@ class ExplicitSearchRuntime:
         self.log_retrieval = log_retrieval
         self.record_access = record_access
 
-    def _search_metadata(self, request: ExplicitSearchRequest, vault: Path | None = None) -> dict:
-        return shape_search_results(
+    def _search_metadata(
+        self,
+        request: ExplicitSearchRequest,
+        vault: Path | None = None,
+        *,
+        backend: str | None = None,
+        backend_index: str = "unknown",
+        query_variant: str | None = None,
+        semantic_used: bool | None = None,
+        concrete_enabled: bool | None = None,
+    ) -> dict:
+        metadata = shape_search_results(
             [],
             vault=vault or self.vault_loader(),
             detail_level=request.detail_level,
             include_content=request.include_content,
             token_budget=request.token_budget,
         )["metadata"]
+        if backend:
+            metadata["backend"] = backend
+        metadata["backend_index"] = backend_index
+        if query_variant:
+            metadata["query_variant"] = query_variant
+        if semantic_used is not None:
+            metadata["semantic_used"] = bool(semantic_used)
+        if concrete_enabled is not None:
+            metadata["concrete_enabled"] = bool(concrete_enabled)
+        return metadata
 
     def _miss(self, reason: str, request: ExplicitSearchRequest, *, details: dict | None = None) -> dict:
         miss = miss_envelope(reason, details=details, metadata=self._search_metadata(request))
@@ -477,6 +599,15 @@ class ExplicitSearchRuntime:
             self.log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
             return miss
 
+        backend_name = "unknown"
+        try:
+            from memento.search_backend import get_backend
+
+            backend_name = type(get_backend()).__name__
+        except Exception:
+            pass
+        search_metadata = self._search_metadata(request, vault, backend=backend_name)
+
         if not self.has_backend():
             miss = miss_envelope("backend_unavailable", metadata=search_metadata)
             self.log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
@@ -486,7 +617,16 @@ class ExplicitSearchRuntime:
         concrete_auto_mode = request.concrete is None or (
             isinstance(request.concrete, str) and request.concrete.strip().lower() in ("", "auto")
         )
+        search_metadata = self._search_metadata(
+            request,
+            vault,
+            backend=backend_name,
+            semantic_used=bool(request.semantic and not concrete_enabled),
+            concrete_enabled=concrete_enabled,
+        )
         conceptual_miss_reason = normalize_miss_reason("no-results", query) if concrete_auto_mode else "no_exact_match"
+        semantic_used = bool(request.semantic and not concrete_enabled)
+        query_variant = ""
         raw_results = self.qmd_search(
             query,
             limit=limit + 3,
@@ -496,6 +636,39 @@ class ExplicitSearchRuntime:
             concrete=concrete_enabled,
         )
         results = raw_results
+
+        if not concrete_enabled and not request.semantic:
+            variant = normalized_natural_query(query)
+            if (
+                variant
+                and variant != query
+                and (not results or confidence_margin(results) < DEFAULT_RECALL_CONFIDENCE_MARGIN)
+            ):
+                query_variant = variant
+                variant_results = self.qmd_search(
+                    variant,
+                    limit=limit + 3,
+                    semantic=False,
+                    timeout=10,
+                    min_score=request.min_score,
+                    concrete=False,
+                )
+                if variant_results:
+                    existing = {result.get("path") for result in results}
+                    for result in variant_results:
+                        if result.get("path") not in existing:
+                            results.append(result)
+                            existing.add(result.get("path"))
+                    results.sort(key=lambda result: result.get("score", 0), reverse=True)
+                    raw_results = results
+                search_metadata = self._search_metadata(
+                    request,
+                    vault,
+                    backend=backend_name,
+                    query_variant=query_variant,
+                    semantic_used=semantic_used,
+                    concrete_enabled=concrete_enabled,
+                )
 
         if results:
             if concrete_enabled:
@@ -539,6 +712,16 @@ class ExplicitSearchRuntime:
         )
         output = shaped["results"]
         metadata = shaped["metadata"]
+        metadata.update(
+            {
+                "backend": backend_name,
+                "backend_index": "unknown",
+                "semantic_used": semantic_used,
+                "concrete_enabled": concrete_enabled,
+            }
+        )
+        if query_variant:
+            metadata["query_variant"] = query_variant
 
         self.log_retrieval("mcp", "search", query=query, results=len(output))
         self.record_access(
@@ -829,6 +1012,8 @@ class PromptRecallRuntime:
         )
 
         search_limit = max_notes + 4
+        threshold_probe_found = False
+        threshold_probe_checked = False
         t0 = self.now()
         results = self.qmd_search(
             query,
@@ -842,14 +1027,62 @@ class PromptRecallRuntime:
         pipeline_depth = "concrete" if concrete_enabled else "bm25"
         self._log_candidates(config, results, "bm25", query=query)
 
-        # Confident is a relative rank-1-vs-rank-2 gap, not an absolute score
-        # threshold (see confidence_margin() docstring for why): computed once
-        # from the initial BM25 pass and reused at every expansion gate below,
-        # matching the original design's "one confidence call decides how much
-        # deeper to go" shape. Crucially, it is never confident on empty or
-        # single-result BM25 output, so vector search below always gets a
-        # chance to answer instead of being short-circuited by "and results".
-        confident = confidence_margin(results) >= confidence_margin_threshold
+        if not results and min_score > 0:
+            threshold_probe_checked = True
+            threshold_probe_found = bool(
+                self.qmd_search(
+                    query,
+                    limit=1,
+                    semantic=False,
+                    timeout=5,
+                    min_score=0.0,
+                    concrete=concrete_enabled,
+                )
+            )
+
+        lexical_variant_matched = False
+        single_strong_hit = len(results) == 1 and float(results[0].get("score", 0) or 0) >= float(
+            config.get("recall_high_confidence", 0.55) or 0.55
+        )
+        if not concrete_enabled and not threshold_probe_found:
+            variant_query = normalized_natural_query(query)
+            should_try_variant = (
+                variant_query
+                and variant_query != query
+                and (
+                    not results or (not single_strong_hit and confidence_margin(results) < confidence_margin_threshold)
+                )
+            )
+            if should_try_variant:
+                variant_results = self.qmd_search(
+                    variant_query,
+                    limit=search_limit,
+                    semantic=False,
+                    timeout=5,
+                    min_score=min_score,
+                )
+                if variant_results:
+                    existing = {result["path"] for result in results}
+                    appended_any = False
+                    for result in variant_results:
+                        if result["path"] not in existing:
+                            results.append(result)
+                            existing.add(result["path"])
+                            appended_any = True
+                    results.sort(key=lambda result: result["score"], reverse=True)
+                    if appended_any:
+                        lexical_variant_matched = True
+                        pipeline_depth = "bm25+query_terms"
+                    self._log_candidates(config, results, "query-terms", query=variant_query)
+
+        # Confident is primarily a relative rank-1-vs-rank-2 gap, not an
+        # absolute score threshold (see confidence_margin() docstring for why).
+        # A single strong lexical hit still counts as confident enough to avoid
+        # redundant lexical fallback work, while a single weak hit remains
+        # non-confident so deep recall can investigate.
+        confident = (
+            single_strong_hit or lexical_variant_matched or confidence_margin(results) >= confidence_margin_threshold
+        )
 
         if not concrete_enabled and not confident:
             expanded_query = self.prf_expand(query, config=config, initial_results=results)
@@ -871,7 +1104,7 @@ class PromptRecallRuntime:
                     pipeline_depth = "prf"
                     self._log_candidates(config, results, "prf", query=expanded_query)
 
-            if config.get("rrf_enabled", True) and self.semantic_warm():
+            if results and config.get("rrf_enabled", True) and self.semantic_warm():
                 vec_results = self.qmd_search(
                     query,
                     limit=search_limit,
@@ -947,14 +1180,16 @@ class PromptRecallRuntime:
 
         if not results:
             if min_score > 0:
-                threshold_probe = self.qmd_search(
-                    query,
-                    limit=1,
-                    semantic=False,
-                    timeout=5,
-                    min_score=0.0,
-                )
-                if threshold_probe:
+                threshold_probe = []
+                if not threshold_probe_checked:
+                    threshold_probe = self.qmd_search(
+                        query,
+                        limit=1,
+                        semantic=False,
+                        timeout=5,
+                        min_score=0.0,
+                    )
+                if threshold_probe_found or threshold_probe:
                     self.log_retrieval(
                         "recall",
                         "threshold_too_high",

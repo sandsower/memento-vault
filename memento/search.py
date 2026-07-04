@@ -16,6 +16,7 @@ from memento.graph import (
     load_or_build_graph,
     ppr_expand,
     read_note_metadata,
+    note_is_superseded,
 )
 
 
@@ -675,6 +676,12 @@ def apply_temporal_decay(results, config=None):
 
         date_str = meta.get("date")
         if not date_str:
+            try:
+                undated_factor = float(config.get("temporal_decay_undated_factor", 0.5))
+            except (TypeError, ValueError):
+                undated_factor = 0.5
+            result["_original_score"] = result.get("score", 0.0)
+            result["score"] = result.get("score", 0.0) * undated_factor
             continue
 
         try:
@@ -820,13 +827,28 @@ def filter_by_project(results, cwd, require_match=False):
                 filtered.append(r)  # No project field — general knowledge
             continue
 
+        note_project_raw = str(note_project).strip().strip('"').strip("'")
+        if not note_project_raw:
+            continue
+
+        if "/" not in note_project_raw and "\\" not in note_project_raw:
+            note_slug = re.sub(r"[^a-z0-9]+", "-", note_project_raw.lower()).strip("-")
+            cwd_slugs = {
+                re.sub(r"[^a-z0-9]+", "-", part.lower()).strip("-")
+                for part in Path(cwd).parts
+                if part and part not in {os.sep, "/"}
+            }
+            if note_slug and note_slug in cwd_slugs:
+                filtered.append(r)
+            continue
+
         # Match if cwd starts with (or equals) the note's project path
         try:
-            note_project = os.path.realpath(note_project).rstrip("/")
+            note_project_path = os.path.realpath(note_project_raw).rstrip("/")
         except (OSError, ValueError):
-            pass
+            note_project_path = note_project_raw
 
-        if cwd.startswith(note_project) or note_project.startswith(cwd):
+        if cwd.startswith(note_project_path) or note_project_path.startswith(cwd):
             filtered.append(r)
 
     return filtered
@@ -865,6 +887,7 @@ def apply_quality_signals(results, config=None):
     session_factor = _quality_factor(config, "quality_session_note_factor", 0.85)
     untyped_factor = _quality_factor(config, "quality_untyped_factor", 0.95)
     low_certainty_factor = _quality_factor(config, "quality_low_certainty_factor", 0.9)
+    superseded_factor = _quality_factor(config, "quality_superseded_factor", 0.8)
 
     kept = []
     for r in results:
@@ -903,6 +926,9 @@ def apply_quality_signals(results, config=None):
                 certainty = 2
             if certainty is not None and certainty <= 2:
                 factor *= low_certainty_factor
+            note_name = Path(path).stem if path else ""
+            if note_name and note_is_superseded(note_name):
+                factor *= superseded_factor
             if factor != 1.0:
                 r["score"] = round(r.get("score", 0.0) * factor, 4)
         kept.append(r)

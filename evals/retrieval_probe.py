@@ -184,9 +184,7 @@ def fixture_checks(root: Path) -> list[dict]:
         "decay_applies_to_undated_notes",
         "An undated low-certainty note should still decay (or be penalized)",
         _score_of(results, "quasar-retry-policy-undated") < 1.0,
-        f"score={_score_of(results, 'quasar-retry-policy-undated')}; "
-        "apply_temporal_decay skips notes without a date, so undated stale notes never decay",
-        known_gap=True,
+        f"score={_score_of(results, 'quasar-retry-policy-undated')}",
     )
 
     # --- quality signals ----------------------------------------------------
@@ -262,8 +260,7 @@ def fixture_checks(root: Path) -> list[dict]:
         "slug_project_not_universal",
         "A slug-valued project field must not match an unrelated cwd",
         _paths(slug_only) == [],
-        f"survivors={_paths(slug_only)}; filter_by_project realpaths slugs against process cwd",
-        known_gap=True,
+        f"survivors={_paths(slug_only)}",
     )
 
     # --- archive exclusion --------------------------------------------------------
@@ -284,9 +281,7 @@ def fixture_checks(root: Path) -> list[dict]:
         "superseded_note_demoted",
         "A superseded note should rank below its successor at equal base score",
         superseded_score is not None and successor_score is not None and superseded_score < successor_score,
-        f"superseded={superseded_score} successor={successor_score}; "
-        "no pipeline stage currently reads the supersedes field for ranking",
-        known_gap=True,
+        f"superseded={superseded_score} successor={successor_score}",
     )
 
     # --- end-to-end fixture retrieval ------------------------------------------------

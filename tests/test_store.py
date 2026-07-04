@@ -172,13 +172,20 @@ class TestWriteNote:
         assert "type: bugfix" in underscore.read_text()
         assert "type: bugfix" in hyphen.read_text()
 
-    def test_write_note_triggers_indexing(self, tmp_vault):
-        """When embedded backend is active, index_note is called after write."""
-        from memento.embedded_search import EmbeddedSearchBackend
+    def test_write_note_triggers_backend_index_hook(self, tmp_vault):
+        """Official writes must notify whichever backend is active, not only embedded search."""
 
-        mock_backend = MagicMock(spec=EmbeddedSearchBackend)
+        class FakeBackend:
+            def __init__(self):
+                self.indexed = []
 
-        with patch("memento.search_backend.get_backend", return_value=mock_backend):
+            def index_note(self, rel_path, collection=None):
+                self.indexed.append((rel_path, collection))
+                return True
+
+        fake_backend = FakeBackend()
+
+        with patch("memento.search_backend.get_backend", return_value=fake_backend):
             path = write_note(
                 tmp_vault,
                 title="Indexing test note",
@@ -188,10 +195,33 @@ class TestWriteNote:
             )
 
         assert path.exists()
-        mock_backend.index_note.assert_called_once()
-        call_arg = mock_backend.index_note.call_args[0][0]
+        assert len(fake_backend.indexed) == 1
+        call_arg, collection = fake_backend.indexed[0]
+        assert collection is None
         assert call_arg.startswith("notes/")
         assert call_arg.endswith(".md")
+
+    def test_write_note_falls_back_to_backend_reindex_when_single_note_hook_absent(self, tmp_vault):
+        class ReindexOnlyBackend:
+            def __init__(self):
+                self.calls = []
+
+            def reindex(self, collection, embed=True):
+                self.calls.append((collection, embed))
+                return True
+
+        fake_backend = ReindexOnlyBackend()
+        with patch("memento.search_backend.get_backend", return_value=fake_backend):
+            path = write_note(
+                tmp_vault,
+                title="Reindex fallback",
+                body="Should trigger a cheap backend reindex fallback.",
+                note_type="discovery",
+                tags=["test"],
+            )
+
+        assert path.exists()
+        assert fake_backend.calls == [("memento", False)]
 
     def test_write_note_survives_indexing_failure(self, tmp_vault):
         """If index_note raises, the note is still written successfully."""

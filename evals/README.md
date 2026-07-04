@@ -29,10 +29,10 @@ Every check prints a status, a value, the threshold it was graded against, up to
 - `SKIP` - the check could not run (missing backend, no telemetry); the details say why.
 
 Checks labeled `informational` or `known gaps` never fail the run.
-Known-gap checks encode desired behavior the system does not implement yet (for example: superseded notes are not demoted in ranking).
+Known-gap checks encode desired behavior the system does not implement yet.
 They exist so progress is visible: when one flips to FIXED, promote it to a core check (see maintenance below).
 
-## The five suites
+## The six suites
 
 ### vault_content - what we recorded
 
@@ -70,6 +70,10 @@ With `--llm`, feeds two fixture transcripts (`golden/fixtures/transcripts/`) thr
 No LLM judge is used; the rubric is plain string and schema checks so results are reproducible.
 
 The hermetic layer is a blocking CI gate: `python3 evals/run_evals.py --suite capture_e2e` (without `--llm`, so the extraction layer is skipped and no tokens are spent).
+
+### retrieval_surface - can users actually reach retrieval?
+
+Grades the day-to-day recall surfaces that sit around the retrieval engine: concierge trigger wording, non-MCP local CLI fallback (`memento-vault search` / `python3 -m memento search`, plus `recall`), natural-language query normalization for lexical backends, and backend/index metadata on explicit search envelopes. This suite catches the product failure mode where the engine is healthy but users or hookless agents do not route through it.
 
 ### capture_retrieve_loop - does a captured note become retrievable?
 
