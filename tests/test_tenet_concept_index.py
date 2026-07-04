@@ -124,22 +124,32 @@ class TestLookupConcepts:
 class TestConceptIndexIntegration:
     """Test the concept index merge logic used in vault-recall.py."""
 
-    def _merge_concept_hits(self, bm25_results, concept_hits, config=None):
-        """Replicate the merge logic from vault-recall.py's run_recall()."""
+    def _merge_concept_hits(self, bm25_results, concept_hits, config=None, min_score=0.4):
+        """Replicate the merge logic from PromptRecallRuntime.run()
+        (memento/retrieval_policy.py), including the MEM-141 min_score gate
+        and post-merge re-sort.
+        """
         if config is None:
             config = {}
         results = list(bm25_results)
         if config.get("concept_index_enabled", True):
             try:
                 existing_paths = {r.get("path", "") for r in results}
+                merged_any = False
                 for hit in concept_hits:
-                    if hit["path"] not in existing_paths:
-                        hit["score"] = max(
-                            hit.get("score", 0),
-                            config.get("concept_index_score", 0.5),
-                        )
-                        results.append(hit)
-                        existing_paths.add(hit["path"])
+                    if hit["path"] in existing_paths:
+                        continue
+                    hit["score"] = max(
+                        hit.get("score", 0),
+                        config.get("concept_index_score", 0.5),
+                    )
+                    if hit["score"] < min_score:
+                        continue
+                    results.append(hit)
+                    existing_paths.add(hit["path"])
+                    merged_any = True
+                if merged_any:
+                    results.sort(key=lambda r: r.get("score", 0), reverse=True)
             except Exception:
                 pass
         return results
@@ -220,6 +230,48 @@ class TestConceptIndexIntegration:
         merged = self._merge_concept_hits(bm25_results, concept_hits)
 
         assert merged[0]["score"] == 0.9
+
+    def test_concept_hit_filtered_by_min_score(self):
+        """A concept hit whose floored score still trails recall_min_score is dropped (MEM-141)."""
+        bm25_results = []
+        concept_hits = [
+            {"path": "notes/low-score.md", "title": "Low score", "score": 0.1},
+        ]
+
+        # Default floor (0.5) clears a stricter min_score threshold's bar only
+        # if the threshold itself is <= the floor -- here it isn't.
+        merged = self._merge_concept_hits(bm25_results, concept_hits, min_score=0.6)
+
+        assert merged == []
+
+    def test_concept_hit_admitted_when_floor_clears_min_score(self):
+        """A concept hit whose floored score clears recall_min_score is still merged."""
+        bm25_results = []
+        concept_hits = [
+            {"path": "notes/low-score.md", "title": "Low score", "score": 0.1},
+        ]
+
+        merged = self._merge_concept_hits(bm25_results, concept_hits, min_score=0.4)
+
+        assert len(merged) == 1
+        assert merged[0]["score"] == 0.5
+
+    def test_concept_hits_resorted_after_merge(self):
+        """Concept hits are merged by score order, not by lookup/insertion order (MEM-141).
+
+        A weak BM25 candidate must not out-rank a stronger concept-index hit
+        just because it was appended first.
+        """
+        bm25_results = [
+            {"path": "notes/weak-bm25.md", "title": "Weak BM25 hit", "score": 0.45},
+        ]
+        concept_hits = [
+            {"path": "notes/strong-concept.md", "title": "Strong concept hit", "score": 0.9},
+        ]
+
+        merged = self._merge_concept_hits(bm25_results, concept_hits)
+
+        assert [r["path"] for r in merged] == ["notes/strong-concept.md", "notes/weak-bm25.md"]
 
     def test_multiple_novel_concept_hits(self):
         """Multiple novel concept hits are all merged, duplicates excluded."""

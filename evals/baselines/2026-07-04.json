@@ -44,11 +44,11 @@
           "value": 0.0839
         },
         {
-          "grade": "pass",
+          "grade": "warn",
           "known_gap": false,
           "name": "capture_health.missing_transcript_rate",
           "threshold": "warn > 0.05, fail > 0.15",
-          "value": 0.0483
+          "value": 0.0509
         },
         {
           "grade": "pass",
@@ -117,18 +117,18 @@
     {
       "checks": [
         {
-          "grade": "warn",
+          "grade": "pass",
           "known_gap": false,
           "name": "retrieval_accuracy.golden_mrr",
           "threshold": "warn < 0.6, fail < 0.3",
-          "value": 0.383
+          "value": 0.75
         },
         {
-          "grade": "warn",
+          "grade": "pass",
           "known_gap": false,
           "name": "retrieval_accuracy.golden_recall_at_5",
           "threshold": "warn < 0.7, fail < 0.4",
-          "value": 0.6
+          "value": 0.8
         },
         {
           "grade": "warn",
@@ -152,11 +152,11 @@
           "value": 1.0
         },
         {
-          "grade": "warn",
+          "grade": "pass",
           "known_gap": false,
           "name": "retrieval_accuracy.semantic_rescue",
           "threshold": "",
-          "value": "2 rescued, 8/10 semantic hits"
+          "value": "0 rescued, 8/10 semantic hits"
         }
       ],
       "suite": "retrieval_accuracy"
@@ -168,14 +168,14 @@
           "known_gap": false,
           "name": "vault_content.canonical_type_rate",
           "threshold": "warn < 0.85, fail < 0.7",
-          "value": 0.7896
+          "value": 0.7898
         },
         {
           "grade": "warn",
           "known_gap": false,
           "name": "vault_content.certainty_present_rate",
           "threshold": "warn < 0.9, fail < 0.75",
-          "value": 0.8668
+          "value": 0.867
         },
         {
           "grade": "warn",
@@ -189,14 +189,14 @@
           "known_gap": false,
           "name": "vault_content.dangling_wikilink_rate",
           "threshold": "warn > 0.1, fail > 0.25",
-          "value": 0.0997
+          "value": 0.0994
         },
         {
           "grade": "fail",
           "known_gap": false,
           "name": "vault_content.ephemeral_note_rate",
           "threshold": "warn > 0.05, fail > 0.15",
-          "value": 0.1898
+          "value": 0.1896
         },
         {
           "grade": "pass",
@@ -210,14 +210,14 @@
           "known_gap": false,
           "name": "vault_content.growth_ratio",
           "threshold": "warn > 2.0, fail > 4.0",
-          "value": 5.37
+          "value": 5.38
         },
         {
           "grade": "warn",
           "known_gap": false,
           "name": "vault_content.near_duplicate_rate",
           "threshold": "warn > 0.02, fail > 0.05",
-          "value": 0.0257
+          "value": 0.0256
         },
         {
           "grade": "pass",
@@ -231,7 +231,7 @@
           "known_gap": false,
           "name": "vault_content.project_slug_rate",
           "threshold": "warn < 0.9, fail < 0.6",
-          "value": 0.1413
+          "value": 0.1412
         },
         {
           "grade": "pass",
@@ -259,11 +259,11 @@
           "known_gap": false,
           "name": "vault_content.wikilink_rate",
           "threshold": "warn < 0.5, fail < 0.25",
-          "value": 0.4024
+          "value": 0.4031
         }
       ],
       "suite": "vault_content"
     }
   ],
-  "vault_note_count": 4520
+  "vault_note_count": 4525
 }

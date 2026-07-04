@@ -897,11 +897,26 @@ class PromptRecallRuntime:
                     concept_hits = self.concept_lookup(prompt)
                     if concept_hits:
                         existing_paths = {result.get("path", "") for result in results}
+                        merged_any = False
                         for hit in concept_hits:
-                            if hit["path"] not in existing_paths:
-                                hit["score"] = max(hit.get("score", 0), config.get("concept_index_score", 0.5))
-                                results.append(hit)
-                                existing_paths.add(hit["path"])
+                            if hit["path"] in existing_paths:
+                                continue
+                            # Same recall_min_score contract BM25/PRF/RRF results are
+                            # held to -- a concept hit whose floored score still can't
+                            # clear the bar is exactly the kind of low-relevance match
+                            # the confidence gate exists to keep out (MEM-141).
+                            hit["score"] = max(hit.get("score", 0), config.get("concept_index_score", 0.5))
+                            if hit["score"] < min_score:
+                                continue
+                            results.append(hit)
+                            existing_paths.add(hit["path"])
+                            merged_any = True
+                        if merged_any:
+                            # Concept hits are merged by lookup order, not by score, so
+                            # the combined list must be re-sorted before anything downstream
+                            # (quality signals, final [:max_notes] truncation) treats list
+                            # position as a relevance ranking (MEM-141).
+                            results.sort(key=lambda result: result.get("score", 0), reverse=True)
                         self._log_candidates(config, results, "concept-index", query=query)
                 except Exception:
                     pass

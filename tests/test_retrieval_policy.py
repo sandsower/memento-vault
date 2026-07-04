@@ -87,6 +87,87 @@ def test_recall_candidate_summary_sanitizes_and_bounds_title():
     assert "t" * 130 not in summary["title"]
 
 
+def test_prompt_recall_runtime_gates_concept_index_hits_by_min_score(tmp_path):
+    """Concept-index hits must respect recall_min_score like BM25/PRF/RRF results (MEM-141).
+
+    A concept-index hit whose score (after the concept_index_score floor is
+    applied) still falls under recall_min_score must never be injected --
+    the concept-index merge previously appended every hit unconditionally,
+    regardless of the confidence gate BM25/PRF/RRF results are held to.
+    """
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+
+    runtime = PromptRecallRuntime(
+        config_loader=lambda: {
+            "prompt_recall": True,
+            "recall_min_score": 0.6,
+            "recall_max_notes": 3,
+            "concept_index_enabled": True,
+            "concept_index_score": 0.5,
+            "rrf_enabled": False,
+            "multi_hop_enabled": False,
+            "reranker_enabled": False,
+        },
+        vault_loader=lambda: vault,
+        has_backend=lambda: True,
+        remote_available=lambda: False,
+        detect_project=lambda _cwd: ("unknown", None),
+        qmd_search=lambda *_args, **_kwargs: [],
+        concept_lookup=lambda _prompt: [{"path": "notes/weak-concept.md", "title": "Weak concept match", "score": 0.1}],
+        enhance_results=lambda results, **_kwargs: results,
+        recently_injected_paths=lambda *_args, **_kwargs: set(),
+    )
+
+    decision = runtime.run(
+        PromptRecallRequest(
+            prompt="kafka consumer group rebalancing strategy for the payments cluster",
+            cwd=str(tmp_path),
+            session_id="s1",
+        )
+    )
+
+    assert decision.should_inject is False
+
+
+def test_prompt_recall_runtime_admits_concept_index_hits_clearing_min_score(tmp_path):
+    """A concept-index hit whose floored score clears recall_min_score is still injected."""
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+
+    runtime = PromptRecallRuntime(
+        config_loader=lambda: {
+            "prompt_recall": True,
+            "recall_min_score": 0.4,
+            "recall_max_notes": 3,
+            "concept_index_enabled": True,
+            "concept_index_score": 0.5,
+            "rrf_enabled": False,
+            "multi_hop_enabled": False,
+            "reranker_enabled": False,
+        },
+        vault_loader=lambda: vault,
+        has_backend=lambda: True,
+        remote_available=lambda: False,
+        detect_project=lambda _cwd: ("unknown", None),
+        qmd_search=lambda *_args, **_kwargs: [],
+        concept_lookup=lambda _prompt: [{"path": "notes/strong-concept.md", "title": "Strong concept match", "score": 0.9}],
+        enhance_results=lambda results, **_kwargs: results,
+        recently_injected_paths=lambda *_args, **_kwargs: set(),
+    )
+
+    decision = runtime.run(
+        PromptRecallRequest(
+            prompt="redis caching invalidation strategy",
+            cwd=str(tmp_path),
+            session_id="s1",
+        )
+    )
+
+    assert decision.should_inject is True
+    assert decision.top_path == "notes/strong-concept.md"
+
+
 def test_prompt_recall_runtime_uses_concrete_auto_for_identifier_lookup(tmp_path):
     """Identifier-shaped prompts bypass low-signal gates and reach literal search mode."""
     vault = tmp_path / "vault"
