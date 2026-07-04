@@ -302,14 +302,27 @@ class TestDeepRecallGate:
         return {"prompt": prompt, "cwd": cwd}
 
     def test_high_confidence_no_deep_recall(self, runtime_dir, tmp_path):
-        """High-confidence results should not trigger deep recall."""
+        """A decisive rank-1-vs-rank-2 margin should not trigger deep recall.
+
+        MEM-135 replaced the absolute top_score < high_conf gate with a
+        relative margin (confidence_margin() in retrieval_policy.py): a
+        single result can never establish a margin (nothing to compare
+        against), so it is never "confident" by construction and always
+        falls through to expansion. This case now needs two results with a
+        clear score gap to exercise the "confident, skip expansion" path -
+        a single high-scoring result is exactly the false-confidence
+        failure mode the fix removes (see MEM-135).
+        """
         _, pending_path = runtime_dir
         config = self._make_config()
         vault = tmp_path / "vault"
         (vault / "notes").mkdir(parents=True)
         config["vault_path"] = str(vault)
 
-        results = [{"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.8}]
+        results = [
+            {"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.8},
+            {"path": "notes/b.md", "title": "B", "snippet": "Y", "score": 0.3},
+        ]
 
         with (
             patch("memento.lifecycle.get_config", return_value=config),
@@ -359,15 +372,23 @@ class TestDeepRecallGate:
         mock_spawn.assert_called_once()
 
     def test_high_confidence_no_deep_recall_complex(self, runtime_dir, tmp_path):
-        """High confidence results should skip deep recall even on complex prompts."""
+        """A decisive margin should skip deep recall even on complex prompts.
+
+        See test_high_confidence_no_deep_recall for why this needs two
+        results with a clear score gap rather than one high absolute score
+        (MEM-135: margin-based confidence, not an absolute-score gate).
+        """
         _, pending_path = runtime_dir
         config = self._make_config()
         vault = tmp_path / "vault"
         (vault / "notes").mkdir(parents=True)
         config["vault_path"] = str(vault)
 
-        # Score above high_conf threshold
-        results = [{"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.8}]
+        # Decisive rank-1-vs-rank-2 margin, well above recall_confidence_margin.
+        results = [
+            {"path": "notes/a.md", "title": "A", "snippet": "X", "score": 0.8},
+            {"path": "notes/b.md", "title": "B", "snippet": "Y", "score": 0.3},
+        ]
 
         with (
             patch("memento.lifecycle.get_config", return_value=config),
