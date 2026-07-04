@@ -150,17 +150,14 @@ def format_timestamp_utc(value: Any) -> str:
 
 
 def iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
-    try:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(rec, dict):
-                    yield rec
-    except OSError:
-        return
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict):
+                yield rec
 
 
 def iter_recent_jsonl(path: Path, cutoff: datetime) -> Iterator[dict[str, Any]]:

@@ -602,12 +602,18 @@ def build_automation_memory_readiness(
         readiness = "degraded"
         status = WARN
         degradations.append("search_backend_degraded")
-    if search.get("stale_index", {}).get("stale"):
+    stale_index = search.get("stale_index", {})
+    if stale_index.get("status") == WARN:
         if status != FAIL:
             status = WARN
             readiness = "degraded"
         degradations.append("stale_index")
-    if telemetry.failure_rate_warns(recall["failures"], recall["events"]):
+    if recall.get("status") == WARN:
+        if status != FAIL:
+            status = WARN
+            readiness = "degraded"
+        degradations.append("recall_log_unavailable" if not recall.get("checked", True) else "recall_failure_rate")
+    elif telemetry.failure_rate_warns(recall["failures"], recall["events"]):
         if status != FAIL:
             status = WARN
             readiness = "degraded"
@@ -684,13 +690,14 @@ def _embedded_index_staleness(vault: Path, config: dict[str, Any]) -> dict[str, 
         "checked": True,
         "backend": "embedded",
         "db_path": str(db_path),
-        "stale": False,
+        "stale": None,
+        "status": PASS,
     }
     if not vault.exists():
-        metadata.update({"checked": False, "reason": "vault_missing"})
+        metadata.update({"checked": False, "reason": "vault_missing", "status": WARN})
         return metadata
     if not db_path.exists():
-        metadata.update({"checked": False, "reason": "embedded_index_missing"})
+        metadata.update({"checked": False, "reason": "embedded_index_missing", "status": WARN})
         return metadata
     newest_note_mtime = None
     try:
@@ -706,18 +713,20 @@ def _embedded_index_staleness(vault: Path, config: dict[str, Any]) -> dict[str, 
                 newest_note_mtime = mtime if newest_note_mtime is None else max(newest_note_mtime, mtime)
         db_mtime = db_path.stat().st_mtime
     except OSError as exc:
-        metadata.update({"checked": False, "reason": type(exc).__name__})
+        metadata.update({"checked": False, "reason": type(exc).__name__, "error": str(exc), "status": WARN})
         return metadata
     if newest_note_mtime is None:
-        metadata.update({"reason": "no_notes"})
+        metadata.update({"reason": "no_notes", "stale": False, "status": PASS})
         return metadata
     lag_seconds = int(max(0, newest_note_mtime - db_mtime))
+    stale = lag_seconds > 60
     metadata.update(
         {
             "db_mtime": datetime.fromtimestamp(db_mtime).isoformat(timespec="seconds"),
             "newest_note_mtime": datetime.fromtimestamp(newest_note_mtime).isoformat(timespec="seconds"),
             "lag_seconds": lag_seconds,
-            "stale": lag_seconds > 60,
+            "stale": stale,
+            "status": WARN if stale else PASS,
         }
     )
     return metadata
@@ -728,10 +737,48 @@ def _automation_recall_metadata(
 ) -> dict[str, Any]:
     path = Path(RETRIEVAL_LOG_PATH)
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
-    diagnostics = _scan_retrieval_logs(path, cutoff)
+    if not path.exists():
+        metadata = {
+            "log_path": str(path),
+            "checked": False,
+            "events": 0,
+            "failures": 0,
+            "failure_rate": 0.0,
+            "status": WARN,
+            "reason": "retrieval_log_missing",
+            "last_error": None,
+            "last_error_truncated": False,
+            "no_results": 0,
+            "backend_unavailable": 0,
+            "backend_exceptions": 0,
+            "low_signal_skips": 0,
+            "other_failures": 0,
+        }
+        return metadata
+    try:
+        diagnostics = _scan_retrieval_logs(path, cutoff)
+    except OSError as exc:
+        return {
+            "log_path": str(path),
+            "checked": False,
+            "events": 0,
+            "failures": 0,
+            "failure_rate": 0.0,
+            "status": WARN,
+            "reason": type(exc).__name__,
+            "error": str(exc),
+            "last_error": None,
+            "last_error_truncated": False,
+            "no_results": 0,
+            "backend_unavailable": 0,
+            "backend_exceptions": 0,
+            "low_signal_skips": 0,
+            "other_failures": 0,
+        }
     status = WARN if telemetry.failure_rate_warns(diagnostics["failures"], diagnostics["events"]) else PASS
     metadata = {
         "log_path": str(path),
+        "checked": True,
         "events": diagnostics["events"],
         "failures": diagnostics["failures"],
         "failure_rate": diagnostics["failure_rate"],
@@ -867,22 +914,25 @@ def _automation_remote_sync_metadata(vault: Path) -> dict[str, Any]:
 def _last_successful_automation_packet() -> dict[str, Any] | None:
     latest: dict[str, Any] | None = None
     latest_ts: datetime | None = None
-    for rec in _iter_jsonl(Path(AUTOMATION_MEMORY_HEALTH_LOG_PATH)):
-        if rec.get("hook") != "automation-memory" or rec.get("action") != "packet_success":
-            continue
-        ts = _parse_ts(rec.get("ts"))
-        if ts is None:
-            continue
-        if latest_ts is None or ts >= latest_ts:
-            latest_ts = ts
-            latest = {
-                "ts": rec.get("ts"),
-                "source": rec.get("source"),
-                "should_inject": bool(rec.get("should_inject")),
-                "result_count": int(rec.get("result_count") or 0),
-                "warning_count": int(rec.get("warning_count") or 0),
-                "truncated": bool(rec.get("truncated")),
-            }
+    try:
+        for rec in _iter_jsonl(Path(AUTOMATION_MEMORY_HEALTH_LOG_PATH)):
+            if rec.get("hook") != "automation-memory" or rec.get("action") != "packet_success":
+                continue
+            ts = _parse_ts(rec.get("ts"))
+            if ts is None:
+                continue
+            if latest_ts is None or ts >= latest_ts:
+                latest_ts = ts
+                latest = {
+                    "ts": rec.get("ts"),
+                    "source": rec.get("source"),
+                    "should_inject": bool(rec.get("should_inject")),
+                    "result_count": int(rec.get("result_count") or 0),
+                    "warning_count": int(rec.get("warning_count") or 0),
+                    "truncated": bool(rec.get("truncated")),
+                }
+    except OSError:
+        return None
     return latest
 
 
@@ -890,16 +940,19 @@ def _common_automation_failure_reasons(vault: Path, limit: int = 5) -> list[dict
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
     counts: Counter[str] = Counter()
     for path in (Path(RETRIEVAL_LOG_PATH), Path(TRIAGE_HEALTH_LOG_PATH), vault / ".sync" / "ledger.jsonl"):
-        for rec in _iter_recent_jsonl(path, cutoff):
-            reason = None
-            if rec.get("status") == "error":
-                reason = rec.get("error") or "sync_error"
-            else:
-                action = str(rec.get("action") or "")
-                if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
-                    reason = rec.get("error") or rec.get("reason") or action
-            if reason:
-                counts[_safe_text(str(reason))] += 1
+        try:
+            for rec in _iter_recent_jsonl(path, cutoff):
+                reason = None
+                if rec.get("status") == "error":
+                    reason = rec.get("error") or "sync_error"
+                else:
+                    action = str(rec.get("action") or "")
+                    if any(marker in action for marker in _RECENT_FAILURE_ACTION_MARKERS):
+                        reason = rec.get("error") or rec.get("reason") or action
+                if reason:
+                    counts[_safe_text(str(reason))] += 1
+        except OSError:
+            continue
     return [{"reason": reason, "count": count} for reason, count in counts.most_common(limit)]
 
 
@@ -1419,34 +1472,41 @@ def _is_pi_bridge_failure_record(rec: dict[str, Any]) -> bool:
 def _check_pi_bridge_health() -> CheckResult:
     path = Path(TRIAGE_HEALTH_LOG_PATH)
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
-    if not path.exists():
-        return CheckResult(
-            "pi bridge health",
-            PASS,
-            "no recent Pi bridge failures recorded",
-            {"log_path": str(path), "window_hours": _HEALTH_WINDOW_HOURS},
-        )
 
     recent_failures: list[dict[str, Any]] = []
     latest_failure: dict[str, Any] | None = None
-    for rec in _iter_recent_jsonl(path, cutoff):
-        if rec.get("hook") != "pi-bridge" or not _is_pi_bridge_failure_record(rec):
-            continue
-        failure = {
-            "ts": rec.get("ts"),
-            "action": rec.get("action"),
-            "operation": rec.get("operation") or rec.get("action"),
-            "backend": rec.get("backend"),
-            "config": rec.get("config"),
-            "cwd": rec.get("cwd"),
-            "project": rec.get("project"),
-            "session_id": rec.get("session_id"),
-            "error": rec.get("error"),
-            "error_type": rec.get("error_type"),
-            "reason": rec.get("reason"),
-        }
-        recent_failures.append(_sanitize_obj(failure))
-        latest_failure = failure
+    try:
+        for rec in _iter_recent_jsonl(path, cutoff):
+            if rec.get("hook") != "pi-bridge" or not _is_pi_bridge_failure_record(rec):
+                continue
+            failure = {
+                "ts": rec.get("ts"),
+                "action": rec.get("action"),
+                "operation": rec.get("operation") or rec.get("action"),
+                "backend": rec.get("backend"),
+                "config": rec.get("config"),
+                "cwd": rec.get("cwd"),
+                "project": rec.get("project"),
+                "session_id": rec.get("session_id"),
+                "error": rec.get("error"),
+                "error_type": rec.get("error_type"),
+                "reason": rec.get("reason"),
+            }
+            recent_failures.append(_sanitize_obj(failure))
+            latest_failure = failure
+    except OSError as exc:
+        return CheckResult(
+            "pi bridge health",
+            WARN,
+            f"Pi bridge health log unavailable: {exc}",
+            {
+                "log_path": str(path),
+                "window_hours": _HEALTH_WINDOW_HOURS,
+                "checked": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
 
     if not recent_failures:
         return CheckResult(
@@ -1596,6 +1656,20 @@ def _check_triage_health() -> CheckResult:
     cutoff = datetime.now() - timedelta(hours=_HEALTH_WINDOW_HOURS)
     log_path, total, failed, invalid_mcp_failed, stale_certainty_failed, last_error = _scan_triage_logs(cutoff)
     if total == 0:
+        if last_error:
+            error_type, _, error = last_error.partition(": ")
+            return CheckResult(
+                "triage",
+                WARN,
+                f"triage log unavailable: {last_error}",
+                {
+                    "log_path": log_path,
+                    "window_hours": _HEALTH_WINDOW_HOURS,
+                    "checked": False,
+                    "error_type": error_type or "OSError",
+                    "error": error or last_error,
+                },
+            )
         return CheckResult(
             "triage", WARN, "no recent triage health events found", {"window_hours": _HEALTH_WINDOW_HOURS}
         )
@@ -1620,7 +1694,13 @@ def _scan_triage_logs(cutoff: datetime) -> tuple[str | None, int, int, bool, boo
     if primary[1] >= 3:
         return primary
     legacy = _scan_triage_log(Path(RETRIEVAL_LOG_PATH), cutoff, legacy=True)
-    return legacy if legacy[1] >= primary[1] else primary
+    if legacy[1] > primary[1]:
+        return legacy
+    if primary[1] > legacy[1]:
+        return primary
+    if primary[5] and not legacy[5]:
+        return primary
+    return legacy
 
 
 def _is_stale_certainty_error(error: str) -> bool:
@@ -1648,31 +1728,34 @@ def _scan_triage_log(path: Path, cutoff: datetime, legacy: bool) -> tuple[str | 
     invalid_mcp_failed = False
     stale_certainty_failed = False
     last_error = None
-    for rec in _iter_recent_jsonl(path, cutoff):
-        if rec.get("hook") != "triage":
-            continue
-        action = rec.get("action") or ""
-        if legacy:
-            if action not in ("decision", "parse_transcript_failed", "structured_notes_llm_failed"):
+    try:
+        for rec in _iter_recent_jsonl(path, cutoff):
+            if rec.get("hook") != "triage":
                 continue
-            total += 1
-            is_failed = action != "decision"
-        else:
-            if action in success_actions:
+            action = rec.get("action") or ""
+            if legacy:
+                if action not in ("decision", "parse_transcript_failed", "structured_notes_llm_failed"):
+                    continue
                 total += 1
-                is_failed = False
-            elif action in failure_actions:
-                total += 1
-                is_failed = True
+                is_failed = action != "decision"
             else:
-                continue
-        if is_failed:
-            failed += 1
-            error = str(rec.get("error") or "")
-            if error:
-                last_error = error
-                invalid_mcp_failed = invalid_mcp_failed or _is_invalid_mcp_config_error(error)
-                stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
+                if action in success_actions:
+                    total += 1
+                    is_failed = False
+                elif action in failure_actions:
+                    total += 1
+                    is_failed = True
+                else:
+                    continue
+            if is_failed:
+                failed += 1
+                error = str(rec.get("error") or "")
+                if error:
+                    last_error = error
+                    invalid_mcp_failed = invalid_mcp_failed or _is_invalid_mcp_config_error(error)
+                    stale_certainty_failed = stale_certainty_failed or _is_stale_certainty_error(error)
+    except OSError as exc:
+        return (str(path), 0, 0, False, False, f"{type(exc).__name__}: {exc}")
     return (str(path), total, failed, invalid_mcp_failed, stale_certainty_failed, last_error)
 
 
@@ -1686,7 +1769,22 @@ def _check_retrieval_health(
             "retrieval", WARN, "retrieval log not found; recall/search failure rate unavailable", {"path": str(path)}
         )
 
-    diagnostics = _scan_retrieval_logs(path, cutoff)
+    try:
+        diagnostics = _scan_retrieval_logs(path, cutoff)
+    except OSError as exc:
+        return CheckResult(
+            "retrieval",
+            WARN,
+            f"retrieval log unavailable: {exc}",
+            {
+                "log_path": str(path),
+                "window_hours": _HEALTH_WINDOW_HOURS,
+                "checked": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+
     remediation = _retrieval_remediation(diagnostics, config or {}, search_check)
     details = dict(diagnostics)
     details["log_path"] = str(path)

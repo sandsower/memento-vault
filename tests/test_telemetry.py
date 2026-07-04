@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from memento import telemetry
 
 
@@ -44,6 +46,13 @@ def test_iter_recent_jsonl_accepts_naive_cutoff_as_utc(tmp_path):
     cutoff = datetime(2026, 6, 30, 11, 59, 59)
 
     assert [entry["action"] for entry in telemetry.iter_recent_jsonl(path, cutoff)] == ["match"]
+
+
+def test_iter_jsonl_raises_on_missing_input(tmp_path):
+    missing = tmp_path / "missing.jsonl"
+
+    with pytest.raises(FileNotFoundError):
+        list(telemetry.iter_jsonl(missing))
 
 
 def test_failure_rate_warning_threshold_is_shared():

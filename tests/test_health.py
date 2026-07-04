@@ -370,6 +370,31 @@ def test_retrieval_last_error_is_redacted_and_truncated():
     assert len(check.details["last_error"]) <= 503
 
 
+def test_retrieval_health_warns_when_log_is_unreadable():
+    path = Path(health.RETRIEVAL_LOG_PATH)
+    path.write_text(
+        json.dumps(
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "hook": "search",
+                "action": "qmd_search_unexpected",
+            }
+        )
+        + "\n"
+    )
+    path.chmod(0)
+    try:
+        report = health.build_report()
+    finally:
+        path.chmod(0o600)
+
+    check = next(check for check in report.checks if check.name == "retrieval")
+
+    assert check.status == "warn"
+    assert check.details["error_type"] == "PermissionError"
+    assert "log unavailable" in check.message
+
+
 def test_automation_memory_reports_stale_embedded_index(tmp_path):
     vault = _make_vault(tmp_path / "stale-vault")
     db = vault / ".search" / "search.db"
@@ -391,6 +416,24 @@ def test_automation_memory_reports_stale_embedded_index(tmp_path):
     stale = readiness["metadata"]["search"]["stale_index"]
     assert stale["stale"] is True
     assert stale["lag_seconds"] > 60
+
+
+def test_automation_memory_warns_when_embedded_index_missing(tmp_path):
+    vault = _make_vault(tmp_path / "missing-index-vault")
+
+    readiness = health.build_automation_memory_readiness(
+        config={"vault_path": str(vault), "search_backend": "embedded", "search_db_path": ".search/search.db"},
+        vault=vault,
+        checks=[health.CheckResult("search", health.PASS, "search ok")],
+    )
+
+    stale = readiness["metadata"]["search"]["stale_index"]
+
+    assert readiness["status"] == "warn"
+    assert stale["checked"] is False
+    assert stale["status"] == "warn"
+    assert stale["reason"] == "embedded_index_missing"
+    assert stale["stale"] is None
 
 
 def test_automation_memory_reports_remote_sync_pending_retries(tmp_path, monkeypatch):
@@ -936,6 +979,16 @@ def test_recent_pi_bridge_success_records_do_not_warn():
 
     assert check.status == "pass"
     assert "no recent Pi bridge failures" in check.message
+
+
+def test_pi_bridge_health_warns_when_log_missing():
+    report = health.build_report()
+    check = next(check for check in report.checks if check.name == "pi bridge health")
+
+    assert check.status == "warn"
+    assert check.details["checked"] is False
+    assert check.details["error_type"] == "FileNotFoundError"
+    assert "unavailable" in check.message
 
 
 def test_queue_health_warns_on_backlog_size(tmp_path, monkeypatch):

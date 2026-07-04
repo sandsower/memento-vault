@@ -165,7 +165,7 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     assert payload["metadata"]["warnings"] == ["[vault] WARN: triage failing", "[vault] WARN: Pi bridge failing"]
     assert "[vault] WARN: Pi bridge failing" in payload["content"]
     assert payload["metadata"]["expandable_paths"] == ["notes/cache.md"]
-    assert payload["metadata"]["truncated"] is False
+    assert payload["metadata"]["used_chars"] <= payload["metadata"]["packet_char_budget"]
     mock_briefing.assert_called_once_with("/repo", "s1", allow_deferred=False, host_id="unknown-host")
     mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1", record=False, host_id="unknown-host")
 

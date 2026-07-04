@@ -2046,6 +2046,16 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
     if "structured payload compacted to fit packet budget" not in notes:
         notes.append("structured payload compacted to fit packet budget")
 
+    status_section = payload.get("sections", {}).get("status")
+    if isinstance(status_section, dict) and isinstance(status_section.get("automation_memory"), dict):
+        automation_memory = status_section["automation_memory"]
+        status_section["automation_memory"] = {
+            "ready": automation_memory.get("ready"),
+            "status": automation_memory.get("status"),
+            "readiness": automation_memory.get("readiness"),
+            "probe": {"name": (automation_memory.get("probe") or {}).get("name")},
+        }
+
     content = payload.get("content", "")
     if content:
         overage = len(json.dumps(payload)) - packet_char_budget
@@ -2062,25 +2072,6 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
     if len(json.dumps(payload)) <= packet_char_budget:
         return _finalize_session_context_payload(payload)
 
-    status_section = payload.get("sections", {}).get("status")
-    if isinstance(status_section, dict) and isinstance(status_section.get("automation_memory"), dict):
-        automation_memory = status_section["automation_memory"]
-        status_section["automation_memory"] = {
-            "ready": automation_memory.get("ready"),
-            "status": automation_memory.get("status"),
-            "readiness": automation_memory.get("readiness"),
-        }
-
-    if len(json.dumps(payload)) <= packet_char_budget:
-        return _finalize_session_context_payload(payload)
-
-    expandable_paths = payload["metadata"].get("expandable_paths", [])
-    while expandable_paths and len(json.dumps(payload)) > packet_char_budget:
-        expandable_paths.pop()
-        payload["metadata"]["omitted_expandable_paths_count"] = (
-            payload["metadata"].get("omitted_expandable_paths_count", 0) + 1
-        )
-
     if len(json.dumps(payload)) > packet_char_budget:
         payload["metadata"].pop("cwd", None)
         payload["metadata"].pop("session_id", None)
@@ -2089,6 +2080,13 @@ def _fit_session_context_payload(payload: dict, packet_char_budget: int) -> dict
 
     if len(json.dumps(payload)) > packet_char_budget and "queue" in payload.get("sections", {}):
         payload["sections"]["queue"].pop("queue_path", None)
+
+    expandable_paths = payload["metadata"].get("expandable_paths", [])
+    while expandable_paths and len(json.dumps(payload)) > packet_char_budget:
+        expandable_paths.pop()
+        payload["metadata"]["omitted_expandable_paths_count"] = (
+            payload["metadata"].get("omitted_expandable_paths_count", 0) + 1
+        )
 
     if len(json.dumps(payload)) > packet_char_budget:
         payload["content"] = ""
