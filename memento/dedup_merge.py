@@ -268,7 +268,7 @@ def merge_into_canonical(
     slug = slugify(canonical_title)
     tmp = canonical_abs.with_name(f".tmp-{slug}.md")
     try:
-        tmp.write_text(merged_markdown)
+        tmp.write_text(merged_markdown, encoding="utf-8")
         os.replace(tmp, canonical_abs)
     except OSError as exc:
         return {"canonical_path": canonical_path, "merged": False, "reason": f"write_error: {exc}"}
@@ -327,19 +327,6 @@ def _already_merged(canonical_body: str, incoming_title: str, incoming_body: str
     return False
 
 
-def _parse_frontmatter_lines(frontmatter: str) -> dict[str, str]:
-    """Parse key:value lines from a raw frontmatter block."""
-    result = {}
-    for line in frontmatter.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = re.match(r"^(\w[\w-]*):\s*(.*)", line)
-        if match:
-            result[match.group(1)] = match.group(2).strip()
-    return result
-
-
 def _fm_value(frontmatter: str, key: str) -> str | None:
     """Extract a single-line frontmatter value."""
     match = re.search(rf"^{re.escape(key)}:\s*(.+)$", frontmatter, re.MULTILINE)
@@ -371,12 +358,6 @@ def _fm_tags(frontmatter: str) -> list[str]:
     if not match:
         return []
     return [item.strip().strip("\"'") for item in match.group(1).split(",") if item.strip()]
-
-
-def _timestamp() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _maybe_rekey_access_log(old_path: str, canonical_path: str) -> None:
