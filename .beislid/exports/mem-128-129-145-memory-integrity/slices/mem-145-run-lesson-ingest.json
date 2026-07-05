@@ -1,0 +1,125 @@
+{
+  "schema": "approved-slice-v1",
+  "slice_id": "mem-145-run-lesson-ingest",
+  "source_ticket": "MEM-145",
+  "prompt": "## Objective\nClose the MEM-145 loop on the memento side: after the OLI-17 specimen run, nothing was queued or recallable. Give run evidence a deterministic ingest path with a provable recall guarantee.\n\n## Design summary\nBound decision (made in the envelope session): the v1 mechanism is an EXPLICIT ingest command, not implicit lifecycle magic - Rondo (or an operator) calls it with a payload; automatic emission from Rondo is a separate rondo-side ticket to note in your final report.\n- Reuse the existing machinery: memento/automated_run_lessons.py already has capture_automated_run_lesson (L122), queue_lesson_candidate (L160), and lesson_to_note_payload (L247), consumed today by mcp_server.py. Do not fork it.\n- Add a `run-lesson` subcommand to the pi_bridge argparse CLI (parser registration near pi_bridge.py L2873, dispatch near L3062) accepting --payload <json-file> with fields: run_id (required), ticket_id (required), title, lesson_text, evidence_paths[], tags[]. It normalizes via the existing functions and captures a note.\n- Recall guarantee: the produced note's searchable text MUST embed run_id and ticket_id verbatim (search.py is_literal_like_query L199 routes identifier-shaped queries to literal matching - verified; a run id like RON-160-20260705T031413Z-d846d0b8 trips the digit/hyphen heuristics).\n- Integration test (the ticket's 'deterministic integration check'): ingest a sample payload into a tmp vault, then assert search by the run id and by the ticket id each return the note. Use the hermetic test patterns from existing capture-e2e tests.\n- Document the payload contract + command in the repo docs so Rondo's future emission has a stable target.\n\n## File scope\nInclude: memento/automated_run_lessons.py, memento/pi_bridge.py (one subcommand), tests, docs. Exclude: Rondo-side emission, Pi lifecycle capture changes, fixing pi-bridge failure counts (report the current triage-health.jsonl failure count in your final report if you look, but do not fix).\n\n## Constraints\nGates via .venv/bin/python. No remote writes. Do not restructure the pi_bridge CLI (mem-129 just moved its queue internals - build on that state).\n\n## Verification\n.venv/bin/python -m pytest tests/test_script_harnesses.py tests/test_pi_bridge.py\n.venv/bin/python -m ruff check . && .venv/bin/python -m ruff format --check .",
+  "boundaries": [
+    "Include: memento/automated_run_lessons.py",
+    "Include: memento/pi_bridge.py (new run-lesson CLI subcommand only)",
+    "Include: tests/test_script_harnesses.py or a new tests/test_run_lesson_ingest.py",
+    "Include: docs (ingest contract documentation)",
+    "Exclude: Rondo-side emission (separate rondo ticket - note it in the final report)",
+    "Exclude: Automatic Pi lifecycle capture changes",
+    "Exclude: Diagnosing the 53 pi-bridge failures (report count if observed, do not fix)"
+  ],
+  "dependencies": [
+    ".venv/bin/python gate env (probed)",
+    "automated_run_lessons.py verified: capture_automated_run_lesson L122, queue_lesson_candidate L160, lesson_to_note_payload L247; consumed by mcp_server.py L1330/L1366",
+    "Literal-identifier search verified: search.py is_literal_like_query L199 routes digit/hyphen tokens to literal matching, so run ids in note text are findable",
+    "Upstream slice mem-129-queue-module-extraction must land first (pi_bridge.py CLI overlap)"
+  ],
+  "proof_requirements": [
+    "mem-145-run-lesson-ingest-gates: Memento venv gates (ruff check/format, compileall, targeted pytest).",
+    "mem-145-run-lesson-ingest-gates success: .venv/bin/python -m ruff check . exits 0",
+    "mem-145-run-lesson-ingest-gates success: .venv/bin/python -m ruff format --check . exits 0",
+    "mem-145-run-lesson-ingest-gates success: .venv/bin/python -m compileall -q memento hooks scripts exits 0",
+    "mem-145-run-lesson-ingest-gates success: .venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py tests/test_beislid_workflow_gates.py exits 0"
+  ],
+  "command_proofs": [
+    {
+      "id": "ingest-tests",
+      "command": ".venv/bin/python -m pytest tests/test_script_harnesses.py tests/test_pi_bridge.py",
+      "description": "Run-lesson ingest integration tests",
+      "timeout_seconds": 600,
+      "expected_exit": 0
+    },
+    {
+      "id": "ruff",
+      "command": ".venv/bin/python -m ruff check .",
+      "description": "Lint gate",
+      "timeout_seconds": 120,
+      "expected_exit": 0
+    }
+  ],
+  "output_expectations": {
+    "summary": "An operator or Rondo hook can run one documented command to ingest a run-lesson JSON; the resulting note embeds run id and ticket id verbatim in searchable text; an integration test proves search-by-run-id and search-by-ticket-id both recall it.",
+    "artifacts": [
+      "changed_files",
+      "proof_results"
+    ],
+    "next_step": "Human close-out: review workspace diff, land on a branch, push, CI, mark ticket Done with run provenance."
+  },
+  "parent_contract": {
+    "work_contract": "MEM-145 (memento-side ingest path, design bound in envelope session)",
+    "source": "Linear MEM-145",
+    "ticket": "MEM-145"
+  },
+  "repo": {
+    "url": "git@github.com:sandsower/memento-vault.git",
+    "base_ref": "origin/main",
+    "base_sha": "5bdbfd3a6e823633e340ec4828b7caa19b18b7e2"
+  },
+  "allowed_actions": {
+    "run_mode": "supervised-auto",
+    "allow": [
+      "Edit files listed in boundaries.include",
+      "Add one argparse subcommand (run-lesson) to the pi_bridge CLI reusing capture_automated_run_lesson",
+      "Run the configured gates and targeted tests",
+      "Create local commits on a work branch"
+    ],
+    "ask": [
+      "Any edit outside boundaries.include",
+      "Adding dependencies not named in the slice",
+      "Behavioral changes beyond the bound design summary"
+    ],
+    "deny": [
+      "git push, PR creation, or any remote write",
+      "Tracker (Linear/GitHub) mutations",
+      "External service mutations",
+      "Destructive actions outside the repo workspace"
+    ]
+  },
+  "process_provider": {
+    "name": "claude_code"
+  },
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {
+          "boundary": "implementation",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "Authored tier for this slice; see bundle validation notes.",
+          "source": {
+            "skill": "envelope",
+            "phase": "execution"
+          }
+        },
+        {
+          "boundary": "review_fix",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "review/fix iterations stay mechanical against exact feedback and gate output",
+          "source": {
+            "skill": "envelope"
+          }
+        },
+        {
+          "boundary": "gate_repair",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "gate repair is bounded by exact gate commands",
+          "source": {
+            "skill": "envelope"
+          }
+        }
+      ],
+      "tier": "standard",
+      "mode": "prefer",
+      "candidates": [
+        "pi:openrouter/deepseek/deepseek-v4-pro",
+        "pi:openai-codex/gpt-5.4-mini"
+      ]
+    }
+  }
+}
