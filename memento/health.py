@@ -855,8 +855,9 @@ def _check_local_extraction_retries(vault: Path) -> CheckResult:
     if dead_letters:
         sources = metadata.get("dead_letter_sources", [])
         source_info = ", ".join(sources[:3])
-        if len(sources) > 3:
-            source_info += f" … +{len(sources) - 3} more"
+        remaining = dead_letters - len(sources[:3])
+        if remaining > 0:
+            source_info += f" … +{remaining} more"
         status = WARN
         message = f"local extraction retry backlog has {pending} pending and {dead_letters} dead-lettered item(s): {source_info}"
     elif pending:

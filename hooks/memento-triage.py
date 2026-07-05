@@ -619,6 +619,9 @@ def _spool_local_extraction_failure(
         print(f"[memento] local extraction retry ledger record failed: {exc}", file=sys.stderr)
 
 
+_LEDGER_ERROR_LIMIT = 500
+
+
 def _recovery_dead_letter_entry(vault, entry, error_msg):
     """Append a dead-letter entry preserving the original attempt counter.
 
@@ -626,6 +629,9 @@ def _recovery_dead_letter_entry(vault, entry, error_msg):
     entry with the *same* attempt number so the operator can retry again.
     """
     from datetime import datetime, timezone
+
+    # Keep error bounded like sync_ledger.record() does.
+    safe_error = str(error_msg)[:_LEDGER_ERROR_LIMIT]
 
     sync_ledger.append(
         vault,
@@ -636,7 +642,7 @@ def _recovery_dead_letter_entry(vault, entry, error_msg):
             "status": "dead-letter",
             "attempt": entry.get("attempt", 1),
             "content_hash": entry.get("content_hash"),
-            "error": error_msg,
+            "error": safe_error,
             "spool_path": entry.get("spool_path"),
         },
     )

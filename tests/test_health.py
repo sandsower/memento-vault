@@ -1612,6 +1612,33 @@ def test_warn_message_with_more_than_3_dead_letter_sources_caps_with_overflow(tm
     assert check.message.count("session:s") == 3  # only first 3 named
 
 
+def test_warn_message_uses_uncapped_count_when_dead_letter_sources_exceed_20(tmp_path):
+    """Overflow must use uncapped dead_letter_count, not len(capped sources)."""
+    vault = _make_vault(tmp_path / "dl-cap-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    lines = []
+    for i in range(25):
+        lines.append(
+            json.dumps(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "kind": "local-extraction",
+                    "source": f"session:long{i}",
+                    "status": "dead-letter",
+                    "error": "attempts exhausted",
+                }
+            )
+        )
+    ledger.write_text("\n".join(lines) + "\n")
+
+    check = health._check_local_extraction_retries(vault)
+    assert check.status == "warn"
+    # 25 - 3 = 22 remaining
+    assert "+22 more" in check.message, f"got {check.message}"
+    assert check.message.count("session:long") == 3  # only first 3 named
+
+
 def test_common_failure_reasons_excludes_dead_letter_ledger_noise(tmp_path, monkeypatch):
     vault = _make_vault(tmp_path / "dl-noise-vault")
     ledger = vault / ".sync" / "ledger.jsonl"
