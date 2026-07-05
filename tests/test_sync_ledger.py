@@ -246,3 +246,38 @@ class TestEndToEndFlow:
         assert len(lines) == 2
         for line in lines:
             json.loads(line)  # must parse standalone
+
+
+class TestDeadLetters:
+    def test_returns_only_dead_lettered_entries_from_folded_state(self, tmp_path):
+        vault = tmp_path / "vault"
+        sync_ledger.record(vault, "local-extraction", "session:a", status="error", error="boom")
+        sync_ledger.record(vault, "local-extraction", "session:a", status="dead-letter", error="exhausted")
+        sync_ledger.record(vault, "local-extraction", "session:b", status="error", error="nope")
+        sync_ledger.record(vault, "local-extraction", "session:c", status="ok")
+        sync_ledger.record(vault, "local-extraction", "session:d", status="error")
+        sync_ledger.record(vault, "local-extraction", "session:d", status="dead-letter", error="spool missing")
+
+        dead = sync_ledger.dead_letters(vault)
+        sources = [e["source"] for e in dead]
+        assert sorted(sources) == ["session:a", "session:d"]
+        for e in dead:
+            assert e["status"] == "dead-letter"
+
+    def test_empty_when_no_dead_letters(self, tmp_path):
+        vault = tmp_path / "vault"
+        sync_ledger.record(vault, "local-extraction", "session:a", status="ok")
+        sync_ledger.record(vault, "local-extraction", "session:b", status="error", error="boom")
+
+        assert sync_ledger.dead_letters(vault) == []
+
+    def test_empty_when_ledger_missing(self, tmp_path):
+        assert sync_ledger.dead_letters(tmp_path / "nonexistent") == []
+
+    def test_ok_supersedes_dead_letter(self, tmp_path):
+        """A later ok entry folds over an earlier dead-letter."""
+        vault = tmp_path / "vault"
+        sync_ledger.record(vault, "local-extraction", "session:a", status="dead-letter", error="exhausted")
+        sync_ledger.record(vault, "local-extraction", "session:a", status="ok")
+
+        assert sync_ledger.dead_letters(vault) == []

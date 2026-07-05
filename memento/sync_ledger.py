@@ -125,6 +125,11 @@ def pending_retries(vault: Path) -> list[dict]:
     return [e for e in fold_state(vault).values() if e.get("status") == "error"]
 
 
+def dead_letters(vault: Path) -> list[dict]:
+    """Return the subset of current state whose last attempt dead-lettered."""
+    return [e for e in fold_state(vault).values() if e.get("status") == "dead-letter"]
+
+
 def attempt_count(vault: Path, kind: str, source: str) -> int:
     """Count prior attempts for a (kind, source) across the whole ledger."""
     n = 0
