@@ -307,6 +307,24 @@ class TestEmbeddedSearchIndexNote:
         assert len(results) > 0
         assert results[0]["path"] == "notes/new-discovery.md"
 
+    def test_write_note_retrievable_without_manual_reindex(self, backend, embedded_vault):
+        """Write via write_note → retrievable via backend.search() without
+        calling reindex() manually. Acceptance criterion #3."""
+        from memento.store import write_note
+
+        vault, db_path = embedded_vault
+        write_note(
+            vault,
+            title="FTC vs TTS semantic gap",
+            body="The FTC rulemaking process and TTS phoneme output differ in speed, precision, and liability semantics.",
+            note_type="discovery",
+            tags=["linguistics", "regulatory"],
+        )
+        # Search for a unique term from the body
+        results = backend.search("FTC rulemaking TTS", "memento", limit=5)
+        assert len(results) >= 1
+        assert any("semantic" in r["path"] or "ftc" in r["path"] for r in results)
+
     def test_index_note_updates_existing(self, backend, embedded_vault):
         vault, _ = embedded_vault
         backend.reindex("memento")

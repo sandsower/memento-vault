@@ -178,6 +178,22 @@ class SearchBackend(ABC):
         """
         ...
 
+    def index_staleness(self, vault: Path, config: dict) -> dict:
+        """Return index staleness metadata for the active backend.
+
+        Subclasses should override this to provide backend-specific staleness
+        detection. The default implementation returns a no-index pass.
+
+        Returns dict with keys:
+            checked (bool): Whether an index was found to check.
+            backend (str): Backend name.
+            stale (bool | None): Whether the index is stale (None if
+                not applicable).
+            status (str): "pass", "warn", or "fail".
+            reason (str): Optional early-return reason.
+        """
+        return {"checked": False, "reason": "backend_no_index", "stale": False, "status": "pass"}
+
 
 class QMDBackend(SearchBackend):
     """Search backend that wraps the QMD CLI tool."""
@@ -338,6 +354,76 @@ class QMDBackend(SearchBackend):
         except (subprocess.TimeoutExpired, OSError):
             return False
 
+    def index_staleness(self, vault: Path, config: dict) -> dict:
+        """Compare resolved QMD index mtime vs newest note mtime."""
+        import os
+        from datetime import datetime
+
+        cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        qmd_index = cache_home / "qmd" / "index.sqlite"
+
+        if not qmd_index.exists():
+            return {
+                "checked": False,
+                "backend": "qmd",
+                "reason": "qmd_index_unresolved",
+                "stale": False,
+                "status": "pass",
+            }
+
+        # Get newest note mtime from disk
+        newest_note_mtime = None
+        for dirname in ("notes", "fleeting", "projects"):
+            root = vault / dirname
+            if not root.exists():
+                continue
+            for p in root.rglob("*.md"):
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                newest_note_mtime = mtime if newest_note_mtime is None else max(newest_note_mtime, mtime)
+
+        if newest_note_mtime is None:
+            return {
+                "checked": True,
+                "backend": "qmd",
+                "db_path": str(qmd_index),
+                "reason": "no_notes",
+                "stale": False,
+                "status": "pass",
+            }
+
+        try:
+            db_mtime = qmd_index.stat().st_mtime
+        except OSError as exc:
+            return {
+                "checked": False,
+                "backend": "qmd",
+                "reason": type(exc).__name__,
+                "stale": None,
+                "status": "warn",
+            }
+
+        lag_seconds = int(max(0, newest_note_mtime - db_mtime))
+        if lag_seconds > 3600:
+            status = "fail"
+        elif lag_seconds > 60:
+            status = "warn"
+        else:
+            status = "pass"
+
+        return {
+            "checked": True,
+            "backend": "qmd",
+            "db_path": str(qmd_index),
+            "db_mtime": datetime.fromtimestamp(db_mtime).isoformat(timespec="seconds"),
+            "newest_note_mtime": datetime.fromtimestamp(newest_note_mtime).isoformat(timespec="seconds"),
+            "lag_seconds": lag_seconds,
+            "stale": lag_seconds > 60,
+            "status": status,
+        }
+
 
 class GrepBackend(SearchBackend):
     """Simple grep-based fallback search for when QMD is not available.
@@ -481,6 +567,10 @@ class GrepBackend(SearchBackend):
     def reindex(self, collection: str, embed: bool = True) -> bool:
         # Grep backend has no index to update
         return True
+
+    def index_staleness(self, vault: Path, config: dict) -> dict:
+        """Grep backend has no index to check."""
+        return {"checked": False, "reason": "no_index", "stale": False, "status": "pass"}
 
 
 def _clean_snippet(raw):

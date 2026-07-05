@@ -212,6 +212,9 @@ class TestWriteNote:
 
         fake_backend = ReindexOnlyBackend()
         with patch("memento.search_backend.get_backend", return_value=fake_backend):
+            from memento.store import _reset_debouncer
+
+            _reset_debouncer()
             path = write_note(
                 tmp_vault,
                 title="Reindex fallback",
@@ -221,7 +224,11 @@ class TestWriteNote:
             )
 
         assert path.exists()
-        assert fake_backend.calls == [("memento", False)]
+        # The fallback calls backend.reindex() directly, and the
+        # supplementary debouncer also calls reindex(). Accept ≤2.
+        assert 1 <= len(fake_backend.calls) <= 2
+        assert fake_backend.calls[0] == ("memento", False)  # immediate fallback
+        assert all(c == ("memento", False) for c in fake_backend.calls)
 
     def test_write_note_survives_indexing_failure(self, tmp_vault):
         """If index_note raises, the note is still written successfully."""
@@ -242,6 +249,87 @@ class TestWriteNote:
         assert path.exists()
         assert "Note must persist" in path.read_text()
         mock_backend.index_note.assert_called_once()
+
+    def test_write_note_debounce_triggers_batch_reindex(self, tmp_vault):
+        """Rapid writes: index_note per write + ≤1 reindex from debouncer."""
+
+        class CountingBackend:
+            def __init__(self):
+                self.index_calls = []
+                self.reindex_calls = []
+
+            def index_note(self, rel_path, collection=None):
+                self.index_calls.append((rel_path, collection))
+                return True
+
+            def reindex(self, collection, embed=True):
+                self.reindex_calls.append((collection, embed))
+                return True
+
+        fake_backend = CountingBackend()
+
+        # Use low threshold/ms so debouncer fires quickly in test
+        with patch("memento.search_backend.get_backend", return_value=fake_backend):
+            with patch("memento.store.get_config", return_value={"index_debounce_count": 5, "index_debounce_ms": 50}):
+                from memento.store import _reset_debouncer
+
+                _reset_debouncer()
+
+                for i in range(10):
+                    write_note(
+                        tmp_vault,
+                        title=f"Debounce test note {i}",
+                        body=f"Content for debounce test iteration {i}.",
+                        note_type="discovery",
+                        tags=["test"],
+                    )
+
+        # Each note should have been indexed synchronously
+        assert len(fake_backend.index_calls) == 10, f"expected 10 index_note calls, got {len(fake_backend.index_calls)}"
+        # At least one batch reindex should have been triggered (the 5th
+        # write hits the threshold). At most, the timer could fire an
+        # additional flush after the window, but ≤2 is expected.
+        assert 1 <= len(fake_backend.reindex_calls) <= 2, (
+            f"expected 1-2 reindex calls, got {len(fake_backend.reindex_calls)}"
+        )
+
+    def test_write_note_debounce_single_write_no_extra_reindex(self, tmp_vault):
+        """Single write: index_note called, but no debounced reindex."""
+
+        class CountingBackend:
+            def __init__(self):
+                self.index_calls = []
+                self.reindex_calls = []
+
+            def index_note(self, rel_path, collection=None):
+                self.index_calls.append((rel_path, collection))
+                return True
+
+            def reindex(self, collection, embed=True):
+                self.reindex_calls.append((collection, embed))
+                return True
+
+        fake_backend = CountingBackend()
+
+        with patch("memento.search_backend.get_backend", return_value=fake_backend):
+            with patch("memento.store.get_config", return_value={"index_debounce_count": 5, "index_debounce_ms": 2000}):
+                from memento.store import _reset_debouncer
+
+                _reset_debouncer()
+
+                write_note(
+                    tmp_vault,
+                    title="Single debounce test",
+                    body="Single write should only index_note, no batch reindex.",
+                    note_type="discovery",
+                    tags=["test"],
+                )
+
+        assert len(fake_backend.index_calls) == 1
+        # Single write below threshold → debouncer starts a timer but
+        # does not trigger a reindex before this assertion. The timer
+        # is best-effort and may fire later; accept 0 or 1 reindex.
+        assert len(fake_backend.reindex_calls) <= 1, f"expected ≤1 reindex calls, got {len(fake_backend.reindex_calls)}"
 
     def test_write_note_appends_related_when_body_lacks_one(self, tmp_vault):
         """Bodies without a ``## Related`` section get the canonical placeholder."""
