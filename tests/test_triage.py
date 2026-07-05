@@ -28,6 +28,7 @@ spawn_memento_agent = _mod.spawn_memento_agent
 sentinel_path = _mod._sentinel_path
 run_remote_triage = _mod.run_remote_triage
 retry_local_extractions = _mod.retry_local_extractions
+recover_dead_letter_extractions = _mod.recover_dead_letter_extractions
 
 
 def _write_transcript(tmp_path, entries):
@@ -946,6 +947,144 @@ class TestSpawnMementoAgent:
         assert results[-1]["status"] == "dead-letter"
         ledger = (tmp_vault / ".sync" / "ledger.jsonl").read_text()
         assert '"status":"dead-letter"' in ledger
+
+        # Normal retry must skip dead-lettered entries.
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="still broken")),
+        ):
+            assert retry_local_extractions(tmp_vault, limit=10) == []
+
+    def test_recover_dead_letter_replays_spool_and_marks_ok(self, tmp_vault, tmp_path):
+        """Recovery re-attempts a dead-lettered entry successful LLM → ok."""
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+        payload = json.dumps(
+            [
+                {
+                    "title": "Redis cache keys need explicit TTL",
+                    "body": "Keys without TTL caused stale reads.",
+                    "type": "bugfix",
+                    "tags": ["redis", "caching"],
+                    "certainty": 4,
+                }
+            ]
+        )
+
+        # Create a dead-lettered entry (max_attempts=1 ensures immediate dead-letter).
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch(
+                "memento_triage.get_config",
+                return_value={"local_extraction_retry_max_attempts": 1, "triage_transcript_max_chars": 400_000},
+            ),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="codex timed out")),
+        ):
+            process_structured_notes("sess-456", str(transcript), meta, "api-service")
+            results = retry_local_extractions(tmp_vault, limit=10)
+        assert results[-1]["status"] == "dead-letter"
+
+        # Recovery with successful LLM must re-attempt and succeed.
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text=payload, ok=True, error=None)),
+        ):
+            recovered = recover_dead_letter_extractions(tmp_vault, limit=10)
+        assert recovered[-1]["status"] == "ok"
+        note = tmp_vault / "notes" / "redis-cache-keys-need-explicit-ttl.md"
+        assert note.exists()
+
+        # Once recovered, no dead-letters remain for this source.
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text=payload, ok=True, error=None)),
+        ):
+            assert recover_dead_letter_extractions(tmp_vault, limit=10) == []
+
+    def test_recover_dead_letter_failure_re_stays_dead_letter(self, tmp_vault, tmp_path):
+        """Recovery attempt that fails still dead-letters; attempt unchanged."""
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch(
+                "memento_triage.get_config",
+                return_value={"local_extraction_retry_max_attempts": 1, "triage_transcript_max_chars": 400_000},
+            ),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="codex timed out")),
+        ):
+            process_structured_notes("sess-789", str(transcript), meta, "api-service")
+            results = retry_local_extractions(tmp_vault, limit=10)
+        assert results[-1]["status"] == "dead-letter"
+        attempt_before = results[-1].get("attempt", 0)
+
+        # Recovery with failed LLM must not change attempt counter and stay dead-letter.
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="still failing")),
+        ):
+            recovered = recover_dead_letter_extractions(tmp_vault, limit=10)
+        assert recovered[-1]["status"] == "dead-letter"
+        assert recovered[-1].get("attempt", 0) == attempt_before, "attempt must not increment"
+
+    def test_recover_dead_letter_skips_missing_spool(self, tmp_vault, tmp_path):
+        """Recovery for missing spool payload emits dead-letter with clear error."""
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(json.dumps(_user_msg("Figure out the cache bug")) + "\n")
+        meta = {
+            "cwd": "/home/vic/Projects/api-service",
+            "git_branch": "feature/DC-123-cache",
+            "exchange_count": 6,
+            "files_edited": ["src/cache.py"],
+            "first_prompt": "Figure out the cache bug",
+            "last_outcome": "Fixed the TTL bug.",
+        }
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch(
+                "memento_triage.get_config",
+                return_value={"local_extraction_retry_max_attempts": 1, "triage_transcript_max_chars": 400_000},
+            ),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="codex timed out")),
+        ):
+            process_structured_notes("sess-miss", str(transcript), meta, "api-service")
+            results = retry_local_extractions(tmp_vault, limit=10)
+        assert results[-1]["status"] == "dead-letter"
+
+        # Corrupt the spool path in the ledger so the payload is missing.
+        from memento import sync_ledger
+
+        sources = sync_ledger.dead_letters(tmp_vault)
+        for entry in sources:
+            spool = entry.get("spool_path")
+            if spool:
+                Path(spool).unlink(missing_ok=True)
+
+        with (
+            patch("memento_triage.get_vault", return_value=tmp_vault),
+            patch("memento_triage.llm_complete", return_value=LLMResult(text="", ok=False, error="not called")),
+        ):
+            results = recover_dead_letter_extractions(tmp_vault, limit=10)
+        assert results[-1]["status"] == "dead-letter"
+        assert "spooled payload missing" in (results[-1].get("error") or "")
 
     def test_triage_mirrors_pi_llm_error_to_bridge_health(self, tmp_vault, tmp_path):
         transcript = tmp_path / "pi-session.jsonl"
