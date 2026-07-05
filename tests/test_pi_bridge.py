@@ -6,9 +6,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from memento.lifecycle import LifecycleResult
 from memento.llm import LLMResult
 from memento import pi_bridge
+
+
+@pytest.fixture(autouse=True)
+def _smart_store_patches(monkeypatch):
+    """Patch smart_store dependencies so pi_bridge tests don't hit real backends.
+
+    Individual tests must still patch ``memento.config.get_vault`` (or
+    ``memento.smart_store.get_vault``) when they need a specific vault path.
+    """
+    monkeypatch.setattr("memento.smart_store.get_vault", lambda: None)
+    monkeypatch.setattr("memento.smart_store.has_qmd", lambda: False)
+    monkeypatch.setattr("memento.smart_store.inspect_contradictions", lambda *a, **kw: {})
 
 
 def test_bridge_health_status_normalizes_offset_aware_timestamps(tmp_path, monkeypatch):
@@ -357,6 +371,7 @@ def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     (tmp_path / "notes").mkdir()
     with (
         patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
     ):
         code = pi_bridge.main(
@@ -401,7 +416,7 @@ def test_pi_bridge_capture_runs_commit_and_reindex_under_vault_lock(capsys, tmp_
 
     def fake_write_note(*_args, **_kwargs):
         call_order.append("write")
-        return note_path
+        return {"decision": "created", "path": "notes/pi-bridge.md", "created": True}
 
     def fake_sync(vault, commit_message, collection=None):
         call_order.append("sync")
@@ -418,7 +433,8 @@ def test_pi_bridge_capture_runs_commit_and_reindex_under_vault_lock(capsys, tmp_
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
         patch("memento.pi_bridge.acquire_vault_write_lock", side_effect=fake_acquire),
         patch("memento.pi_bridge.release_vault_write_lock", side_effect=fake_release),
-        patch("memento.pi_bridge.write_note", side_effect=fake_write_note),
+        patch("memento.pi_bridge.write_smart_store_note", side_effect=fake_write_note),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge._commit_and_reindex_locked", side_effect=fake_sync),
     ):
         code = pi_bridge.main(
@@ -500,6 +516,7 @@ def test_pi_bridge_capture_records_manual_session_state(capsys, tmp_path, monkey
     (tmp_path / "notes").mkdir()
     with (
         patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):
@@ -908,6 +925,7 @@ def test_pi_bridge_lifecycle_after_manual_capture_skips_low_signal_body(capsys, 
     (tmp_path / "notes").mkdir()
     with (
         patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):
@@ -1261,6 +1279,7 @@ def test_pi_bridge_capture_writes_type_tags_certainty_and_session_metadata_as_fr
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     with (
         patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):

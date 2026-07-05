@@ -396,6 +396,35 @@ def load_access_log_stats():
     return stats
 
 
+def write_access_log_stats(stats: dict) -> None:
+    """Replace access-log aggregated stats for this vault's paths.
+
+    *stats* should be in the same ``{path: {"events": [{"ts": ..., "rank": ...}]}}``
+    shape returned by ``load_access_log_stats``.  The cache is invalidated so
+    subsequent reads re-read the persisted file.
+    """
+    vault_id = _current_vault_id()
+    data = _read_access_log_stats_file()
+    data.setdefault("vaults", {})[vault_id] = {
+        "paths": {
+            path: {
+                "events": [
+                    {
+                        "ts": event["ts"].isoformat() if hasattr(event.get("ts"), "isoformat") else event["ts"],
+                        "rank": int(event.get("rank", 1)),
+                    }
+                    for event in bucket.get("events", [])
+                ]
+            }
+            for path, bucket in stats.items()
+        },
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    _write_access_log_stats_file(data)
+    # Invalidate the in-memory cache so next load re-reads.
+    _ACCESS_LOG_CACHE["signature"] = (vault_id, None, None)
+
+
 def apply_access_log_boost(results, config=None, now=None):
     """Boost scores for notes that have been repeatedly and recently accessed."""
     if config is None:

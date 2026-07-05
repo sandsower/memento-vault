@@ -153,6 +153,9 @@ DEFAULT_CONFIG = {
     "embedding_dimensions": 512,
     "embedding_api_key": None,
     "embedding_api_base": None,
+    # Dedup/merge at capture
+    "dedup_embed_threshold": 0.86,
+    "dedup_embed_min_title_overlap": 0,  # 0=disabled; >0 requires title-token overlap fraction in addition to embed similarity
     # LLM backend (agent-agnostic)
     "llm_backend": "claude",
     "llm_model": None,  # None = use agent_model for backwards compat
