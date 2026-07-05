@@ -128,6 +128,19 @@ def find_merge_target(
     if score < threshold:
         return None
 
+    # Title-token overlap gate (disabled when threshold is 0)
+    config = get_config()
+    min_title_overlap = int(config.get("dedup_embed_min_title_overlap", 0))
+    if min_title_overlap > 0:
+        candidate_title = str(best.get("title", ""))
+        cand_tokens = set(re.findall(r"[a-z0-9]+", candidate_title.lower()))
+        inc_tokens = set(re.findall(r"[a-z0-9]+", title.lower()))
+        if cand_tokens and inc_tokens:
+            overlap = len(cand_tokens & inc_tokens) / max(len(inc_tokens), 1)
+            if overlap < min_title_overlap:
+                logger.debug("Title overlap below threshold: %.2f < %d", overlap, min_title_overlap)
+                return None
+
     # Load canonical note's contract for the MergeTarget
     vault = get_vault()
     candidate_path = str(best.get("path", ""))

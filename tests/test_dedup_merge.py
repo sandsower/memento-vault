@@ -112,12 +112,10 @@ def test_find_merge_target_fallback_when_provider_unavailable(tmp_vault, monkeyp
     """When the embedding provider is unavailable, fall back to token overlap (no merge)."""
     _seed_note(tmp_vault, title="Redis cache guidance", body="Use TTL on Redis keys.")
 
-    fail_backend = _FakeBackend(results=[])
-    monkeypatch.setattr("memento.dedup_merge._is_embedding_backend", lambda _: True)
-    monkeypatch.setattr("memento.dedup_merge._get_backend", lambda: fail_backend)
+    # _is_embedding_backend returns False -> find_merge_target short-circuits to None
+    monkeypatch.setattr("memento.dedup_merge._is_embedding_backend", lambda _: False)
     monkeypatch.setattr("memento.dedup_merge.get_vault", lambda: tmp_vault)
 
-    # Low-score result below threshold -> returns None
     target = find_merge_target("Redis cache guidance", "Set explicit TTL on Redis keys.", threshold=0.86)
     assert target is None
 

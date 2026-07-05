@@ -132,11 +132,9 @@ def test_suggest_store_action_returns_merged_into_on_embed_match(tmp_vault, monk
     monkeypatch.setattr("memento.smart_store.has_qmd", lambda: False)
     monkeypatch.setattr("memento.smart_store.inspect_contradictions", lambda *args, **kwargs: {})
     monkeypatch.setattr("memento.smart_store.find_merge_target", lambda *a, **kw: mock_target)
-    monkeypatch.setattr(
-        "memento.smart_store.merge_into_canonical",
-        lambda *a, **kw: {"canonical_path": rel_path, "merged": True, "reason": "ok"},
-    )
 
+    # Note: merge_into_canonical is NOT mocked here because suggest_store_action
+    # returns the merged_into decision directly without calling it.
     result = suggest_store_action(
         title="Redis TTL policy",
         body="Set explicit TTL on Redis keys to prevent stale reads.",
@@ -190,6 +188,5 @@ def test_write_smart_store_note_performs_merge_on_merged_into(tmp_vault, monkeyp
     assert result["decision"] == "merged_into"
     assert result["merged"] is True
     assert result["canonical_path"] == rel_path
-    assert (tmp_vault / rel_path).exists()
     # The canonical file should still exist (merge appended, didn't delete)
     assert (tmp_vault / rel_path).exists()

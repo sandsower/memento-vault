@@ -1241,6 +1241,8 @@ def _capture(
             origin=f"pi_bridge:{source_event or reason or 'manual'}",
             source="pi-capture",
         )
+        if decision.get("error"):
+            return decision
         if reason == "manual" or source_event in {"manual", "tool"}:
             _mark_manual_capture_state(
                 session_id,

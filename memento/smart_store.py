@@ -294,34 +294,8 @@ def suggest_store_action(
         session_id=session_id,
     )
 
-    # Embed-match gate: check for near-duplicate via vector similarity first.
-    # If the embedding provider is unavailable or no match found, this returns
-    # None and we fall through to the existing token-overlap logic below.
-    if candidate_limit > 0:
-        try:
-            merge_target = find_merge_target(title, sanitized_body, tags=tags, threshold=None)
-        except Exception:
-            merge_target = None
-        if merge_target is not None:
-            return {
-                "decision": "merged_into",
-                "created": False,
-                "path": merge_target.path,
-                "title": title,
-                "candidates": [],
-                "reason": (
-                    f"embed match (similarity={merge_target.similarity:.3f})"
-                    " suggests merging into existing note instead of creating a new one"
-                ),
-                "best_candidate": {
-                    "path": merge_target.path,
-                    "title": merge_target.title,
-                    "score": merge_target.similarity,
-                    "contract": merge_target.contract,
-                    "reasons": [f"embed vector similarity {merge_target.similarity:.3f} meets threshold"],
-                },
-            }
-
+    # Fast exact-duplicate check: if a note with the same title/body/contract
+    # already exists, return already_covered without running the embed gate.
     candidates = _combine_candidate_sources(vault, title, sanitized_body, tags, candidate_limit)
     if not candidates:
         return {
@@ -366,6 +340,34 @@ def suggest_store_action(
                 "title": title,
                 "candidates": candidates,
                 "reason": "exact duplicate already exists",
+            }
+
+    # Embed-match gate: check for near-duplicate via vector similarity.
+    # Only runs after the exact-duplicate check above so exact matches
+    # are never routed through the merge path.
+    if candidate_limit > 0:
+        try:
+            merge_target = find_merge_target(title, sanitized_body, tags=tags, threshold=None)
+        except Exception:
+            merge_target = None
+        if merge_target is not None:
+            return {
+                "decision": "merged_into",
+                "created": False,
+                "path": merge_target.path,
+                "title": title,
+                "candidates": [],
+                "reason": (
+                    f"embed match (similarity={merge_target.similarity:.3f})"
+                    " suggests merging into existing note instead of creating a new one"
+                ),
+                "best_candidate": {
+                    "path": merge_target.path,
+                    "title": merge_target.title,
+                    "score": merge_target.similarity,
+                    "contract": merge_target.contract,
+                    "reasons": [f"embed vector similarity {merge_target.similarity:.3f} meets threshold"],
+                },
             }
 
     best = max(candidates, key=lambda item: (item["score"], len(item["reasons"]), item["path"]))
@@ -474,11 +476,12 @@ def write_smart_store_note(
     if decision.get("decision") == "merged_into":
         vault = get_vault()
         bc = decision.get("best_candidate", {})
+        sanitized_body = sanitize_secrets(body).strip()
         merge_result = merge_into_canonical(
             vault,
             bc.get("path", decision["path"]),
             title=title,
-            body=body,
+            body=sanitized_body,
             note_type=note_type,
             tags=tags,
             certainty=certainty,

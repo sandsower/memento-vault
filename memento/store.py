@@ -410,10 +410,12 @@ def write_access_log_stats(stats: dict) -> None:
             path: {
                 "events": [
                     {
-                        "ts": event["ts"].isoformat() if hasattr(event.get("ts"), "isoformat") else event["ts"],
+                        "ts": event.get("ts").isoformat()
+                        if hasattr(event.get("ts"), "isoformat")
+                        else str(event.get("ts", "")),
                         "rank": int(event.get("rank", 1)),
                     }
-                    for event in bucket.get("events", [])
+                    for event in (bucket.get("events", []) or [])[-_ACCESS_LOG_EVENT_CAP:]
                 ]
             }
             for path, bucket in stats.items()
