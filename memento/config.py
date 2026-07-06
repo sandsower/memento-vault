@@ -553,8 +553,16 @@ def _repo_toplevel_name(path):
     if not common_path.is_absolute():
         # Relative output is relative to the queried path (e.g. plain ".git").
         common_path = Path(path) / common_path
-    repo_dir = common_path.parent if common_path.name == ".git" else common_path
-    return repo_dir.name or None
+    repo_dir = common_path
+    # Peel the git-dir layer: ordinary checkouts end in ".git"; bare-repo
+    # worktree layouts (repo/.bare + repo/<branch> worktrees) end in ".bare".
+    if repo_dir.name in (".git", ".bare"):
+        repo_dir = repo_dir.parent
+    name = repo_dir.name or None
+    # Bare clone directories are conventionally named "<repo>.git".
+    if name and name != ".git" and name.endswith(".git"):
+        name = name[: -len(".git")]
+    return name or None
 
 
 def repo_slug_from_path(path):

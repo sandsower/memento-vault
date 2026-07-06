@@ -320,6 +320,36 @@ class TestRepoSlugFromPath:
         assert repo_slug_from_path("") is None
         assert repo_slug_from_path(None) is None
 
+    def test_dot_bare_worktree_layout_collapses_to_repo_dir(self, tmp_path):
+        """repo/.bare + repo/<branch> worktree layout must slug as "repo", not "bare"."""
+        import subprocess
+
+        repo = tmp_path / "agentic-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "--bare", str(repo / ".bare")], check=True)
+        seed = tmp_path / "seed"
+        subprocess.run(["git", "clone", "-q", str(repo / ".bare"), str(seed)], check=True)
+        (seed / "f.txt").write_text("x")
+        subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(seed), "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "seed"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "HEAD:main"], check=True)
+        worktree = repo / "main"
+        subprocess.run(
+            ["git", "--git-dir", str(repo / ".bare"), "worktree", "add", "-q", str(worktree), "main"],
+            check=True,
+        )
+        assert repo_slug_from_path(str(worktree)) == "agentic-repo"
+
+    def test_bare_clone_dir_strips_dot_git_suffix(self, tmp_path):
+        import subprocess
+
+        bare = tmp_path / "care.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        assert repo_slug_from_path(str(bare)) == "care"
+
 
 class TestTagAliasesDefault:
     def test_tag_aliases_default_is_a_string_map(self):
