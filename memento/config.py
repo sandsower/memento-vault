@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -297,9 +298,25 @@ DEFAULT_CONFIG = {
     # the new validity-chain report (note -> invalidated_by -> ... with
     # dates).
     "contradictions_lexical_fallback": False,
+    # profile/ is curated, cross-agent memory (identity, voice, standing
+    # constraints), distinct from append-only session captures in notes/.
+    # It is indexed + searchable and lifecycle-exempt. `dir` names the folder,
+    # `searchable` controls indexing, and inject_into_briefing / decay_exempt
+    # are read by later phases (briefing injection / lifecycle exemption).
+    "profile": {
+        "dir": "profile",
+        "searchable": True,
+        "inject_into_briefing": True,
+        "decay_exempt": True,
+    },
 }
 
 _CONFIG = None
+
+# Default profile settings, re-applied on top of any user `profile:` override.
+# The config loader does a shallow dict.update(), so a user who sets only
+# `profile: {dir: persona}` would otherwise drop the other keys.
+_PROFILE_DEFAULTS = dict(DEFAULT_CONFIG["profile"])
 
 
 def load_config():
@@ -393,6 +410,76 @@ def reset_config():
     """Reset cached config. Useful for testing."""
     global _CONFIG
     _CONFIG = None
+
+
+@dataclass(frozen=True)
+class DirSpec:
+    """One vault content directory and the roles it plays.
+
+    Single source of truth for the dir sets that used to be duplicated as
+    ``("notes", "fleeting", "projects")`` tuples across indexer, search
+    backends, retrieval policy, health, and archive.
+    """
+
+    name: str
+    indexed: bool = False  # scanned into search.db and searched
+    core: bool = False  # a usable vault needs at least one of these
+    health_expected: bool = False  # absence warrants a health WARN
+    archivable: bool = False  # packed into a portable export
+    curated: bool = False  # lifecycle-exempt (read in a later phase)
+    inject_index: bool = False  # index injected into briefings (later phase)
+
+
+def _profile_settings(config=None):
+    """Profile config with defaults re-applied over any user override."""
+    config = config if config is not None else get_config()
+    override = config.get("profile") or {}
+    return {**_PROFILE_DEFAULTS, **override}
+
+
+def content_dirs(config=None):
+    """Return the ordered registry of vault content directories."""
+    profile = _profile_settings(config)
+    return (
+        DirSpec("notes", indexed=True, core=True, health_expected=True, archivable=True),
+        DirSpec("fleeting", indexed=True, core=True, health_expected=True, archivable=True),
+        DirSpec("projects", indexed=True, core=True, health_expected=True, archivable=True),
+        DirSpec("archive", health_expected=True, archivable=True),
+        DirSpec(
+            profile["dir"],
+            indexed=bool(profile["searchable"]),
+            archivable=True,
+            curated=bool(profile["decay_exempt"]),
+            inject_index=bool(profile["inject_into_briefing"]),
+        ),
+    )
+
+
+def indexed_dir_names(config=None):
+    """Dirs scanned into the search index and searched (notes/fleeting/projects/profile)."""
+    return tuple(spec.name for spec in content_dirs(config) if spec.indexed)
+
+
+def core_dir_names(config=None):
+    """Dirs a usable vault must have at least one of (notes/fleeting/projects)."""
+    return tuple(spec.name for spec in content_dirs(config) if spec.core)
+
+
+def expected_dir_names(config=None):
+    """Dirs whose absence warrants a health WARN (notes/fleeting/projects/archive)."""
+    return tuple(spec.name for spec in content_dirs(config) if spec.health_expected)
+
+
+def archive_root_names(config=None):
+    """Top-level dirs packed into a portable archive (adds archive/ and profile/)."""
+    return tuple(spec.name for spec in content_dirs(config) if spec.archivable)
+
+
+def source_for_path(rel_path, config=None):
+    """Classify a vault-relative note path by origin: "profile" (curated) or "note"."""
+    profile_dir = _profile_settings(config)["dir"]
+    first_segment = str(rel_path).replace("\\", "/").split("/", 1)[0]
+    return "profile" if first_segment == profile_dir else "note"
 
 
 def get_vault():
