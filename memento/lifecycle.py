@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, slugify
+from memento.config import RUNTIME_DIR, content_dirs, detect_project, get_config, get_vault, slugify
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
 from memento.hub import vault_map
 from memento import queue as capture_queue
@@ -881,6 +881,47 @@ def run_remote_briefing(cwd, config, session_id="unknown", host_id: str | None =
         )
 
     return summary
+
+
+_PROFILE_BRIEFING_LABEL = "[vault] Profile (curated - read before drafting public writing, bios, or copy):"
+_PROFILE_BRIEFING_MAX_CHARS = 2000
+_PROFILE_BRIEFING_TRUNCATION_MARKER = "\n... (profile index truncated)"
+
+
+def profile_briefing_section(vault, config) -> str | None:
+    """Return the curated profile index as a labeled briefing block, or None.
+
+    Gated by the registry's ``inject_index`` flag (set only when
+    ``profile.inject_into_briefing`` is enabled). Reads the profile dir's
+    PROFILE.md index (curated, human-maintained) and returns it under an
+    authoritative label. Index only -- agents fetch full facet files on
+    demand. A no-op for vaults without a profile index.
+    """
+    spec = next((d for d in content_dirs(config) if d.inject_index), None)
+    if spec is None:
+        return None
+
+    index_file = Path(vault) / spec.name / "PROFILE.md"
+    if not index_file.is_file():
+        return None
+
+    try:
+        text = index_file.read_text(errors="replace")
+    except OSError:
+        return None
+
+    # Drop the file's own leading H1 -- our label replaces it.
+    lines = text.splitlines()
+    if lines and lines[0].lstrip().startswith("# "):
+        lines = lines[1:]
+    body = "\n".join(lines).strip()
+    if not body:
+        return None
+
+    if len(body) > _PROFILE_BRIEFING_MAX_CHARS:
+        body = body[:_PROFILE_BRIEFING_MAX_CHARS].rstrip() + _PROFILE_BRIEFING_TRUNCATION_MARKER
+
+    return f"{_PROFILE_BRIEFING_LABEL}\n{body}"
 
 
 def build_briefing(
