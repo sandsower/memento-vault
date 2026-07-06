@@ -186,3 +186,56 @@ def test_main_still_triages_when_archive_sweep_raises(tmp_path, monkeypatch):
         _mod.main()
 
     assert exc.value.code == 0
+
+
+def test_main_runs_fleeting_lifecycle_sweep_after_archive_sweep(tmp_path, monkeypatch):
+    """MEM-153: the sweeper is also the periodic trigger for the fleeting lifecycle sweep."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    monkeypatch.setattr(_mod, "VAULT", vault)
+    monkeypatch.setattr(_mod, "FLEETING", vault / "fleeting")
+    monkeypatch.setattr(_mod, "LOCK_FILE", tmp_path / "sweeper.lock")
+    monkeypatch.setattr(_mod, "CLAUDE_PROJECTS", tmp_path / "no-claude-projects")
+    monkeypatch.setattr(_mod, "PI_SESSIONS", tmp_path / "no-pi-sessions")
+    monkeypatch.setattr(_mod, "PI_SUBAGENTS", tmp_path / "no-pi-subagents")
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.delenv("MEMENTO_PI_TRANSCRIPT_ROOTS", raising=False)
+    monkeypatch.setattr(_mod, "fold_access_log_into_frontmatter", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "sweep_archive_candidates", lambda vault_path: None)
+
+    fleeting_calls = []
+    monkeypatch.setattr(_mod, "fleeting_lifecycle_sweep", lambda vault_path: fleeting_calls.append(vault_path))
+
+    with pytest.raises(SystemExit) as exc:
+        _mod.main()
+
+    assert exc.value.code == 0
+    assert fleeting_calls == [str(vault)]
+
+
+def test_main_still_triages_when_fleeting_lifecycle_sweep_raises(tmp_path, monkeypatch):
+    """A fleeting-lifecycle failure must never block orphan triage -- isolated like fold/archive sweep."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    monkeypatch.setattr(_mod, "VAULT", vault)
+    monkeypatch.setattr(_mod, "FLEETING", vault / "fleeting")
+    monkeypatch.setattr(_mod, "LOCK_FILE", tmp_path / "sweeper.lock")
+    monkeypatch.setattr(_mod, "CLAUDE_PROJECTS", tmp_path / "no-claude-projects")
+    monkeypatch.setattr(_mod, "PI_SESSIONS", tmp_path / "no-pi-sessions")
+    monkeypatch.setattr(_mod, "PI_SUBAGENTS", tmp_path / "no-pi-subagents")
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.delenv("MEMENTO_PI_TRANSCRIPT_ROOTS", raising=False)
+    monkeypatch.setattr(_mod, "fold_access_log_into_frontmatter", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "sweep_archive_candidates", lambda vault_path: None)
+
+    def _boom(vault_path):
+        raise RuntimeError("fleeting lifecycle exploded")
+
+    monkeypatch.setattr(_mod, "fleeting_lifecycle_sweep", _boom)
+
+    with pytest.raises(SystemExit) as exc:
+        _mod.main()
+
+    assert exc.value.code == 0

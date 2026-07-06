@@ -19,7 +19,7 @@ _repo_root = str(Path(__file__).parent.parent)
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from memento.archive import sweep_archive_candidates  # noqa: E402
+from memento.archive import fleeting_lifecycle_sweep, sweep_archive_candidates  # noqa: E402
 from memento.store import fold_access_log_into_frontmatter  # noqa: E402
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
@@ -260,6 +260,18 @@ def main():
             # same way as the fold above -- a sweep failure must never block
             # orphan triage.
             sweep_archive_candidates(str(VAULT))
+        except Exception:
+            pass
+
+        try:
+            # Fleeting note lifecycle (MEM-153): promote fleeting/*.md notes
+            # to notes/ (resurfaced or cited by a session-summary note) and
+            # reversibly expire the rest once older than fleeting_expire_days
+            # (memento.archive.fleeting_lifecycle_sweep). A no-op until
+            # fleeting_lifecycle_enabled is flipped on. Isolated the same way
+            # as the fold/archive sweep above -- a failure here must never
+            # block orphan triage.
+            fleeting_lifecycle_sweep(str(VAULT))
         except Exception:
             pass
 

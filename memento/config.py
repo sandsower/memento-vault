@@ -82,6 +82,15 @@ DEFAULT_CONFIG = {
     "archive_sweep_enabled": False,
     "archive_sweep_age_days": 90,
     "archive_sweep_max_per_run": 50,
+    # Fleeting note lifecycle (MEM-153): promotes fleeting/*.md notes to
+    # notes/ when resurfaced_count >= fleeting_promote_min_resurfaced or
+    # they're cited by a session-summary note, and reversibly expires
+    # (archives) whatever's left once older than fleeting_expire_days.
+    # Disabled by default -- flip fleeting_lifecycle_enabled once you've
+    # reviewed a dry-run report. See memento.archive.fleeting_lifecycle_sweep.
+    "fleeting_lifecycle_enabled": False,
+    "fleeting_promote_min_resurfaced": 2,
+    "fleeting_expire_days": 14,
     "wikilink_expansion": True,
     "wikilink_max_hops": 1,
     "wikilink_score_factor": 0.5,

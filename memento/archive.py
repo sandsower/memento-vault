@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import uuid
@@ -103,7 +104,9 @@ def tombstones_path(vault: Path) -> Path:
 
 
 def _is_allowed_tombstone_rel(rel: str) -> bool:
-    return rel.startswith("notes/") and rel.endswith(".md")
+    # MEM-153: fleeting/ is a second allowed tombstone source (expiring
+    # fleeting notes reuses this same ledger) -- never a parallel mechanism.
+    return rel.endswith(".md") and (rel.startswith("notes/") or rel.startswith("fleeting/"))
 
 
 def _iter_jsonl(path: Path):
@@ -611,21 +614,30 @@ DEFAULT_ARCHIVE_SWEEP_MAX_PER_RUN = 50
 ARCHIVE_SWEEP_CERTAINTY_CEILING = 4
 
 
-def _archive_rel_for(notes_rel: str) -> str:
-    """Map a ``notes/...`` vault-relative path to its ``archive/...`` counterpart."""
-    if not notes_rel.startswith("notes/"):
-        raise ValueError(f"expected a notes/ relative path, got: {notes_rel}")
-    return "archive/" + notes_rel[len("notes/") :]
+def _archive_rel_for(rel: str) -> str:
+    """Map a ``notes/...`` or ``fleeting/...`` vault-relative path to its ``archive/...`` counterpart.
+
+    ``notes/...`` keeps the original MEM-152 flat mapping (``archive/<name>``)
+    unchanged for backward compatibility. ``fleeting/...`` (MEM-153) nests
+    under ``archive/fleeting/<name>`` instead of also flattening -- fleeting
+    stems are dates (``2026-05-19``) and a flat mapping risks colliding with
+    an archived ``notes/`` file that happens to share a stem.
+    """
+    if rel.startswith("notes/"):
+        return "archive/" + rel[len("notes/") :]
+    if rel.startswith("fleeting/"):
+        return "archive/fleeting/" + rel[len("fleeting/") :]
+    raise ValueError(f"expected a notes/ or fleeting/ relative path, got: {rel}")
 
 
 def archive_note(vault: Path, notes_rel_path: str, *, reason: str = "archived", ts: str | None = None) -> dict:
-    """Move a note from ``notes/`` to ``archive/`` and record a reversible tombstone.
+    """Move a note from ``notes/`` (or ``fleeting/``, MEM-153) to ``archive/`` and record a reversible tombstone.
 
     Reuses the same tombstone ledger (:func:`record_tombstone`) that portable
-    export/import already use to track "this notes/ path used to exist and
-    was removed" -- no new archive mechanism. The file is moved, not deleted,
-    so its content survives under ``archive/`` and :func:`restore_note` can
-    move it back. Raises :class:`ArchiveError` if the note does not exist.
+    export/import already use to track "this path used to exist and was
+    removed" -- no new archive mechanism. The file is moved, not deleted, so
+    its content survives under ``archive/`` and :func:`restore_note` can move
+    it back. Raises :class:`ArchiveError` if the note does not exist.
     """
     vault = Path(vault)
     rel = _normalize_rel(notes_rel_path)
@@ -646,12 +658,12 @@ def archive_note(vault: Path, notes_rel_path: str, *, reason: str = "archived", 
 
 
 def restore_note(vault: Path, notes_rel_path: str, *, ts: str | None = None) -> dict:
-    """Reverse :func:`archive_note`: move a note back from ``archive/`` to ``notes/``.
+    """Reverse :func:`archive_note`: move a note back from ``archive/`` to its original location.
 
-    ``notes_rel_path`` is the note's ORIGINAL ``notes/...`` path (as passed to
-    ``archive_note``), not its ``archive/...`` location. Appends a
-    ``reason="restored"`` tombstone record via the same restore path
-    (:func:`_restore_record`) the portable-import merge logic uses, so a
+    ``notes_rel_path`` is the note's ORIGINAL ``notes/...`` or ``fleeting/...``
+    path (as passed to ``archive_note``), not its ``archive/...`` location.
+    Appends a ``reason="restored"`` tombstone record via the same restore
+    path (:func:`_restore_record`) the portable-import merge logic uses, so a
     later portable export/import correctly sees the path as live again.
     """
     vault = Path(vault)
@@ -818,6 +830,305 @@ def sweep_archive_candidates(vault, *, config=None, now=None, dry_run: bool = Fa
             print(
                 f"[memento] archived {candidate['path']} "
                 f"(tier={candidate['tier']}, age={candidate['age_days']}d, certainty={candidate['certainty']})",
+                file=sys.stderr,
+            )
+    finally:
+        if not already_held:
+            release_vault_write_lock()
+
+    return report
+
+
+# --- Fleeting note lifecycle (MEM-153) ---
+#
+# fleeting/<YYYY-MM-DD>.md notes (memento.store.append_fleeting_session)
+# accumulate forever today -- nothing promotes them to a durable notes/
+# entry and nothing expires them. This closes that gap by reusing the SAME
+# archive_note()/restore_note() tombstone machinery as the MEM-152 sweep
+# above (extended, not forked, via the notes/-or-fleeting/ branches in
+# _is_allowed_tombstone_rel/_archive_rel_for) -- never a second archive
+# path.
+
+DEFAULT_FLEETING_PROMOTE_MIN_RESURFACED = 2
+DEFAULT_FLEETING_EXPIRE_DAYS = 14
+
+# docs/frontmatter-schema.md's "Source values" table describes `source:
+# mcp-capture` as "`memento_capture` session-summary note writer" -- there is
+# no distinct `type: session-summary` frontmatter enum value anywhere in the
+# schema (Note types are decision/discovery/pattern/bugfix/tool/architecture/
+# daily; mcp-capture notes are written with `type: discovery`). This is the
+# literal, evidenced signal used below to recognize "a session-summary note"
+# for fleeting-note promotion-by-citation.
+SESSION_SUMMARY_SOURCE = "mcp-capture"
+
+# Matches `[[stem]]` and `[[stem|alias]]`, not `[[stem#heading]]` -- section
+# links point at a heading within a note, not necessarily citing the whole
+# thing, so they are deliberately excluded from the citation signal. The
+# trailing `(?:\]\]|\|)` lookahead-by-match is what rejects `#heading`: once
+# the captured run hits `#` it can't reach a closing `]]` or `|`, so the
+# whole pattern fails to match at that position instead of silently
+# truncating the capture at the `#`.
+_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:\]\]|\|)")
+
+
+def _iter_fleeting_notes(vault: Path):
+    fleeting_dir = Path(vault) / "fleeting"
+    if not fleeting_dir.exists():
+        return
+    for path in sorted(p for p in fleeting_dir.rglob("*.md") if p.is_file() and not p.is_symlink()):
+        yield path.relative_to(vault).as_posix()
+
+
+def _is_cited_by_session_summary(vault: Path, stem: str) -> bool:
+    """True if any ``notes/`` session-summary note wikilinks ``stem``.
+
+    A plain content scan (regex over the raw body), not the wikilink graph --
+    MEM-153 is explicitly scoped to avoid a networkx/graph.py dependency for
+    this check.
+    """
+    notes_dir = Path(vault) / "notes"
+    if not notes_dir.exists():
+        return False
+
+    from memento.store import _frontmatter_scalar, split_frontmatter
+
+    for path in sorted(p for p in notes_dir.rglob("*.md") if p.is_file() and not p.is_symlink()):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        frontmatter, body = split_frontmatter(text)
+        if _frontmatter_scalar(frontmatter, "source") != SESSION_SUMMARY_SOURCE:
+            continue
+        if any(match.group(1).strip() == stem for match in _WIKILINK_RE.finditer(body)):
+            return True
+    return False
+
+
+def _fleeting_age_days(path: Path, frontmatter: str, now: datetime):
+    """Age in days: ``date`` frontmatter first, else the file's mtime, else ``None``.
+
+    ``None`` means neither signal was available -- callers must skip, never
+    guess an age to archive against.
+    """
+    from memento.store import _frontmatter_scalar
+
+    age = _age_days_from_date(_frontmatter_scalar(frontmatter, "date"), now)
+    if age is not None:
+        return age
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return None
+    return (now - mtime).total_seconds() / 86400.0
+
+
+def _fleeting_notes_target(vault: Path, rel: str) -> tuple[str, Path]:
+    """Compute the ``notes/`` destination for promoting ``fleeting/<name>.md``.
+
+    Mirrors ``memento.store.write_note``'s numeric-suffix-on-collision
+    behavior so a promoted fleeting note never silently overwrites an
+    existing notes/ file with the same stem.
+    """
+    if not rel.startswith("fleeting/"):
+        raise ValueError(f"expected a fleeting/ relative path, got: {rel}")
+    name = rel[len("fleeting/") :]
+    notes_dir = Path(vault) / "notes"
+    dest = notes_dir / name
+    if not dest.exists():
+        return f"notes/{name}", dest
+
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    for i in range(2, 100):
+        candidate_name = f"{stem}-{i}{suffix}"
+        candidate_dest = notes_dir / candidate_name
+        if not candidate_dest.exists():
+            return f"notes/{candidate_name}", candidate_dest
+    raise ArchiveError(f"could not find a free notes/ destination for {rel}")
+
+
+def promote_fleeting_note(vault: Path, fleeting_rel: str, *, now: datetime | None = None) -> dict:
+    """Promote ``fleeting/<x>.md`` to ``notes/<x>.md``, stamping ``promoted_at`` (MEM-153).
+
+    Adds a ``promoted_at: <ISO date>`` frontmatter line while preserving
+    every other frontmatter line verbatim (fleeting notes as written by
+    :func:`memento.store.append_fleeting_session` carry no YAML frontmatter
+    block at all today, so there is usually nothing to preserve -- but this
+    round-trips any that do exist, the same way
+    ``memento.store.replace_note_at_path``/``_fold_note_frontmatter``
+    preserve unmanaged keys elsewhere). Atomic move (``os.replace``) plus a
+    single atomic rewrite of the destination via ``_write_text_atomic`` --
+    never a full ``write_note()`` re-render that would rebuild the body.
+    """
+    from memento.store import _write_text_atomic, split_frontmatter
+
+    vault = Path(vault)
+    rel = _normalize_rel(fleeting_rel)
+    if not rel.startswith("fleeting/") or not rel.endswith(".md"):
+        raise ValueError(f"unsupported promotion path: {rel}")
+    src = _safe_dest(vault, rel)
+    if not src.exists() or not src.is_file():
+        raise ArchiveError(f"fleeting note not found: {rel}")
+
+    target_rel, dest = _fleeting_notes_target(vault, rel)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    promoted_at = now.strftime("%Y-%m-%d")
+
+    text = src.read_text(encoding="utf-8", errors="replace")
+    frontmatter, body = split_frontmatter(text)
+    preserved = [line for line in (frontmatter or "").splitlines() if line.strip()]
+    preserved.append(f"promoted_at: {promoted_at}")
+    new_text = "---\n" + "\n".join(preserved) + "\n---\n" + body
+
+    os.replace(src, dest)
+    _write_text_atomic(dest, new_text)
+
+    return {"path": rel, "notes_path": target_rel, "promoted_at": promoted_at}
+
+
+def fleeting_lifecycle_sweep(vault, *, config=None, now=None, dry_run: bool = False) -> dict:
+    """Promote or expire ``fleeting/`` notes on the sweep cadence (MEM-153).
+
+    Promotion (``fleeting/<x>.md`` -> ``notes/<x>.md`` via
+    :func:`promote_fleeting_note`) happens when EITHER:
+
+    1. ``resurfaced_count`` frontmatter is >= ``fleeting_promote_min_resurfaced``
+       (config, default :data:`DEFAULT_FLEETING_PROMOTE_MIN_RESURFACED`) --
+       the same durable resurfacing signal MEM-148 folds from the access log
+       (:func:`memento.store.fold_access_log_into_frontmatter`). A fleeting
+       note with no frontmatter block reads as 0 -- not an error, just "no
+       signal yet."
+    2. It is cited by a session-summary note: a ``[[stem]]`` wikilink to the
+       fleeting note's filename stem, appearing in the body of any
+       ``notes/*.md`` note whose ``source`` frontmatter is
+       :data:`SESSION_SUMMARY_SOURCE` (see :func:`_is_cited_by_session_summary`).
+
+    Expiry (:func:`archive_note` with ``reason="fleeting_expired"``,
+    reversible via :func:`restore_note`, same tombstone ledger) happens for
+    anything left over whose age -- ``date`` frontmatter first, file mtime
+    otherwise (:func:`_fleeting_age_days`) -- exceeds ``fleeting_expire_days``
+    (config, default :data:`DEFAULT_FLEETING_EXPIRE_DAYS`). A note with
+    neither a parseable ``date`` nor a readable mtime is skipped, never
+    archived on ambiguity -- and a note under the expiry threshold that also
+    didn't qualify for promotion is left untouched, not reported.
+
+    Gated by ``fleeting_lifecycle_enabled`` (config, default ``False``): when
+    disabled this is a no-op that logs one line and returns immediately.
+    ``dry_run=True`` runs the full scan and returns the same report shape
+    without moving, rewriting, or archiving anything.
+
+    Mutations happen under the vault write lock, re-entrant like
+    :func:`sweep_archive_candidates` -- acquires only if not already held,
+    never releases a lock a caller holds.
+
+    Returns a report dict: ``{enabled, dry_run, promoted, expired, skipped}``
+    -- ``promoted``/``expired`` are lists of ``{path, ...}`` dicts, ``skipped``
+    is a list of ``{path, reason}``.
+    """
+    from memento.config import get_config as _get_config
+    from memento.store import _frontmatter_int, split_frontmatter
+
+    vault = Path(vault)
+    if config is None:
+        config = _get_config()
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    enabled = bool(config.get("fleeting_lifecycle_enabled", False))
+    min_resurfaced = config.get("fleeting_promote_min_resurfaced", DEFAULT_FLEETING_PROMOTE_MIN_RESURFACED)
+    expire_days = config.get("fleeting_expire_days", DEFAULT_FLEETING_EXPIRE_DAYS)
+
+    report: dict = {
+        "enabled": enabled,
+        "dry_run": dry_run,
+        "promoted": [],
+        "expired": [],
+        "skipped": [],
+    }
+
+    if not enabled:
+        print(
+            "[memento] fleeting lifecycle disabled (fleeting_lifecycle_enabled: false) -- skipping",
+            file=sys.stderr,
+        )
+        return report
+
+    to_promote = []
+    to_expire = []
+
+    for rel in _iter_fleeting_notes(vault):
+        path = vault / rel
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            report["skipped"].append({"path": rel, "reason": f"unreadable: {exc}"})
+            continue
+
+        frontmatter, _ = split_frontmatter(text)
+        stem = Path(rel).stem
+
+        resurfaced_count = _frontmatter_int(frontmatter, "resurfaced_count") or 0
+        if resurfaced_count >= min_resurfaced:
+            to_promote.append({"path": rel, "reason": f"resurfaced_count >= {min_resurfaced}"})
+            continue
+        if _is_cited_by_session_summary(vault, stem):
+            to_promote.append({"path": rel, "reason": "cited by session-summary note"})
+            continue
+
+        age_days = _fleeting_age_days(path, frontmatter, now)
+        if age_days is None:
+            report["skipped"].append({"path": rel, "reason": "no date frontmatter and no readable mtime"})
+            continue
+        if age_days > expire_days:
+            to_expire.append({"path": rel, "age_days": round(age_days, 1)})
+        # else: under the expiry threshold and not promoted -- left alone.
+
+    if dry_run:
+        report["promoted"] = to_promote
+        report["expired"] = to_expire
+        return report
+
+    if not to_promote and not to_expire:
+        return report
+
+    from memento.store import acquire_vault_write_lock, owns_vault_write_lock, release_vault_write_lock
+
+    already_held = owns_vault_write_lock()
+    if not already_held and not acquire_vault_write_lock():
+        for candidate in [*to_promote, *to_expire]:
+            report["skipped"].append({"path": candidate["path"], "reason": "vault write lock unavailable"})
+        return report
+
+    try:
+        for candidate in to_promote:
+            try:
+                result = promote_fleeting_note(vault, candidate["path"], now=now)
+            except (ArchiveError, ValueError, OSError) as exc:
+                report["skipped"].append({"path": candidate["path"], "reason": f"promotion failed: {exc}"})
+                continue
+            report["promoted"].append({**candidate, **result})
+            print(
+                f"[memento] promoted {candidate['path']} -> {result['notes_path']} ({candidate['reason']})",
+                file=sys.stderr,
+            )
+
+        for candidate in to_expire:
+            try:
+                result = archive_note(vault, candidate["path"], reason="fleeting_expired")
+            except (ArchiveError, ValueError, OSError) as exc:
+                report["skipped"].append({"path": candidate["path"], "reason": f"expire failed: {exc}"})
+                continue
+            report["expired"].append({**candidate, "archive_path": result["archive_path"]})
+            print(
+                f"[memento] expired {candidate['path']} (age={candidate['age_days']}d)",
                 file=sys.stderr,
             )
     finally:

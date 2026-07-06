@@ -123,6 +123,40 @@ delete. Gated by `archive_sweep_enabled` (config, default `false` -- a no-op
 until enabled) and capped per run by `archive_sweep_max_per_run` (config,
 default 50).
 
+### Fleeting note lifecycle (MEM-153)
+
+`memento.archive.fleeting_lifecycle_sweep` runs from the same
+`hooks/memento-sweeper.py` periodic sweep, right after the MEM-152 archive
+sweep above, and promotes or expires `fleeting/*.md` notes (see
+`memento.store.append_fleeting_session` -- these are per-UTC-day session log
+files and, as written today, carry no YAML frontmatter block of their own).
+
+A fleeting note is promoted (moved to `notes/`, stamped with
+`promoted_at: <ISO date>`, all other frontmatter preserved verbatim) when
+EITHER:
+
+- its `resurfaced_count` frontmatter (folded in by
+  `memento.store.fold_access_log_into_frontmatter`, same as the durability
+  tier above) is at least `fleeting_promote_min_resurfaced` (config, default
+  2), or
+- it is cited by a session-summary note: a `[[stem]]` wikilink to the
+  fleeting note's filename stem appears in the body of any `notes/*.md` note
+  whose `source` frontmatter is `mcp-capture`. There is no distinct
+  `type: session-summary` frontmatter value in this schema -- `mcp-capture`
+  is the literal, documented signal (see
+  [Source values](#source-values) above: "`memento_capture` session-summary
+  note writer") used to recognize a session-summary note. The check is a
+  plain content scan, not the wikilink graph.
+
+Anything left over whose age -- `date` frontmatter first, file mtime
+otherwise -- exceeds `fleeting_expire_days` (config, default 14) is
+reversibly archived via the same `archive_note`/`restore_note`/tombstone
+machinery the MEM-152 sweep uses (`fleeting/<x>.md` archives to
+`archive/fleeting/<x>.md`, never a second archive mechanism). A note with
+neither a parseable `date` nor a readable mtime is skipped, never archived
+on ambiguity. Gated by `fleeting_lifecycle_enabled` (config, default `false`
+-- a no-op until enabled).
+
 ## Note types
 
 | Type | When to use |
