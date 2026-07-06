@@ -225,6 +225,45 @@ class TestMainPipeline:
         assert len(state["runs"]) >= 1
         assert state["runs"][-1]["dry_run"] is True
 
+    def test_run_records_total_notes_and_processed_notes_total(
+        self, mock_config, sample_notes, tmp_vault, inception_state_path, mock_qmd_db
+    ):
+        """MEM-154: every run entry records total_notes and
+        processed_notes_total so memento/health.py can compute a coverage
+        ratio and backlog trend from state history alone, without
+        rescanning the vault. processed_notes_total must reflect *this*
+        run's consolidation (mark_consolidated runs before record_run)."""
+        (tmp_vault / "notes" / "existing-pattern.md").unlink()
+        with _force_cluster(["redis-cache-ttl", "redis-eviction-policy", "redis-cache-invalidation"]):
+            with _mock_llm_response():
+                result = _run_main(mock_config, inception_state_path, ["--full"], db_path=str(mock_qmd_db))
+        assert result == 0
+        state = json.loads(inception_state_path.read_text())
+        last_run = state["runs"][-1]
+        # sample_notes has 5 non-pattern, non-archived notes eligible for
+        # clustering (existing-pattern is source: inception and excluded
+        # regardless of the unlink above; archived-note lives in archive/).
+        assert last_run["total_notes"] == 5
+        assert last_run["processed_notes_total"] == len(state["processed_notes"])
+        assert last_run["processed_notes_total"] >= 3
+
+    def test_total_notes_recorded_when_below_cluster_min(
+        self, mock_config, tmp_vault, inception_state_path, mock_qmd_db
+    ):
+        """The early-return "not enough notes to cluster" path still records
+        total_notes, so a quiet vault doesn't show up as missing coverage
+        data in health.py."""
+        for i, (stem, tag) in enumerate([("solo-a", "alpha"), ("solo-b", "beta")]):
+            (tmp_vault / "notes" / f"{stem}.md").write_text(
+                f"---\ntitle: {stem}\ntype: discovery\ntags: [{tag}]\n"
+                f"date: 2026-03-22T10:0{i}\n---\n\nSome content about {tag}.\n"
+            )
+        result = _run_main(mock_config, inception_state_path, ["--full"], db_path=str(mock_qmd_db))
+        assert result == 0
+        state = json.loads(inception_state_path.read_text())
+        assert state["runs"][-1]["total_notes"] == 2
+        assert state["runs"][-1]["processed_notes_total"] == 0
+
 
 class TestMainBackendSelection:
     """MEM-157: the embedding source main() uses is resolved from the vault's
