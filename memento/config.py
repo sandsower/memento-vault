@@ -36,13 +36,30 @@ DEFAULT_CONFIG = {
     "briefing_min_score": 0.55,
     "prompt_recall": True,
     "recall_concrete_mode": False,
-    "recall_min_score": 0.6,
+    # Recalibrated 0.6 -> 0.25 (MEM-127). 0.6 was tuned for QMD's native BM25
+    # band (0.9+ per docs/quality-analysis-2026-07-02.md); applied uniformly
+    # to whichever backend answered, it silently discarded valid embedded
+    # -backend hits (FTS5's bounded score/(score+k) transform and vec's
+    # cosine-based (cos+1)/2 both commonly land well under 0.6 for a genuine
+    # match - see normalize_fts5_score()/normalize_vec_cosine_distance() in
+    # memento.embedded_search). 0.25 stays inside the range
+    # benchmark/optuna_sweep.py already sweeps (0.0-0.3, best-found ~0.14-
+    # 0.16 against LongMemEval's own BM25 adapter) while remaining a
+    # meaningful noise floor: QMD's own measured "barely related" junk still
+    # scores 0.87-0.89 (see confidence_margin() docstring), well above it.
+    "recall_min_score": 0.25,
     "recall_max_notes": 3,
-    # No longer read by the deep-pipeline gate in retrieval_policy.py (MEM-135
-    # replaced the absolute-score gate with recall_confidence_margin below,
-    # since an absolute cutoff cannot hold across un-normalized backend score
-    # scales - see confidence_margin() in retrieval_policy.py). Kept only for
-    # the benchmark/optuna_sweep.py tuning harness and longmemeval_adapter.py.
+    # Read by the single_strong_hit check in retrieval_policy.py's
+    # PromptRecallRuntime.run(): a lone BM25/embedded/vec/grep result whose
+    # score clears this bar counts as confident enough to skip PRF/RRF/
+    # rerank, even though confidence_margin() can't establish a margin from
+    # a single result (see confidence_margin() docstring). Left at 0.55
+    # post-MEM-127: benchmark/sweep-findings-2026-03-23.md found production's
+    # existing 0.55 already near-optimal against LongMemEval, and under the
+    # new vec cosine scale (neutral/uncorrelated = 0.5, see
+    # normalize_vec_cosine_distance()) 0.55 still requires genuinely
+    # positive relatedness rather than merely non-negative, so it doesn't
+    # need to move for the embedded backend either.
     "recall_high_confidence": 0.55,
     # Relative rank-1-vs-rank-2 score gap (fraction of the top score) the
     # deep-pipeline gate requires before treating a result set as confident
@@ -186,6 +203,19 @@ DEFAULT_CONFIG = {
     # Search backend
     "search_backend": "auto",  # auto | qmd | embedded | grep
     "search_db_path": ".search/search.db",  # relative to vault_path
+    # Bounded-transform constant for the embedded backend's FTS5 BM25 score
+    # normalization (MEM-127): score / (score + fts5_score_k), replacing the
+    # old batch-relative `score / max_score_in_this_batch` (which always
+    # forced the top hit in any result batch to exactly 1.0 - see
+    # normalize_fts5_score() in memento.embedded_search). Default chosen
+    # empirically against a small fixture vault: a single rare, discriminating
+    # term match raw-scores ~1.0-1.7 (mapping to ~0.4-0.6 with k=2.0), while
+    # common-term-only matches (near-zero raw BM25, since IDF collapses when
+    # a term appears in most documents) stay near 0. Raw BM25 magnitude
+    # scales with corpus size and term rarity, so this is a coarse starting
+    # point - tune via benchmark/optuna_sweep.py if a vault's score
+    # distribution warrants it.
+    "fts5_score_k": 2.0,
     # Embedding (for embedded search backend)
     "embedding_provider": "local",  # local | voyage | openai | google
     "embedding_model": "nomic-embed-text-v1.5",

@@ -58,9 +58,9 @@ briefing_min_score: 0.55
 
 # Inject vault notes before each prompt
 prompt_recall: true
-recall_min_score: 0.6
+recall_min_score: 0.25         # normalized [0,1] relevance floor, see "Search backend and scoring" below
 recall_max_notes: 3
-recall_high_confidence: 0.55   # BM25 score above this skips deep path
+recall_high_confidence: 0.55   # normalized score above this (single result only) skips the deep path
 recall_skip_broad_project_queries: true  # Skip broad project/history prompts; use explicit search instead
 recall_skip_patterns:
   - "^(yes|no|ok|sure|thanks|y|n|yep|nope|looks good|lgtm|ship it|continue)$"
@@ -132,6 +132,29 @@ extra_qmd_collections: [team-knowledge, shared-docs]
 
 Each collection must be configured in your `~/.config/qmd/index.yml`.
 
+## Search backend and scoring
+
+`search_backend: auto` (default) picks QMD -> embedded (SQLite FTS5 + sqlite-vec) -> grep, in that order, based on what's available. Every backend's `search()` result carries a `backend` field (`qmd`, `embedded-fts`, `embedded-vec`, or `grep`) alongside `path`, `title`, `score`, and `snippet`.
+
+```yaml
+search_backend: auto   # auto | qmd | embedded | grep
+search_db_path: .search/search.db   # embedded backend's derived index, relative to vault_path
+
+# Bounded-transform constant for the embedded backend's FTS5 BM25 score
+# normalization: score / (score + fts5_score_k). Higher k compresses scores
+# toward 0 (stricter); lower k lets weaker matches climb higher.
+fts5_score_k: 2.0
+```
+
+Each backend normalizes its own relevance signal to `[0, 1]` at the `search()` boundary so a single `recall_min_score` / `recall_high_confidence` threshold behaves sensibly no matter which backend answers:
+
+- **qmd**: QMD's own BM25/vector score, already ~bounded in practice (observed: BM25 hits 0.9-0.98, semantic hits 0.5-0.7) - only defensively clamped to `[0, 1]`, since we don't control the external binary's internal scale.
+- **embedded-fts**: FTS5's raw BM25 rank is unbounded, so it's mapped via `score / (score + fts5_score_k)` - monotonic, bounded, and *not* a rescale relative to the current result batch (the old behavior forced the top hit in any batch to exactly 1.0, regardless of true relevance).
+- **embedded-vec**: sqlite-vec's `notes_vec` table is declared with `distance_metric=cosine`, so cosine distance (`1 - cosine_similarity`, range `[0, 2]`) maps to `(cos_sim + 1) / 2` - identical direction -> 1.0, orthogonal/unrelated -> 0.5, opposite -> 0.0.
+- **grep**: matched-terms / total-terms coverage fraction, already bounded by construction.
+
+This normalization is a coarse, monotonic-per-backend signal, not a guarantee that the same score means the same thing on every backend - `recall_min_score` is a noise floor more than a fine-grained confidence signal (see `confidence_margin()` in `memento/retrieval_policy.py` for the relative rank-1-vs-rank-2 gap the deep pipeline actually uses to decide confidence).
+
 ## Post-capture extensions
 
 The `/memento` skill checks for `~/.claude/skills/memento-post/SKILL.md` after creating notes. If the file exists, its instructions run as an extra step. Use this for things like promoting notes to a team vault or applying domain-specific tags.
@@ -201,8 +224,8 @@ prompt_recall: false
 # Default false preserves the existing conceptual recall behavior.
 recall_concrete_mode: auto
 
-# Tighter relevance threshold (fewer, more relevant results)
-recall_min_score: 0.6
+# Tighter relevance threshold (fewer, more relevant results; default 0.25)
+recall_min_score: 0.4
 
 # Show more results per prompt
 recall_max_notes: 5

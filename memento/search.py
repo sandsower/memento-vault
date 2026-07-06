@@ -159,6 +159,12 @@ def shape_search_results(
             "path": path,
             "title": _strip_injection(str(result.get("title", ""))),
             "score": round(result.get("score", 0.0), 4),
+            # MEM-127: which backend produced this result (qmd | embedded-fts
+            # | embedded-vec | grep), so callers can reason about cross
+            # -backend score comparability. "unknown" covers results that
+            # didn't originate from a backend.search() call (e.g. wikilink
+            # -expansion entries fetched via backend.get()).
+            "backend": result.get("backend", "unknown"),
         }
         snippet = _strip_injection(str(result.get("snippet", "")).strip())
         if normalized_detail in ("summary", "full") and snippet:
