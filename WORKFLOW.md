@@ -30,7 +30,7 @@ hooks:
     # ahead of /opt/homebrew/bin, and memento requires python >=3.10.
     /opt/homebrew/bin/python3 -m venv .venv
     .venv/bin/python -m pip install --quiet --upgrade pip
-    .venv/bin/python -m pip install --quiet -e '.[mcp]' pytest ruff
+    .venv/bin/python -m pip install --quiet -e '.[mcp,embedded,test]' pytest ruff
   before_run: |
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       git checkout -B rondo/{{ issue.identifier }}
