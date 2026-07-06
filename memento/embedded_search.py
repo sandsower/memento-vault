@@ -15,6 +15,7 @@ import struct
 import threading
 from pathlib import Path
 
+from memento.config import indexed_dir_names
 from memento.search_backend import SearchBackend, _literal_score, _literal_snippet, normalize_grep_term_coverage
 
 logger = logging.getLogger(__name__)
@@ -808,7 +809,7 @@ class EmbeddedSearchBackend(SearchBackend):
         try:
             conn = self._get_conn()
             search_dirs = [
-                self._vault_path / d for d in ("notes", "fleeting", "projects") if (self._vault_path / d).exists()
+                self._vault_path / d for d in indexed_dir_names() if (self._vault_path / d).exists()
             ]
 
             indexed_paths = set()

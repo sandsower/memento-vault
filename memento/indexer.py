@@ -1,8 +1,8 @@
 """Background vault indexer — scans for unindexed or stale markdown files.
 
 Designed to be called from a hook or cron, not run as a daemon.
-Walks vault dirs (notes/, fleeting/, projects/) and indexes .md files
-that are missing from or stale in the search database.
+Walks the indexed vault dirs (notes/, fleeting/, projects/, profile/) and
+indexes .md files that are missing from or stale in the search database.
 """
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from memento.config import indexed_dir_names
 
-VAULT_DIRS = ("notes", "fleeting", "projects")
+logger = logging.getLogger(__name__)
 
 
 def scan_and_index(vault_path: Path | str, backend) -> dict:
@@ -32,7 +32,7 @@ def scan_and_index(vault_path: Path | str, backend) -> dict:
     indexed = 0
     skipped = 0
 
-    for dir_name in VAULT_DIRS:
+    for dir_name in indexed_dir_names():
         search_dir = vault_path / dir_name
         if not search_dir.exists():
             continue
