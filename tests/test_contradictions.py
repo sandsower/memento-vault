@@ -7,7 +7,12 @@ from unittest.mock import patch
 import pytest
 
 from memento.config import DEFAULT_CONFIG
-from memento.contradictions import apply_invalidation, apply_supersession_backlinks, inspect_contradictions
+from memento.contradictions import (
+    _scan_notes_for_validity,
+    apply_invalidation,
+    apply_supersession_backlinks,
+    inspect_contradictions,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +53,46 @@ def _write_note(
 
 def _lexical_config():
     return {**DEFAULT_CONFIG, "contradictions_lexical_fallback": True}
+
+
+class TestScanNotesForValidityTags:
+    """MEM-166 characterization: _scan_notes_for_validity's tag parsing."""
+
+    def test_inline_tags(self, tmp_path):
+        vault = tmp_path / "vault"
+        notes_dir = vault / "notes"
+        notes_dir.mkdir(parents=True)
+        (notes_dir / "inline-tagged.md").write_text(
+            "---\ntitle: Inline Tagged\ncertainty: 3\ndate: 2026-01-01\ntags: [caching, redis]\n---\n\nBody.\n"
+        )
+
+        notes = _scan_notes_for_validity(vault)
+
+        assert notes["inline-tagged"]["tags"] == ["caching", "redis"]
+
+    def test_block_style_tags_are_now_visible(self, tmp_path):
+        """The ONE intended behavior change (MEM-166): the naive
+        `.strip("[]")` this replaced only understood inline tags."""
+        vault = tmp_path / "vault"
+        notes_dir = vault / "notes"
+        notes_dir.mkdir(parents=True)
+        (notes_dir / "block-tagged.md").write_text(
+            "---\ntitle: Block Tagged\ncertainty: 3\ndate: 2026-01-01\ntags:\n  - caching\n  - redis\n---\n\nBody.\n"
+        )
+
+        notes = _scan_notes_for_validity(vault)
+
+        assert notes["block-tagged"]["tags"] == ["caching", "redis"]
+
+    def test_no_tags_returns_empty_list(self, tmp_path):
+        vault = tmp_path / "vault"
+        notes_dir = vault / "notes"
+        notes_dir.mkdir(parents=True)
+        _write_note(notes_dir / "untagged.md", title="Untagged", body="Body.", certainty=3, date="2026-01-01")
+
+        notes = _scan_notes_for_validity(vault)
+
+        assert notes["untagged"]["tags"] == []
 
 
 def test_inspect_contradictions_marks_supersession_and_opposite_language(tmp_path):
