@@ -58,9 +58,9 @@ briefing_min_score: 0.55
 
 # Inject vault notes before each prompt
 prompt_recall: true
-recall_min_score: 0.6
+recall_min_score: 0.25         # normalized [0,1] relevance floor, see "Search backend and scoring" below
 recall_max_notes: 3
-recall_high_confidence: 0.55   # BM25 score above this skips deep path
+recall_high_confidence: 0.55   # normalized score above this (single result only) skips the deep path
 recall_skip_broad_project_queries: true  # Skip broad project/history prompts; use explicit search instead
 recall_skip_patterns:
   - "^(yes|no|ok|sure|thanks|y|n|yep|nope|looks good|lgtm|ship it|continue)$"
@@ -132,6 +132,29 @@ extra_qmd_collections: [team-knowledge, shared-docs]
 
 Each collection must be configured in your `~/.config/qmd/index.yml`.
 
+## Search backend and scoring
+
+`search_backend: auto` (default) picks QMD -> embedded (SQLite FTS5 + sqlite-vec) -> grep, in that order, based on what's available. Every backend's `search()` result carries a `backend` field (`qmd`, `embedded-fts`, `embedded-vec`, or `grep`) alongside `path`, `title`, `score`, and `snippet`.
+
+```yaml
+search_backend: auto   # auto | qmd | embedded | grep
+search_db_path: .search/search.db   # embedded backend's derived index, relative to vault_path
+
+# Bounded-transform constant for the embedded backend's FTS5 BM25 score
+# normalization: score / (score + fts5_score_k). Higher k compresses scores
+# toward 0 (stricter); lower k lets weaker matches climb higher.
+fts5_score_k: 2.0
+```
+
+Each backend normalizes its own relevance signal to `[0, 1]` at the `search()` boundary so a single `recall_min_score` / `recall_high_confidence` threshold behaves sensibly no matter which backend answers:
+
+- **qmd**: QMD's own BM25/vector score, already ~bounded in practice (observed: BM25 hits 0.9-0.98, semantic hits 0.5-0.7) - only defensively clamped to `[0, 1]`, since we don't control the external binary's internal scale.
+- **embedded-fts**: FTS5's raw BM25 rank is unbounded, so it's mapped via `score / (score + fts5_score_k)` - monotonic, bounded, and *not* a rescale relative to the current result batch (the old behavior forced the top hit in any batch to exactly 1.0, regardless of true relevance).
+- **embedded-vec**: sqlite-vec's `notes_vec` table is declared with `distance_metric=cosine`, so cosine distance (`1 - cosine_similarity`, range `[0, 2]`) maps to `(cos_sim + 1) / 2` - identical direction -> 1.0, orthogonal/unrelated -> 0.5, opposite -> 0.0.
+- **grep**: matched-terms / total-terms coverage fraction, already bounded by construction.
+
+This normalization is a coarse, monotonic-per-backend signal, not a guarantee that the same score means the same thing on every backend - `recall_min_score` is a noise floor more than a fine-grained confidence signal (see `confidence_margin()` in `memento/retrieval_policy.py` for the relative rank-1-vs-rank-2 gap the deep pipeline actually uses to decide confidence).
+
 ## Post-capture extensions
 
 The `/memento` skill checks for `~/.claude/skills/memento-post/SKILL.md` after creating notes. If the file exists, its instructions run as an extra step. Use this for things like promoting notes to a team vault or applying domain-specific tags.
@@ -201,8 +224,8 @@ prompt_recall: false
 # Default false preserves the existing conceptual recall behavior.
 recall_concrete_mode: auto
 
-# Tighter relevance threshold (fewer, more relevant results)
-recall_min_score: 0.6
+# Tighter relevance threshold (fewer, more relevant results; default 0.25)
+recall_min_score: 0.4
 
 # Show more results per prompt
 recall_max_notes: 5
@@ -252,8 +275,10 @@ Use `memento-vault retrieval-report --since 7` (or `python tools/analyze-retriev
 
 When the initial BM25 score is below the confidence threshold, `vault-recall` follows `[[wikilinks]]` from top results to pull in connected notes. It fetches the full content of the top 3 results, extracts wikilink targets, and retrieves linked notes directly via `qmd get`. Only fires on the deep path (low BM25 confidence).
 
+Enabled by default since MEM-159 (gated on MEM-143's RRF fusion fix: the fused score seeding this expansion is now bounded by the doc's own underlying normalized quality, so multi-hop no longer risks following links from a rank-inflated weak match).
+
 ```yaml
-# Enable multi-hop (default false)
+# Enable multi-hop (default true)
 multi_hop_enabled: true
 
 # Maximum linked notes to add per recall (default 2)
@@ -270,6 +295,34 @@ When confidence is low, spawns a background codex process for deeper analysis. R
 deep_recall_enabled: false
 deep_recall_backend: codex     # "codex" or "claude"
 ```
+
+### Agentic retrieval tier (experimental)
+
+One-shot top-k injection is the deferred workers' ceiling: a single search pass (or a single guess-the-titles completion) either finds the right notes or it doesn't. When enabled, both background workers instead run a bounded ReAct-style loop (`memento/retrieval_agent.py`) that calls search/query/related/get tools in-process, over as many as 6 turns and 60 seconds:
+
+- **Deep recall worker** (the primary consumer): on not-confident complex prompts, the deep-recall worker's internals upgrade from a single "suggest likely note titles" completion to the tool-using agent, which actually searches and traverses the vault before writing its picks to the same suggestions file consumed on the next prompt.
+- **Deferred briefing worker**: the SessionStart background search upgrades from a one-shot semantic search to the same loop, writing to the same deferred-briefing file/TTL.
+
+The loop is driven through the same `llm_complete` backend abstraction as deep recall, so it can reuse the global `llm_backend`/`llm_model`, or route independently via `retrieval_agent_provider`/`retrieval_agent_model` -- for example to a cheaper routed model through the `pi` CLI provider (see below).
+
+This tier is strictly additive: any protocol failure (malformed tool-call JSON after one retry, a provider error or timeout, the tool-call cap, or empty results) falls back to each worker's existing pipeline, byte-identically to today's behavior. Disabled by default.
+
+```yaml
+agentic_retrieval_enabled: false
+retrieval_agent_provider: null   # null = fall back to llm_backend
+retrieval_agent_model: null      # null = fall back to llm_model
+```
+
+### The `pi` LLM backend
+
+`llm_backend`/`retrieval_agent_provider` accept `pi`, a fifth CLI provider alongside `claude`/`codex`/`gemini`/`anthropic-api`/`openai-compat`. `pi` is the local coding-agent CLI (see https://pi.dev) that already routes to a wide range of provider/model combinations, including cheap ones like OpenRouter-hosted DeepSeek models:
+
+```yaml
+llm_backend: pi
+llm_model: openrouter/deepseek/deepseek-v4-pro
+```
+
+Memento invokes `pi` in a bare, non-interactive text-in/text-out mode (`--print --no-tools --no-session`, among other flags) -- it is a single completion call, not an agent run; memento's own retrieval agent (above) drives its own tool loop on top of that text contract. If `pi` is not resolvable on `PATH`, `preflight_check` reports a clear error rather than crashing the calling worker. Note: this is unrelated to `memento/pi_bridge.py`, which is the reverse integration -- the `pi` runtime embedding memento as an extension.
 
 ### Tier 1 retrieval enhancements (v1.2.0)
 
@@ -322,6 +375,68 @@ reranker_min_score: 0.01                               # minimum reranker score
 ```
 
 Only fires on the deep path (BM25 score below `recall_high_confidence`). Adds ~15-25ms for 10-20 candidates.
+
+### Auto-archive sweep (MEM-152)
+
+Periodically archives `notes/*.md` files that are durability-tier `cold`
+(never resurfaced -- see [frontmatter-schema.md#durability-tier](frontmatter-schema.md#durability-tier)),
+older than `archive_sweep_age_days`, and `certainty` below 4. Archiving moves
+the file to `archive/` and records a reversible tombstone -- never a hard
+delete. Runs from `hooks/memento-sweeper.py`'s periodic sweep.
+
+```yaml
+archive_sweep_enabled: false     # no-op until explicitly enabled
+archive_sweep_age_days: 90       # note `date` frontmatter age threshold
+archive_sweep_max_per_run: 50    # safety valve: max notes archived per run
+```
+
+### Fleeting note lifecycle (MEM-153)
+
+Periodically promotes or expires `fleeting/*.md` notes so they stop
+accumulating forever. A fleeting note is promoted to `notes/` (stamped with
+`promoted_at`) when EITHER its `resurfaced_count` frontmatter is at least
+`fleeting_promote_min_resurfaced`, or it is cited by a `[[stem]]` wikilink
+from a `notes/*.md` note with `source: mcp-capture` (the documented
+"session-summary note writer" -- see
+[frontmatter-schema.md#source-values](frontmatter-schema.md#source-values)).
+Anything left over that is older than `fleeting_expire_days` (`date`
+frontmatter, falling back to file mtime) is reversibly archived the same way
+the MEM-152 sweep above archives notes -- never a hard delete. Runs from
+`hooks/memento-sweeper.py`'s periodic sweep, right after the MEM-152 archive
+sweep.
+
+```yaml
+fleeting_lifecycle_enabled: false        # no-op until explicitly enabled
+fleeting_promote_min_resurfaced: 2       # resurfaced_count threshold for promotion
+fleeting_expire_days: 14                 # age threshold (date frontmatter, else mtime) for expiry
+```
+
+### Vault map & project hubs (MEM-160)
+
+Replaces the old free-text `## Sessions`/`## Activity log` append (which
+corrupted real `projects/<slug>.md` hubs into multi-hundred-line files with
+duplicate headers and truncated entries) with mechanical, idempotent
+regeneration. `memento.hub.regenerate_project_hub` rebuilds a project's hub
+**from scratch** every time (frontmatter + the wikilink graph -- see
+[how-it-works.md#project-hubs-and-vault-map-mem-160](how-it-works.md#project-hubs-and-vault-map-mem-160)
+for the section schema), and `memento.hub.vault_map` assembles a capped
+two-tier index (this project's hub plus top cross-project notes) for
+briefing injection.
+
+`hub_regeneration_enabled` gates the periodic sweep
+(`memento.hub.regenerate_stale_hubs`, run from `hooks/memento-sweeper.py`
+right after the MEM-153 fleeting lifecycle sweep) that regenerates hubs for
+any project with notes newer than its hub file. `vault_map_in_briefing`
+gates injecting `vault_map()`'s output into `memento.lifecycle.build_briefing`.
+Both default to `false` -- flip them once you've reviewed a regenerated hub
+and the assembled vault map.
+
+```yaml
+hub_regeneration_enabled: false   # no-op until explicitly enabled
+hub_max_bytes: 25000              # ~25KB cap per regenerated projects/<slug>.md
+vault_map_max_bytes: 25000        # ~25KB cap for the assembled two-tier vault map
+vault_map_in_briefing: false      # inject vault_map() into the session-start briefing
+```
 
 ## Disabling features
 

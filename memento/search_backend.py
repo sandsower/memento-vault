@@ -50,6 +50,40 @@ def classify_index_lag(lag_seconds: int) -> str:
     return "pass"
 
 
+def _clamp01(value: float) -> float:
+    """Clamp a float to [0, 1], guarding NaN/None/non-numeric input."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if score != score:  # NaN
+        return 0.0
+    return max(0.0, min(1.0, score))
+
+
+def normalize_qmd_score(raw_score: float) -> float:
+    """Clamp the QMD CLI's own relevance score to [0, 1] (MEM-127).
+
+    QMD is an external binary we do not control the internals of. Observed
+    production scores (docs/quality-analysis-2026-07-02.md) already sit in a
+    bounded band: BM25 hits commonly land 0.9-0.98, semantic (vsearch) hits
+    0.5-0.7. Unlike FTS5's unbounded BM25 rank or sqlite-vec's raw distance,
+    QMD's own scale doesn't need a rescale to reach [0, 1] - only a defensive
+    clamp against an out-of-range or malformed value from the subprocess.
+    """
+    return _clamp01(raw_score)
+
+
+def normalize_grep_term_coverage(raw_score: float) -> float:
+    """Clamp the grep backend's term-coverage fraction to [0, 1] (MEM-127).
+
+    Already bounded by construction (matched_terms / total_terms), so this
+    is a defensive clamp rather than a rescale - kept as a named function so
+    every backend has an explicit, unit-testable normalization boundary.
+    """
+    return _clamp01(raw_score)
+
+
 def _literal_terms(query: str) -> tuple[str, list[str]]:
     literal = (query or "").strip()
     quoted = re.search(r'"(.+?)"', literal) or re.search(r"(?<!\w)'(.+?)'(?!\w)", literal)
@@ -118,7 +152,9 @@ def _literal_snippet(query: str, content: str) -> str:
     return _clean_snippet(content)
 
 
-def _literal_file_search(vault: Path, query: str, limit: int, timeout: int = 10, min_score: float = 0.0) -> list[dict]:
+def _literal_file_search(
+    vault: Path, query: str, limit: int, timeout: int = 10, min_score: float = 0.0, backend: str = "grep"
+) -> list[dict]:
     """Literal substring search over vault markdown files."""
     if not query or not query.strip() or not vault.exists():
         return []
@@ -153,7 +189,13 @@ def _literal_file_search(vault: Path, query: str, limit: int, timeout: int = 10,
         if score <= 0 or score < min_score:
             continue
         results.append(
-            {"path": rel_path, "title": title, "score": round(score, 4), "snippet": _literal_snippet(query, content)}
+            {
+                "path": rel_path,
+                "title": title,
+                "score": round(score, 4),
+                "snippet": _literal_snippet(query, content),
+                "backend": backend,
+            }
         )
 
     results.sort(key=lambda r: r["score"], reverse=True)
@@ -181,7 +223,14 @@ class SearchBackend(ABC):
     ) -> list[dict]:
         """Search for notes matching a query.
 
-        Returns list of dicts with keys: path, title, score, snippet.
+        Returns list of dicts with keys: path, title, score, snippet, backend.
+        ``score`` is normalized to [0, 1], monotonic in the backend's native
+        relevance ordering (MEM-127) - callers may compare scores across
+        backends as a coarse signal, though the normalization is per-backend
+        and not guaranteed to carry identical meaning at every point in the
+        range (see memento.search_backend / memento.embedded_search
+        normalize_* functions for each backend's mapping). ``backend`` is one
+        of "qmd", "embedded-fts", "embedded-vec", or "grep".
         """
         ...
 
@@ -267,7 +316,7 @@ class QMDBackend(SearchBackend):
         if concrete:
             from memento.config import get_vault
 
-            return _literal_file_search(get_vault(), query, limit, timeout=timeout, min_score=min_score)
+            return _literal_file_search(get_vault(), query, limit, timeout=timeout, min_score=min_score, backend="qmd")
 
         if not self.is_available():
             return []
@@ -291,7 +340,7 @@ class QMDBackend(SearchBackend):
 
             items = data if isinstance(data, list) else data.get("results", [])
             for item in items:
-                score = item.get("score", 0.0)
+                score = normalize_qmd_score(item.get("score", 0.0))
                 if score < min_score:
                     continue
 
@@ -314,6 +363,7 @@ class QMDBackend(SearchBackend):
                         "title": title,
                         "score": score,
                         "snippet": _clean_snippet(item.get("snippet", item.get("content", ""))),
+                        "backend": "qmd",
                     }
                 )
 
@@ -490,7 +540,7 @@ class GrepBackend(SearchBackend):
 
         vault = get_vault()
         if concrete:
-            return _literal_file_search(vault, query, limit, timeout=timeout, min_score=min_score)
+            return _literal_file_search(vault, query, limit, timeout=timeout, min_score=min_score, backend="grep")
         if not vault.exists():
             return []
 
@@ -535,7 +585,7 @@ class GrepBackend(SearchBackend):
             if matched == 0:
                 continue
 
-            score = matched / len(terms)
+            score = normalize_grep_term_coverage(matched / len(terms))
             if score < min_score:
                 continue
 
@@ -555,7 +605,7 @@ class GrepBackend(SearchBackend):
                     break
 
             rel_path = str(md_file.relative_to(vault))
-            results.append({"path": rel_path, "title": title, "score": score, "snippet": snippet})
+            results.append({"path": rel_path, "title": title, "score": score, "snippet": snippet, "backend": "grep"})
 
             if score >= 1.0:
                 perfect_count += 1
@@ -689,7 +739,10 @@ def _make_embedded(config: dict) -> "SearchBackend | None":
         except Exception:
             pass
 
-        return EmbeddedSearchBackend(vault_path=vault, db_path=db_path, embedding_provider=provider)
+        fts5_score_k = config.get("fts5_score_k", 2.0)
+        return EmbeddedSearchBackend(
+            vault_path=vault, db_path=db_path, embedding_provider=provider, fts5_score_k=fts5_score_k
+        )
     except Exception:
         return None
 

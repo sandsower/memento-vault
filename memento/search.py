@@ -7,9 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from memento.config import RUNTIME_DIR, get_config, get_vault
+from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, repo_slug_from_path
 from memento.search_backend import _clean_snippet, get_backend  # noqa: F401 (_clean_snippet re-exported for compat)
-from memento.store import apply_access_log_boost, log_retrieval
+from memento.store import apply_access_log_boost, log_retrieval, read_durability_tier
 from memento.graph import (
     apply_pagerank_boost,
     extract_wikilinks,
@@ -40,6 +40,10 @@ MISS_RECOVERY_HINTS = {
     "semantic_mode_not_available": ["Try semantic=false.", "Run memento_reindex if index state looks stale."],
     "empty_vault": ["Capture or sync notes first.", "Run memento_status to verify the vault path."],
     "index_stale_or_missing": ["Run memento_reindex if index state looks stale."],
+    "filters_eliminated_all": [
+        "Broaden or remove the search filters.",
+        "Use memento_query to inspect raw metadata without ranking.",
+    ],
 }
 
 _REASON_ALIASES = {
@@ -155,6 +159,12 @@ def shape_search_results(
             "path": path,
             "title": _strip_injection(str(result.get("title", ""))),
             "score": round(result.get("score", 0.0), 4),
+            # MEM-127: which backend produced this result (qmd | embedded-fts
+            # | embedded-vec | grep), so callers can reason about cross
+            # -backend score comparability. "unknown" covers results that
+            # didn't originate from a backend.search() call (e.g. wikilink
+            # -expansion entries fetched via backend.get()).
+            "backend": result.get("backend", "unknown"),
         }
         snippet = _strip_injection(str(result.get("snippet", "")).strip())
         if normalized_detail in ("summary", "full") and snippet:
@@ -501,9 +511,20 @@ def rrf_fuse(result_lists, k=60):
     Each result list is a list of dicts with at least "path" and "score".
     Returns a single merged list sorted by RRF score descending,
     with scores normalized to 0-1.
+
+    RRF's own rank-based score is purely positional: a document that is the
+    sole candidate in every input list always ranks #1 in each, so
+    rrf_score/max_rrf normalizes to 1.0 regardless of how weak that
+    document's actual per-backend score was (MEM-143). Post-MEM-127, every
+    backend's own "score" is already normalized to a comparable [0, 1]
+    scale, so the fused score is capped at the document's own best
+    underlying normalized score: `fused = rrf_normalized * best_quality`.
+    Rank still decides ORDERING (via rrf_normalized), it just can no longer
+    manufacture quality above what the underlying backends actually measured.
     """
     scores = {}  # path -> cumulative RRF score
     best_entry = {}  # path -> dict from highest-scored occurrence
+    best_quality = {}  # path -> best underlying normalized backend score
 
     for result_list in result_lists:
         for rank, item in enumerate(result_list, start=1):
@@ -512,6 +533,10 @@ def rrf_fuse(result_lists, k=60):
                 continue
             rrf_score = 1.0 / (k + rank)
             scores[path] = scores.get(path, 0.0) + rrf_score
+
+            quality = float(item.get("score", 0) or 0)
+            if quality > best_quality.get(path, 0.0):
+                best_quality[path] = quality
 
             # Keep metadata from the occurrence with the highest original score
             prev = best_entry.get(path)
@@ -526,7 +551,8 @@ def rrf_fuse(result_lists, k=60):
     merged = []
     for path, rrf_score in scores.items():
         entry = best_entry[path]
-        entry["score"] = rrf_score / max_score if max_score > 0 else 0.0
+        rrf_normalized = rrf_score / max_score if max_score > 0 else 0.0
+        entry["score"] = rrf_normalized * best_quality.get(path, 0.0)
         merged.append(entry)
 
     merged.sort(key=lambda r: r["score"], reverse=True)
@@ -633,14 +659,91 @@ def multi_hop_search(query, initial_results, config=None):
     return all_results
 
 
+def expand_result_links(shaped_results, config=None, top_n=3, max_expanded=None):
+    """Fetch 1-hop wikilink neighbors of the top shaped search results.
+
+    Thin exposure shim over the same primitives multi_hop_search uses
+    (qmd_get + extract_wikilinks), for memento_search's opt-in
+    `expand_links` parameter. Unlike multi_hop_search, entries are returned
+    separately -- never merged or re-sorted with the direct hits -- so a
+    caller can append them after direct results without an expanded note
+    ever outranking a direct one.
+
+    Args:
+        shaped_results: already-shaped search result dicts (must have "path").
+        config: dict with multi_hop_max (default 2); reused as max_expanded
+            when max_expanded is not given explicitly.
+        top_n: only follow links from this many top results.
+        max_expanded: cap on the number of expanded entries returned.
+
+    Returns:
+        List of dicts: path, title, score (0.0), snippet, via_link (the
+        stem of the direct-hit result the entry was discovered through).
+    """
+    if not shaped_results:
+        return []
+
+    if config is None:
+        config = get_config()
+    if max_expanded is None:
+        max_expanded = config.get("multi_hop_max", 2)
+
+    seen_paths = {r.get("path", "") for r in shaped_results}
+    expanded = []
+    added = 0
+
+    for result in shaped_results[:top_n]:
+        if added >= max_expanded:
+            break
+
+        source_path = result.get("path", "")
+        source_stem = Path(source_path).stem if source_path else ""
+
+        note = qmd_get(source_path)
+        if not note:
+            continue
+
+        for slug in extract_wikilinks(note.get("content", "")):
+            if added >= max_expanded:
+                break
+
+            linked_path = f"notes/{slug}.md"
+            if linked_path in seen_paths:
+                continue
+
+            linked = qmd_get(linked_path)
+            if not linked:
+                continue
+
+            seen_paths.add(linked_path)
+            expanded.append(
+                {
+                    "path": linked.get("path", linked_path),
+                    "title": linked.get("title", slug),
+                    "score": 0.0,
+                    "snippet": (linked.get("content", "") or "").strip()[:160],
+                    "via_link": source_stem,
+                }
+            )
+            added += 1
+
+    return expanded
+
+
 # --- Retrieval enhancements ---
 
 
 def apply_temporal_decay(results, config=None):
-    """Apply temporal decay to search results based on note age and certainty.
+    """Apply temporal decay to search results based on note age and durability tier.
 
-    High-certainty notes (>= certainty_floor) are immune to decay.
-    Others decay exponentially with a configurable half-life.
+    Decay immunity is driven by the derived durability tier (MEM-150), not
+    certainty: `pinned` (manual) and `hot` (resurfaced within
+    `durability_hot_window_days`) notes are immune. `warm` (resurfaced at
+    some point) and `cold` (never resurfaced) notes decay exponentially with
+    a configurable half-life regardless of certainty -- a certainty-5 note
+    nobody has looked at in 90 days sinks like any other. Certainty still
+    slows (but no longer stops) decay at certainty 3, unchanged from before.
+    `temporal_decay_certainty_floor` is deprecated and no longer read here.
 
     Modifies results in-place and re-sorts by adjusted score.
     """
@@ -651,10 +754,10 @@ def apply_temporal_decay(results, config=None):
         return results
 
     half_life = config.get("temporal_decay_half_life", 90)
-    certainty_floor = config.get("temporal_decay_certainty_floor", 4)
     decay_lambda = math.log(2) / max(half_life, 1)
 
     now = datetime.now()
+    vault = get_vault()
 
     for result in results:
         path = result.get("path", "")
@@ -670,10 +773,12 @@ def apply_temporal_decay(results, config=None):
         # Store metadata for later use by wikilink expansion
         result["_meta"] = meta
 
-        certainty = meta.get("certainty")
-        if certainty is not None and certainty >= certainty_floor:
-            continue  # No decay for high-certainty notes
+        tier = read_durability_tier(vault, path, config=config, now=now) if path else "cold"
+        result["_durability_tier"] = tier
+        if tier in ("pinned", "hot"):
+            continue  # Decay-immune tiers.
 
+        certainty = meta.get("certainty")
         date_str = meta.get("date")
         if not date_str:
             try:
@@ -793,14 +898,25 @@ def filter_by_project(results, cwd, require_match=False):
     through. With require_match=True only positively matched notes survive —
     the bar for unsolicited injection surfaces like tool-context, where
     untagged junk previously slipped through as "general knowledge".
+
+    Comparison is slug-to-slug (MEM-164), not path-prefix: the query cwd is
+    resolved to its repo-name slug via ``detect_project`` (same derivation
+    used at write time), and each note's `project` field is compared
+    case-insensitively against it. Notes already backfilled to a slug compare
+    directly; notes still holding a legacy raw path (not yet backfilled) have
+    their slug derived on the fly via ``repo_slug_from_path`` so old and new
+    notes for the same repo match uniformly.
     """
     if not cwd:
         return results
 
-    # Normalize cwd: resolve symlinks, strip trailing slash
     try:
-        cwd = os.path.realpath(cwd).rstrip("/")
-    except (OSError, ValueError):
+        query_slug, _ticket = detect_project(cwd, None)
+    except Exception:
+        return results
+
+    query_slug = (query_slug or "").strip().lower()
+    if not query_slug or query_slug == "unknown":
         return results
 
     filtered = []
@@ -831,25 +947,16 @@ def filter_by_project(results, cwd, require_match=False):
         if not note_project_raw:
             continue
 
-        if "/" not in note_project_raw and "\\" not in note_project_raw:
-            note_slug = re.sub(r"[^a-z0-9]+", "-", note_project_raw.lower()).strip("-")
-            cwd_slugs = {
-                re.sub(r"[^a-z0-9]+", "-", part.lower()).strip("-")
-                for part in Path(cwd).parts
-                if part and part not in {os.sep, "/"}
-            }
-            if note_slug and note_slug in cwd_slugs:
-                filtered.append(r)
-            continue
+        if "/" in note_project_raw or "\\" in note_project_raw:
+            # Legacy note not yet backfilled to a slug - derive it on the fly.
+            note_slug = repo_slug_from_path(note_project_raw) or ""
+        else:
+            note_slug = note_project_raw
 
-        # Match if cwd starts with (or equals) the note's project path
-        try:
-            note_project_path = os.path.realpath(note_project_raw).rstrip("/")
-        except (OSError, ValueError):
-            note_project_path = note_project_raw
-
-        if cwd.startswith(note_project_path) or note_project_path.startswith(cwd):
+        if note_slug.strip().lower() == query_slug:
             filtered.append(r)
+        elif require_match:
+            log_retrieval("search", "project_match_required", path=r.get("path", ""), reason="slug-mismatch")
 
     return filtered
 

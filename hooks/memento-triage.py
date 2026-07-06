@@ -20,6 +20,7 @@ sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 from memento.config import detect_project, get_config, get_vault  # noqa: E402
 from memento.llm import llm_complete  # noqa: E402
+from memento.smart_store import write_smart_store_note  # noqa: E402
 from memento.store import (  # noqa: E402
     acquire_vault_write_lock,
     append_project_session_line,
@@ -27,8 +28,6 @@ from memento.store import (  # noqa: E402
     log_retrieval,
     log_triage_health,
     release_vault_write_lock,
-    update_project_index,
-    write_note,
 )
 from memento.adapters import parse_transcript, render_transcript_text, truncate_transcript  # noqa: E402
 from memento.utils import normalize_note_tags, read_hook_input, sanitize_secrets  # noqa: E402
@@ -413,6 +412,18 @@ TRIAGE_NOTES_JSON_SCHEMA = {
                     "certainty": {"type": "integer", "minimum": 1, "maximum": 5},
                     "validity_context": {"type": "string"},
                     "supersedes": {"type": "string"},
+                    "citations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": {"type": "string"},
+                                "anchor": {"type": "string"},
+                                "commit": {"type": "string"},
+                            },
+                            "required": ["file", "anchor"],
+                        },
+                    },
                 },
                 "required": ["title", "body", "type", "tags", "certainty"],
             },
@@ -437,7 +448,13 @@ def _build_structured_notes_prompt(session_id, transcript_text, meta, project_sl
         'Return either a JSON array of notes or {"notes": [...]}.\n'
         "Each note must include: title, body, type, tags, certainty.\n"
         "certainty must be an integer from 1 to 5, not a word such as confirmed.\n"
-        "Optional fields: validity_context, supersedes.\n"
+        "Optional fields: validity_context, supersedes, citations.\n"
+        "When a note asserts something about specific code you saw in the transcript, "
+        "add citations: a list of {file, anchor} objects, where file is the repo-relative "
+        "path you saw and anchor is a short, verbatim, distinctive line from that file "
+        "(under 120 characters) that would let someone verify the claim still holds. "
+        "commit is an optional short git sha for provenance only. Omit citations entirely "
+        "when the note isn't about specific code.\n"
         "Do not include any prose outside JSON.\n\n"
         f"Session ID: {session_id}\n"
         f"Project slug: {project_slug}\n"
@@ -487,7 +504,6 @@ def _note_already_written(vault, title, session_id):
 
 
 def _write_structured_notes(notes, vault, session_id, meta, project_slug, llm_telemetry, transcript_path=None):
-    summary = build_session_summary(meta)
     if not acquire_vault_write_lock():
         log_retrieval(
             "triage",
@@ -515,23 +531,25 @@ def _write_structured_notes(notes, vault, session_id, meta, project_slug, llm_te
             if _note_already_written(vault, note["title"], session_id):
                 skipped_duplicates += 1
                 continue
-            path = write_note(
-                vault,
+            result = write_smart_store_note(
                 title=note["title"],
                 body=sanitize_secrets(note["body"]),
                 note_type=note.get("type", "discovery"),
                 tags=note.get("tags", []),
                 certainty=note.get("certainty"),
-                source="session",
-                origin=f"claude_triage:{meta.get('agent') or 'claude'}",
-                validity_context=note.get("validity_context") or note.get("validity-context"),
-                supersedes=note.get("supersedes"),
                 project=meta.get("cwd"),
                 branch=meta.get("git_branch"),
                 session_id=session_id,
+                validity_context=note.get("validity_context") or note.get("validity-context"),
+                supersedes=note.get("supersedes"),
+                origin=f"claude_triage:{meta.get('agent') or 'claude'}",
+                source="session",
+                citations=note.get("citations"),
             )
-            update_project_index(vault, project_slug, path.stem, f"`{session_id}` — {summary}")
-            written += 1
+            if result.get("decision") in ("created", "merged_into"):
+                written += 1
+            elif result.get("decision") == "already_covered":
+                skipped_duplicates += 1
         log_triage_health(
             "structured_notes_written",
             session_id=session_id,
@@ -619,10 +637,42 @@ def _spool_local_extraction_failure(
         print(f"[memento] local extraction retry ledger record failed: {exc}", file=sys.stderr)
 
 
-def _retry_local_extraction_entry(vault, entry):
+_LEDGER_ERROR_LIMIT = 500
+
+
+def _recovery_dead_letter_entry(vault, entry, error_msg):
+    """Append a dead-letter entry preserving the original attempt counter.
+
+    During recovery (`force=True`), a failed re-attempt writes a dead-letter
+    entry with the *same* attempt number so the operator can retry again.
+    """
+    from datetime import datetime, timezone
+
+    # Keep error bounded like sync_ledger.record() does.
+    safe_error = str(error_msg)[:_LEDGER_ERROR_LIMIT]
+
+    sync_ledger.append(
+        vault,
+        {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "kind": LOCAL_EXTRACTION_RETRY_KIND,
+            "source": entry.get("source") or "",
+            "status": "dead-letter",
+            "attempt": entry.get("attempt", 1),
+            "content_hash": entry.get("content_hash"),
+            "error": safe_error,
+            "spool_path": entry.get("spool_path"),
+        },
+    )
+    # Re-read and return the folded current state for this source.
+    folded = sync_ledger.fold_state(vault)
+    return folded.get((LOCAL_EXTRACTION_RETRY_KIND, entry.get("source") or ""), {})
+
+
+def _retry_local_extraction_entry(vault, entry, *, force=False):
     source = entry.get("source") or ""
     max_attempts = _local_extraction_retry_max_attempts()
-    if int(entry.get("attempt") or 0) >= max_attempts:
+    if not force and int(entry.get("attempt") or 0) >= max_attempts:
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
@@ -635,25 +685,31 @@ def _retry_local_extraction_entry(vault, entry):
 
     raw = sync_ledger.read_spooled(entry.get("spool_path") or "")
     if raw is None:
+        msg = "spooled payload missing"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, msg)
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
             source,
             status="dead-letter",
             content_hash=entry.get("content_hash"),
-            error="spooled payload missing",
+            error=msg,
             spool_path=entry.get("spool_path"),
         )
     try:
         envelope = json.loads(raw)
     except json.JSONDecodeError as exc:
+        msg = f"spooled payload invalid JSON: {exc}"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, msg)
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
             source,
             status="dead-letter",
             content_hash=entry.get("content_hash"),
-            error=f"spooled payload invalid JSON: {exc}",
+            error=msg,
             spool_path=entry.get("spool_path"),
         )
 
@@ -674,6 +730,8 @@ def _retry_local_extraction_entry(vault, entry):
     telemetry = _llm_telemetry(result)
     if not result.ok:
         error = result.error or "unknown llm error"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, f"recovery failed: {error}")
         status = "dead-letter" if int(entry.get("attempt") or 0) + 1 >= max_attempts else "error"
         return sync_ledger.record(
             vault,
@@ -687,13 +745,16 @@ def _retry_local_extraction_entry(vault, entry):
 
     notes = _parse_structured_notes_response(result.text)
     if not notes:
+        msg = "recovery produced no structured notes" if force else "retry produced no structured notes"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, msg)
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
             source,
             status="dead-letter",
             content_hash=entry.get("content_hash"),
-            error="retry produced no structured notes",
+            error=msg,
             spool_path=entry.get("spool_path"),
         )
 
@@ -707,13 +768,16 @@ def _retry_local_extraction_entry(vault, entry):
         transcript_path=envelope.get("transcript_path"),
     )
     if written == 0 and not all(_note_already_written(vault, note["title"], session_id) for note in notes):
+        msg = "recovery did not write notes" if force else "retry did not write notes"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, msg)
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
             source,
             status="error",
             content_hash=entry.get("content_hash"),
-            error="retry did not write notes",
+            error=msg,
             spool_path=entry.get("spool_path"),
         )
     return sync_ledger.record(
@@ -739,6 +803,24 @@ def retry_local_extractions(vault=None, limit=LOCAL_EXTRACTION_RETRY_SESSION_LIM
     results = []
     for entry in pending:
         results.append(_retry_local_extraction_entry(vault, entry))
+    return results
+
+
+def recover_dead_letter_extractions(vault=None, limit=LOCAL_EXTRACTION_RETRY_SESSION_LIMIT):
+    """Re-attempt dead-lettered local structured-note extractions.
+
+    Unlike ``retry_local_extractions`` this bypasses the max-attempts gate
+    and uses ``force=True`` so dead-lettered entries get one re-attempt per
+    invocation. On failure the attempt counter is NOT advanced, so the
+    operator can run recovery again.
+    """
+    vault = vault or get_vault()
+    dead = [entry for entry in sync_ledger.dead_letters(vault) if entry.get("kind") == LOCAL_EXTRACTION_RETRY_KIND]
+    if limit:
+        dead = dead[: max(0, int(limit))]
+    results = []
+    for entry in dead:
+        results.append(_retry_local_extraction_entry(vault, entry, force=True))
     return results
 
 
@@ -1348,5 +1430,9 @@ if __name__ == "__main__":
         limit = int(sys.argv[2]) if len(sys.argv) == 3 else 0
         results = retry_local_extractions(limit=limit)
         print(json.dumps({"retried": len(results), "results": results}, ensure_ascii=False))
+    elif len(sys.argv) in {2, 3} and sys.argv[1] == "--recover-dead-letters":
+        limit = int(sys.argv[2]) if len(sys.argv) == 3 else 0
+        results = recover_dead_letter_extractions(limit=limit)
+        print(json.dumps({"recovered": len(results), "results": results}, ensure_ascii=False))
     else:
         main()

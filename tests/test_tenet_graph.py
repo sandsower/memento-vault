@@ -8,11 +8,17 @@ import pytest
 
 from memento.graph import (
     apply_pagerank_boost,
-    compute_pagerank,
-    _serialize_graph,
-    _deserialize_graph,
+    build_related_view,
     build_wikilink_graph,
+    compute_pagerank,
+    graph_neighborhood,
     load_or_build_graph,
+    read_note_metadata,
+    resolve_note_reference,
+    supersession_chain,
+    _deserialize_graph,
+    _serialize_graph,
+    _vault_notes_max_mtime,
 )
 
 
@@ -34,6 +40,101 @@ def _write_note(vault, stem, body, frontmatter=None):
     path = vault / "notes" / f"{stem}.md"
     path.write_text("\n".join(lines))
     return path
+
+
+# --- read_note_metadata (MEM-166 characterization) ---
+
+
+class TestReadNoteMetadata:
+    """Characterization tests for memento.graph.read_note_metadata, migrated
+    to memento.frontmatter in MEM-166. Covers every schema field shape it
+    reads plus the fixture corpus edge cases (no frontmatter, missing note,
+    body-level `---`, unknown keys) so consolidation is behavior-frozen
+    except the one documented fix (block-style tags)."""
+
+    def test_missing_note_returns_none(self, tmp_vault, mock_config):
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            assert read_note_metadata("does-not-exist") is None
+
+    def test_no_frontmatter_returns_all_none_scalars_and_empty_lists(self, tmp_vault, mock_config):
+        (tmp_vault / "notes").mkdir(parents=True, exist_ok=True)
+        (tmp_vault / "notes" / "bare.md").write_text("Just a body, no frontmatter.\n")
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("bare")
+
+        assert meta["title"] is None
+        assert meta["certainty"] is None
+        assert meta["tags"] == []
+        assert meta["links"] == []
+
+    def test_full_field_shapes_and_wikilinks(self, tmp_vault, mock_config):
+        _write_note(
+            tmp_vault,
+            "full",
+            "See [[other-note]] for background.",
+            frontmatter={
+                "title": "Full Note",
+                "type": "decision",
+                "date": "2026-03-20T10:00",
+                "certainty": 4,
+                "project": "my-api",
+                "source": "session",
+                "origin": "manual",
+                "supersedes": "[[older-note]]",
+                "tags": "[alpha, beta]",
+            },
+        )
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("full")
+
+        assert meta["title"] == "Full Note"
+        assert meta["type"] == "decision"
+        assert meta["date"] == "2026-03-20T10:00"
+        assert meta["certainty"] == 4
+        assert meta["project"] == "my-api"
+        assert meta["source"] == "session"
+        assert meta["origin"] == "manual"
+        assert meta["supersedes"] == "[[older-note]]"
+        assert meta["tags"] == ["alpha", "beta"]
+        assert meta["links"] == ["other-note"]
+
+    def test_block_style_tags_are_now_visible(self, tmp_vault, mock_config):
+        """The ONE intended behavior change (MEM-166)."""
+        notes = tmp_vault / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "block-tagged.md").write_text(
+            "---\ntitle: Block Tagged\ntype: discovery\ntags:\n  - alpha\n  - beta\n---\n\nBody.\n"
+        )
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("block-tagged")
+
+        assert meta["tags"] == ["alpha", "beta"]
+
+    def test_body_level_dash_fence_not_treated_as_frontmatter(self, tmp_vault, mock_config):
+        notes = tmp_vault / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "dashes.md").write_text("---\ntitle: Has Dashes\n---\n\nBody.\n\n---\n\nMore body.\n")
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("dashes")
+
+        assert meta["title"] == "Has Dashes"
+
+    def test_unknown_frontmatter_keys_do_not_break_parsing(self, tmp_vault, mock_config):
+        notes = tmp_vault / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "unknown.md").write_text(
+            "---\ntitle: Unknown Keys\ntype: discovery\nhand-added: value\n---\n\nBody.\n"
+        )
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("unknown")
+
+        assert meta["title"] == "Unknown Keys"
+        assert meta["type"] == "discovery"
 
 
 # --- build_wikilink_graph ---
@@ -198,6 +299,80 @@ def test_load_or_build_rebuilds_stale_cache(tmp_vault, mock_config):
     assert g2.has_edge("gamma", "alpha")
 
 
+def test_load_or_build_rebuilds_when_note_written_after_cache_build(tmp_vault, mock_config):
+    """A note written after the cache was built forces a rebuild, even
+    within the 1h TTL window (MEM-159: cache validity is now driven by
+    note mtimes, with the 1h TTL kept only as an additional ceiling)."""
+    _write_note(tmp_vault, "alpha", "See [[beta]].")
+    _write_note(tmp_vault, "beta", "No links.")
+
+    cache_path = str(tmp_vault / "fresh-write-cache.json")
+
+    import memento.graph as memento_graph
+
+    memento_graph._GRAPH_CACHE = [None]
+
+    g1, pr1 = load_or_build_graph(vault_path=str(tmp_vault), cache_path=cache_path)
+    assert "gamma" not in g1.nodes
+
+    # Clear in-process cache so the next call must consult disk + do the mtime scan.
+    memento_graph._GRAPH_CACHE = [None]
+
+    # Write a new note whose mtime is strictly after the cache file's mtime,
+    # well within the 1h TTL -- proves staleness is driven by note mtime,
+    # not only the TTL ceiling.
+    cache_mtime = os.path.getmtime(cache_path)
+    new_note_path = _write_note(tmp_vault, "gamma", "See [[alpha]].")
+    os.utime(new_note_path, (cache_mtime + 5, cache_mtime + 5))
+
+    with patch("memento.graph.build_wikilink_graph", wraps=memento_graph.build_wikilink_graph) as spy_build:
+        g2, pr2 = load_or_build_graph(vault_path=str(tmp_vault), cache_path=cache_path)
+        spy_build.assert_called_once()
+
+    assert "gamma" in g2.nodes
+    assert g2.has_edge("gamma", "alpha")
+
+
+def test_load_or_build_reuses_cache_when_no_notes_changed(tmp_vault, mock_config):
+    """Sanity check: without any new writes, a cache well within the TTL is
+    still reused (mtime check does not force a rebuild every call)."""
+    _write_note(tmp_vault, "alpha", "See [[beta]].")
+    _write_note(tmp_vault, "beta", "No links.")
+
+    cache_path = str(tmp_vault / "reuse-cache.json")
+
+    import memento.graph as memento_graph
+
+    memento_graph._GRAPH_CACHE = [None]
+    load_or_build_graph(vault_path=str(tmp_vault), cache_path=cache_path)
+    memento_graph._GRAPH_CACHE = [None]
+
+    with patch("memento.graph.build_wikilink_graph") as mock_build:
+        load_or_build_graph(vault_path=str(tmp_vault), cache_path=cache_path)
+        mock_build.assert_not_called()
+
+
+def test_notes_mtime_scan_is_cheap(tmp_vault, mock_config):
+    """Benchmark backing the claim in load_or_build_graph's docstring: a
+    stat-only scan (no file reads) over ~5k notes stays well under a
+    second, so doing it on every cache-validity check is acceptable."""
+    notes_dir = tmp_vault / "notes"
+    for i in range(5000):
+        (notes_dir / f"bench-note-{i}.md").write_text("---\ntitle: x\n---\n\nbody\n")
+
+    start = time.perf_counter()
+    result = _vault_notes_max_mtime(str(tmp_vault))
+    elapsed = time.perf_counter() - start
+
+    assert result > 0
+    assert elapsed < 1.0, f"mtime scan over 5k notes took {elapsed:.3f}s, expected < 1s"
+
+
+def test_notes_mtime_scan_empty_vault():
+    """No notes/ directory returns 0.0 rather than raising."""
+    assert _vault_notes_max_mtime("/nonexistent/path/for/sure") == 0.0
+
+
 # --- apply_pagerank_boost ---
 
 
@@ -257,3 +432,228 @@ def test_pagerank_boost_preserves_order_when_equal():
     assert results[0]["path"].endswith("first.md")
     assert results[1]["path"].endswith("second.md")
     assert results[2]["path"].endswith("third.md")
+
+
+# --- MEM-159: memento_related topology (resolve_note_reference,
+# graph_neighborhood, supersession_chain, build_related_view) ---
+
+
+@pytest.fixture
+def _isolate_graph_cache(tmp_path, monkeypatch):
+    """Keep the wikilink graph cache out of the real shared runtime dir.
+
+    build_related_view calls load_or_build_graph(vault) without an explicit
+    cache_path, so without this it would read/write the same
+    ~/.cache/memento-vault/wikilink-graph.json every other worktree/test in
+    this repo uses.
+    """
+    monkeypatch.setattr("memento.graph._GRAPH_CACHE_PATH", str(tmp_path / "related-view-cache.json"))
+    monkeypatch.setattr("memento.graph._GRAPH_CACHE", [None])
+
+
+class TestResolveNoteReference:
+    def test_resolves_by_stem(self, tmp_vault, mock_config, monkeypatch):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        _write_note(tmp_vault, "alpha", "See [[beta]].")
+
+        stem, suggestions = resolve_note_reference("alpha")
+
+        assert stem == "alpha"
+        assert suggestions == []
+
+    def test_resolves_by_relative_path(self, tmp_vault, mock_config, monkeypatch):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        _write_note(tmp_vault, "alpha", "See [[beta]].")
+
+        stem, _ = resolve_note_reference("notes/alpha.md")
+
+        assert stem == "alpha"
+
+    def test_resolves_by_exact_title(self, tmp_vault, mock_config, monkeypatch):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        _write_note(tmp_vault, "redis-cache-ttl", "Body.", frontmatter={"title": "Redis cache requires explicit TTL"})
+
+        stem, suggestions = resolve_note_reference("Redis cache requires explicit TTL")
+
+        assert stem == "redis-cache-ttl"
+        assert suggestions == []
+
+    def test_unresolved_returns_close_match_suggestions(self, tmp_vault, mock_config, monkeypatch):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        _write_note(tmp_vault, "redis-cache-ttl", "Body.")
+        _write_note(tmp_vault, "zustand-state-reset", "Body.")
+
+        stem, suggestions = resolve_note_reference("redis-cache-tt")  # typo
+
+        assert stem is None
+        assert "redis-cache-ttl" in suggestions
+
+    def test_empty_note_reference_unresolved(self, tmp_vault, mock_config, monkeypatch):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+
+        stem, suggestions = resolve_note_reference("")
+
+        assert stem is None
+        assert suggestions == []
+
+
+class TestGraphNeighborhood:
+    def _chain_graph(self):
+        import networkx as nx
+
+        g = nx.DiGraph()
+        g.add_edge("a", "b")
+        g.add_edge("b", "c")
+        g.add_edge("c", "d")
+        g.add_edge("d", "e")
+        return g
+
+    def test_depth_clamped_to_max_three(self):
+        graph = self._chain_graph()
+
+        entries, truncated = graph_neighborhood(graph, "a", direction="out", depth=10)
+
+        hops = {entry["stem"]: entry["hop"] for entry in entries}
+        assert hops == {"b": 1, "c": 2, "d": 3}
+        assert "e" not in hops  # hop 4, beyond the clamp
+        assert truncated is False
+
+    def test_direction_out_only_follows_successors(self):
+        import networkx as nx
+
+        g = nx.DiGraph()
+        g.add_edge("hub", "out1")
+        g.add_edge("hub", "out2")
+        g.add_edge("in1", "hub")
+        g.add_edge("in2", "hub")
+
+        entries, _ = graph_neighborhood(g, "hub", direction="out", depth=1)
+
+        assert {e["stem"] for e in entries} == {"out1", "out2"}
+
+    def test_direction_in_only_follows_predecessors(self):
+        import networkx as nx
+
+        g = nx.DiGraph()
+        g.add_edge("hub", "out1")
+        g.add_edge("in1", "hub")
+        g.add_edge("in2", "hub")
+
+        entries, _ = graph_neighborhood(g, "hub", direction="in", depth=1)
+
+        assert {e["stem"] for e in entries} == {"in1", "in2"}
+
+    def test_direction_both_follows_both(self):
+        import networkx as nx
+
+        g = nx.DiGraph()
+        g.add_edge("hub", "out1")
+        g.add_edge("in1", "hub")
+
+        entries, _ = graph_neighborhood(g, "hub", direction="both", depth=1)
+
+        assert {e["stem"] for e in entries} == {"out1", "in1"}
+
+    def test_truncation_flag_set_when_cap_exceeded(self):
+        import networkx as nx
+
+        g = nx.DiGraph()
+        for i in range(5):
+            g.add_edge("hub", f"leaf{i}")
+
+        entries, truncated = graph_neighborhood(g, "hub", direction="out", depth=1, cap=3)
+
+        assert len(entries) == 3
+        assert truncated is True
+
+    def test_no_neighbors_returns_empty(self):
+        import networkx as nx
+
+        g = nx.DiGraph()
+        g.add_node("lonely")
+
+        entries, truncated = graph_neighborhood(g, "lonely", direction="both", depth=2)
+
+        assert entries == []
+        assert truncated is False
+
+    def test_missing_node_returns_empty(self):
+        import networkx as nx
+
+        g = nx.DiGraph()
+        g.add_edge("a", "b")
+
+        entries, truncated = graph_neighborhood(g, "nonexistent", direction="both", depth=2)
+
+        assert entries == []
+        assert truncated is False
+
+
+class TestSupersessionChain:
+    def test_walks_both_directions_oldest_to_newest(self, tmp_vault, mock_config, monkeypatch):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        _write_note(tmp_vault, "note-v1", "First version.")
+        _write_note(tmp_vault, "note-v2", "Second version.", frontmatter={"supersedes": '"[[note-v1]]"'})
+        _write_note(tmp_vault, "note-v3", "Third version.", frontmatter={"supersedes": '"[[note-v2]]"'})
+
+        chain = supersession_chain("note-v2")
+
+        assert [entry["stem"] for entry in chain] == ["note-v1", "note-v2", "note-v3"]
+        assert [entry["hop"] for entry in chain] == [-1, 0, 1]
+
+    def test_no_supersession_returns_only_self(self, tmp_vault, mock_config, monkeypatch):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        _write_note(tmp_vault, "standalone", "No supersession here.")
+
+        chain = supersession_chain("standalone")
+
+        assert [entry["stem"] for entry in chain] == ["standalone"]
+        assert chain[0]["hop"] == 0
+
+
+class TestBuildRelatedView:
+    def test_full_shape_for_connected_note(self, tmp_vault, mock_config, monkeypatch, _isolate_graph_cache):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        _write_note(tmp_vault, "alpha", "See [[beta]].")
+        _write_note(tmp_vault, "beta", "No links.")
+        _write_note(tmp_vault, "gamma", "See [[alpha]].")
+
+        result = build_related_view("alpha", direction="both", depth=1)
+
+        assert result["note"] == "alpha"
+        assert result["path"] == "notes/alpha.md"
+        assert [e["stem"] for e in result["outbound"]] == ["beta"]
+        assert [e["stem"] for e in result["inbound"]] == ["gamma"]
+        neighborhood_stems = {e["stem"] for e in result["neighborhood"]["nodes"]}
+        assert neighborhood_stems == {"beta", "gamma"}
+        assert result["neighborhood"]["truncated"] is False
+        assert [e["stem"] for e in result["supersession_chain"]] == ["alpha"]
+        assert "error" not in result
+
+    def test_depth_is_clamped_in_response(self, tmp_vault, mock_config, monkeypatch, _isolate_graph_cache):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        _write_note(tmp_vault, "alpha", "See [[beta]].")
+        _write_note(tmp_vault, "beta", "No links.")
+
+        result = build_related_view("alpha", depth=99)
+
+        assert result["depth"] == 3
+
+    def test_unresolved_note_returns_structured_error(self, tmp_vault, mock_config, monkeypatch, _isolate_graph_cache):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        _write_note(tmp_vault, "redis-cache-ttl", "Body.")
+
+        result = build_related_view("redis-cache-tt")  # typo
+
+        assert result["reason"] == "note_not_found"
+        assert "error" in result
+        assert "redis-cache-ttl" in result["suggestions"]
+
+    def test_networkx_unavailable_returns_structured_error(self, tmp_vault, mock_config, monkeypatch):
+        monkeypatch.setattr("memento.graph.get_vault", lambda: tmp_vault)
+        monkeypatch.setattr("memento.graph._HAS_NETWORKX", False)
+
+        result = build_related_view("alpha")
+
+        assert result["reason"] == "networkx_unavailable"
+        assert "error" in result

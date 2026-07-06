@@ -13,7 +13,9 @@ import re
 from collections import Counter
 from datetime import datetime, time, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from memento import frontmatter as frontmatter_module
 
 ALLOWED_AGGREGATIONS = ("project", "type", "tag", "source", "month", "date", "branch", "session_id")
 MISSING_VALUE = "(missing)"
@@ -33,38 +35,37 @@ def _strip_injection(text: str) -> str:
     return text
 
 
-def _clean_scalar(value: str) -> str:
-    return value.strip().strip('"').strip("'")
+def read_note_record(vault: Path, path: Path) -> dict[str, Any] | None:
+    """Read a single note's frontmatter metadata as a filter-ready record.
 
-
-def _parse_inline_list(value: str) -> list[str]:
-    raw = value.strip()
-    if not (raw.startswith("[") and raw.endswith("]")):
-        return []
-    return [_clean_scalar(item) for item in raw[1:-1].split(",") if _clean_scalar(item)]
-
-
-def _split_frontmatter(text: str) -> str:
-    if not text.startswith("---"):
-        return ""
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return ""
-    frontmatter: list[str] = []
-    for line in lines[1:]:
-        if line.strip() == "---":
-            return "\n".join(frontmatter)
-        frontmatter.append(line)
-    return ""
+    Public entry point so callers outside this module (for example a search
+    tool applying typed post-filters to ranked hits) can look up frontmatter
+    for one known path without reimplementing frontmatter parsing. ``path``
+    may be absolute or relative to ``vault``; returns ``None`` if the file is
+    unreadable.
+    """
+    candidate = Path(path)
+    absolute = candidate if candidate.is_absolute() else vault / candidate
+    return _read_note_record(vault, absolute)
 
 
 def _read_note_record(vault: Path, path: Path) -> dict[str, Any] | None:
+    """Read one note's frontmatter into a filter-ready metadata record.
+
+    MEM-166: parses via :mod:`memento.frontmatter` instead of a private
+    ``split(":", 1)`` scanner. The one behavior change: ``tags`` written in
+    block style (``tags:\n  - a\n  - b``) are now visible here, same as the
+    inline ``tags: [a, b]`` form -- previously only the inline form was
+    understood by this scanner (the same gap :func:`memento.graph.read_note_metadata`
+    had), so block-style tags were silently invisible to typed queries and
+    project/type/tag filtering.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
 
-    frontmatter = _split_frontmatter(text)
+    fields, _ = frontmatter_module.parse(text)
     metadata: dict[str, Any] = {
         "title": path.stem,
         "type": "",
@@ -75,24 +76,24 @@ def _read_note_record(vault: Path, path: Path) -> dict[str, Any] | None:
         "project": "",
         "branch": "",
         "session_id": "",
+        "invalidated_by": "",
     }
-    if frontmatter:
-        for line in frontmatter.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or ":" not in stripped:
-                continue
-            key, raw_value = stripped.split(":", 1)
-            key = key.strip()
-            value = raw_value.strip()
-            if key == "tags":
-                metadata["tags"] = _parse_inline_list(value)
-            elif key == "certainty":
-                try:
-                    metadata["certainty"] = int(_clean_scalar(value))
-                except ValueError:
-                    metadata["certainty"] = None
-            elif key in {"title", "type", "source", "date", "project", "branch", "session_id"}:
-                metadata[key] = _clean_scalar(value)
+
+    tags = fields.get("tags")
+    if isinstance(tags, list):
+        metadata["tags"] = tags
+
+    raw_certainty = fields.get("certainty")
+    if isinstance(raw_certainty, str) and raw_certainty:
+        try:
+            metadata["certainty"] = int(raw_certainty)
+        except ValueError:
+            metadata["certainty"] = None
+
+    for key in ("title", "type", "source", "date", "project", "branch", "session_id", "invalidated_by"):
+        value = fields.get(key)
+        if isinstance(value, str):
+            metadata[key] = value
 
     rel_path = str(path.resolve().relative_to(vault.resolve())).replace(os.sep, "/")
     return {
@@ -106,7 +107,13 @@ def _read_note_record(vault: Path, path: Path) -> dict[str, Any] | None:
         "project": _strip_injection(str(metadata.get("project") or "")),
         "branch": _strip_injection(str(metadata.get("branch") or "")),
         "session_id": _strip_injection(str(metadata.get("session_id") or "")),
+        "invalidated_by": _strip_injection(str(metadata.get("invalidated_by") or "")),
     }
+
+
+def is_invalidated_record(record: dict[str, Any]) -> bool:
+    """True when a note record carries a non-empty ``invalidated_by`` (MEM-163)."""
+    return bool(str((record or {}).get("invalidated_by") or "").strip())
 
 
 def _iter_note_records(vault: Path) -> list[dict[str, Any]]:
@@ -184,6 +191,7 @@ def _filters_metadata(
     date_end: str,
     branch: str,
     session_id: str,
+    include_invalidated: bool = False,
 ) -> dict[str, Any]:
     return {
         "project": project or None,
@@ -196,10 +204,13 @@ def _filters_metadata(
         "date_end": date_end or None,
         "branch": branch or None,
         "session_id": session_id or None,
+        "include_invalidated": bool(include_invalidated),
     }
 
 
 def _matches(record: dict[str, Any], filters: dict[str, Any], start: datetime | None, end: datetime | None) -> bool:
+    if not filters.get("include_invalidated", False) and is_invalidated_record(record):
+        return False
     if filters["project"] and record.get("project") != filters["project"]:
         return False
     if filters["type"] and record.get("type") != filters["type"]:
@@ -228,6 +239,70 @@ def _matches(record: dict[str, Any], filters: dict[str, Any], start: datetime | 
     return True
 
 
+def build_metadata_filter(
+    *,
+    project: str = "",
+    note_type: str = "",
+    tag: str = "",
+    source: str = "",
+    certainty_min: int | None = None,
+    certainty_max: int | None = None,
+    date_start: str = "",
+    date_end: str = "",
+    branch: str = "",
+    session_id: str = "",
+    include_invalidated: bool = False,
+) -> tuple[Callable[[dict[str, Any]], bool], dict[str, Any]]:
+    """Validate typed filter params and build a reusable note-record predicate.
+
+    This is the single source of truth for the typed metadata filter
+    semantics also used by :func:`query_notes` -- both callers get identical
+    validation and matching behavior for project/type/tag/source/certainty/
+    date/branch/session_id/include_invalidated.
+
+    ``include_invalidated`` (MEM-163, default ``False``) excludes notes
+    carrying a non-empty ``invalidated_by`` frontmatter field -- notes whose
+    validity has been explicitly closed out (by the supersession backlink
+    sweep or contradiction-adjudication auto-apply) are dropped from results
+    by default; set ``True`` to include them anyway.
+
+    Returns ``(predicate, filters_echo)`` where ``predicate(record)`` mirrors
+    the per-note match logic used by ``query_notes`` and ``filters_echo`` is
+    the same shape as ``query_notes``'s ``metadata["filters"]``.
+
+    Raises:
+        QueryValidationError: same validation as ``query_notes`` -- invalid
+            certainty range or unparsable/inverted date boundaries.
+    """
+    clean_min = _validate_certainty(certainty_min, key="certainty_min")
+    clean_max = _validate_certainty(certainty_max, key="certainty_max")
+    if clean_min is not None and clean_max is not None and clean_min > clean_max:
+        raise QueryValidationError("certainty_min must be <= certainty_max")
+    start = _parse_boundary(date_start, key="date_start")
+    end = _parse_boundary(date_end, key="date_end", end_of_day=True)
+    if start is not None and end is not None and start > end:
+        raise QueryValidationError("date_start must be <= date_end")
+
+    filters = _filters_metadata(
+        project=project,
+        note_type=note_type,
+        tag=tag,
+        source=source,
+        certainty_min=clean_min,
+        certainty_max=clean_max,
+        date_start=date_start,
+        date_end=date_end,
+        branch=branch,
+        session_id=session_id,
+        include_invalidated=include_invalidated,
+    )
+
+    def predicate(record: dict[str, Any]) -> bool:
+        return _matches(record, filters, start, end)
+
+    return predicate, filters
+
+
 def _compact_note(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "path": record["path"],
@@ -240,6 +315,7 @@ def _compact_note(record: dict[str, Any]) -> dict[str, Any]:
         "project": record.get("project") or None,
         "branch": record.get("branch") or None,
         "session_id": record.get("session_id") or None,
+        "invalidated_by": record.get("invalidated_by") or None,
     }
 
 
@@ -325,6 +401,7 @@ def query_notes(
     aggregate_by: str = "",
     recent_sessions_project: str = "",
     limit: int = 20,
+    include_invalidated: bool = False,
 ) -> dict[str, Any]:
     """Run a typed metadata query over vault notes and return compact results."""
 
@@ -334,32 +411,49 @@ def query_notes(
         if aggregate and aggregate not in ALLOWED_AGGREGATIONS:
             allowed = ", ".join(ALLOWED_AGGREGATIONS)
             raise QueryValidationError(f"aggregate_by must be one of: {allowed}")
-        clean_min = _validate_certainty(certainty_min, key="certainty_min")
-        clean_max = _validate_certainty(certainty_max, key="certainty_max")
-        if clean_min is not None and clean_max is not None and clean_min > clean_max:
-            raise QueryValidationError("certainty_min must be <= certainty_max")
-        start = _parse_boundary(date_start, key="date_start")
-        end = _parse_boundary(date_end, key="date_end", end_of_day=True)
-        if start is not None and end is not None and start > end:
-            raise QueryValidationError("date_start must be <= date_end")
+        effective_project = recent_sessions_project or project
+        predicate, filters = build_metadata_filter(
+            project=effective_project,
+            note_type=note_type,
+            tag=tag,
+            source=source,
+            certainty_min=certainty_min,
+            certainty_max=certainty_max,
+            date_start=date_start,
+            date_end=date_end,
+            branch=branch,
+            session_id=session_id,
+            include_invalidated=include_invalidated,
+        )
     except QueryValidationError as exc:
         return {"error": str(exc), "metadata": {"valid": False}}
 
-    effective_project = recent_sessions_project or project
-    filters = _filters_metadata(
-        project=effective_project,
-        note_type=note_type,
-        tag=tag,
-        source=source,
-        certainty_min=clean_min,
-        certainty_max=clean_max,
-        date_start=date_start,
-        date_end=date_end,
-        branch=branch,
-        session_id=session_id,
-    )
     records = _iter_note_records(vault)
-    matched = [record for record in records if _matches(record, filters, start, end)]
+    matched = [record for record in records if predicate(record)]
+
+    # MEM-163: count notes that matched every OTHER filter but were dropped
+    # solely for carrying invalidated_by, so callers relying on the default
+    # exclusion can see how many were held back (mirrors MEM-158's
+    # filters_applied visibility).
+    excluded_invalidated_count = 0
+    if not include_invalidated:
+        predicate_with_invalidated, _ = build_metadata_filter(
+            project=effective_project,
+            note_type=note_type,
+            tag=tag,
+            source=source,
+            certainty_min=certainty_min,
+            certainty_max=certainty_max,
+            date_start=date_start,
+            date_end=date_end,
+            branch=branch,
+            session_id=session_id,
+            include_invalidated=True,
+        )
+        excluded_invalidated_count = sum(
+            1 for record in records if predicate_with_invalidated(record) and is_invalidated_record(record)
+        )
+
     metadata = {
         "valid": True,
         "scanned_notes": len(records),
@@ -368,6 +462,7 @@ def query_notes(
         "aggregate_by": aggregate or None,
         "recent_sessions_project": recent_sessions_project or None,
         "limit": normalized_limit,
+        "excluded_invalidated_count": excluded_invalidated_count,
     }
 
     if recent_sessions_project:

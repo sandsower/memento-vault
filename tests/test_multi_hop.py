@@ -7,9 +7,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
+from memento.config import DEFAULT_CONFIG
 from memento.graph import extract_wikilinks
-from memento.search import multi_hop_search, qmd_get
+from memento.search import expand_result_links, multi_hop_search, qmd_get, rrf_fuse
 from memento.search_backend import reset_backend
+
+RECALL_MIN_SCORE = DEFAULT_CONFIG["recall_min_score"]
+RECALL_HIGH_CONFIDENCE = DEFAULT_CONFIG["recall_high_confidence"]
 
 
 class TestExtractWikilinks:
@@ -263,3 +267,172 @@ class TestMultiHopSearch:
 
         # Should only fetch content for top 3, not all 10
         assert len(get_calls) <= 3
+
+
+class TestExpandResultLinks:
+    """expand_result_links (MEM-159): thin shim for memento_search's
+    expand_links opt-in. Unlike multi_hop_search, entries are returned
+    separately -- never merged/re-sorted with the direct hits."""
+
+    def _shaped(self, path, title, score=0.5):
+        return {"path": path, "title": title, "score": score}
+
+    def test_returns_via_link_marked_entries(self):
+        shaped = [self._shaped("notes/a.md", "Note A", 0.6)]
+
+        def mock_get(path, **kwargs):
+            if path == "notes/a.md":
+                return {"path": "notes/a.md", "content": "See [[note-b]]."}
+            if path == "notes/note-b.md":
+                return {"path": "notes/note-b.md", "title": "Note B", "content": "B content."}
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expanded = expand_result_links(shaped, config={"multi_hop_max": 2})
+
+        assert len(expanded) == 1
+        assert expanded[0]["path"] == "notes/note-b.md"
+        assert expanded[0]["via_link"] == "a"
+        assert expanded[0]["score"] == 0.0
+
+    def test_does_not_mutate_or_reorder_direct_hits(self):
+        shaped = [
+            self._shaped("notes/low.md", "Low", 0.1),
+            self._shaped("notes/high.md", "High", 0.9),
+        ]
+        original = [dict(entry) for entry in shaped]
+
+        def mock_get(path, **kwargs):
+            if path == "notes/low.md":
+                return {"path": "notes/low.md", "content": "See [[linked]]."}
+            if path == "notes/linked.md":
+                return {"path": "notes/linked.md", "title": "Linked", "content": "text"}
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expand_result_links(shaped, config={"multi_hop_max": 2})
+
+        # Direct hits list must be untouched: same dicts, same order.
+        assert shaped == original
+
+    def test_skips_paths_already_in_direct_hits(self):
+        shaped = [
+            self._shaped("notes/a.md", "Note A", 0.6),
+            self._shaped("notes/note-b.md", "Note B", 0.5),
+        ]
+
+        def mock_get(path, **kwargs):
+            if path == "notes/a.md":
+                return {"path": "notes/a.md", "content": "See [[note-b]] and [[note-c]]."}
+            if path == "notes/note-c.md":
+                return {"path": "notes/note-c.md", "title": "Note C", "content": "C"}
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expanded = expand_result_links(shaped, config={"multi_hop_max": 5})
+
+        paths = [e["path"] for e in expanded]
+        assert "notes/note-b.md" not in paths  # already a direct hit
+        assert "notes/note-c.md" in paths
+
+    def test_respects_max_expanded_from_config(self):
+        shaped = [self._shaped("notes/a.md", "Note A", 0.6)]
+
+        def mock_get(path, **kwargs):
+            if path == "notes/a.md":
+                return {"path": "notes/a.md", "content": "See [[b]], [[c]], [[d]]."}
+            return {"path": path, "title": Path(path).stem, "content": "text"}
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expanded = expand_result_links(shaped, config={"multi_hop_max": 1})
+
+        assert len(expanded) == 1
+
+    def test_only_follows_top_n_direct_hits(self):
+        shaped = [self._shaped(f"notes/{i}.md", f"Note {i}", 0.9 - i * 0.1) for i in range(10)]
+
+        get_calls = []
+
+        def mock_get(path, **kwargs):
+            get_calls.append(path)
+            return {"path": path, "content": "No links here."}
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expand_result_links(shaped, config={"multi_hop_max": 5}, top_n=3)
+
+        assert len(get_calls) <= 3
+
+    def test_empty_results_returns_empty(self):
+        assert expand_result_links([], config={"multi_hop_max": 2}) == []
+
+    def test_no_wikilinks_returns_empty(self):
+        shaped = [self._shaped("notes/a.md", "Note A", 0.6)]
+
+        def mock_get(path, **kwargs):
+            return {"path": path, "content": "Plain text with no links."}
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expanded = expand_result_links(shaped, config={"multi_hop_max": 2})
+
+        assert expanded == []
+
+
+class TestMultiHopGateWithFixedFusionMEM143:
+    """MEM-143 gates the multi_hop_enabled default flip (MEM-159 part 3) on
+    the RRF fusion fix: multi-hop follows wikilinks starting from the top of
+    whatever result list it's handed, so if RRF fusion could still
+    manufacture an inflated score for a weak match, multi-hop would
+    confidently expand from a garbage seed. These tests run the actual
+    (fixed) rrf_fuse() output through multi_hop_search() to confirm the
+    bound holds end to end, not just inside rrf_fuse() in isolation."""
+
+    def test_weak_only_multi_hop_expansion_cannot_clear_recall_min_score(self):
+        """A weak match that is the sole candidate in two thin RRF input
+        lists must stay below recall_min_score even after being used as a
+        multi-hop seed and expanded with another equally weak linked note."""
+        weak_seed = {"path": "notes/weak-seed.md", "title": "Weak seed", "score": 0.05, "snippet": ""}
+        fused = rrf_fuse([[dict(weak_seed)], [dict(weak_seed)]], k=60)
+        assert fused[0]["score"] < RECALL_MIN_SCORE
+
+        def mock_get(path, **kwargs):
+            if path == "notes/weak-seed.md":
+                return {"path": path, "content": "See [[weak-linked]]."}
+            if path == "notes/weak-linked.md":
+                return {"path": "notes/weak-linked.md", "title": "Weak linked", "content": "text", "score": 0.0}
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            results = multi_hop_search("irrelevant query", fused, config={"multi_hop_max": 2})
+
+        by_path = {r["path"]: r for r in results}
+        assert by_path["notes/weak-linked.md"] is not None
+        assert by_path["notes/weak-seed.md"]["score"] < RECALL_MIN_SCORE
+        assert by_path["notes/weak-linked.md"]["score"] < RECALL_MIN_SCORE
+
+    def test_genuinely_strong_multi_hop_result_still_surfaces(self):
+        """A strong match that clears recall_high_confidence through RRF
+        fusion must still surface as the top result after multi-hop
+        expansion adds its linked note."""
+        strong_seed = {"path": "notes/strong-seed.md", "title": "Strong seed", "score": 0.9, "snippet": ""}
+        fused = rrf_fuse([[dict(strong_seed)], [dict(strong_seed)]], k=60)
+        assert fused[0]["score"] >= RECALL_HIGH_CONFIDENCE
+
+        def mock_get(path, **kwargs):
+            if path == "notes/strong-seed.md":
+                return {"path": path, "content": "See [[strong-linked]]."}
+            if path == "notes/strong-linked.md":
+                return {
+                    "path": "notes/strong-linked.md",
+                    "title": "Strong linked",
+                    "content": "text",
+                    "score": 0.0,
+                }
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            results = multi_hop_search("irrelevant query", fused, config={"multi_hop_max": 2})
+
+        assert results[0]["path"] == "notes/strong-seed.md"
+        assert results[0]["score"] >= RECALL_MIN_SCORE
+        paths = [r["path"] for r in results]
+        assert "notes/strong-linked.md" in paths

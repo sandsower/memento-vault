@@ -141,7 +141,7 @@ def test_beislid_process_artifact_and_workflow_wiring() -> None:
     artifact = _artifact()
     policy = _action_policy()
     rondo_workflow = Rondo_WORKFLOW.read_text(encoding="utf-8")
-    docs = (REPO_ROOT / "docs" / "beislid-gates.md").read_text(encoding="utf-8")
+    docs = (REPO_ROOT / "docs" / "history" / "beislid-gates.md").read_text(encoding="utf-8")
 
     assert artifact["schema"] == "beislid-process-artifact-v1"
     assert artifact["id"] == "rondo-mem-20-process-artifact"
@@ -254,8 +254,8 @@ def test_beislid_process_artifact_and_workflow_wiring() -> None:
 
 
 def test_beislid_gate_migration_policy_is_documented() -> None:
-    docs = (REPO_ROOT / "docs" / "beislid-gates.md").read_text(encoding="utf-8")
-    releasing = (REPO_ROOT / "docs" / "releasing.md").read_text(encoding="utf-8")
+    docs = (REPO_ROOT / "docs" / "history" / "beislid-gates.md").read_text(encoding="utf-8")
+    releasing = (REPO_ROOT / "docs" / "history" / "releasing.md").read_text(encoding="utf-8")
 
     assert "Flat gates are still valid Beislið input" in docs
     assert "pre-pr" in docs

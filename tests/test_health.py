@@ -748,6 +748,166 @@ def test_inception_health_surfaces_recent_run_summary_and_error(monkeypatch):
     assert "last run note count 7" in report.message
 
 
+def test_inception_health_omits_coverage_when_no_run_has_it(monkeypatch):
+    """State files predating MEM-154 (or with no completed run since
+    upgrading) must not report bogus coverage numbers."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": datetime.now().isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": [
+                    {"iso": datetime.now().isoformat(timespec="seconds"), "clusters_found": 1, "notes_written": 0}
+                ],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "pass"
+    assert "coverage" not in report.details
+
+
+def test_inception_health_reports_coverage_without_trend_on_single_run(monkeypatch):
+    """A single run with total_notes/processed_notes_total gives a coverage
+    ratio but no trend flags (not enough history to confirm a direction)."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    now = datetime.now()
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": now.isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": [
+                    {
+                        "iso": now.isoformat(timespec="seconds"),
+                        "clusters_found": 1,
+                        "notes_written": 1,
+                        "total_notes": 100,
+                        "processed_notes_total": 20,
+                    }
+                ],
+                "processed_notes": [f"n{i}" for i in range(20)],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "pass"
+    assert report.details["coverage"]["total_notes"] == 100
+    assert report.details["coverage"]["processed_notes_total"] == 20
+    assert report.details["coverage"]["coverage_ratio"] == pytest.approx(0.2)
+    assert report.details["coverage"]["backlog"] == 80
+    assert report.details["coverage"]["backlog_growing"] is False
+    assert report.details["coverage"]["coverage_falling"] is False
+    assert "coverage 20.0%" in report.message
+
+
+def test_inception_health_warns_when_backlog_grows_across_runs(monkeypatch):
+    """Backlog strictly increasing across 3 consecutive runs -> WARN, not FAIL."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    now = datetime.now()
+    runs = []
+    # total_notes grows faster than processed_notes_total each run, so
+    # backlog (total - processed) strictly increases: 80, 90, 100.
+    for i, (total, processed) in enumerate([(100, 20), (110, 20), (120, 20)]):
+        runs.append(
+            {
+                "iso": (now - timedelta(hours=3 - i)).isoformat(timespec="seconds"),
+                "clusters_found": 1,
+                "notes_written": 0,
+                "total_notes": total,
+                "processed_notes_total": processed,
+            }
+        )
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": now.isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": runs,
+                "processed_notes": [f"n{i}" for i in range(20)],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "warn"
+    assert report.details["coverage"]["backlog_growing"] is True
+    assert "backlog growing" in report.message
+
+
+def test_inception_health_warns_when_coverage_falls_across_runs(monkeypatch):
+    """Coverage ratio strictly decreasing across 3 consecutive runs -> WARN."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    now = datetime.now()
+    runs = []
+    for i, (total, processed) in enumerate([(100, 50), (150, 50), (200, 50)]):
+        runs.append(
+            {
+                "iso": (now - timedelta(hours=3 - i)).isoformat(timespec="seconds"),
+                "clusters_found": 1,
+                "notes_written": 0,
+                "total_notes": total,
+                "processed_notes_total": processed,
+            }
+        )
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": now.isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": runs,
+                "processed_notes": [f"n{i}" for i in range(50)],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "warn"
+    assert report.details["coverage"]["coverage_falling"] is True
+    assert "coverage falling" in report.message
+
+
+def test_inception_health_does_not_warn_on_a_single_noisy_run(monkeypatch):
+    """A single backwards blip doesn't trip the trend flag -- needs
+    min_consecutive confirmations."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    now = datetime.now()
+    # backlog: 80, 70 (improves), 90 (blip) -- not a confirmed growing trend.
+    runs = []
+    for i, (total, processed) in enumerate([(100, 20), (100, 30), (100, 10)]):
+        runs.append(
+            {
+                "iso": (now - timedelta(hours=3 - i)).isoformat(timespec="seconds"),
+                "clusters_found": 1,
+                "notes_written": 0,
+                "total_notes": total,
+                "processed_notes_total": processed,
+            }
+        )
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": now.isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": runs,
+                "processed_notes": [f"n{i}" for i in range(10)],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.details["coverage"]["backlog_growing"] is False
+    assert report.status == "pass"
+
+
 def test_inception_health_reports_live_lock(monkeypatch):
     monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
     Path(health.INCEPTION_STATE_PATH).write_text(
@@ -1152,6 +1312,23 @@ def test_pi_bridge_health_warns_when_log_missing():
     assert check.details["checked"] is False
     assert check.details["error_type"] == "FileNotFoundError"
     assert "unavailable" in check.message
+
+
+def test_health_queue_path_resolution_characterization(tmp_path, monkeypatch):
+    """Freeze queue-path/state-home resolution semantics across the queue-module extraction."""
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "pi-state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ignored-xdg"))
+    assert health._pi_queue_file() == tmp_path / "pi-state" / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME")
+    assert health._pi_queue_file() == tmp_path / "ignored-xdg" / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert (
+        health._pi_queue_file()
+        == tmp_path / "home" / ".local" / "state" / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    )
 
 
 def test_queue_health_warns_on_backlog_size(tmp_path, monkeypatch):
@@ -1667,3 +1844,143 @@ def test_pid_is_live_returns_false_for_missing_process(monkeypatch):
     monkeypatch.setattr(health.os, "kill", missing_process)
 
     assert health._pid_is_live(12345) is False
+
+
+def test_warn_message_includes_dead_letter_sources(tmp_path):
+    vault = _make_vault(tmp_path / "dl-message-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    ledger.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:abc",
+                        "status": "dead-letter",
+                        "error": "attempts exhausted",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:def",
+                        "status": "dead-letter",
+                        "error": "spool missing",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    check = health._check_local_extraction_retries(vault)
+    assert check.status == "warn"
+    assert "session:abc" in check.message
+    assert "session:def" in check.message
+
+
+def test_warn_message_with_more_than_3_dead_letter_sources_caps_with_overflow(tmp_path):
+    vault = _make_vault(tmp_path / "dl-overflow-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    lines = []
+    for i in range(5):
+        lines.append(
+            json.dumps(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "kind": "local-extraction",
+                    "source": f"session:s{i}",
+                    "status": "dead-letter",
+                    "error": "attempts exhausted",
+                }
+            )
+        )
+    ledger.write_text("\n".join(lines) + "\n")
+
+    check = health._check_local_extraction_retries(vault)
+    assert check.status == "warn"
+    assert "+2 more" in check.message
+    assert check.message.count("session:s") == 3  # only first 3 named
+
+
+def test_warn_message_uses_uncapped_count_when_dead_letter_sources_exceed_20(tmp_path):
+    """Overflow must use uncapped dead_letter_count, not len(capped sources)."""
+    vault = _make_vault(tmp_path / "dl-cap-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    lines = []
+    for i in range(25):
+        lines.append(
+            json.dumps(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "kind": "local-extraction",
+                    "source": f"session:long{i}",
+                    "status": "dead-letter",
+                    "error": "attempts exhausted",
+                }
+            )
+        )
+    ledger.write_text("\n".join(lines) + "\n")
+
+    check = health._check_local_extraction_retries(vault)
+    assert check.status == "warn"
+    # 25 - 3 = 22 remaining
+    assert "+22 more" in check.message, f"got {check.message}"
+    assert check.message.count("session:long") == 3  # only first 3 named
+
+
+def test_common_failure_reasons_excludes_dead_letter_ledger_noise(tmp_path, monkeypatch):
+    vault = _make_vault(tmp_path / "dl-noise-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    now = datetime.now(timezone.utc)
+    ledger.write_text(
+        "\n".join(
+            [
+                # Source that ultimately dead-lettered: intermediate noise error + dead-letter.
+                json.dumps(
+                    {
+                        "ts": (now - timedelta(hours=1)).isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:dead1",
+                        "status": "error",
+                        "error": "OpenAI Codex v0.133.0\\nmodel: gpt-5.5\\nsandbox: read-only",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": (now - timedelta(minutes=30)).isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:dead1",
+                        "status": "dead-letter",
+                        "error": "attempts exhausted",
+                    }
+                ),
+                # Genuine error entry for a non-dead-letter source.
+                json.dumps(
+                    {
+                        "ts": (now - timedelta(minutes=10)).isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:other",
+                        "status": "error",
+                        "error": "backend connection refused",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    reasons = health._common_automation_failure_reasons(vault, limit=10)
+    reason_texts = [r["reason"] for r in reasons]
+
+    # The dead-letter source's error text (codex banner) must NOT appear.
+    assert not any("Codex" in r for r in reason_texts), f"Codex noise found in {reason_texts}"
+    assert not any("gpt-5.5" in r for r in reason_texts), f"model name found in {reason_texts}"
+    # The genuine error should still appear.
+    assert any("connection refused" in r for r in reason_texts), f"genuine error missing in {reason_texts}"

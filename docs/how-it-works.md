@@ -55,6 +55,10 @@ vault-briefing.py (SessionStart hook)
     |       if maps have enough notes for this project: write ready immediately
     |       else: fall through to async vsearch
     +---> ASYNC: spawn background subprocess for QMD vsearch
+    |       if agentic_retrieval_enabled: try a bounded ReAct loop first
+    |       (memento/retrieval_agent.py -- search/query/related/get tools,
+    |       max 6 calls / 60s); any protocol/provider failure falls back to
+    |       the one-shot vsearch below, byte-identically
     |     writes results to a session/project-scoped deferred file with a short TTL
     |     picked up by vault-recall.py only for the matching first prompt context
     |
@@ -74,7 +78,7 @@ vault-recall.py (UserPromptSubmit hook)
     |       if cold: BM25 only
     +---> supplement with concept index lookups (inception-produced)
     +---> enhance_results():
-    |       temporal decay (90-day half-life, certainty 4-5 immune)
+    |       temporal decay (90-day half-life; pinned/hot durability-tier notes immune, warm/cold decay regardless of certainty -- see frontmatter-schema.md#durability-tier)
     |       PageRank centrality boost (well-connected notes rank higher)
     |       project filter (exclude notes from other projects)
     |       Personalized PageRank expansion (replaces naive 1-hop wikilinks)
@@ -82,6 +86,11 @@ vault-recall.py (UserPromptSubmit hook)
     +---> multi-hop: if low confidence + multi_hop_enabled,
     |       follow [[wikilinks]] from top results via qmd get
     |       add linked notes (up to multi_hop_max)
+    +---> deep recall: if low confidence + deep_recall_enabled,
+    |       spawn a background worker; results injected on the next prompt
+    |       if agentic_retrieval_enabled: the worker runs the bounded ReAct
+    |       loop (memento/retrieval_agent.py) instead of a single
+    |       suggest-titles completion; falls back on any failure
     +---> dedup: skip if same top result as last injection (within 3 prompts)
     +---> print [vault] related memories to stdout --> Claude sees them
     |
@@ -152,8 +161,16 @@ memento-triage.py (existing)
           memento-inception.py (background, non-blocking)
                 |
                 +---> Phase 1: Local clustering (zero LLM cost)
-                |     Read QMD embeddings from SQLite
-                |     Mean-pool chunk vectors -> doc-level 768-dim vectors
+                |     Read note vectors from the active search backend:
+                |       - QMD: mean-pool chunked SQLite vectors -> doc-level
+                |       - Embedded (QMD-less default): read notes_vec
+                |         directly -- already one vector per note, no pooling
+                |       - Grep-only / no backend: no vectors available --
+                |         skip clustering with an explicit logged reason
+                |     Dimensionality comes from the backend's own metadata
+                |     (768 for QMD's default model, 512 for the embedded
+                |     backend's default Matryoshka-truncated model) --
+                |     never a hardcoded constant.
                 |     HDBSCAN clustering (leaf method, cosine metric)
                 |     Score clusters: size + tag diversity + temporal spread
                 |                     + project diversity + mean certainty
@@ -219,7 +236,7 @@ Pattern notes compete with atomic notes for limited injection slots (`recall_max
 - Pattern notes match broader queries because their embedding is a mean of the cluster. When a pattern note displaces an atomic note, BM25/vsearch scored it higher -- it's more relevant to the prompt.
 - One injection gives you the synthesized insight *and* wikilinks to specifics.
 - At ~200-300 chars per injection, pattern notes stay within the vault's injection budget (~555 chars/session average).
-- Certainty 4-5 pattern notes are immune to temporal decay, so they persist as stable retrieval anchors -- the same behavior Park et al. validated as beneficial.
+- Pattern notes that get resurfaced by retrieval earn a `hot`/`warm` durability tier and persist as stable retrieval anchors -- the same behavior Park et al. validated as beneficial. (Certainty itself no longer confers decay immunity; see frontmatter-schema.md#durability-tier.)
 
 ### Cost
 
@@ -249,7 +266,7 @@ For context, a single concierge agent search costs ~$0.02 in API calls. Inceptio
 
 Pattern notes follow the same lifecycle as all vault notes:
 
-- **Certainty capped at 3.** Inception notes start at certainty 3 ("confirmed by cross-referencing"), not the LLM's self-assessment. They're subject to temporal decay (90-day half-life) and defrag archival. If a pattern proves durable, bump it to 4-5 manually -- that's a human signal the system can trust.
+- **Certainty capped at 3.** Inception notes start at certainty 3 ("confirmed by cross-referencing"), not the LLM's self-assessment. They're subject to temporal decay (90-day half-life, gated by durability tier rather than certainty -- see frontmatter-schema.md#durability-tier) and defrag archival. If a pattern proves durable, bump it to 4-5 manually as a human trust signal, or pin it (`pinned: true`) if it should never decay.
 - **Hybrid incremental clustering.** Each run clusters ALL notes (not just new ones) so cross-temporal patterns get detected. A new note that completes a cluster with two older notes produces a pattern. Only clusters containing at least 1 new note or flagged for refresh get synthesized -- the rest are skipped.
 - **Pattern refresh.** When new notes join an existing pattern's cluster (superset of `synthesized_from`), the pattern is re-synthesized with the full evidence. Stale conclusions get updated as new evidence arrives.
 - **Three-layer dedup.** Before writing: (1) check the `synthesized_from` ledger to skip already-covered clusters, (2) check title overlap against all existing notes, (3) the LLM itself responds SKIP for trivial connections. These layers prevent the vault from filling with redundant patterns.
@@ -259,7 +276,7 @@ Pattern notes follow the same lifecycle as all vault notes:
 
 - **No invalidation of wrong patterns.** Inception can refresh a pattern when new evidence extends it, but it can't detect when a pattern's conclusion has been contradicted. If the source notes are archived or superseded by newer work, the pattern note persists until you delete it. Periodic `--full` runs re-cluster everything and may produce updated patterns, but there's no automated "this is now wrong" signal. This would require the LLM to evaluate its own past output against new evidence -- an open research problem.
 - **No cross-system dedup.** The triage agent and Inception are independent pipelines. Both can write notes covering similar ground -- an atomic note "Redis TTL matters" and a pattern note "Cache TTL is the recurring footgun" may coexist. The Tenet hooks resolve this at query time (higher-scoring note wins the injection slot), but both consume index space.
-- **Clustering depends on QMD embeddings.** Semantically similar notes using different vocabulary may not cluster together. The 768-dim model captures meaning reasonably well but isn't perfect.
+- **Clustering depends on the active backend's embeddings.** Semantically similar notes using different vocabulary may not cluster together. Neither the 768-dim QMD model nor the 512-dim embedded-backend model captures meaning perfectly. If the active backend has no vector support at all (grep-only), Inception skips clustering entirely and logs why, rather than running with stale or wrong assumptions.
 - **HDBSCAN has tuning parameters.** `min_cluster_size=3` and `leaf` selection work well for ~550 notes but may need adjustment past 1000+.
 - **LLM synthesis dominates runtime.** Clusters are synthesized in parallel (4 workers by default via `inception_parallel`), but each call still takes 10-30s. Typical run: 30-90s for 10 clusters.
 - **First-run bias.** On a full backfill, the LLM sees all clusters at once and may over-synthesize. Incremental runs (5+ new notes) produce more focused patterns.
@@ -309,6 +326,23 @@ Notes accumulate. `/memento-defrag` handles decay:
 - Certainty 4-5 -> never archive
 
 Archived notes and preserved bundles move to `archive/`, are removed from the QMD index, but remain in git history and are searchable via grep.
+
+## Project hubs and vault map (MEM-160)
+
+`projects/<slug>.md` hub files used to grow by free-text append on every MCP store/replace/capture — a session-summary line hand-appended under `## Sessions` (or `## Activity log`) with no cap and no structural guarantee across format drift. Left running, that turns into exactly what happened in the real vault: a 300+ line file with duplicate `## Sessions` headers, truncated entries, and stray agent-output fragments — nothing curated it, and nothing navigated from it.
+
+`memento/hub.py` replaces that with mechanical, idempotent regeneration:
+
+- `regenerate_project_hub` rebuilds `projects/<slug>.md` **from scratch** every time — it never reads or parses the previous hub file, so whatever corruption accumulated there is discarded outright rather than patched around. Calling it twice with the same vault state produces byte-identical output.
+- The hub has a fixed, always-present section schema: a `# <project>` header (note count + generated-at), `## Top notes` (ranked by PageRank, falling back to a plain inbound-wikilink-count scan when `networkx` is unavailable), `## Recent decisions` (`type: decision` notes from the last 30 days), `## Recent activity` (the most recently dated notes — the bounded replacement for the old unbounded `## Sessions` append), and `## Overflow` (explicit "N notes not shown; use `memento_search --project <slug>`" counts — truncation is never silent).
+- The whole hub is capped at `hub_max_bytes` (default 25KB); sections are trimmed in reverse priority order (Recent activity first, then Recent decisions, then Top notes) to fit, and every trim is folded into the `## Overflow` counts.
+- `vault_map()` layers a second tier on top: the regenerated hub plus up to 10 of the highest-centrality notes from *other* projects, capped at `vault_map_max_bytes` (default 25KB), designed for briefing injection. Everything else stays read-on-demand via search/get.
+
+Both knobs are off by default (`hub_regeneration_enabled`, `vault_map_in_briefing`) — see [configuration.md](configuration.md) for the periodic sweep cadence and the briefing wiring. `memento/store.py`'s `update_project_index` no longer writes a session-summary line at all; only the `[[note_name]]` link under `## Notes` remains.
+
+## Contradiction detection and validity chains (MEM-163)
+
+The sparse `supersedes` field alone can't answer "what did we believe on date X" or deterministically close out an invalidated fact. `valid_from`/`invalidated_by` frontmatter give deterministic validity intervals: a note is invalid once `invalidated_by` is set (never backfilled, never a hard delete -- history stays greppable). A backlink pass in the periodic sweeper turns every `supersedes` edge into the target's `invalidated_by`; a background stage inside Inception's run (gated by `contradiction_detection_enabled`, default off) additionally finds embedding-similar note pairs and asks an LLM for a strict contradicts/newer-wins/confidence verdict, auto-applying only high-confidence same-project cases and queuing everything else for human review. This only ever touches atomic notes -- Inception's own generated pattern notes are still excluded from clustering/candidate scope, so the "no invalidation of wrong patterns" limitation above still applies to Inception's synthesized output specifically. `memento_search`/`memento_query` exclude invalidated notes by default (`include_invalidated` opts back in); `memento_contradictions` reports the resulting validity chains. Full field semantics and the apply policy live in [frontmatter-schema.md](frontmatter-schema.md#bitemporal-supersession-mem-163).
 
 ## Automation consumption
 

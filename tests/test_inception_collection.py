@@ -233,3 +233,34 @@ class TestParseNote:
 
         record = parse_note(path)
         assert record is None
+
+    def test_parse_note_reads_resurfacing_signal(self, tmp_vault):
+        """MEM-148 resurfacing fields (resurfaced_count/last_resurfaced) are
+        parsed so Inception can inherit them into synthesis notes (MEM-154).
+        Not consumed by any reader on this branch yet -- MEM-148 landed
+        separately -- but Inception must still read them here."""
+        from memento_inception import parse_note
+
+        path = tmp_vault / "notes" / "resurfaced-note.md"
+        path.write_text(
+            "---\ntitle: Resurfaced\ntype: discovery\ntags: []\n"
+            "resurfaced_count: 4\nlast_resurfaced: 2026-06-15T12:00:00Z\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+        record = parse_note(path)
+
+        assert record.resurfaced_count == 4
+        assert record.last_resurfaced == "2026-06-15T12:00:00Z"
+
+    def test_parse_note_defaults_resurfacing_signal_when_absent(self, tmp_vault):
+        """Notes without the MEM-148 fields default to 0/None, not a crash."""
+        from memento_inception import parse_note
+
+        path = tmp_vault / "notes" / "no-resurfacing.md"
+        path.write_text("---\ntitle: Plain\ntype: discovery\ntags: []\n---\n\nBody.\n", encoding="utf-8")
+
+        record = parse_note(path)
+
+        assert record.resurfaced_count == 0
+        assert record.last_resurfaced is None
