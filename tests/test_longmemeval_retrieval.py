@@ -3,9 +3,13 @@
 import sys
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("rank_bm25", reason="rank_bm25 not installed; install the 'test' extra to run this suite")
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "benchmark"))
 
-from longmemeval_retrieval import BM25Index, tokenize, build_bm25_index, bm25_search
+from longmemeval_retrieval import BM25Index, tokenize, build_bm25_index, bm25_search  # noqa: E402
 
 
 # ---- fixtures ----

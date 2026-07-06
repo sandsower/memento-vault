@@ -1,16 +1,27 @@
 """Tests for the Inception main pipeline."""
 
+import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 
 from memento_inception import (
     main,
     check_dependencies,
     parse_args,
+)
+
+# TestMainPipeline drives main(), which runs the real check_dependencies() gate
+# (hdbscan + scikit-learn) before it will do anything; without those installed
+# main() short-circuits with exit code 2 and every test below fails for a reason
+# unrelated to what it's actually checking. Skip that class only, not this
+# whole module - TestCheckDependencies and TestParseArgs don't need hdbscan.
+_HAS_INCEPTION_DEPS = (
+    importlib.util.find_spec("hdbscan") is not None and importlib.util.find_spec("sklearn") is not None
 )
 
 
@@ -54,6 +65,10 @@ class TestParseArgs:
 
 
 class TestMainPipeline:
+    pytestmark = pytest.mark.skipif(
+        not _HAS_INCEPTION_DEPS, reason="hdbscan/scikit-learn not installed; install the 'test' extra to run this suite"
+    )
+
     def test_exits_0_when_disabled(self, mock_config, tmp_vault, inception_state_path):
         """When inception_enabled=False and not --full, exits 0."""
         mock_config["inception_enabled"] = False

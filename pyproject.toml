@@ -23,6 +23,13 @@ classifiers = [
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.0"]
 embedded = ["onnxruntime", "sqlite-vec", "numpy", "tokenizers"]
+# Everything the full pytest suite needs beyond mcp+embedded: hdbscan/rank_bm25/optuna
+# back the Inception clustering, LongMemEval BM25, and hyperparameter-sweep benchmark
+# tests; pyyaml/numpy/networkx/scipy are the CI-mirrored core test/runtime deps. This
+# is the single source of truth for "what a contributor venv needs to run pytest clean" -
+# keep WORKFLOW.md and .github/workflows/ci.yml pointed at this extra rather than
+# ad-hoc package lists.
+test = ["pyyaml", "numpy", "networkx", "scipy", "hdbscan", "rank_bm25", "optuna"]
 
 [project.urls]
 Homepage = "https://github.com/sandsower/memento-vault"
