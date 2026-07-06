@@ -137,6 +137,13 @@ def log_automation_memory_health(action, **kwargs):
 _ACCESS_LOG_CACHE = {"signature": None, "stats": {}}
 _ACCESS_LOG_EVENT_CAP = 200
 
+# Below this many cached events for a candidate, apply_access_log_boost() also
+# checks the note's own frontmatter (resurfaced_count/last_resurfaced) so a
+# purged runtime-dir cache (or one that never caught up on old history) does
+# not silently reset the resurfacing signal. Notes that already have a
+# healthy cached history skip the extra frontmatter read entirely.
+_ACCESS_LOG_SEED_THRESHOLD = 3
+
 
 def _should_track_access():
     return get_config().get("access_log_enabled", True)
@@ -451,12 +458,32 @@ def apply_access_log_boost(results, config=None, now=None):
 
     current = now or datetime.now(timezone.utc)
     stats = load_access_log_stats()
-    if not stats:
+
+    vault_path = str(config.get("vault_path") or "")
+    vault = None
+    if vault_path:
+        try:
+            vault = Path(vault_path).expanduser().resolve()
+        except OSError:
+            vault = None
+
+    if not stats and vault is None:
         return results
 
     for result in results:
         path = str(result.get("path") or "")
-        events = stats.get(path, {}).get("events", [])
+        events = list(stats.get(path, {}).get("events", []))
+
+        # A cache wipe (or a note whose access history predates the cache)
+        # leaves few or no events here even though the note's own frontmatter
+        # remembers being resurfaced. Seed/merge from that durable signal so
+        # the boost below still sees it -- the decay formula itself is
+        # unchanged, it just gets a richer event list to sum over.
+        if vault is not None and path and len(events) < _ACCESS_LOG_SEED_THRESHOLD:
+            fm_count, fm_last = _frontmatter_resurfacing_signal(vault, path)
+            if fm_count > len(events) and fm_last is not None:
+                events = events + [{"ts": fm_last, "rank": 1} for _ in range(fm_count - len(events))]
+
         if not events:
             continue
 
@@ -477,6 +504,123 @@ def apply_access_log_boost(results, config=None, now=None):
 
     results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
     return results
+
+
+def _frontmatter_resurfacing_signal(vault, rel_path):
+    """Read ``(resurfaced_count, last_resurfaced)`` from a note's frontmatter.
+
+    These two fields are the durable side of the resurfacing signal, kept in
+    sync with the (purgeable) access-log cache by
+    :func:`fold_access_log_into_frontmatter`. Returns ``(0, None)`` for any
+    missing note, unreadable file, absent frontmatter block, or note that has
+    never been folded -- callers treat that as "no durable signal to seed
+    from," never as an error.
+    """
+    try:
+        note_path = (vault / rel_path).resolve()
+        note_path.relative_to(vault)
+    except (OSError, ValueError):
+        return 0, None
+    try:
+        text = note_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0, None
+
+    frontmatter, _ = split_frontmatter(text)
+    last_ts = _parse_access_log_ts(_frontmatter_scalar(frontmatter, "last_resurfaced"))
+    if last_ts is None:
+        return 0, None
+    return _frontmatter_int(frontmatter, "resurfaced_count") or 0, last_ts
+
+
+# Default window (days) for the "hot" durability tier -- configurable via
+# get_config()["durability_hot_window_days"] (MEM-150).
+DEFAULT_DURABILITY_HOT_WINDOW_DAYS = 30
+
+# Ordered so callers can treat earlier tiers as "more durable" if useful.
+DURABILITY_TIERS = ("pinned", "hot", "warm", "cold")
+
+
+def durability_tier(frontmatter, now=None, *, hot_window_days=None):
+    """Derive a note's durability tier from its raw frontmatter text (MEM-150).
+
+    Certainty keeps meaning "how sure this is true"; it no longer confers
+    decay immunity on its own. This is the one pure, side-effect-free
+    computation that decides what *does*: :func:`memento.search.apply_temporal_decay`
+    treats ``pinned``/``hot`` as decay-immune and lets ``warm``/``cold`` decay
+    normally (a certainty-5 note nobody has looked at in 90 days sinks like
+    any other). MEM-152's archive sweep is expected to reuse this same
+    function rather than re-deriving the tier.
+
+    Tiers, most to least durable:
+    - ``"pinned"``: frontmatter has ``pinned: true`` (manual, permanent).
+    - ``"hot"``: ``last_resurfaced`` is within ``hot_window_days`` of ``now``
+      (default :data:`DEFAULT_DURABILITY_HOT_WINDOW_DAYS`, 30).
+    - ``"warm"``: ``resurfaced_count`` > 0 at some point, but not within the
+      hot window.
+    - ``"cold"``: never resurfaced.
+
+    ``now`` defaults to the current UTC time. A naive ``now`` (or a naive
+    ``last_resurfaced``, which should not happen post-MEM-148 but is handled
+    defensively) is treated as UTC, matching :func:`_parse_access_log_ts`'s
+    convention elsewhere in this module.
+
+    Pure: no file I/O and no config lookups -- callers resolve the
+    frontmatter text and the hot-window override themselves (see
+    :func:`read_durability_tier` for the file-reading convenience wrapper).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if hot_window_days is None:
+        hot_window_days = DEFAULT_DURABILITY_HOT_WINDOW_DAYS
+
+    if _frontmatter_bool(frontmatter, "pinned"):
+        return "pinned"
+
+    last_ts = _parse_access_log_ts(_frontmatter_scalar(frontmatter, "last_resurfaced"))
+    if last_ts is not None:
+        age_days = (now - last_ts).total_seconds() / 86400.0
+        if age_days <= hot_window_days:
+            return "hot"
+
+    count = _frontmatter_int(frontmatter, "resurfaced_count") or 0
+    if count > 0:
+        return "warm"
+
+    return "cold"
+
+
+def read_durability_tier(vault, rel_path, config=None, now=None):
+    """Read a note's frontmatter off disk and compute its durability tier.
+
+    Thin file-I/O wrapper around the pure :func:`durability_tier` so callers
+    (``memento.search.apply_temporal_decay``, and MEM-152's archive sweep)
+    don't each duplicate the read. ``vault`` may be a path-like or ``Path``;
+    ``rel_path`` is vault-relative (e.g. ``"notes/example.md"``). Tolerates
+    the same missing/unreadable/traversal cases
+    :func:`_frontmatter_resurfacing_signal` does -- returns ``"cold"``
+    (never an error) since "no signal to read" and "never resurfaced"
+    collapse to the same tier.
+    """
+    if config is None:
+        config = get_config()
+    hot_window_days = config.get("durability_hot_window_days", DEFAULT_DURABILITY_HOT_WINDOW_DAYS)
+
+    try:
+        vault_path = Path(vault).resolve()
+        note_path = (vault_path / rel_path).resolve()
+        note_path.relative_to(vault_path)
+    except (OSError, ValueError):
+        return "cold"
+    try:
+        text = note_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "cold"
+
+    frontmatter, _ = split_frontmatter(text)
+    return durability_tier(frontmatter, now=now, hot_window_days=hot_window_days)
 
 
 def load_inception_state(state_path=None):
@@ -944,7 +1088,14 @@ def normalize_note_contract(
 
 
 def _coerce_certainty(certainty):
-    """Return a schema-valid certainty int, or None for unusable input."""
+    """Return a schema-valid certainty int, or None for unusable input.
+
+    Out-of-range integers (e.g. a `95`/`97` typo meant to be `5`) are clamped
+    into 1-5 with a logged warning rather than dropped (MEM-150) -- capture
+    must never hard-fail a write over a bad certainty value. Genuinely
+    unusable input (missing, empty, unparseable) still returns None, same as
+    before.
+    """
     if certainty is None or certainty == "":
         return None
     if isinstance(certainty, str):
@@ -958,7 +1109,11 @@ def _coerce_certainty(certainty):
         return None
     if 1 <= value <= 5:
         return value
-    return None
+    clamped = max(1, min(5, value))
+    import sys as _sys
+
+    print(f"[memento] warning: certainty {value} out of range 1-5, clamped to {clamped}", file=_sys.stderr)
+    return clamped
 
 
 def _render_note_markdown(
@@ -1105,13 +1260,65 @@ _MANAGED_NOTE_FRONTMATTER_KEYS = {
 
 _FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:")
 
+# Keys owned by fold_access_log_into_frontmatter(). Kept deliberately out of
+# _MANAGED_NOTE_FRONTMATTER_KEYS: from the write path's point of view these
+# are just another unmanaged key it round-trips unchanged, which is exactly
+# what should happen when e.g. an MCP edit rewrites a note's title/body —
+# the resurfacing signal must survive that rewrite untouched.
+_RESURFACING_FRONTMATTER_KEYS = {"resurfaced_count", "last_resurfaced"}
 
-def _unmanaged_frontmatter_lines(frontmatter):
-    """Return raw frontmatter lines for keys the write path does not manage.
 
-    Each unmanaged ``key:`` line is preserved verbatim together with its
-    indented continuation lines so rewrites round-trip unknown keys unchanged.
+def _frontmatter_scalar(frontmatter, key):
+    """Return the raw single-line scalar value for a frontmatter key, or None.
+
+    Same tiny per-key regex lookup smart_store.py already uses for its own
+    read-only frontmatter comparisons (MEM-166 will consolidate frontmatter
+    parsing later) — this is this module's copy of that existing convention
+    for the two keys it owns (resurfacing), not a new parsing strategy.
     """
+    match = re.search(rf"^{re.escape(key)}:\s*(.+)$", frontmatter or "", re.MULTILINE)
+    if not match:
+        return None
+    return match.group(1).strip().strip("\"'")
+
+
+def _frontmatter_int(frontmatter, key):
+    """Return a frontmatter scalar as ``int``, or None if absent/unparseable."""
+    raw = _frontmatter_scalar(frontmatter, key)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+_FRONTMATTER_TRUE_VALUES = {"true", "yes", "1"}
+
+
+def _frontmatter_bool(frontmatter, key):
+    """Return a frontmatter scalar as ``bool``. Absent/unparseable values are False."""
+    raw = _frontmatter_scalar(frontmatter, key)
+    if raw is None:
+        return False
+    return raw.strip().lower() in _FRONTMATTER_TRUE_VALUES
+
+
+def _unmanaged_frontmatter_lines(frontmatter, managed_keys=None):
+    """Return raw frontmatter lines for keys ``managed_keys`` does not cover.
+
+    Defaults to ``_MANAGED_NOTE_FRONTMATTER_KEYS`` (the write-path contract
+    fields) — this is what ``replace_note_at_path`` uses to round-trip
+    unknown keys on rewrite. ``fold_access_log_into_frontmatter`` instead
+    passes ``_RESURFACING_FRONTMATTER_KEYS`` so it can drop just the two
+    resurfacing lines it is about to rewrite while preserving every other
+    key — managed or not — unchanged.
+
+    Each preserved ``key:`` line is kept verbatim together with its indented
+    continuation lines so rewrites round-trip multi-line values unchanged.
+    """
+    if managed_keys is None:
+        managed_keys = _MANAGED_NOTE_FRONTMATTER_KEYS
     preserved = []
     keep = False
     for line in (frontmatter or "").splitlines():
@@ -1120,7 +1327,7 @@ def _unmanaged_frontmatter_lines(frontmatter):
                 preserved.append(line)
             continue
         match = _FRONTMATTER_KEY_RE.match(line)
-        keep = bool(match) and match.group(1) not in _MANAGED_NOTE_FRONTMATTER_KEYS
+        keep = bool(match) and match.group(1) not in managed_keys
         if keep:
             preserved.append(line)
     return preserved
@@ -1234,6 +1441,177 @@ def replace_note_at_path(
     )
     _index_written_note(vault_path, target)
     return target
+
+
+def _read_vault_access_log_entries(vault_id, log_path=None):
+    """Read ordered, parsed access-log entries for one vault, oldest first.
+
+    Unlike :func:`_events_from_raw_access_log` (which buckets by path and
+    caps each bucket to the boost's decay window), this keeps a single flat,
+    file-order list so the fold cursor in
+    :func:`fold_access_log_into_frontmatter` can tell exactly how many
+    entries at a given timestamp have already been folded.
+    """
+    entries = []
+    try:
+        with open(log_path or ACCESS_LOG_PATH) as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if str(entry.get("vault_id") or "") != vault_id:
+                    continue
+                path = str(entry.get("path") or "").strip()
+                if not path:
+                    continue
+                ts_raw = entry.get("ts")
+                ts = _parse_access_log_ts(ts_raw)
+                if ts is None:
+                    continue
+                entries.append({"path": path, "ts": ts, "ts_raw": str(ts_raw)})
+    except OSError:
+        return []
+    return entries
+
+
+def _fold_note_frontmatter(note_path, new_events, last_ts):
+    """Merge newly delivered access events into one note's frontmatter.
+
+    Increments ``resurfaced_count`` by ``new_events`` and advances
+    ``last_resurfaced`` to the max of the existing value and ``last_ts``. All
+    other frontmatter lines — managed or not — round-trip unchanged, via the
+    same ``_unmanaged_frontmatter_lines`` helper ``replace_note_at_path`` uses
+    to preserve unknown keys; this only ever touches the two resurfacing
+    lines. Returns True when the note was actually rewritten.
+    """
+    text = note_path.read_text(encoding="utf-8", errors="replace")
+    frontmatter, body = split_frontmatter(text)
+    if not frontmatter:
+        return False  # No frontmatter block -- nothing safe to fold into.
+
+    existing_count = _frontmatter_int(frontmatter, "resurfaced_count") or 0
+    existing_last = _parse_access_log_ts(_frontmatter_scalar(frontmatter, "last_resurfaced"))
+
+    new_count = existing_count + new_events
+    new_last = last_ts if existing_last is None or last_ts > existing_last else existing_last
+    new_last_raw = new_last.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    preserved = _unmanaged_frontmatter_lines(frontmatter, managed_keys=_RESURFACING_FRONTMATTER_KEYS)
+    new_frontmatter = "\n".join([*preserved, f"resurfaced_count: {new_count}", f"last_resurfaced: {new_last_raw}"])
+    new_text = f"---\n{new_frontmatter}\n---\n{body}"
+    if new_text == text:
+        return False
+    _write_text_atomic(note_path, new_text)
+    return True
+
+
+def fold_access_log_into_frontmatter(vault_path, *, lock_file=None):
+    """Fold the derived access-log (write-ahead buffer) into note frontmatter.
+
+    The access log lives under the runtime dir so cache cleaners can purge it
+    freely, but that means the ``access_log_half_life_days`` boost never
+    accumulates real history and never crosses machines (MEM-148). This fold
+    makes each note's frontmatter (``resurfaced_count``, ``last_resurfaced``)
+    the durable source of truth: it aggregates newly delivered events per
+    note path since the last fold and rewrites only the touched notes, under
+    the vault write lock, using the same atomic tmp+rename write as the rest
+    of this module.
+
+    Idempotent: a per-vault fold cursor (timestamp plus a same-timestamp
+    tie-breaker count) is persisted in ``ACCESS_LOG_STATS_PATH`` so re-running
+    the fold with no new access-log entries is a no-op, and entries that
+    share a timestamp with the cursor are never double-counted.
+
+    Only call this from a periodic trigger (e.g. hooks/memento-sweeper.py's
+    ``main()``) — never inline on every ``record_access``, which would
+    rewrite notes (and dirty git) on every recall.
+
+    Re-entrant like ``write_smart_store_note``: acquires the vault write lock
+    only if not already held by this process, and never releases a lock a
+    caller holds.
+
+    Like ``write_note``/``replace_note_at_path``, ``vault_path`` is a required
+    positional argument — the caller resolves it (e.g. from config), this
+    function does not fall back to ``get_config()`` for it. Vault *identity*
+    (for matching this vault's access-log entries) still comes from the
+    ambient config via ``_current_vault_id()``, consistent with
+    ``record_access``/``apply_access_log_boost`` elsewhere in this module.
+
+    Returns a dict with ``folded_notes`` (int notes touched), ``new_events``
+    (int access-log entries folded), and ``error`` (str, only on lock
+    contention).
+    """
+    vault = Path(vault_path).expanduser().resolve()
+
+    vault_id = _current_vault_id()
+    entries = _read_vault_access_log_entries(vault_id)
+    if not entries:
+        return {"folded_notes": 0, "new_events": 0}
+
+    already_held = owns_vault_write_lock(lock_file)
+    if not already_held and not acquire_vault_write_lock(lock_file=lock_file):
+        return {"folded_notes": 0, "new_events": 0, "error": "lock_unavailable"}
+
+    try:
+        data = _read_access_log_stats_file()
+        vaults = data.setdefault("vaults", {})
+        vault_entry = vaults.setdefault(vault_id, {"paths": {}, "updated_at": None})
+        cursor = vault_entry.get("fold_cursor") or {}
+        cursor_ts = _parse_access_log_ts(cursor.get("ts"))
+        cursor_count_at_ts = int(cursor.get("count_at_ts") or 0)
+
+        new_entries = []
+        seen_at_cursor = 0
+        for entry in entries:
+            if cursor_ts is not None and entry["ts"] < cursor_ts:
+                continue
+            if cursor_ts is not None and entry["ts"] == cursor_ts:
+                seen_at_cursor += 1
+                if seen_at_cursor <= cursor_count_at_ts:
+                    continue
+            new_entries.append(entry)
+
+        if not new_entries:
+            return {"folded_notes": 0, "new_events": 0}
+
+        per_path = {}
+        for entry in new_entries:
+            bucket = per_path.setdefault(entry["path"], {"count": 0, "last_ts": entry["ts"]})
+            bucket["count"] += 1
+            if entry["ts"] >= bucket["last_ts"]:
+                bucket["last_ts"] = entry["ts"]
+
+        folded = 0
+        for rel_path, agg in per_path.items():
+            try:
+                note_path = (vault / rel_path).resolve()
+                note_path.relative_to(vault)
+            except (OSError, ValueError):
+                continue
+            if not note_path.is_file():
+                continue
+            try:
+                if _fold_note_frontmatter(note_path, agg["count"], agg["last_ts"]):
+                    folded += 1
+            except OSError:
+                continue
+
+        last_entry = entries[-1]
+        vault_entry["fold_cursor"] = {
+            "ts": last_entry["ts_raw"],
+            "count_at_ts": sum(1 for entry in entries if entry["ts"] == last_entry["ts"]),
+        }
+        vault_entry["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _write_access_log_stats_file(data)
+
+        return {"folded_notes": folded, "new_events": len(new_entries)}
+    finally:
+        if not already_held:
+            release_vault_write_lock(lock_file=lock_file)
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

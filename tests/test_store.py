@@ -9,11 +9,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from memento import store
 from memento.store import (
     acquire_vault_write_lock,
     append_fleeting_session,
+    apply_access_log_boost,
+    durability_tier,
     find_dedup_candidates,
+    fold_access_log_into_frontmatter,
     log_triage_health,
+    owns_vault_write_lock,
+    read_durability_tier,
+    record_access,
     release_vault_write_lock,
     replace_note_at_path,
     update_project_index,
@@ -1048,3 +1055,267 @@ class TestTagNormalization:
             )
 
         assert 'tags: ["bugs", "bug"]' in path.read_text()
+
+
+class TestFoldAccessLogIntoFrontmatter:
+    """MEM-148: the runtime access log is a write-ahead buffer; frontmatter
+    (``resurfaced_count``/``last_resurfaced``) is the durable source of truth.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_vault_write_lock(self, monkeypatch, tmp_path):
+        """Point the vault write lock at a per-test file (never the real runtime dir)."""
+        lock_file = tmp_path / "locks" / "vault-write.lock"
+        monkeypatch.setattr("memento.store.VAULT_WRITE_LOCK_PATH", str(lock_file))
+        return lock_file
+
+    @pytest.fixture(autouse=True)
+    def _patch_config(self, monkeypatch, tmp_vault):
+        """Pin both config bindings (memento.config and memento.store) to tmp_vault.
+
+        record_access()/_should_track_access() and _current_vault_id()/
+        get_vault_id() resolve get_config() from their own defining module's
+        globals, so both bindings need patching for a fully hermetic vault_id
+        and access_log_enabled regardless of the real host config.
+        """
+        cfg = {"vault_path": str(tmp_vault), "access_log_enabled": True}
+        monkeypatch.setattr("memento.config.get_config", lambda: cfg, raising=False)
+        monkeypatch.setattr("memento.store.get_config", lambda: cfg, raising=False)
+        return cfg
+
+    @staticmethod
+    def _seed_note(tmp_vault, stem="example", extra_frontmatter=""):
+        note_path = tmp_vault / "notes" / f"{stem}.md"
+        note_path.write_text(f"---\ntitle: Example\ntype: discovery\ntags: [redis]\n{extra_frontmatter}---\n\nBody.\n")
+        return note_path
+
+    def test_fold_writes_count_and_last_resurfaced(self, tmp_vault):
+        note_path = self._seed_note(tmp_vault)
+
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q2", result_count=1)
+
+        result = fold_access_log_into_frontmatter(str(tmp_vault))
+
+        assert result == {"folded_notes": 1, "new_events": 2}
+        text = note_path.read_text()
+        assert "resurfaced_count: 2" in text
+        assert "last_resurfaced: " in text
+        # Untouched fields and body survive verbatim.
+        assert "title: Example" in text
+        assert "tags: [redis]" in text
+        assert text.endswith("Body.\n")
+
+    def test_fold_survives_a_full_cache_wipe(self, tmp_vault):
+        """Acceptance test (MEM-148): a runtime-dir wipe must not reset the signal."""
+        self._seed_note(tmp_vault)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="redis ttl", result_count=1)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="redis ttl", result_count=1)
+
+        first = fold_access_log_into_frontmatter(str(tmp_vault))
+        assert first["folded_notes"] == 1
+
+        # Simulate a cache cleaner wiping the runtime dir out from under us.
+        Path(store.ACCESS_LOG_PATH).unlink(missing_ok=True)
+        Path(store.ACCESS_LOG_STATS_PATH).unlink(missing_ok=True)
+        store._ACCESS_LOG_CACHE["signature"] = None
+        store._ACCESS_LOG_CACHE["stats"] = {}
+
+        baseline = apply_access_log_boost(
+            [{"path": "notes/untouched.md", "score": 1.0}],
+            config={"access_log_enabled": True, "access_log_boost_weight": 0.2, "vault_path": str(tmp_vault)},
+        )
+        boosted = apply_access_log_boost(
+            [{"path": "notes/example.md", "score": 1.0}],
+            config={"access_log_enabled": True, "access_log_boost_weight": 0.2, "vault_path": str(tmp_vault)},
+        )
+
+        assert boosted[0]["score"] > baseline[0]["score"]
+
+    def test_fold_is_idempotent(self, tmp_vault):
+        note_path = self._seed_note(tmp_vault)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+
+        first = fold_access_log_into_frontmatter(str(tmp_vault))
+        assert first == {"folded_notes": 1, "new_events": 1}
+
+        second = fold_access_log_into_frontmatter(str(tmp_vault))
+        assert second == {"folded_notes": 0, "new_events": 0}
+
+        text = note_path.read_text()
+        assert text.count("resurfaced_count:") == 1
+        assert "resurfaced_count: 1" in text
+
+    def test_fold_accumulates_across_separate_runs(self, tmp_vault):
+        note_path = self._seed_note(tmp_vault)
+
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+        fold_access_log_into_frontmatter(str(tmp_vault))
+
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q2", result_count=1)
+        second = fold_access_log_into_frontmatter(str(tmp_vault))
+
+        assert second == {"folded_notes": 1, "new_events": 1}
+        text = note_path.read_text()
+        assert "resurfaced_count: 2" in text
+
+    def test_fold_preserves_unknown_frontmatter_keys(self, tmp_vault):
+        note_path = self._seed_note(
+            tmp_vault,
+            extra_frontmatter='custom_field: keep-me\nsynthesized_from: ["a", "b"]\n',
+        )
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+
+        fold_access_log_into_frontmatter(str(tmp_vault))
+
+        text = note_path.read_text()
+        assert "custom_field: keep-me" in text
+        assert 'synthesized_from: ["a", "b"]' in text
+        assert "resurfaced_count: 1" in text
+        assert "last_resurfaced: " in text
+        assert "title: Example" in text
+        assert text.endswith("Body.\n")
+
+    def test_fold_skips_notes_without_a_frontmatter_block(self, tmp_vault):
+        note_path = tmp_vault / "notes" / "no-frontmatter.md"
+        note_path.write_text("Just a body, no frontmatter.\n")
+        record_access(["notes/no-frontmatter.md"], hook="mcp", tool="search", query="q1", result_count=1)
+
+        result = fold_access_log_into_frontmatter(str(tmp_vault))
+
+        assert result["folded_notes"] == 0
+        assert note_path.read_text() == "Just a body, no frontmatter.\n"
+
+    def test_fold_ignores_missing_notes_and_traversal_paths(self, tmp_vault):
+        record_access(["notes/does-not-exist.md"], hook="mcp", tool="search", query="q1", result_count=1)
+        record_access(["../outside-vault.md"], hook="mcp", tool="search", query="q2", result_count=1)
+
+        result = fold_access_log_into_frontmatter(str(tmp_vault))
+
+        assert result["folded_notes"] == 0
+
+    def test_fold_is_reentrant_with_a_caller_held_lock(self, tmp_vault):
+        note_path = self._seed_note(tmp_vault)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+
+        assert acquire_vault_write_lock() is True
+        try:
+            result = fold_access_log_into_frontmatter(str(tmp_vault))
+            assert result["folded_notes"] == 1
+            # fold() must not release a lock it did not acquire itself.
+            assert owns_vault_write_lock() is True
+        finally:
+            release_vault_write_lock()
+
+        assert "resurfaced_count: 1" in note_path.read_text()
+
+
+class TestDurabilityTier:
+    """MEM-150: derived durability tier decouples decay immunity from certainty.
+
+    Tiers, most to least durable: pinned > hot > warm > cold. Certainty never
+    enters this computation -- see TestCoerceCertaintyClamping for the
+    (separate) write-time certainty guard.
+    """
+
+    NOW = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+
+    def test_pinned_wins_regardless_of_resurfacing(self):
+        frontmatter = "title: x\npinned: true\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "pinned"
+
+    def test_pinned_false_is_not_pinned(self):
+        frontmatter = "title: x\npinned: false\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "cold"
+
+    def test_hot_within_default_window(self):
+        frontmatter = "resurfaced_count: 3\nlast_resurfaced: 2026-06-20T00:00:00Z\n"  # 16 days ago
+        assert durability_tier(frontmatter, now=self.NOW) == "hot"
+
+    def test_warm_outside_default_window(self):
+        frontmatter = "resurfaced_count: 3\nlast_resurfaced: 2026-01-01T00:00:00Z\n"  # ~186 days ago
+        assert durability_tier(frontmatter, now=self.NOW) == "warm"
+
+    def test_cold_never_resurfaced(self):
+        frontmatter = "title: x\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "cold"
+
+    def test_cold_when_count_is_zero(self):
+        frontmatter = "resurfaced_count: 0\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "cold"
+
+    def test_pinned_overrides_hot(self):
+        frontmatter = "pinned: true\nresurfaced_count: 5\nlast_resurfaced: 2026-06-20T00:00:00Z\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "pinned"
+
+    def test_hot_window_is_configurable(self):
+        """The same last_resurfaced timestamp reclassifies under a narrower window (MEM-150)."""
+        frontmatter = "resurfaced_count: 1\nlast_resurfaced: 2026-06-20T00:00:00Z\n"  # 16 days ago
+        assert durability_tier(frontmatter, now=self.NOW, hot_window_days=30) == "hot"
+        assert durability_tier(frontmatter, now=self.NOW, hot_window_days=10) == "warm"
+
+    def test_naive_now_is_treated_as_utc(self):
+        """Callers that pass a naive `now` (matching apply_temporal_decay's own
+        naive datetime.now()) must not crash or silently misclassify."""
+        frontmatter = "resurfaced_count: 1\nlast_resurfaced: 2026-06-20T00:00:00Z\n"
+        naive_now = datetime(2026, 7, 6, 12, 0)
+        assert durability_tier(frontmatter, now=naive_now) == "hot"
+
+
+class TestReadDurabilityTier:
+    """File-reading wrapper around durability_tier(), for search.py/MEM-152 reuse."""
+
+    def test_reads_pinned_frontmatter_from_disk(self, tmp_vault):
+        note = tmp_vault / "notes" / "example.md"
+        note.write_text("---\ntitle: Example\ntype: discovery\ntags: []\npinned: true\n---\n\nBody.\n")
+
+        assert read_durability_tier(tmp_vault, "notes/example.md") == "pinned"
+
+    def test_missing_note_is_cold(self, tmp_vault):
+        assert read_durability_tier(tmp_vault, "notes/missing.md") == "cold"
+
+    def test_path_traversal_is_cold(self, tmp_vault):
+        assert read_durability_tier(tmp_vault, "../outside-vault.md") == "cold"
+
+    def test_respects_config_hot_window(self, tmp_vault):
+        note = tmp_vault / "notes" / "example.md"
+        now = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+        note.write_text(
+            "---\ntitle: Example\ntype: discovery\ntags: []\n"
+            "resurfaced_count: 1\nlast_resurfaced: 2026-06-20T00:00:00Z\n---\n\nBody.\n"
+        )
+
+        wide = read_durability_tier(tmp_vault, "notes/example.md", config={"durability_hot_window_days": 30}, now=now)
+        narrow = read_durability_tier(tmp_vault, "notes/example.md", config={"durability_hot_window_days": 10}, now=now)
+
+        assert wide == "hot"
+        assert narrow == "warm"
+
+
+class TestCoerceCertaintyClamping:
+    """MEM-150: out-of-range certainty is clamped at write time, never rejected."""
+
+    def test_write_note_clamps_high_out_of_range_certainty(self, tmp_vault, capsys):
+        path = write_note(tmp_vault, title="Bad certainty", body="Body.", note_type="discovery", tags=[], certainty=95)
+
+        assert "certainty: 5" in path.read_text()
+        assert "clamped" in capsys.readouterr().err
+
+    def test_write_note_clamps_low_out_of_range_certainty(self, tmp_vault, capsys):
+        path = write_note(tmp_vault, title="Zero certainty", body="Body.", note_type="discovery", tags=[], certainty=0)
+
+        assert "certainty: 1" in path.read_text()
+        assert "clamped" in capsys.readouterr().err
+
+    def test_write_note_in_range_certainty_is_unwarned(self, tmp_vault, capsys):
+        write_note(tmp_vault, title="Fine", body="Body.", note_type="discovery", tags=[], certainty=4)
+
+        assert capsys.readouterr().err == ""
+
+    def test_write_note_still_drops_unparseable_certainty(self, tmp_vault):
+        """Unusable (non-numeric, unmapped) input still yields no certainty line at all."""
+        path = write_note(
+            tmp_vault, title="Bogus", body="Body.", note_type="discovery", tags=[], certainty="not-a-number"
+        )
+
+        assert "certainty:" not in path.read_text()

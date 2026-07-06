@@ -15,6 +15,13 @@ import sys
 import time
 from pathlib import Path
 
+_repo_root = str(Path(__file__).parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from memento.archive import fleeting_lifecycle_sweep, sweep_archive_candidates  # noqa: E402
+from memento.store import fold_access_log_into_frontmatter  # noqa: E402
+
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 CLAUDE_SESSIONS = Path.home() / ".claude" / "sessions"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
@@ -236,6 +243,38 @@ def main():
         sys.exit(0)
 
     try:
+        try:
+            # Durable resurfacing signal (MEM-148): fold the derived
+            # access-log write-ahead buffer into note frontmatter so a
+            # runtime-dir cache wipe never resets access_log_half_life_days
+            # history. This must never block orphan triage below.
+            fold_access_log_into_frontmatter(str(VAULT))
+        except Exception:
+            pass
+
+        try:
+            # Auto-archive sweep (MEM-152): reversibly archive notes that are
+            # durability_tier "cold", older than archive_sweep_age_days, and
+            # certainty < 4 (memento.archive.sweep_archive_candidates). A
+            # no-op until archive_sweep_enabled is flipped on. Isolated the
+            # same way as the fold above -- a sweep failure must never block
+            # orphan triage.
+            sweep_archive_candidates(str(VAULT))
+        except Exception:
+            pass
+
+        try:
+            # Fleeting note lifecycle (MEM-153): promote fleeting/*.md notes
+            # to notes/ (resurfaced or cited by a session-summary note) and
+            # reversibly expire the rest once older than fleeting_expire_days
+            # (memento.archive.fleeting_lifecycle_sweep). A no-op until
+            # fleeting_lifecycle_enabled is flipped on. Isolated the same way
+            # as the fold/archive sweep above -- a failure here must never
+            # block orphan triage.
+            fleeting_lifecycle_sweep(str(VAULT))
+        except Exception:
+            pass
+
         known = collect_known_session_ids()
         active = collect_active_session_ids()
         recent = find_recent_transcripts()
