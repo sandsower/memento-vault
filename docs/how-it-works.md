@@ -318,7 +318,7 @@ Notes accumulate. `/memento-defrag` handles decay:
 
 Archived notes and preserved bundles move to `archive/`, are removed from the QMD index, but remain in git history and are searchable via grep.
 
-## Project hubs & vault map (MEM-160)
+## Project hubs and vault map (MEM-160)
 
 `projects/<slug>.md` hub files used to grow by free-text append on every MCP store/replace/capture — a session-summary line hand-appended under `## Sessions` (or `## Activity log`) with no cap and no structural guarantee across format drift. Left running, that turns into exactly what happened in the real vault: a 300+ line file with duplicate `## Sessions` headers, truncated entries, and stray agent-output fragments — nothing curated it, and nothing navigated from it.
 

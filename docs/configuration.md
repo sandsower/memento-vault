@@ -388,7 +388,7 @@ corrupted real `projects/<slug>.md` hubs into multi-hundred-line files with
 duplicate headers and truncated entries) with mechanical, idempotent
 regeneration. `memento.hub.regenerate_project_hub` rebuilds a project's hub
 **from scratch** every time (frontmatter + the wikilink graph -- see
-[how-it-works.md#project-hubs--vault-map-mem-160](how-it-works.md#project-hubs--vault-map-mem-160)
+[how-it-works.md#project-hubs-and-vault-map-mem-160](how-it-works.md#project-hubs-and-vault-map-mem-160)
 for the section schema), and `memento.hub.vault_map` assembles a capped
 two-tier index (this project's hub plus top cross-project notes) for
 briefing injection.
