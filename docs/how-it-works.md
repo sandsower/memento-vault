@@ -74,7 +74,7 @@ vault-recall.py (UserPromptSubmit hook)
     |       if cold: BM25 only
     +---> supplement with concept index lookups (inception-produced)
     +---> enhance_results():
-    |       temporal decay (90-day half-life, certainty 4-5 immune)
+    |       temporal decay (90-day half-life; pinned/hot durability-tier notes immune, warm/cold decay regardless of certainty -- see frontmatter-schema.md#durability-tier)
     |       PageRank centrality boost (well-connected notes rank higher)
     |       project filter (exclude notes from other projects)
     |       Personalized PageRank expansion (replaces naive 1-hop wikilinks)
@@ -219,7 +219,7 @@ Pattern notes compete with atomic notes for limited injection slots (`recall_max
 - Pattern notes match broader queries because their embedding is a mean of the cluster. When a pattern note displaces an atomic note, BM25/vsearch scored it higher -- it's more relevant to the prompt.
 - One injection gives you the synthesized insight *and* wikilinks to specifics.
 - At ~200-300 chars per injection, pattern notes stay within the vault's injection budget (~555 chars/session average).
-- Certainty 4-5 pattern notes are immune to temporal decay, so they persist as stable retrieval anchors -- the same behavior Park et al. validated as beneficial.
+- Pattern notes that get resurfaced by retrieval earn a `hot`/`warm` durability tier and persist as stable retrieval anchors -- the same behavior Park et al. validated as beneficial. (Certainty itself no longer confers decay immunity; see frontmatter-schema.md#durability-tier.)
 
 ### Cost
 
@@ -249,7 +249,7 @@ For context, a single concierge agent search costs ~$0.02 in API calls. Inceptio
 
 Pattern notes follow the same lifecycle as all vault notes:
 
-- **Certainty capped at 3.** Inception notes start at certainty 3 ("confirmed by cross-referencing"), not the LLM's self-assessment. They're subject to temporal decay (90-day half-life) and defrag archival. If a pattern proves durable, bump it to 4-5 manually -- that's a human signal the system can trust.
+- **Certainty capped at 3.** Inception notes start at certainty 3 ("confirmed by cross-referencing"), not the LLM's self-assessment. They're subject to temporal decay (90-day half-life, gated by durability tier rather than certainty -- see frontmatter-schema.md#durability-tier) and defrag archival. If a pattern proves durable, bump it to 4-5 manually as a human trust signal, or pin it (`pinned: true`) if it should never decay.
 - **Hybrid incremental clustering.** Each run clusters ALL notes (not just new ones) so cross-temporal patterns get detected. A new note that completes a cluster with two older notes produces a pattern. Only clusters containing at least 1 new note or flagged for refresh get synthesized -- the rest are skipped.
 - **Pattern refresh.** When new notes join an existing pattern's cluster (superset of `synthesized_from`), the pattern is re-synthesized with the full evidence. Stale conclusions get updated as new evidence arrives.
 - **Three-layer dedup.** Before writing: (1) check the `synthesized_from` ledger to skip already-covered clusters, (2) check title overlap against all existing notes, (3) the LLM itself responds SKIP for trivial connections. These layers prevent the vault from filling with redundant patterns.

@@ -502,6 +502,96 @@ def _frontmatter_resurfacing_signal(vault, rel_path):
     return _frontmatter_int(frontmatter, "resurfaced_count") or 0, last_ts
 
 
+# Default window (days) for the "hot" durability tier -- configurable via
+# get_config()["durability_hot_window_days"] (MEM-150).
+DEFAULT_DURABILITY_HOT_WINDOW_DAYS = 30
+
+# Ordered so callers can treat earlier tiers as "more durable" if useful.
+DURABILITY_TIERS = ("pinned", "hot", "warm", "cold")
+
+
+def durability_tier(frontmatter, now=None, *, hot_window_days=None):
+    """Derive a note's durability tier from its raw frontmatter text (MEM-150).
+
+    Certainty keeps meaning "how sure this is true"; it no longer confers
+    decay immunity on its own. This is the one pure, side-effect-free
+    computation that decides what *does*: :func:`memento.search.apply_temporal_decay`
+    treats ``pinned``/``hot`` as decay-immune and lets ``warm``/``cold`` decay
+    normally (a certainty-5 note nobody has looked at in 90 days sinks like
+    any other). MEM-152's archive sweep is expected to reuse this same
+    function rather than re-deriving the tier.
+
+    Tiers, most to least durable:
+    - ``"pinned"``: frontmatter has ``pinned: true`` (manual, permanent).
+    - ``"hot"``: ``last_resurfaced`` is within ``hot_window_days`` of ``now``
+      (default :data:`DEFAULT_DURABILITY_HOT_WINDOW_DAYS`, 30).
+    - ``"warm"``: ``resurfaced_count`` > 0 at some point, but not within the
+      hot window.
+    - ``"cold"``: never resurfaced.
+
+    ``now`` defaults to the current UTC time. A naive ``now`` (or a naive
+    ``last_resurfaced``, which should not happen post-MEM-148 but is handled
+    defensively) is treated as UTC, matching :func:`_parse_access_log_ts`'s
+    convention elsewhere in this module.
+
+    Pure: no file I/O and no config lookups -- callers resolve the
+    frontmatter text and the hot-window override themselves (see
+    :func:`read_durability_tier` for the file-reading convenience wrapper).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if hot_window_days is None:
+        hot_window_days = DEFAULT_DURABILITY_HOT_WINDOW_DAYS
+
+    if _frontmatter_bool(frontmatter, "pinned"):
+        return "pinned"
+
+    last_ts = _parse_access_log_ts(_frontmatter_scalar(frontmatter, "last_resurfaced"))
+    if last_ts is not None:
+        age_days = (now - last_ts).total_seconds() / 86400.0
+        if age_days <= hot_window_days:
+            return "hot"
+
+    count = _frontmatter_int(frontmatter, "resurfaced_count") or 0
+    if count > 0:
+        return "warm"
+
+    return "cold"
+
+
+def read_durability_tier(vault, rel_path, config=None, now=None):
+    """Read a note's frontmatter off disk and compute its durability tier.
+
+    Thin file-I/O wrapper around the pure :func:`durability_tier` so callers
+    (``memento.search.apply_temporal_decay``, and MEM-152's archive sweep)
+    don't each duplicate the read. ``vault`` may be a path-like or ``Path``;
+    ``rel_path`` is vault-relative (e.g. ``"notes/example.md"``). Tolerates
+    the same missing/unreadable/traversal cases
+    :func:`_frontmatter_resurfacing_signal` does -- returns ``"cold"``
+    (never an error) since "no signal to read" and "never resurfaced"
+    collapse to the same tier.
+    """
+    if config is None:
+        config = get_config()
+    hot_window_days = config.get("durability_hot_window_days", DEFAULT_DURABILITY_HOT_WINDOW_DAYS)
+
+    try:
+        vault_path = Path(vault).resolve()
+        note_path = (vault_path / rel_path).resolve()
+        note_path.relative_to(vault_path)
+    except (OSError, ValueError):
+        return "cold"
+    try:
+        text = note_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "cold"
+
+    frontmatter, _ = split_frontmatter(text)
+    return durability_tier(frontmatter, now=now, hot_window_days=hot_window_days)
+
+
 def load_inception_state(state_path=None):
     """Load Inception state from disk. Returns defaults if missing/corrupt."""
     path = state_path or INCEPTION_STATE_PATH
@@ -912,7 +1002,14 @@ def normalize_note_contract(
 
 
 def _coerce_certainty(certainty):
-    """Return a schema-valid certainty int, or None for unusable input."""
+    """Return a schema-valid certainty int, or None for unusable input.
+
+    Out-of-range integers (e.g. a `95`/`97` typo meant to be `5`) are clamped
+    into 1-5 with a logged warning rather than dropped (MEM-150) -- capture
+    must never hard-fail a write over a bad certainty value. Genuinely
+    unusable input (missing, empty, unparseable) still returns None, same as
+    before.
+    """
     if certainty is None or certainty == "":
         return None
     if isinstance(certainty, str):
@@ -926,7 +1023,11 @@ def _coerce_certainty(certainty):
         return None
     if 1 <= value <= 5:
         return value
-    return None
+    clamped = max(1, min(5, value))
+    import sys as _sys
+
+    print(f"[memento] warning: certainty {value} out of range 1-5, clamped to {clamped}", file=_sys.stderr)
+    return clamped
 
 
 def _render_note_markdown(
@@ -1099,6 +1200,17 @@ def _frontmatter_int(frontmatter, key):
         return int(raw)
     except ValueError:
         return None
+
+
+_FRONTMATTER_TRUE_VALUES = {"true", "yes", "1"}
+
+
+def _frontmatter_bool(frontmatter, key):
+    """Return a frontmatter scalar as ``bool``. Absent/unparseable values are False."""
+    raw = _frontmatter_scalar(frontmatter, key)
+    if raw is None:
+        return False
+    return raw.strip().lower() in _FRONTMATTER_TRUE_VALUES
 
 
 def _unmanaged_frontmatter_lines(frontmatter, managed_keys=None):

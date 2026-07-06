@@ -71,6 +71,37 @@ Older Pi bridge captures may have been written as `type: session` without `certa
 | 4 | shipped | PR merged, tested in production |
 | 5 | established | Seen across multiple tickets, reliable pattern |
 
+Certainty is purely epistemic -- how sure this is true. It no longer confers
+decay immunity on its own (MEM-150); see [Durability tier](#durability-tier)
+for what does. Values outside 1-5 are clamped into range at write time with a
+logged warning rather than rejected (`memento.store._coerce_certainty`);
+`scripts/fix_certainty_values.py` is a one-shot fixer for notes written
+before that guard existed.
+
+## Durability tier
+
+Retrieval decay immunity is driven by a tier derived from frontmatter, not
+certainty: `memento.store.durability_tier(frontmatter, now)`. It is not a
+managed frontmatter field written by any current writer -- it's computed at
+read time by `apply_temporal_decay` (and reusable by future consumers such
+as an archive sweep) from the fields below.
+
+- **`pinned`** -- optional bool frontmatter field, manually set
+  (`pinned: true`). Permanent decay immunity.
+- **`hot`** -- `last_resurfaced` (see [Compatibility](#compatibility)-adjacent
+  resurfacing fields below) is within `durability_hot_window_days`
+  (default 30) of now. Decay-immune.
+- **`warm`** -- `resurfaced_count` > 0 at some point, but not within the hot
+  window. Decays normally.
+- **`cold`** -- never resurfaced. Decays normally. A certainty-5 note that
+  has never been resurfaced decays exactly like a certainty-1 note (only
+  certainty 3 gets a slower, not zero, decay rate).
+
+`resurfaced_count` (int) and `last_resurfaced` (datetime) are folded into a
+note's frontmatter from the access log by
+`memento.store.fold_access_log_into_frontmatter` -- they are durable
+retrieval-history fields, not something writers set directly.
+
 ## Note types
 
 | Type | When to use |

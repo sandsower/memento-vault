@@ -9,7 +9,7 @@ from typing import Optional
 
 from memento.config import RUNTIME_DIR, get_config, get_vault
 from memento.search_backend import _clean_snippet, get_backend  # noqa: F401 (_clean_snippet re-exported for compat)
-from memento.store import apply_access_log_boost, log_retrieval
+from memento.store import apply_access_log_boost, log_retrieval, read_durability_tier
 from memento.graph import (
     apply_pagerank_boost,
     extract_wikilinks,
@@ -637,10 +637,16 @@ def multi_hop_search(query, initial_results, config=None):
 
 
 def apply_temporal_decay(results, config=None):
-    """Apply temporal decay to search results based on note age and certainty.
+    """Apply temporal decay to search results based on note age and durability tier.
 
-    High-certainty notes (>= certainty_floor) are immune to decay.
-    Others decay exponentially with a configurable half-life.
+    Decay immunity is driven by the derived durability tier (MEM-150), not
+    certainty: `pinned` (manual) and `hot` (resurfaced within
+    `durability_hot_window_days`) notes are immune. `warm` (resurfaced at
+    some point) and `cold` (never resurfaced) notes decay exponentially with
+    a configurable half-life regardless of certainty -- a certainty-5 note
+    nobody has looked at in 90 days sinks like any other. Certainty still
+    slows (but no longer stops) decay at certainty 3, unchanged from before.
+    `temporal_decay_certainty_floor` is deprecated and no longer read here.
 
     Modifies results in-place and re-sorts by adjusted score.
     """
@@ -651,10 +657,10 @@ def apply_temporal_decay(results, config=None):
         return results
 
     half_life = config.get("temporal_decay_half_life", 90)
-    certainty_floor = config.get("temporal_decay_certainty_floor", 4)
     decay_lambda = math.log(2) / max(half_life, 1)
 
     now = datetime.now()
+    vault = get_vault()
 
     for result in results:
         path = result.get("path", "")
@@ -670,10 +676,12 @@ def apply_temporal_decay(results, config=None):
         # Store metadata for later use by wikilink expansion
         result["_meta"] = meta
 
-        certainty = meta.get("certainty")
-        if certainty is not None and certainty >= certainty_floor:
-            continue  # No decay for high-certainty notes
+        tier = read_durability_tier(vault, path, config=config, now=now) if path else "cold"
+        result["_durability_tier"] = tier
+        if tier in ("pinned", "hot"):
+            continue  # Decay-immune tiers.
 
+        certainty = meta.get("certainty")
         date_str = meta.get("date")
         if not date_str:
             try:

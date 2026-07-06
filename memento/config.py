@@ -63,8 +63,16 @@ DEFAULT_CONFIG = {
     # Retrieval enhancements
     "temporal_decay": True,
     "temporal_decay_half_life": 90,
+    # Deprecated (MEM-150): no longer confers decay immunity. Kept parseable
+    # for config-file backwards compatibility, but apply_temporal_decay() now
+    # derives immunity from the durability tier (see durability_hot_window_days
+    # below and memento.store.durability_tier) instead of certainty.
     "temporal_decay_certainty_floor": 4,
     "temporal_decay_undated_factor": 0.5,
+    # Durability tiers (MEM-150): "hot" is last_resurfaced within this many
+    # days; "pinned" (manual `pinned: true` frontmatter) and "hot" are the
+    # only decay-immune tiers. See memento.store.durability_tier.
+    "durability_hot_window_days": 30,
     "wikilink_expansion": True,
     "wikilink_max_hops": 1,
     "wikilink_score_factor": 0.5,

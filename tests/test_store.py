@@ -14,10 +14,12 @@ from memento.store import (
     acquire_vault_write_lock,
     append_fleeting_session,
     apply_access_log_boost,
+    durability_tier,
     find_dedup_candidates,
     fold_access_log_into_frontmatter,
     log_triage_health,
     owns_vault_write_lock,
+    read_durability_tier,
     record_access,
     release_vault_write_lock,
     replace_note_at_path,
@@ -1093,3 +1095,114 @@ class TestFoldAccessLogIntoFrontmatter:
             release_vault_write_lock()
 
         assert "resurfaced_count: 1" in note_path.read_text()
+
+
+class TestDurabilityTier:
+    """MEM-150: derived durability tier decouples decay immunity from certainty.
+
+    Tiers, most to least durable: pinned > hot > warm > cold. Certainty never
+    enters this computation -- see TestCoerceCertaintyClamping for the
+    (separate) write-time certainty guard.
+    """
+
+    NOW = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+
+    def test_pinned_wins_regardless_of_resurfacing(self):
+        frontmatter = "title: x\npinned: true\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "pinned"
+
+    def test_pinned_false_is_not_pinned(self):
+        frontmatter = "title: x\npinned: false\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "cold"
+
+    def test_hot_within_default_window(self):
+        frontmatter = "resurfaced_count: 3\nlast_resurfaced: 2026-06-20T00:00:00Z\n"  # 16 days ago
+        assert durability_tier(frontmatter, now=self.NOW) == "hot"
+
+    def test_warm_outside_default_window(self):
+        frontmatter = "resurfaced_count: 3\nlast_resurfaced: 2026-01-01T00:00:00Z\n"  # ~186 days ago
+        assert durability_tier(frontmatter, now=self.NOW) == "warm"
+
+    def test_cold_never_resurfaced(self):
+        frontmatter = "title: x\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "cold"
+
+    def test_cold_when_count_is_zero(self):
+        frontmatter = "resurfaced_count: 0\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "cold"
+
+    def test_pinned_overrides_hot(self):
+        frontmatter = "pinned: true\nresurfaced_count: 5\nlast_resurfaced: 2026-06-20T00:00:00Z\n"
+        assert durability_tier(frontmatter, now=self.NOW) == "pinned"
+
+    def test_hot_window_is_configurable(self):
+        """The same last_resurfaced timestamp reclassifies under a narrower window (MEM-150)."""
+        frontmatter = "resurfaced_count: 1\nlast_resurfaced: 2026-06-20T00:00:00Z\n"  # 16 days ago
+        assert durability_tier(frontmatter, now=self.NOW, hot_window_days=30) == "hot"
+        assert durability_tier(frontmatter, now=self.NOW, hot_window_days=10) == "warm"
+
+    def test_naive_now_is_treated_as_utc(self):
+        """Callers that pass a naive `now` (matching apply_temporal_decay's own
+        naive datetime.now()) must not crash or silently misclassify."""
+        frontmatter = "resurfaced_count: 1\nlast_resurfaced: 2026-06-20T00:00:00Z\n"
+        naive_now = datetime(2026, 7, 6, 12, 0)
+        assert durability_tier(frontmatter, now=naive_now) == "hot"
+
+
+class TestReadDurabilityTier:
+    """File-reading wrapper around durability_tier(), for search.py/MEM-152 reuse."""
+
+    def test_reads_pinned_frontmatter_from_disk(self, tmp_vault):
+        note = tmp_vault / "notes" / "example.md"
+        note.write_text("---\ntitle: Example\ntype: discovery\ntags: []\npinned: true\n---\n\nBody.\n")
+
+        assert read_durability_tier(tmp_vault, "notes/example.md") == "pinned"
+
+    def test_missing_note_is_cold(self, tmp_vault):
+        assert read_durability_tier(tmp_vault, "notes/missing.md") == "cold"
+
+    def test_path_traversal_is_cold(self, tmp_vault):
+        assert read_durability_tier(tmp_vault, "../outside-vault.md") == "cold"
+
+    def test_respects_config_hot_window(self, tmp_vault):
+        note = tmp_vault / "notes" / "example.md"
+        now = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+        note.write_text(
+            "---\ntitle: Example\ntype: discovery\ntags: []\n"
+            "resurfaced_count: 1\nlast_resurfaced: 2026-06-20T00:00:00Z\n---\n\nBody.\n"
+        )
+
+        wide = read_durability_tier(tmp_vault, "notes/example.md", config={"durability_hot_window_days": 30}, now=now)
+        narrow = read_durability_tier(tmp_vault, "notes/example.md", config={"durability_hot_window_days": 10}, now=now)
+
+        assert wide == "hot"
+        assert narrow == "warm"
+
+
+class TestCoerceCertaintyClamping:
+    """MEM-150: out-of-range certainty is clamped at write time, never rejected."""
+
+    def test_write_note_clamps_high_out_of_range_certainty(self, tmp_vault, capsys):
+        path = write_note(tmp_vault, title="Bad certainty", body="Body.", note_type="discovery", tags=[], certainty=95)
+
+        assert "certainty: 5" in path.read_text()
+        assert "clamped" in capsys.readouterr().err
+
+    def test_write_note_clamps_low_out_of_range_certainty(self, tmp_vault, capsys):
+        path = write_note(tmp_vault, title="Zero certainty", body="Body.", note_type="discovery", tags=[], certainty=0)
+
+        assert "certainty: 1" in path.read_text()
+        assert "clamped" in capsys.readouterr().err
+
+    def test_write_note_in_range_certainty_is_unwarned(self, tmp_vault, capsys):
+        write_note(tmp_vault, title="Fine", body="Body.", note_type="discovery", tags=[], certainty=4)
+
+        assert capsys.readouterr().err == ""
+
+    def test_write_note_still_drops_unparseable_certainty(self, tmp_vault):
+        """Unusable (non-numeric, unmapped) input still yields no certainty line at all."""
+        path = write_note(
+            tmp_vault, title="Bogus", body="Body.", note_type="discovery", tags=[], certainty="not-a-number"
+        )
+
+        assert "certainty:" not in path.read_text()
