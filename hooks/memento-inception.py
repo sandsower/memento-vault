@@ -25,8 +25,10 @@ _repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 from memento.config import RUNTIME_DIR, get_config, slugify  # noqa: E402
+from memento.embedded_search import EmbeddedSearchBackend  # noqa: E402
 from memento.llm import llm_complete  # noqa: E402
 from memento.search import has_qmd  # noqa: E402
+from memento.search_backend import QMDBackend, get_backend  # noqa: E402
 from memento.store import (  # noqa: E402
     INCEPTION_STATE_PATH,
     acquire_inception_lock,
@@ -221,11 +223,41 @@ def collect_eligible_notes(config, state, full=False):
     return notes
 
 
+def _detect_qmd_vector_dim(conn, default=768):
+    """Best-effort detection of QMD's embedding dimensionality from its own
+    sqlite-vec schema, instead of assuming a fixed constant.
+
+    sqlite-vec's vec0 virtual tables declare their column width directly in
+    the CREATE VIRTUAL TABLE statement (e.g. ``embedding float[768]``), which
+    is recorded verbatim in ``sqlite_master.sql``. QMD's chunk-storage shadow
+    tables (``vectors_vec_rowids``, ``vectors_vec_vector_chunks00``) are
+    generated from a parent vec0 table conventionally named ``vectors_vec``;
+    read the dimension straight from there.
+
+    Falls back to *default* if the parent table isn't present or its SQL
+    can't be parsed (older/nonstandard QMD schemas), so behavior degrades to
+    the previous fixed assumption rather than misreading the vector layout.
+    """
+    try:
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vectors_vec'").fetchone()
+        if row and row[0]:
+            match = re.search(r"float\[(\d+)\]", row[0])
+            if match:
+                return int(match.group(1))
+    except sqlite3.Error:
+        pass
+    return default
+
+
 def load_embeddings(note_stems, db_path=None, collection="memento"):
     """Load document-level embeddings from QMD's SQLite database.
 
-    QMD stores chunk-level 768-dim float32 embeddings. This function
-    mean-pools chunks into a single vector per document.
+    QMD stores chunk-level float32 embeddings (768-dim for the default
+    model). This function mean-pools chunks into a single vector per
+    document. This is one of several possible vector sources for Inception
+    -- see load_active_backend_embeddings(), which selects between this
+    QMD reader, the embedded search backend, and no source at all based on
+    the vault's configured search backend.
 
     Args:
         note_stems: list of note filename stems (e.g. ["redis-cache-ttl"])
@@ -233,7 +265,9 @@ def load_embeddings(note_stems, db_path=None, collection="memento"):
         collection: QMD collection name
 
     Returns:
-        dict mapping stem -> np.ndarray (768-dim, L2-normalized)
+        dict mapping stem -> np.ndarray (L2-normalized). Dimensionality is
+        detected from QMD's own schema (see _detect_qmd_vector_dim), not
+        hardcoded.
 
     Notes without embeddings are silently skipped.
     """
@@ -301,8 +335,9 @@ def load_embeddings(note_stems, db_path=None, collection="memento"):
             chunk_reads.setdefault(chunk_id, []).append((vec_id, chunk_offset))
 
         # Step 5: Read chunk blobs and extract individual vectors
-        # Each chunk stores up to 1024 vectors of dim floats (768 * 4 bytes each)
-        dim = 768
+        # Each chunk stores up to 1024 vectors of dim floats (dim * 4 bytes
+        # each). Detect dim from QMD's own schema rather than assuming.
+        dim = _detect_qmd_vector_dim(conn)
         vec_size = dim * 4  # float32
 
         doc_chunks = {}
@@ -336,6 +371,99 @@ def load_embeddings(note_stems, db_path=None, collection="memento"):
         return result
     finally:
         conn.close()
+
+
+def load_embedded_vectors(note_stems, backend):
+    """Load per-note embeddings from the embedded search backend's vector index.
+
+    Unlike QMD, the embedded backend (memento/embedded_search.py) stores
+    exactly one whole-document vector per note keyed by path -- notes_vec has
+    no chunking, so no mean-pooling is needed here. Dimensionality comes from
+    the backend's own provider/index metadata (MEM-46 embedding-dimension
+    tracking), never a hardcoded constant, so it stays correct whether the
+    embedding provider emits 512-dim (default Matryoshka-truncated nomic) or
+    any other size.
+
+    Args:
+        note_stems: list of note filename stems (e.g. ["redis-cache-ttl"])
+        backend: an EmbeddedSearchBackend instance
+
+    Returns:
+        dict mapping stem -> np.ndarray. Notes without a stored vector, or
+        whose stored vector doesn't match the backend's declared dimension,
+        are silently skipped (mirrors load_embeddings' QMD behavior).
+    """
+    dim = backend.vector_dimensions()
+    if not dim:
+        return {}
+
+    path_to_stem = {f"notes/{stem}.md": stem for stem in note_stems}
+    if not path_to_stem:
+        return {}
+
+    raw = backend.get_note_vectors(list(path_to_stem.keys()))
+    if not raw:
+        return {}
+
+    result = {}
+    for path, vec in raw.items():
+        stem = path_to_stem.get(path)
+        if stem is None:
+            continue
+        arr = np.array(vec, dtype=np.float32)
+        if arr.shape != (dim,):
+            continue
+        result[stem] = arr
+    return result
+
+
+def load_active_backend_embeddings(note_stems, config, db_path=None):
+    """Select and load note embeddings from the vault's active search backend.
+
+    Inception must not assume QMD is present -- the default, QMD-less install
+    uses the embedded search backend (memento/embedded_search.py), which
+    stores 512-dim vectors in .search/search.db rather than QMD's private
+    768-dim SQLite cache. This resolves the vector source using the same
+    backend selection as memento.search_backend.get_backend() (QMD ->
+    Embedded -> Grep) instead of duplicating that heuristic here.
+
+    Args:
+        note_stems: list of note filename stems to load vectors for
+        config: the loaded memento config dict
+        db_path: optional explicit QMD SQLite path. When given, this forces
+            the QMD reader against that literal path (used by callers/tests
+            that want to bypass backend auto-detection entirely); when None,
+            the active backend is resolved and used.
+
+    Returns:
+        (embeddings, source, reason) where:
+          - embeddings: dict stem -> np.ndarray (possibly empty)
+          - source: "qmd", "embedded", or "none"
+          - reason: short machine-readable string explaining an empty
+            result, e.g. "qmd-empty", "embedded-empty", "no-vector-backend".
+            None when embeddings were found.
+    """
+    if db_path is not None:
+        collection = config.get("qmd_collection", "memento")
+        embeddings = load_embeddings(note_stems, db_path=db_path, collection=collection)
+        return (embeddings, "qmd", None if embeddings else "qmd-empty")
+
+    backend = get_backend()
+
+    if isinstance(backend, QMDBackend) and backend.is_available():
+        collection = config.get("qmd_collection", "memento")
+        embeddings = load_embeddings(note_stems, collection=collection)
+        return (embeddings, "qmd", None if embeddings else "qmd-empty")
+
+    if isinstance(backend, EmbeddedSearchBackend):
+        embeddings = load_embedded_vectors(note_stems, backend)
+        return (embeddings, "embedded", None if embeddings else "embedded-empty")
+
+    # Grep backend (or no backend at all) has no vectors to offer. Inception
+    # cannot cluster without embeddings -- surface this explicitly rather
+    # than silently no-op-ing (the QMD-only assumption this replaces used to
+    # do exactly that on QMD-less installs).
+    return ({}, "none", "no-vector-backend")
 
 
 def score_cluster(stems, notes_dict):
@@ -775,7 +903,9 @@ def parse_args(argv=None):
 def main(args=None, state_path=None, db_path=None, lock_path=None):
     """Run the Inception pipeline.
 
-    Returns exit code: 0=success, 1=locked, 2=missing deps, 3=embedding failure, 5=config error.
+    Returns exit code: 0=success, 1=locked, 2=missing deps,
+    3=no vector source available or no embeddings found (see
+    load_active_backend_embeddings), 5=config error.
     """
     if args is None:
         args = parse_args()
@@ -833,18 +963,35 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         # Build notes dict for lookups (all notes)
         notes_dict = {n.stem: n for n in all_notes}
 
-        # Load embeddings for all notes
-        collection = config.get("qmd_collection", "memento")
-        embeddings = load_embeddings(
+        # Load embeddings for all notes from whichever search backend is
+        # active (QMD, embedded, or none) -- never assume QMD is present.
+        embeddings, source, reason = load_active_backend_embeddings(
             list(notes_dict.keys()),
+            config,
             db_path=db_path,
-            collection=collection,
         )
 
         if not embeddings:
-            if args.verbose:
-                print("No embeddings found — is QMD indexed?", file=sys.stderr)
+            message = {
+                "qmd-empty": "No embeddings found in QMD index — is QMD indexed?",
+                "embedded-empty": (
+                    "No embeddings found in the embedded search index — run memento_reindex "
+                    "to build vectors, or check that an embedding provider is configured."
+                ),
+                "no-vector-backend": (
+                    "No vector-capable search backend is configured (active backend has no "
+                    "embeddings) — Inception cannot cluster without vectors. Configure "
+                    "search_backend: embedded or qmd to enable clustering."
+                ),
+            }.get(reason, "No embeddings found.")
+            # Always surfaced (not gated behind --verbose): a silent skip here
+            # is exactly the QMD-only failure mode this resolution replaces.
+            print(f"Skipping clustering: {message}", file=sys.stderr)
+            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run, skip_reason=reason)
             return 3
+
+        if args.verbose:
+            print(f"Embeddings loaded from '{source}' backend ({len(embeddings)} notes)", file=sys.stderr)
 
         # Build matrix (all notes with embeddings)
         stem_index = [s for s in notes_dict if s in embeddings]
@@ -1066,23 +1213,29 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         release_inception_lock(lock_path=_lock_path)
 
 
-def _record_run(state, state_path, note_count, clusters_processed, notes_written, dry_run):
+def _record_run(state, state_path, note_count, clusters_processed, notes_written, dry_run, skip_reason=None):
     """Update run metadata. Always called on exit, regardless of outcome.
 
     Does NOT touch processed_notes — that is the job of _mark_consolidated,
     which is only invoked when pattern notes were actually written.
+
+    skip_reason (e.g. "no-vector-backend", "qmd-empty", "embedded-empty")
+    records why a run produced no clusters when the cause was a missing
+    vector source, so the reason is surfaced in the persisted summary and
+    not just a transient stderr line.
     """
     now = datetime.now().isoformat(timespec="seconds")
     state["last_run_iso"] = now
     state["last_run_note_count"] = note_count
-    state.setdefault("runs", []).append(
-        {
-            "iso": now,
-            "clusters_found": clusters_processed,
-            "notes_written": notes_written,
-            "dry_run": dry_run,
-        }
-    )
+    run_entry = {
+        "iso": now,
+        "clusters_found": clusters_processed,
+        "notes_written": notes_written,
+        "dry_run": dry_run,
+    }
+    if skip_reason:
+        run_entry["skip_reason"] = skip_reason
+    state.setdefault("runs", []).append(run_entry)
     save_inception_state(state, state_path=state_path)
 
 

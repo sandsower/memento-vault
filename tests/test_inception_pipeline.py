@@ -2,9 +2,10 @@
 
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 from memento_inception import (
@@ -12,6 +13,28 @@ from memento_inception import (
     check_dependencies,
     parse_args,
 )
+
+
+def _sqlite_vec_available() -> bool:
+    conn = sqlite3.connect(":memory:")
+    try:
+        if not hasattr(conn, "enable_load_extension"):
+            return False
+        try:
+            import sqlite_vec
+        except ImportError:
+            return False
+        conn.enable_load_extension(True)
+        try:
+            sqlite_vec.load(conn)
+        finally:
+            conn.enable_load_extension(False)
+        conn.execute("CREATE VIRTUAL TABLE vec_probe USING vec0(embedding float[2])")
+        return True
+    except (AttributeError, sqlite3.Error):
+        return False
+    finally:
+        conn.close()
 
 
 class TestCheckDependencies:
@@ -201,6 +224,82 @@ class TestMainPipeline:
         assert state["processed_notes"] == []
         assert len(state["runs"]) >= 1
         assert state["runs"][-1]["dry_run"] is True
+
+
+class TestMainBackendSelection:
+    """MEM-157: the embedding source main() uses is resolved from the vault's
+    active search backend rather than assuming QMD is present. These cover
+    the QMD-less install path (embedded backend supplies vectors) and the
+    no-vector-backend path (explicit skip, not a silent no-op)."""
+
+    def test_embedded_backend_supplies_vectors_when_qmd_absent(
+        self, mock_config, sample_notes, tmp_vault, inception_state_path
+    ):
+        """When db_path is omitted (the real, non-test invocation shape) and
+        the active backend resolves to the embedded search backend, main()
+        clusters using its vectors instead of finding nothing. cluster_notes
+        is forced to a fixed cluster so this test exercises the embedding
+        *source* wiring, not HDBSCAN convergence."""
+        if not _sqlite_vec_available():
+            import pytest
+
+            pytest.skip("sqlite-vec extension loading is unavailable")
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        class _FixedDimsProvider:
+            def dimensions(self):
+                return 6
+
+            def is_available(self):
+                return True
+
+            def embed(self, texts):
+                return [[1.0] + [0.0] * 5 for _ in texts]
+
+            def embed_query(self, text):
+                return self.embed([text])[0]
+
+        backend = EmbeddedSearchBackend(
+            vault_path=tmp_vault,
+            db_path=tmp_vault / ".search" / "search.db",
+            embedding_provider=_FixedDimsProvider(),
+        )
+        backend.reindex("memento")
+
+        # Remove the pre-seeded pattern so check_ledger_dedup returns
+        # "create" instead of "skip" for this exact stem set (mirrors
+        # test_processed_notes_populated_when_pattern_written).
+        (tmp_vault / "notes" / "existing-pattern.md").unlink()
+
+        with _force_cluster(["redis-cache-ttl", "redis-eviction-policy", "redis-cache-invalidation"]):
+            with _mock_llm_response():
+                with patch("memento_inception.get_backend", return_value=backend):
+                    result = _run_main(mock_config, inception_state_path, ["--full"])
+
+        assert result == 0
+        state = json.loads(inception_state_path.read_text())
+        assert state["runs"][-1]["notes_written"] >= 1
+        assert "skip_reason" not in state["runs"][-1]
+
+    def test_no_vector_backend_reports_explicit_skip_reason(
+        self, mock_config, sample_notes, tmp_vault, inception_state_path, capsys
+    ):
+        """A grep-only (or otherwise vector-less) active backend must not
+        silently no-op: main() exits 3, prints an explicit reason (even
+        without --verbose), and records it in the persisted run summary."""
+        grep_like = MagicMock()
+        grep_like.is_available.return_value = True
+
+        with patch("memento_inception.get_backend", return_value=grep_like):
+            result = _run_main(mock_config, inception_state_path, ["--full"])
+
+        assert result == 3
+        captured = capsys.readouterr()
+        assert "Skipping clustering" in captured.err
+        assert "no vector-capable search backend" in captured.err.lower()
+
+        state = json.loads(inception_state_path.read_text())
+        assert state["runs"][-1]["skip_reason"] == "no-vector-backend"
 
 
 # --- Helpers ---
