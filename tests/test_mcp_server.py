@@ -440,6 +440,319 @@ class TestMementoSearchExpandLinks:
         assert result["metadata"].get("expand_links") is not True
 
 
+# --- memento_search: metadata filters (MEM-158) ---
+
+
+def _write_search_note(vault, name, **frontmatter):
+    lines = ["---"]
+    for key, value in frontmatter.items():
+        lines.append(f"{key}: {value}")
+    lines.append("---")
+    lines.append("Body.\n")
+    (vault / "notes" / f"{name}.md").write_text("\n".join(lines))
+
+
+class TestMementoSearchMetadataFilters:
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/decision.md", "title": "Decision", "score": 0.9, "snippet": ""},
+            {"path": "notes/discovery.md", "title": "Discovery", "score": 0.8, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_type_filter_narrows_ranked_results(self, _qmd, _search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "decision", title="Decision", type="decision")
+        _write_search_note(tmp_vault, "discovery", title="Discovery", type="discovery")
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", type="decision")
+
+        assert [r["path"] for r in result["results"]] == ["notes/decision.md"]
+        assert result["metadata"]["filters_applied"]["type"] == "decision"
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/tagged.md", "title": "Tagged", "score": 0.9, "snippet": ""},
+            {"path": "notes/untagged.md", "title": "Untagged", "score": 0.8, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_tags_filter_matches_tag_membership(self, _qmd, _search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "tagged", title="Tagged", tags="[api, cache]")
+        _write_search_note(tmp_vault, "untagged", title="Untagged", tags="[api]")
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", tags="cache")
+
+        assert [r["path"] for r in result["results"]] == ["notes/tagged.md"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/high.md", "title": "High", "score": 0.9, "snippet": ""},
+            {"path": "notes/low.md", "title": "Low", "score": 0.8, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_certainty_min_max_filter(self, _qmd, _search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "high", title="High", certainty=4)
+        _write_search_note(tmp_vault, "low", title="Low", certainty=2)
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", certainty_min=3, certainty_max=5)
+
+        assert [r["path"] for r in result["results"]] == ["notes/high.md"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/inside.md", "title": "Inside", "score": 0.9, "snippet": ""},
+            {"path": "notes/outside.md", "title": "Outside", "score": 0.8, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_date_from_to_filter(self, _qmd, _search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "inside", title="Inside", date="2026-06-15T10:00")
+        _write_search_note(tmp_vault, "outside", title="Outside", date="2026-05-01T10:00")
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", date_from="2026-06-01", date_to="2026-06-30")
+
+        assert [r["path"] for r in result["results"]] == ["notes/inside.md"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/main.md", "title": "Main", "score": 0.9, "snippet": ""},
+            {"path": "notes/feature.md", "title": "Feature", "score": 0.8, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_branch_filter(self, _qmd, _search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "main", title="Main", branch="main")
+        _write_search_note(tmp_vault, "feature", title="Feature", branch="feat/x")
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", branch="main")
+
+        assert [r["path"] for r in result["results"]] == ["notes/main.md"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/sess1.md", "title": "Sess1", "score": 0.9, "snippet": ""},
+            {"path": "notes/sess2.md", "title": "Sess2", "score": 0.8, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_session_id_filter(self, _qmd, _search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "sess1", title="Sess1", session_id="sess-1")
+        _write_search_note(tmp_vault, "sess2", title="Sess2", session_id="sess-2")
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", session_id="sess-1")
+
+        assert [r["path"] for r in result["results"]] == ["notes/sess1.md"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/path-like.md", "title": "Path-like", "score": 0.9, "snippet": ""},
+            {"path": "notes/other.md", "title": "Other", "score": 0.8, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_project_filter_is_slug_based(self, _qmd, _search, _enhance, _log, tmp_vault):
+        # Frontmatter carries a full path; the filter passes a bare slug --
+        # slug-based comparison should still match (unlike memento_query's
+        # exact-string project filter).
+        _write_search_note(tmp_vault, "path-like", title="Path-like", project="/home/vic/Projects/api-service")
+        _write_search_note(tmp_vault, "other", title="Other", project="/home/vic/Projects/frontend")
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", project="api-service")
+
+        assert [r["path"] for r in result["results"]] == ["notes/path-like.md"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/one.md", "title": "One", "score": 0.9, "snippet": ""},
+            {"path": "notes/two.md", "title": "Two", "score": 0.8, "snippet": ""},
+            {"path": "notes/three.md", "title": "Three", "score": 0.7, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_combined_filters_intersect(self, _qmd, _search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "one", title="One", type="decision", certainty=4)
+        _write_search_note(tmp_vault, "two", title="Two", type="decision", certainty=2)
+        _write_search_note(tmp_vault, "three", title="Three", type="discovery", certainty=4)
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", type="decision", certainty_min=3)
+
+        assert [r["path"] for r in result["results"]] == ["notes/one.md"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/first.md", "title": "First", "score": 0.9, "snippet": ""},
+            {"path": "notes/second.md", "title": "Second", "score": 0.8, "snippet": ""},
+            {"path": "notes/third.md", "title": "Third", "score": 0.7, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_filtered_results_stay_in_ranked_order(self, _qmd, _search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "first", title="First", type="decision")
+        _write_search_note(tmp_vault, "second", title="Second", type="discovery")
+        _write_search_note(tmp_vault, "third", title="Third", type="decision")
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", type="decision")
+
+        # "second" (rank 2, wrong type) is dropped; survivors keep their
+        # original relative score order.
+        assert [r["path"] for r in result["results"]] == ["notes/first.md", "notes/third.md"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[{"path": "notes/a.md", "title": "Note A", "score": 0.8, "snippet": ""}],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_no_filters_leaves_ranking_call_byte_identical(self, _qmd, mock_search, _enhance, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", limit=5)
+
+        assert mock_search.call_args.kwargs["limit"] == 8  # 5 + 3, unchanged from pre-MEM-158 behavior
+        assert "filters_applied" not in result["metadata"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[{"path": "notes/a.md", "title": "Note A", "score": 0.8, "snippet": ""}],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_filters_active_over_fetch_candidates(self, _qmd, mock_search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "a", title="Note A", type="decision")
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            memento_search("q", limit=5, type="decision")
+
+        # over-fetch: min(5*3, 50) = 15, plus the +3 qmd_search always adds.
+        assert mock_search.call_args.kwargs["limit"] == 18
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/a.md", "title": "A", "score": 0.9, "snippet": ""},
+            {"path": "notes/b.md", "title": "B", "score": 0.8, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_filters_eliminate_all_returns_standard_miss_shape(self, _qmd, _search, _enhance, _log, tmp_vault):
+        _write_search_note(tmp_vault, "a", title="A", type="discovery")
+        _write_search_note(tmp_vault, "b", title="B", type="discovery")
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", type="decision")
+
+        assert result["results"] == []
+        assert result["miss"]["reason"] == "filters_eliminated_all"
+        assert result["miss"]["details"]["filters_applied"]["type"] == "decision"
+        assert "memento_query" in " ".join(result["miss"]["recovery_hints"])
+        assert result["metadata"]["filters_applied"]["type"] == "decision"
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch("memento.mcp_server.qmd_search_with_extras", return_value=[])
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_no_ranked_results_skips_filter_processing(self, _qmd, _search, _enhance, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", type="decision")
+
+        assert result["results"] == []
+        assert result["miss"]["reason"] != "filters_eliminated_all"
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/high.md", "title": "High", "score": 0.9, "snippet": ""},
+            {"path": "notes/low.md", "title": "Low", "score": 0.1, "snippet": ""},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_invalid_filter_params_return_error_envelope(self, _qmd, _search, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", certainty_min=5, certainty_max=2)
+
+        assert "certainty_min" in result["error"]
+        assert result["metadata"]["valid"] is False
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.search.qmd_get")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[
+            {"path": "notes/a.md", "title": "Note A", "score": 0.8, "snippet": "..."},
+            {"path": "notes/wrong-type.md", "title": "Wrong type", "score": 0.7, "snippet": "..."},
+        ],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_expand_links_composes_after_filtering_and_is_not_itself_filtered(
+        self, _qmd, _search, _enhance, mock_get, _log, tmp_vault
+    ):
+        _write_search_note(tmp_vault, "a", title="Note A", type="decision")
+        # Matches filter too, but ranks lower -- should be dropped, not expanded from.
+        _write_search_note(tmp_vault, "wrong-type", title="Wrong type", type="discovery")
+        # Linked neighbor of "a"; deliberately does NOT match the type filter,
+        # to prove expansion is exempt from post-filtering.
+        _write_search_note(tmp_vault, "b", title="Note B", type="discovery")
+
+        def get_side_effect(path, **kwargs):
+            if path == "notes/a.md":
+                return {"path": "notes/a.md", "content": "See [[b]]."}
+            if path == "notes/b.md":
+                return {"path": "notes/b.md", "title": "Note B", "content": "B content"}
+            return None
+
+        mock_get.side_effect = get_side_effect
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("q", type="decision", expand_links=True)
+
+        assert [r["path"] for r in result["results"]] == ["notes/a.md", "notes/b.md"]
+        assert result["results"][1]["via_link"] == "a"
+        assert result["metadata"]["expand_links"] is True
+        assert result["metadata"]["filters_applied"]["type"] == "decision"
+
+
 # --- memento_related (MEM-159) ---
 
 

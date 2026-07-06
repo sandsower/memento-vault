@@ -33,8 +33,8 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
     McpToolInventoryItem(
         "memento_search",
         "Read",
-        "Search vault notes with BM25, optional semantic search, hybrid ranking, temporal decay, PageRank/access-log boosts, and `concrete: auto|true|false` for exact identifiers and quoted phrases.",
-        "Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path.",
+        "Search vault notes with BM25, optional semantic search, hybrid ranking, temporal decay, PageRank/access-log boosts, `concrete: auto|true|false` for exact identifiers and quoted phrases, and optional typed post-filters (type, tags, certainty, dates, branch, session_id, project) that mirror `memento_query`'s filter semantics.",
+        "Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers, including when ranked retrieval also needs metadata constraints. Do not use it to read a known note path.",
     ),
     McpToolInventoryItem(
         "memento_query",

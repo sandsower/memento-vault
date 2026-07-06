@@ -40,6 +40,10 @@ MISS_RECOVERY_HINTS = {
     "semantic_mode_not_available": ["Try semantic=false.", "Run memento_reindex if index state looks stale."],
     "empty_vault": ["Capture or sync notes first.", "Run memento_status to verify the vault path."],
     "index_stale_or_missing": ["Run memento_reindex if index state looks stale."],
+    "filters_eliminated_all": [
+        "Broaden or remove the search filters.",
+        "Use memento_query to inspect raw metadata without ranking.",
+    ],
 }
 
 _REASON_ALIASES = {
