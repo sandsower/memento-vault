@@ -77,6 +77,24 @@ def read_queue_file(path: Path) -> list[dict[str, Any]]:
 _QUEUE_LOCK_STATE = threading.local()
 
 
+class QueueLockUnavailable(OSError):
+    """Raised when the capture-queue flock cannot be acquired.
+
+    ``queue_lock`` is fail-closed: it never yields to the caller without
+    actually holding the lock. Callers MUST handle this explicitly rather
+    than letting a queue mutation proceed unlocked, per caller policy
+    (MEM-123):
+
+    - Enqueue/capture paths: retry a bounded number of times with backoff,
+      then durably dead-letter the capture (via ``memento.sync_ledger``)
+      so it is never silently dropped.
+    - Read-only and cleanup paths (sweeps, listings, processing): skip the
+      operation for the current cycle with a structured
+      ``{"skipped": "lock_unavailable"}`` result and a stderr log line;
+      the next cycle retries naturally.
+    """
+
+
 def _queue_lock_file(vault: Path | None = None) -> Path:
     return state_root() / "queue" / "pi-captures.lock"
 
@@ -86,7 +104,9 @@ def queue_lock(vault: Path | None = None) -> Generator[None, None, None]:
     """Acquire an exclusive flock on the queue lock file.
 
     The lock is blocking and re-entrant within a thread so nested queue
-    migrations can safely reuse the same critical section.
+    migrations can safely reuse the same critical section. Fail-closed: if
+    the lock cannot be opened or acquired, raises ``QueueLockUnavailable``
+    instead of yielding without the lock held.
     """
     path = _queue_lock_file(vault)
     depth = getattr(_QUEUE_LOCK_STATE, "depth", 0)
@@ -101,12 +121,14 @@ def queue_lock(vault: Path | None = None) -> Generator[None, None, None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
-    except OSError:
-        yield
-        return
+    except OSError as exc:
+        raise QueueLockUnavailable(f"cannot open capture-queue lock file {path}: {exc}") from exc
 
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            raise QueueLockUnavailable(f"cannot acquire capture-queue lock {path}: {exc}") from exc
         _QUEUE_LOCK_STATE.depth = 1
         try:
             yield
