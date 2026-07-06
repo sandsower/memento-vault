@@ -13,9 +13,18 @@ import re
 import sqlite3
 import struct
 import threading
+from datetime import datetime
 from pathlib import Path
 
-from memento.search_backend import SearchBackend, _literal_score, _literal_snippet, normalize_grep_term_coverage
+from memento.search_backend import (
+    STALE_INDEX_WARN_SECONDS,
+    SearchBackend,
+    _literal_score,
+    _literal_snippet,
+    classify_index_lag,
+    newest_note_mtime,
+    normalize_grep_term_coverage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -976,3 +985,81 @@ class EmbeddedSearchBackend(SearchBackend):
             if self._conn is not None:
                 self._conn.close()
                 self._conn = None
+
+    def index_staleness(self, vault: Path, config: dict) -> dict:
+        """Return index staleness metadata using content-based lag (WAL-robust).
+
+        Uses SQL ``SELECT MAX(updated_at) FROM notes`` to compare against the
+        newest on-disk note mtime. Falls back to file mtime when the notes
+        table is empty or unavailable.
+        """
+        db_path = self._db_path
+        metadata: dict = {
+            "checked": True,
+            "backend": "embedded",
+            "db_path": str(db_path),
+        }
+
+        if not db_path.exists():
+            return {
+                **metadata,
+                "checked": False,
+                "reason": "embedded_index_missing",
+                "stale": None,
+                "status": "pass",
+            }
+
+        # Get newest note mtime from disk (filesystem walk stays outside the
+        # lock so writers are not serialized behind it).
+        newest_note = newest_note_mtime(vault)
+        if newest_note is None:
+            return {
+                **metadata,
+                "reason": "no_notes",
+                "stale": False,
+                "status": "pass",
+            }
+
+        # Prefer content-based updated_at from SQL (WAL-robust). Guard the
+        # shared sqlite3.Connection with self._lock, matching every other
+        # method on this class, so the read cannot race the debounced
+        # reindex()/index_note() writers on the same connection.
+        db_max_updated = None
+        try:
+            with self._lock:
+                conn = self._get_conn()
+                row = conn.execute("SELECT MAX(updated_at) FROM notes").fetchone()
+            db_max_updated = row[0] if row and row[0] is not None else None
+        except sqlite3.Error:
+            pass
+
+        # Always read db file mtime for backward-compat metadata
+        try:
+            db_mtime_val = db_path.stat().st_mtime
+        except OSError as exc:
+            return {
+                **metadata,
+                "checked": False,
+                "reason": type(exc).__name__,
+                "error": str(exc),
+                "stale": None,
+                "status": "warn",
+            }
+
+        if db_max_updated is not None:
+            lag_seconds = int(max(0, newest_note - db_max_updated))
+        else:
+            # File-mtime fallback when SQL data is unavailable
+            lag_seconds = int(max(0, newest_note - db_mtime_val))
+
+        result: dict = {
+            **metadata,
+            "stale": lag_seconds > STALE_INDEX_WARN_SECONDS,
+            "lag_seconds": lag_seconds,
+            "db_mtime": datetime.fromtimestamp(db_mtime_val).isoformat(timespec="seconds"),
+            "newest_note_mtime": datetime.fromtimestamp(newest_note).isoformat(timespec="seconds"),
+            "status": classify_index_lag(lag_seconds),
+        }
+        if db_max_updated is not None:
+            result["db_max_updated"] = datetime.fromtimestamp(db_max_updated).isoformat(timespec="seconds")
+        return result

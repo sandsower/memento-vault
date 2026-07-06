@@ -15,7 +15,7 @@ EXPECTED_COMMANDS = {
     "ruff-format-check": ".venv/bin/python -m ruff format --check .",
     "python-compileall": ".venv/bin/python -m compileall -q memento hooks scripts",
     "frontmatter-schema-drift": ".venv/bin/python scripts/check_frontmatter_schema.py",
-    "targeted-tests": ".venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py tests/test_beislid_workflow_gates.py",
+    "targeted-tests": ".venv/bin/python -m pytest tests/test_llm_backends.py tests/test_lifecycle.py tests/test_triage.py tests/test_store.py tests/test_embedded_search.py tests/test_frontmatter_schema.py tests/test_script_harnesses.py tests/test_beislid_workflow_gates.py",
     "retrieval-tests": ".venv/bin/python -m pytest tests/test_tenet_*.py tests/test_multi_hop.py tests/test_deep_recall.py",
     "mcp-server-tests": ".venv/bin/python -m pytest tests/test_mcp_server.py tests/test_remote_client.py tests/test_integration_remote.py",
     "install-tests": ".venv/bin/python -m pytest tests/test_install_helpers.py tests/test_install_register_mcp.py",

@@ -39,6 +39,9 @@ _INCEPTION_ERROR_DETAIL_LIMIT = 500
 # coverage trend (MEM-154), so a single noisy run never trips the flag.
 _INCEPTION_TREND_MIN_CONSECUTIVE = 2
 _RECENT_FAILURE_ACTION_MARKERS = telemetry.RECENT_FAILURE_ACTION_MARKERS
+# Index-staleness thresholds live in memento.search_backend
+# (STALE_INDEX_WARN_SECONDS / STALE_INDEX_FAIL_SECONDS); the backends own
+# pass/warn/fail classification via classify_index_lag().
 _RETRIEVAL_SKIP_ACTIONS = telemetry.RETRIEVAL_SKIP_ACTIONS
 _RETRIEVAL_NO_RESULT_REASONS = telemetry.RETRIEVAL_NO_RESULT_REASONS
 _RETRIEVAL_BACKEND_UNAVAILABLE_REASONS = telemetry.RETRIEVAL_BACKEND_UNAVAILABLE_REASONS
@@ -607,7 +610,11 @@ def build_automation_memory_readiness(
         status = WARN
         degradations.append("search_backend_degraded")
     stale_index = search.get("stale_index", {})
-    if stale_index.get("status") == WARN:
+    if stale_index.get("status") == FAIL:
+        status = FAIL
+        readiness = "unavailable"
+        blockers.append("stale_index")
+    elif stale_index.get("status") == WARN:
         if status != FAIL:
             status = WARN
             readiness = "degraded"
@@ -678,62 +685,15 @@ def _automation_search_metadata(
             available = bool(qmd_available)
         elif choice == "auto" and qmd_available:
             available = True
+    backend = get_backend()
     return {
         "backend": choice,
         "available": available,
         "status": search_check.status,
         "message": search_check.message,
         "qmd_available": shutil.which("qmd") is not None if qmd_available is None else bool(qmd_available),
-        "stale_index": _embedded_index_staleness(vault, config),
+        "stale_index": backend.index_staleness(vault, config),
     }
-
-
-def _embedded_index_staleness(vault: Path, config: dict[str, Any]) -> dict[str, Any]:
-    db_path = vault / str(config.get("search_db_path", ".search/search.db"))
-    metadata: dict[str, Any] = {
-        "checked": True,
-        "backend": "embedded",
-        "db_path": str(db_path),
-        "stale": None,
-        "status": PASS,
-    }
-    if not vault.exists():
-        metadata.update({"checked": False, "reason": "vault_missing", "status": WARN})
-        return metadata
-    if not db_path.exists():
-        metadata.update({"checked": False, "reason": "embedded_index_missing", "status": WARN})
-        return metadata
-    newest_note_mtime = None
-    try:
-        for dirname in _CORE_DIRS:
-            root = vault / dirname
-            if not root.exists():
-                continue
-            for path in root.rglob("*.md"):
-                try:
-                    mtime = path.stat().st_mtime
-                except OSError:
-                    continue
-                newest_note_mtime = mtime if newest_note_mtime is None else max(newest_note_mtime, mtime)
-        db_mtime = db_path.stat().st_mtime
-    except OSError as exc:
-        metadata.update({"checked": False, "reason": type(exc).__name__, "error": str(exc), "status": WARN})
-        return metadata
-    if newest_note_mtime is None:
-        metadata.update({"reason": "no_notes", "stale": False, "status": PASS})
-        return metadata
-    lag_seconds = int(max(0, newest_note_mtime - db_mtime))
-    stale = lag_seconds > 60
-    metadata.update(
-        {
-            "db_mtime": datetime.fromtimestamp(db_mtime).isoformat(timespec="seconds"),
-            "newest_note_mtime": datetime.fromtimestamp(newest_note_mtime).isoformat(timespec="seconds"),
-            "lag_seconds": lag_seconds,
-            "stale": stale,
-            "status": WARN if stale else PASS,
-        }
-    )
-    return metadata
 
 
 def _automation_recall_metadata(

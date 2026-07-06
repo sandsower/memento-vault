@@ -55,6 +55,19 @@ def isolate_access_log_state(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _reset_index_debouncer():
+    """Cancel any pending write-debounce timer between tests.
+
+    A single ``write_note`` starts a process-global timer; without this a
+    leaked timer could fire a reindex against another test's backend.
+    """
+    yield
+    from memento.store import _reset_debouncer
+
+    _reset_debouncer()
+
+
+@pytest.fixture(autouse=True)
 def isolate_stale_citation_queue(monkeypatch, tmp_path):
     """Keep the citation-staleness review queue out of the user's real runtime dir (MEM-162)."""
     monkeypatch.setattr(

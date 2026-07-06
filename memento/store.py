@@ -6,6 +6,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1263,6 +1264,95 @@ def _render_note_markdown(
     return "\n".join(lines)
 
 
+class _IndexDebouncer:
+    """Process-level debouncer that supplements per-write indexing with
+    a deferred batch reindex when rapid writes accumulate.
+
+    Every write still calls ``backend.index_note()`` synchronously so
+    notes are searchable within seconds. When the write count reaches
+    *threshold* within *window_ms*, a full ``backend.reindex()`` is
+    triggered to coalesce state (e.g. a single ``qmd update`` instead
+    of N). A timer fires after the last write if fewer than threshold
+    writes landed, still flushing a reindex for that batch.
+
+    Thread-safe. Config keys: ``index_debounce_count`` (default 5),
+    ``index_debounce_ms`` (default 2000).
+    """
+
+    def __init__(self, threshold: int = 5, window_ms: int = 2000):
+        self._threshold = max(1, threshold)
+        self._window = max(0.1, window_ms / 1000.0)
+        self._lock = threading.Lock()
+        self._counter = 0
+        self._timer: threading.Timer | None = None
+
+    def note_written(self) -> None:
+        should_flush = False
+        with self._lock:
+            self._counter += 1
+            if self._counter >= self._threshold:
+                self._cancel_timer_locked()
+                self._counter = 0
+                should_flush = True
+            else:
+                self._cancel_timer_locked()
+                self._timer = threading.Timer(self._window, self._on_timer)
+                self._timer.daemon = True
+                self._timer.start()
+        # Reindex outside the lock so concurrent writers and the timer thread
+        # are never serialized behind a full batch reindex.
+        if should_flush:
+            self._flush()
+
+    def _cancel_timer_locked(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _on_timer(self) -> None:
+        should_flush = False
+        with self._lock:
+            if self._counter > 0:
+                self._counter = 0
+                should_flush = True
+        if should_flush:
+            self._flush()
+
+    def _flush(self) -> None:
+        try:
+            from memento.search_backend import get_backend
+
+            collection = str(get_config().get("qmd_collection", "memento"))
+            backend = get_backend()
+            backend.reindex(collection, embed=False)
+        except Exception:
+            pass
+
+
+_DEBOUNCER: _IndexDebouncer | None = None
+
+
+def _reset_debouncer() -> None:
+    """Reset the process-level debouncer (test cleanup)."""
+    global _DEBOUNCER
+    if _DEBOUNCER is not None:
+        try:
+            _DEBOUNCER._cancel_timer_locked()
+        except Exception:
+            pass
+    _DEBOUNCER = None
+
+
+def _get_debouncer() -> _IndexDebouncer:
+    global _DEBOUNCER
+    if _DEBOUNCER is None:
+        cfg = get_config()
+        count = int(cfg.get("index_debounce_count", 5))
+        ms = int(cfg.get("index_debounce_ms", 2000))
+        _DEBOUNCER = _IndexDebouncer(threshold=count, window_ms=ms)
+    return _DEBOUNCER
+
+
 def _index_written_note(vault_path, target):
     try:
         from memento.search_backend import get_backend
@@ -1272,7 +1362,12 @@ def _index_written_note(vault_path, target):
         if hasattr(backend, "index_note"):
             backend.index_note(rel_path)
         else:
-            backend.reindex("memento", embed=False)
+            backend.reindex(str(get_config().get("qmd_collection", "memento")), embed=False)
+
+        # Supplementary debounce — triggers a batch reindex when
+        # rapid writes accumulate, reducing churn for backends like
+        # QMD that benefit from a single update call.
+        _get_debouncer().note_written()
     except Exception:
         pass  # Indexing failure must not block note storage
 
