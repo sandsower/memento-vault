@@ -20,6 +20,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from memento.archive import fleeting_lifecycle_sweep, sweep_archive_candidates  # noqa: E402
+from memento.contradictions import apply_supersession_backlinks  # noqa: E402
 from memento.store import fold_access_log_into_frontmatter  # noqa: E402
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
@@ -272,6 +273,18 @@ def main():
             # as the fold/archive sweep above -- a failure here must never
             # block orphan triage.
             fleeting_lifecycle_sweep(str(VAULT))
+        except Exception:
+            pass
+
+        try:
+            # Bitemporal supersession backlink pass (MEM-163): for any
+            # `supersedes: X` edge whose target X lacks `invalidated_by`,
+            # sets X.invalidated_by to the newer note's stem
+            # (memento.contradictions.apply_supersession_backlinks).
+            # Idempotent and never overwrites an existing invalidated_by
+            # value. Isolated the same way as the folds/sweeps above -- a
+            # failure here must never block orphan triage.
+            apply_supersession_backlinks(str(VAULT))
         except Exception:
             pass
 

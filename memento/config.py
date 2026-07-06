@@ -204,6 +204,25 @@ DEFAULT_CONFIG = {
     "llm_max_tokens": 4096,
     "llm_api_retries": 3,
     "llm_api_initial_backoff_seconds": 1.0,
+    # Bitemporal supersession (MEM-163): `valid_from`/`invalidated_by`
+    # frontmatter give deterministic validity intervals instead of the sparse
+    # `supersedes` field alone. Background candidate pass + LLM adjudication
+    # ride the Inception hook's cadence (hooks/memento-inception.py's
+    # run_contradiction_detection) and auto-set `invalidated_by` only when a
+    # contradicting pair's newer note wins with high confidence and both
+    # share a project; everything else queues for human review. Disabled by
+    # default -- flip contradiction_detection_enabled once you've reviewed
+    # the review-queue output from a run.
+    "contradiction_detection_enabled": False,
+    "contradiction_similarity_threshold": 0.85,
+    "contradiction_max_pairs_per_run": 20,
+    "contradiction_confidence_threshold": 0.75,
+    # Keep the pre-MEM-163 lexical polarity-matching contradiction report
+    # (memento.contradictions.inspect_contradictions) available as an
+    # explicit fallback rather than deleting it outright; default false uses
+    # the new validity-chain report (note -> invalidated_by -> ... with
+    # dates).
+    "contradictions_lexical_fallback": False,
 }
 
 _CONFIG = None

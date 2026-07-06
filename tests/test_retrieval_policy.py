@@ -171,6 +171,84 @@ def test_prompt_recall_runtime_admits_concept_index_hits_clearing_min_score(tmp_
     assert decision.top_path == "notes/strong-concept.md"
 
 
+def _write_note(vault, name, **frontmatter):
+    lines = ["---"]
+    for key, value in frontmatter.items():
+        lines.append(f"{key}: {value}")
+    lines.append("---")
+    lines.append("Body.\n")
+    (vault / "notes" / f"{name}.md").write_text("\n".join(lines))
+
+
+def test_prompt_recall_runtime_excludes_invalidated_notes_by_default(tmp_path):
+    """MEM-163: automatic recall excludes invalidated_by notes, no opt-in."""
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    _write_note(vault, "old", title="Old", invalidated_by="new")
+    _write_note(vault, "new", title="New")
+
+    runtime = PromptRecallRuntime(
+        config_loader=lambda: {
+            "prompt_recall": True,
+            "recall_min_score": 0.4,
+            "recall_max_notes": 3,
+            "concept_index_enabled": False,
+            "rrf_enabled": False,
+            "multi_hop_enabled": False,
+            "reranker_enabled": False,
+        },
+        vault_loader=lambda: vault,
+        has_backend=lambda: True,
+        remote_available=lambda: False,
+        detect_project=lambda _cwd: ("unknown", None),
+        qmd_search=lambda *_args, **_kwargs: [
+            {"path": "notes/old.md", "title": "Old", "score": 0.9, "snippet": ""},
+            {"path": "notes/new.md", "title": "New", "score": 0.8, "snippet": ""},
+        ],
+        enhance_results=lambda results, **_kwargs: results,
+        recently_injected_paths=lambda *_args, **_kwargs: set(),
+    )
+
+    decision = runtime.run(PromptRecallRequest(prompt="redis caching invalidation strategy", cwd=str(tmp_path)))
+
+    assert decision.should_inject is True
+    assert decision.top_path == "notes/new.md"
+    assert [r["path"] for r in decision.results] == ["notes/new.md"]
+    assert decision.metadata["excluded_invalidated_count"] == 1
+
+
+def test_prompt_recall_runtime_all_invalidated_is_a_structured_miss(tmp_path):
+    vault = tmp_path / "vault"
+    (vault / "notes").mkdir(parents=True)
+    _write_note(vault, "only", title="Only", invalidated_by="something-newer")
+
+    runtime = PromptRecallRuntime(
+        config_loader=lambda: {
+            "prompt_recall": True,
+            "recall_min_score": 0.4,
+            "recall_max_notes": 3,
+            "concept_index_enabled": False,
+            "rrf_enabled": False,
+            "multi_hop_enabled": False,
+            "reranker_enabled": False,
+        },
+        vault_loader=lambda: vault,
+        has_backend=lambda: True,
+        remote_available=lambda: False,
+        detect_project=lambda _cwd: ("unknown", None),
+        qmd_search=lambda *_args, **_kwargs: [
+            {"path": "notes/only.md", "title": "Only", "score": 0.9, "snippet": ""},
+        ],
+        enhance_results=lambda results, **_kwargs: results,
+        recently_injected_paths=lambda *_args, **_kwargs: set(),
+    )
+
+    decision = runtime.run(PromptRecallRequest(prompt="redis caching invalidation strategy", cwd=str(tmp_path)))
+
+    assert decision.should_inject is False
+    assert decision.reason == "invalidated-filtered-empty"
+
+
 def test_normalized_natural_query_keeps_durable_search_terms():
     assert normalized_natural_query("how should we store bearer tokens that appear in URLs") == "store bearer token url"
     assert normalized_natural_query("memento installer remembering flags between upgrades") == (

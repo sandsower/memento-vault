@@ -154,7 +154,13 @@ from memento.search import (
     shape_search_results,
 )
 from memento.retrieval_policy import ExplicitSearchRequest, ExplicitSearchRuntime, _project_slug_from_value
-from memento.query import QueryValidationError, build_metadata_filter, query_notes, read_note_record
+from memento.query import (
+    QueryValidationError,
+    build_metadata_filter,
+    is_invalidated_record,
+    query_notes,
+    read_note_record,
+)
 from memento.contradictions import inspect_contradictions
 from memento.store import (
     acquire_vault_write_lock,
@@ -390,6 +396,12 @@ def _apply_search_metadata_filters(
     (``_project_slug_from_value``) so path-like and bare project values match
     consistently -- ``query_notes``'s own project filter stays exact-match and
     is untouched by this.
+
+    Runs AFTER :func:`_drop_invalidated_search_results`, so
+    ``include_invalidated`` is always passed as ``True`` here -- by this
+    point invalidated notes have either already been removed (default) or
+    were deliberately kept (``include_invalidated=True``), so re-checking
+    would be redundant.
     """
     try:
         predicate, filters = build_metadata_filter(
@@ -401,6 +413,7 @@ def _apply_search_metadata_filters(
             date_end=date_to,
             branch=branch,
             session_id=session_id,
+            include_invalidated=True,
         )
     except QueryValidationError as exc:
         return {"error": str(exc), "metadata": {"valid": False}}
@@ -434,6 +447,44 @@ def _apply_search_metadata_filters(
     return result
 
 
+def _drop_invalidated_search_results(result: dict, *, vault: Path) -> dict:
+    """Exclude ranked search results whose note carries `invalidated_by` (MEM-163).
+
+    Fails open: a result whose backing file cannot be read (missing, or a
+    test double with no real file on disk) is kept rather than dropped --
+    unlike the explicit typed filters in :func:`_apply_search_metadata_filters`,
+    this is an always-on default-safety exclusion, not a user-requested
+    constraint, so an unprovable case should not silently vanish. Does not
+    over-fetch to backfill dropped slots (the same trade-off
+    ``apply_quality_signals`` already makes for its own drops) -- fewer than
+    the requested `limit` results can come back when invalidated notes
+    occupied top ranks.
+    """
+    results = result.get("results")
+    if not results:
+        return result
+
+    excluded = 0
+    kept = []
+    for entry in results:
+        record = read_note_record(vault, entry.get("path", ""))
+        if record is not None and is_invalidated_record(record):
+            excluded += 1
+            continue
+        kept.append(entry)
+
+    result["results"] = kept
+    result.setdefault("metadata", {})["excluded_invalidated_count"] = excluded
+
+    if not kept and excluded:
+        return miss_envelope(
+            "filters_eliminated_all",
+            details={"filters_applied": {"include_invalidated": False}},
+            metadata=result.get("metadata"),
+        )
+    return result
+
+
 @mcp.tool()
 def memento_search(
     query: str,
@@ -455,6 +506,7 @@ def memento_search(
     branch: str = "",
     session_id: str = "",
     project: str = "",
+    include_invalidated: bool = False,
 ) -> object:
     """Search vault notes for prior context before answering from memory.
 
@@ -477,12 +529,23 @@ def memento_search(
     with any filter set, candidates are over-fetched (up to limit*3, capped
     at 50), ranked as usual, filtered by frontmatter metadata, then trimmed
     to `limit`; filtered-out candidates never affect the ranking of
-    survivors. Omitting all filter params leaves search behavior byte-for-byte
-    unchanged. There is no aggregation support here -- use memento_query for
+    survivors. There is no aggregation support here -- use memento_query for
     counts/aggregations, or when you only need metadata rows and no ranking.
     When expand_links is also set, link expansion runs AFTER filtering, on
     the filtered top hits; expanded neighbors are via_link context and are
     NOT themselves subject to the filters.
+
+    Notes carrying a non-empty `invalidated_by` frontmatter field (MEM-163 --
+    set by the supersession backlink sweep or contradiction-adjudication
+    auto-apply once a note's validity has been explicitly closed out) are
+    dropped from ranked results by default -- unlike the typed filters above,
+    this check runs unconditionally (not just when other filters are set)
+    and does not over-fetch to backfill a dropped slot, so fewer than
+    `limit` results can come back when invalidated notes ranked highly; this
+    is why omitting every filter param no longer returns results
+    byte-for-byte identical to disabling all filtering. Set
+    include_invalidated=True to opt back in. Use memento_contradictions to
+    inspect a note's validity chain.
 
     Args:
         query: Natural-language question or exact identifier to search for.
@@ -511,13 +574,16 @@ def memento_search(
         session_id: Optional exact session_id frontmatter filter (mirrors memento_query).
         project: Optional project filter compared by slug (path-like values are
             normalized the same way recall project-scoping does), not exact string match.
+        include_invalidated: When true, include notes carrying `invalidated_by`
+            (MEM-163) instead of excluding them by default.
 
     Returns:
         Search envelope with results and metadata. Misses include structured
-        miss metadata. When filters are active, metadata also carries
-        filters_applied; if filters eliminate every hit, the standard empty
-        miss envelope is returned with a filters_applied echo and a hint to
-        use memento_query for raw metadata inspection.
+        miss metadata. Metadata always carries filters_applied (including
+        include_invalidated) and excluded_invalidated_count; if filters
+        eliminate every hit, the standard empty miss envelope is returned
+        with a filters_applied echo and a hint to use memento_query for raw
+        metadata inspection.
     """
     has_filters = _search_filters_requested(
         note_type=type,
@@ -559,6 +625,11 @@ def memento_search(
             token_budget=token_budget,
         )
     )
+
+    if not include_invalidated and result.get("results"):
+        result = _drop_invalidated_search_results(result, vault=get_vault())
+        if not result.get("results"):
+            return result
 
     if has_filters and result.get("results"):
         result = _apply_search_metadata_filters(
@@ -659,6 +730,7 @@ def memento_query(
     aggregate_by: str = "",
     recent_sessions_project: str = "",
     limit: int = 20,
+    include_invalidated: bool = False,
 ) -> dict:
     """Run typed metadata filters and aggregations over vault notes.
 
@@ -681,9 +753,14 @@ def memento_query(
         aggregate_by: Optional count bucket: project, type, tag, source, month, date, branch, or session_id.
         recent_sessions_project: When set, list recent sessions for this exact project instead of note rows.
         limit: Maximum rows/buckets/sessions to return.
+        include_invalidated: When true, include notes carrying a non-empty
+            `invalidated_by` frontmatter field (MEM-163) instead of excluding
+            them by default.
 
     Returns:
-        Compact structured results, aggregations, or recent_sessions plus metadata; invalid typed parameters return an error envelope.
+        Compact structured results, aggregations, or recent_sessions plus
+        metadata (including excluded_invalidated_count); invalid typed
+        parameters return an error envelope.
     """
     payload = query_notes(
         get_vault(),
@@ -700,6 +777,7 @@ def memento_query(
         aggregate_by=aggregate_by,
         recent_sessions_project=recent_sessions_project,
         limit=limit,
+        include_invalidated=include_invalidated,
     )
     action = "query_invalid" if payload.get("error") else "query"
     log_retrieval("mcp", action, results=payload.get("metadata", {}).get("matched_notes", 0))
@@ -719,41 +797,66 @@ def memento_query(
 
 @mcp.tool()
 def memento_contradictions(topic: str, limit: int = 20, min_certainty: int = 2) -> dict:
-    """Inspect a topic for disagreements, stale conclusions, and supersession chains.
+    """Inspect a topic for validity chains, stale conclusions, and supersession history.
 
-    Use this when you want to compare competing notes about the same topic,
-    surface explicit superseded notes, or understand whether newer notes have
-    replaced older conclusions. Output includes source paths plus certainty/date
-    context for the inspected notes.
+    Use this when you want to see whether a note has been explicitly
+    invalidated, walk a note's full validity chain (oldest belief through the
+    still-current one, with dates), or understand what a vault believed on a
+    given topic before a correction landed. Default output (MEM-163) is
+    deterministic validity chains built from `invalidated_by`/`supersedes`
+    frontmatter -- not lexical polarity guessing. Set
+    `contradictions_lexical_fallback: true` in config to restore the older
+    lexical/opposite-language report shape (`results`/`groups`/
+    `contradictions`/`supersession` keys) instead.
     """
     payload = inspect_contradictions(topic, limit=limit, min_certainty=min_certainty)
-    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
-        for entry in payload["results"]:
-            entry["title"] = _strip_injection(entry.get("title", ""))
-            entry["snippet"] = _strip_injection(entry.get("snippet", ""))
-            entry["status"] = _strip_injection(entry.get("status", ""))
-            entry["polarity"] = _strip_injection(entry.get("polarity", ""))
-            entry["path"] = _strip_injection(entry.get("path", ""))
-        for group in payload.get("groups", []):
-            group["theme"] = _strip_injection(group.get("theme", ""))
-            group["summary"] = _strip_injection(group.get("summary", ""))
-            group["note_paths"] = [_strip_injection(path) for path in group.get("note_paths", [])]
-        for item in payload.get("contradictions", []):
-            item["kind"] = _strip_injection(item.get("kind", ""))
-            item["paths"] = [_strip_injection(path) for path in item.get("paths", [])]
-            item["titles"] = [_strip_injection(title) for title in item.get("titles", [])]
-        for item in payload.get("supersession", []):
-            item["older_path"] = _strip_injection(item.get("older_path", ""))
-            item["newer_path"] = _strip_injection(item.get("newer_path", ""))
-            item["older_title"] = _strip_injection(item.get("older_title", ""))
-            item["newer_title"] = _strip_injection(item.get("newer_title", ""))
+    if isinstance(payload, dict):
+        if isinstance(payload.get("results"), list):
+            # Legacy lexical-fallback shape (contradictions_lexical_fallback: true).
+            for entry in payload["results"]:
+                entry["title"] = _strip_injection(entry.get("title", ""))
+                entry["snippet"] = _strip_injection(entry.get("snippet", ""))
+                entry["status"] = _strip_injection(entry.get("status", ""))
+                entry["polarity"] = _strip_injection(entry.get("polarity", ""))
+                entry["path"] = _strip_injection(entry.get("path", ""))
+            for group in payload.get("groups", []):
+                group["theme"] = _strip_injection(group.get("theme", ""))
+                group["summary"] = _strip_injection(group.get("summary", ""))
+                group["note_paths"] = [_strip_injection(path) for path in group.get("note_paths", [])]
+            for item in payload.get("contradictions", []):
+                item["kind"] = _strip_injection(item.get("kind", ""))
+                item["paths"] = [_strip_injection(path) for path in item.get("paths", [])]
+                item["titles"] = [_strip_injection(title) for title in item.get("titles", [])]
+            for item in payload.get("supersession", []):
+                item["older_path"] = _strip_injection(item.get("older_path", ""))
+                item["newer_path"] = _strip_injection(item.get("newer_path", ""))
+                item["older_title"] = _strip_injection(item.get("older_title", ""))
+                item["newer_title"] = _strip_injection(item.get("newer_title", ""))
+        if isinstance(payload.get("chains"), list):
+            # MEM-163 default validity-chain shape.
+            for chain in payload["chains"]:
+                for node in chain.get("nodes", []):
+                    node["path"] = _strip_injection(node.get("path", ""))
+                    node["title"] = _strip_injection(node.get("title", ""))
+                    node["status"] = _strip_injection(node.get("status", ""))
+                    if node.get("invalidated_by"):
+                        node["invalidated_by"] = _strip_injection(node["invalidated_by"])
+                if chain.get("current_path"):
+                    chain["current_path"] = _strip_injection(chain["current_path"])
+        if isinstance(payload.get("standalone"), list):
+            for item in payload["standalone"]:
+                item["path"] = _strip_injection(item.get("path", ""))
+                item["title"] = _strip_injection(item.get("title", ""))
+                item["status"] = _strip_injection(item.get("status", ""))
+                if item.get("invalidated_by"):
+                    item["invalidated_by"] = _strip_injection(item["invalidated_by"])
         if isinstance(payload.get("summary"), str):
             payload["summary"] = _strip_injection(payload["summary"])
     log_retrieval(
         "mcp",
         "contradictions",
         topic=topic,
-        results=len(payload.get("results", [])) if isinstance(payload, dict) else 0,
+        results=len(payload.get("results", []) or payload.get("chains", [])) if isinstance(payload, dict) else 0,
     )
     return payload
 

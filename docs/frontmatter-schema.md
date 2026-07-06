@@ -158,6 +158,78 @@ neither a parseable `date` nor a readable mtime is skipped, never archived
 on ambiguity. Gated by `fleeting_lifecycle_enabled` (config, default `false`
 -- a no-op until enabled).
 
+## Bitemporal supersession (MEM-163)
+
+Like `resurfaced_count`/`last_resurfaced` above, `valid_from` and
+`invalidated_by` are NOT managed fields written by `write_note` -- they are
+optional frontmatter a note may carry, set by hand, by the sweeper backlink
+pass, or by contradiction-adjudication auto-apply (below). Retrieval treats
+a note as invalid once `invalidated_by` is set.
+
+- **`valid_from`** -- optional ISO date. Defaults to the note's own `date`
+  frontmatter when absent; this default is computed at read time only and is
+  never backfilled onto the file.
+- **`invalidated_by`** -- optional note-ref (stem or `[[wikilink]]`) pointing
+  at the note that closed this one's validity out. A note is invalid once
+  this is set.
+
+### Supersession backlink pass
+
+`memento.contradictions.apply_supersession_backlinks` runs from the same
+`hooks/memento-sweeper.py` periodic sweep, right after the MEM-153 fleeting
+lifecycle sweep above. For every note Y with `supersedes: X` where X is a
+note in the vault and X does not yet carry `invalidated_by`, it sets
+`X.invalidated_by = Y` (Y's stem) via a surgical single-field frontmatter
+rewrite (`memento.contradictions.apply_invalidation`) that preserves every
+other line verbatim, using the same atomic tmp+rename write
+(`memento.store._write_text_atomic`) the rest of the write path uses.
+Idempotent -- an edge whose target already carries the correct
+`invalidated_by` is left untouched, and one that already carries a
+*different* `invalidated_by` value is never overwritten (a prior
+deterministic write wins).
+
+### Retrieval exclusion
+
+`memento_search`, `memento_query`, and the automatic prompt-recall pipeline
+exclude notes carrying `invalidated_by` by default. `memento_search` and
+`memento_query` accept `include_invalidated: bool = false` to opt back in;
+excluded counts surface as `excluded_invalidated_count` in the response
+metadata. History stays greppable/queryable -- this is a default view
+filter, not a deletion.
+
+### Contradiction detection v2 (background)
+
+Gated by `contradiction_detection_enabled` (config, default `false`), a
+stage inside `hooks/memento-inception.py`'s run (`run_contradiction_detection`)
+rides the Inception hook's cadence and reuses the SAME
+backend-aware embedding vectors already loaded for clustering (never a
+second embedding load):
+
+1. **Candidate pass** (`find_contradiction_candidates`): embedding-similarity
+   pairs at or above `contradiction_similarity_threshold` (config, default
+   0.85), both notes in the same `project` scope, both non-invalidated, and
+   with no existing direct `supersedes` edge between them (that case is
+   already resolved deterministically by the backlink pass above).
+2. **Adjudication**: `memento.llm.llm_complete` per candidate pair, bounded
+   by `contradiction_max_pairs_per_run` (config, default 20), for a strict
+   JSON verdict `{"contradicts": bool, "newer_wins": bool, "confidence":
+   0.0-1.0}`. Malformed/out-of-range verdicts are never guessed at -- they
+   route to the review queue below.
+3. **Apply policy**: `invalidated_by` is auto-set on the older note ONLY
+   when `contradicts` AND `newer_wins` AND `confidence` is at or above
+   `contradiction_confidence_threshold` (config, default 0.75) -- same
+   project is already guaranteed by the candidate pass. Every other
+   candidate (below-threshold, `newer_wins: false`, unparseable/tied dates,
+   or a malformed verdict) is appended as one JSON line to a review-queue
+   file under the runtime directory
+   (`CONTRADICTION_REVIEW_QUEUE_PATH`, `hooks/memento-inception.py`) for
+   human triage. Every auto-application logs one line.
+
+`memento_contradictions` reports the resulting validity chains (see
+[how-it-works.md](how-it-works.md)) instead of the pre-MEM-163 lexical
+polarity-guessing report; the old report is kept available behind
+`contradictions_lexical_fallback` (config, default `false`).
+
 ## Note types
 
 | Type | When to use |
