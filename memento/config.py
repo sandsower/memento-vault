@@ -482,6 +482,19 @@ def source_for_path(rel_path, config=None):
     return "profile" if first_segment == profile_dir else "note"
 
 
+def is_curated_path(rel_path, config=None):
+    """True if the path lives in a curated dir (lifecycle-exempt, e.g. profile/).
+
+    Curated notes are actively maintained facts, not point-in-time captures,
+    so they are exempt from temporal decay, the auto-archive sweep, and
+    resurfacing-count writes.
+    """
+    first_segment = str(rel_path).replace("\\", "/").split("/", 1)[0]
+    if not first_segment:
+        return False
+    return any(spec.curated and spec.name == first_segment for spec in content_dirs(config))
+
+
 def get_vault():
     """Get vault path."""
     return Path(get_config()["vault_path"])
