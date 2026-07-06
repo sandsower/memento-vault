@@ -1,6 +1,6 @@
 # Memento quality analysis - 2026-07-02
 
-Follow-up to `docs/audit-2026-06-10.md`, focused on knowledge quality rather than architecture.
+Follow-up to `docs/history/audit-2026-06-10.md`, focused on knowledge quality rather than architecture.
 Every number below was measured today against the live vault (4,374 notes), the live triage-health telemetry (5,586 events), and the live QMD index (4,821 documents).
 The new eval suite in `evals/` reproduces all of these measurements on demand: `python3 evals/run_evals.py`.
 
@@ -98,7 +98,7 @@ Give the extraction prompt the top-k related existing notes (by search on the dr
 ## Part 3: the eval suite
 
 Lives in `evals/`; full usage and maintenance guidance (written for less capable agents) in `evals/README.md`.
-Baseline numbers recorded in `docs/eval-baselines.md`.
+Baseline numbers recorded in `docs/history/eval-baselines.md`.
 
 Design principles:
 
