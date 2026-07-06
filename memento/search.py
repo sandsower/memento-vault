@@ -511,9 +511,20 @@ def rrf_fuse(result_lists, k=60):
     Each result list is a list of dicts with at least "path" and "score".
     Returns a single merged list sorted by RRF score descending,
     with scores normalized to 0-1.
+
+    RRF's own rank-based score is purely positional: a document that is the
+    sole candidate in every input list always ranks #1 in each, so
+    rrf_score/max_rrf normalizes to 1.0 regardless of how weak that
+    document's actual per-backend score was (MEM-143). Post-MEM-127, every
+    backend's own "score" is already normalized to a comparable [0, 1]
+    scale, so the fused score is capped at the document's own best
+    underlying normalized score: `fused = rrf_normalized * best_quality`.
+    Rank still decides ORDERING (via rrf_normalized), it just can no longer
+    manufacture quality above what the underlying backends actually measured.
     """
     scores = {}  # path -> cumulative RRF score
     best_entry = {}  # path -> dict from highest-scored occurrence
+    best_quality = {}  # path -> best underlying normalized backend score
 
     for result_list in result_lists:
         for rank, item in enumerate(result_list, start=1):
@@ -522,6 +533,10 @@ def rrf_fuse(result_lists, k=60):
                 continue
             rrf_score = 1.0 / (k + rank)
             scores[path] = scores.get(path, 0.0) + rrf_score
+
+            quality = float(item.get("score", 0) or 0)
+            if quality > best_quality.get(path, 0.0):
+                best_quality[path] = quality
 
             # Keep metadata from the occurrence with the highest original score
             prev = best_entry.get(path)
@@ -536,7 +551,8 @@ def rrf_fuse(result_lists, k=60):
     merged = []
     for path, rrf_score in scores.items():
         entry = best_entry[path]
-        entry["score"] = rrf_score / max_score if max_score > 0 else 0.0
+        rrf_normalized = rrf_score / max_score if max_score > 0 else 0.0
+        entry["score"] = rrf_normalized * best_quality.get(path, 0.0)
         merged.append(entry)
 
     merged.sort(key=lambda r: r["score"], reverse=True)

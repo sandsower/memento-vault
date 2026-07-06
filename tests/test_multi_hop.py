@@ -7,9 +7,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
+from memento.config import DEFAULT_CONFIG
 from memento.graph import extract_wikilinks
-from memento.search import expand_result_links, multi_hop_search, qmd_get
+from memento.search import expand_result_links, multi_hop_search, qmd_get, rrf_fuse
 from memento.search_backend import reset_backend
+
+RECALL_MIN_SCORE = DEFAULT_CONFIG["recall_min_score"]
+RECALL_HIGH_CONFIDENCE = DEFAULT_CONFIG["recall_high_confidence"]
 
 
 class TestExtractWikilinks:
@@ -371,3 +375,64 @@ class TestExpandResultLinks:
             expanded = expand_result_links(shaped, config={"multi_hop_max": 2})
 
         assert expanded == []
+
+
+class TestMultiHopGateWithFixedFusionMEM143:
+    """MEM-143 gates the multi_hop_enabled default flip (MEM-159 part 3) on
+    the RRF fusion fix: multi-hop follows wikilinks starting from the top of
+    whatever result list it's handed, so if RRF fusion could still
+    manufacture an inflated score for a weak match, multi-hop would
+    confidently expand from a garbage seed. These tests run the actual
+    (fixed) rrf_fuse() output through multi_hop_search() to confirm the
+    bound holds end to end, not just inside rrf_fuse() in isolation."""
+
+    def test_weak_only_multi_hop_expansion_cannot_clear_recall_min_score(self):
+        """A weak match that is the sole candidate in two thin RRF input
+        lists must stay below recall_min_score even after being used as a
+        multi-hop seed and expanded with another equally weak linked note."""
+        weak_seed = {"path": "notes/weak-seed.md", "title": "Weak seed", "score": 0.05, "snippet": ""}
+        fused = rrf_fuse([[dict(weak_seed)], [dict(weak_seed)]], k=60)
+        assert fused[0]["score"] < RECALL_MIN_SCORE
+
+        def mock_get(path, **kwargs):
+            if path == "notes/weak-seed.md":
+                return {"path": path, "content": "See [[weak-linked]]."}
+            if path == "notes/weak-linked.md":
+                return {"path": "notes/weak-linked.md", "title": "Weak linked", "content": "text", "score": 0.0}
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            results = multi_hop_search("irrelevant query", fused, config={"multi_hop_max": 2})
+
+        by_path = {r["path"]: r for r in results}
+        assert by_path["notes/weak-linked.md"] is not None
+        assert by_path["notes/weak-seed.md"]["score"] < RECALL_MIN_SCORE
+        assert by_path["notes/weak-linked.md"]["score"] < RECALL_MIN_SCORE
+
+    def test_genuinely_strong_multi_hop_result_still_surfaces(self):
+        """A strong match that clears recall_high_confidence through RRF
+        fusion must still surface as the top result after multi-hop
+        expansion adds its linked note."""
+        strong_seed = {"path": "notes/strong-seed.md", "title": "Strong seed", "score": 0.9, "snippet": ""}
+        fused = rrf_fuse([[dict(strong_seed)], [dict(strong_seed)]], k=60)
+        assert fused[0]["score"] >= RECALL_HIGH_CONFIDENCE
+
+        def mock_get(path, **kwargs):
+            if path == "notes/strong-seed.md":
+                return {"path": path, "content": "See [[strong-linked]]."}
+            if path == "notes/strong-linked.md":
+                return {
+                    "path": "notes/strong-linked.md",
+                    "title": "Strong linked",
+                    "content": "text",
+                    "score": 0.0,
+                }
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            results = multi_hop_search("irrelevant query", fused, config={"multi_hop_max": 2})
+
+        assert results[0]["path"] == "notes/strong-seed.md"
+        assert results[0]["score"] >= RECALL_MIN_SCORE
+        paths = [r["path"] for r in results]
+        assert "notes/strong-linked.md" in paths
