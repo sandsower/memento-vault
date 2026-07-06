@@ -9,6 +9,7 @@ from unittest.mock import patch
 from memento.lifecycle import LifecycleResult
 from memento.llm import LLMResult
 from memento import pi_bridge
+from memento import queue as capture_queue
 
 
 def test_bridge_health_status_normalizes_offset_aware_timestamps(tmp_path, monkeypatch):
@@ -1347,7 +1348,10 @@ def test_pi_bridge_queue_migrates_to_local_state_and_processes(capsys, tmp_path,
         + "\n"
     )
 
-    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.queue.get_vault", return_value=tmp_path),
+    ):
         code = pi_bridge.main(["queue", "list"])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -2836,7 +2840,7 @@ def test_pi_bridge_concurrent_append_during_finalize_preserves_new_capture(capsy
     write_started = threading.Event()
     release_write = threading.Event()
     write_paused = {"value": False}
-    original_write_queue_file = pi_bridge._write_queue_file
+    original_write_queue_file = capture_queue.write_queue_file
     errors: list[BaseException] = []
 
     def gated_write(captures, path):
@@ -2886,7 +2890,7 @@ def test_pi_bridge_concurrent_append_during_finalize_preserves_new_capture(capsy
         except BaseException as exc:  # pragma: no cover - surfaced through assertions below
             errors.append(exc)
 
-    with patch("memento.pi_bridge._write_queue_file", new=gated_write):
+    with patch("memento.queue.write_queue_file", new=gated_write):
         finalize_thread = threading.Thread(target=run_finalize, name="finalize-thread")
         finalize_thread.start()
         assert write_started.wait(5)

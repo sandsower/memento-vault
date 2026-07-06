@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from memento import queue as capture_queue
 from memento import remote_client, telemetry
 from memento.search_backend import get_backend, reset_backend
 
@@ -1657,9 +1658,7 @@ def _queue_health_thresholds(config: dict[str, Any]) -> dict[str, int]:
 
 
 def _pi_queue_file() -> Path:
-    from memento.pi_bridge import _state_root
-
-    return _state_root() / "queue" / "pi-captures.jsonl"
+    return capture_queue.resolved_queue_file()
 
 
 def _config_int(config: dict[str, Any], key: str, default: int) -> int:

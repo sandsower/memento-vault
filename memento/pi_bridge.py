@@ -9,25 +9,34 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
-import threading
 import time
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any, Optional
 
 from memento import telemetry
 from memento.capture_runtime import CaptureProcessRequest, CaptureRuntime
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context, strip_injection
+from memento.queue import (
+    PiQueueStore,
+    atomic_write_text as _atomic_write_text,
+    legacy_queue_file as _legacy_queue_file,
+    load_queue as _load_queue,
+    queue_count as _queue_count,
+    queue_file as _queue_file,
+    queue_lock as _queue_lock,
+    state_root as _state_root,
+    write_queue as _write_queue,
+)
 from memento.search_backend import get_backend
 from memento.store import acquire_vault_write_lock, release_vault_write_lock, write_note
 from memento.search import (
@@ -150,182 +159,6 @@ def _run_lifecycle(
         metadata = dict(health_metadata or {})
         _log_bridge_health(source, error=exc, **metadata)
         return _emit(_error_payload(source, exc))
-
-
-def _state_root() -> Path:
-    raw = os.environ.get("MEMENTO_PI_STATE_HOME")
-    if raw:
-        return Path(raw).expanduser()
-    xdg = os.environ.get("XDG_STATE_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
-    return base / "memento" / "pi"
-
-
-def _queue_file(vault: Path | None = None) -> Path:
-    _migrate_legacy_queue(vault)
-    return _state_root() / "queue" / "pi-captures.jsonl"
-
-
-def _legacy_queue_file(vault: Path | None = None) -> Path:
-    return (vault or get_vault()) / "queue" / "pi-captures.jsonl"
-
-
-def _read_queue_file(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    captures = []
-    for line in path.read_text(errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            captures.append(json.loads(line))
-        except json.JSONDecodeError:
-            captures.append({"id": f"invalid-{len(captures) + 1}", "error": "invalid-json", "raw": line})
-    return captures
-
-
-_QUEUE_LOCK_STATE = threading.local()
-
-
-def _queue_lock_file(vault: Path | None = None) -> Path:
-    return _state_root() / "queue" / "pi-captures.lock"
-
-
-@contextlib.contextmanager
-def _queue_lock(vault: Path | None = None) -> Generator[None, None, None]:
-    """Acquire an exclusive flock on the queue lock file.
-
-    The lock is blocking and re-entrant within a thread so nested queue
-    migrations can safely reuse the same critical section.
-    """
-    path = _queue_lock_file(vault)
-    depth = getattr(_QUEUE_LOCK_STATE, "depth", 0)
-    if depth:
-        _QUEUE_LOCK_STATE.depth = depth + 1
-        try:
-            yield
-        finally:
-            _QUEUE_LOCK_STATE.depth = depth
-        return
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
-    except OSError:
-        yield
-        return
-
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        _QUEUE_LOCK_STATE.depth = 1
-        try:
-            yield
-        finally:
-            _QUEUE_LOCK_STATE.depth = 0
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex[:8]}")
-    try:
-        tmp_path.write_text(content, encoding="utf-8")
-        fd = os.open(str(tmp_path), os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(str(tmp_path), str(path))
-        dir_flag = getattr(os, "O_DIRECTORY", None)
-        if dir_flag is not None:
-            try:
-                dir_fd = os.open(str(path.parent), dir_flag)
-            except OSError:
-                dir_fd = None
-            if dir_fd is not None:
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
-    except Exception:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-
-
-def _write_queue_file(captures: list[dict[str, Any]], path: Path) -> None:
-    """Atomically write the queue file using tmp+fsync+rename."""
-    _atomic_write_text(path, "".join(json.dumps(capture, ensure_ascii=False) + "\n" for capture in captures))
-
-
-def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> None:
-    _write_queue_file(captures, _queue_file(vault))
-
-
-def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
-    legacy = _legacy_queue_file(vault)
-    if not legacy.exists():
-        return {"migrated": False, "reason": "no_legacy_queue"}
-    old = _read_queue_file(legacy)
-    if not old:
-        legacy.unlink()
-        return {"migrated": True, "migrated_count": 0, "deleted_legacy_queue": True}
-    new_path = _state_root() / "queue" / "pi-captures.jsonl"
-    with _queue_lock(vault):
-        current = _read_queue_file(new_path)
-        seen = {capture.get("id") for capture in current if capture.get("id")}
-        migrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        additions = []
-        for capture in old:
-            capture_id = capture.get("id")
-            if capture_id and capture_id in seen:
-                continue
-            item = dict(capture)
-            metadata = dict(item.get("metadata") or {})
-            metadata.setdefault("migrated_from", str(legacy))
-            metadata.setdefault("migrated_at", migrated_at)
-            item["metadata"] = metadata
-            additions.append(item)
-            if capture_id:
-                seen.add(capture_id)
-        combined = current + additions
-        _write_queue_file(combined, new_path)
-        reread_ids = {capture.get("id") for capture in _read_queue_file(new_path)}
-        old_ids = {capture.get("id") for capture in old if capture.get("id")}
-        if not old_ids.issubset(reread_ids):
-            return {
-                "migrated": False,
-                "reason": "verification_failed",
-                "legacy_queue_path": str(legacy),
-                "queue_path": str(new_path),
-            }
-    legacy.unlink()
-    try:
-        legacy.parent.rmdir()
-    except OSError:
-        pass
-    return {
-        "migrated": True,
-        "migrated_count": len(additions),
-        "deleted_legacy_queue": True,
-        "legacy_queue_path": str(legacy),
-        "queue_path": str(new_path),
-    }
-
-
-def _load_queue(vault: Path | None = None) -> list[dict[str, Any]]:
-    return _read_queue_file(_queue_file(vault))
-
-
-def _queue_count(vault: Path | None = None) -> int:
-    return len(_load_queue(vault))
 
 
 _LIFECYCLE_SOURCE_EVENTS = {"agent_end", "session_shutdown", "session_before_compact", "session_compact"}
@@ -2467,20 +2300,6 @@ def _clean_transcript(path: Path, per_tool_cap: int = 3000, total_cap: int = 200
     return "\n\n".join(lines)
 
 
-class _PiQueueStore:
-    def load(self, vault: Path) -> list[dict[str, Any]]:
-        return _load_queue(vault)
-
-    def write(self, captures: list[dict[str, Any]], vault: Path) -> None:
-        _write_queue(captures, vault)
-
-    def path(self, vault: Path) -> Path:
-        return _queue_file(vault)
-
-    def lock(self):
-        return _queue_lock()
-
-
 class _PiProcessingStore:
     def root(self) -> Path:
         return _processing_root()
@@ -2540,7 +2359,7 @@ class _PiVaultWriter:
 def _capture_runtime() -> CaptureRuntime:
     return CaptureRuntime(
         vault=get_vault,
-        queue=_PiQueueStore(),
+        queue=PiQueueStore(),
         processing=_PiProcessingStore(),
         preparer=_PiGroupPreparer(),
         writer=_PiVaultWriter(),

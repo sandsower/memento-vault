@@ -16,6 +16,7 @@ from pathlib import Path
 
 from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, slugify
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
+from memento import queue as capture_queue
 from memento import telemetry
 from memento.health import build_automation_memory_readiness
 from memento.llm import is_invalid_mcp_config_error, llm_complete
@@ -1895,29 +1896,16 @@ def _session_context_char_budget(token_budget: int | None) -> tuple[int, int]:
     return normalized_tokens, normalized_tokens * 4
 
 
-def _pi_state_root() -> Path:
-    raw = os.environ.get("MEMENTO_PI_STATE_HOME")
-    if raw:
-        return Path(raw).expanduser()
-    xdg = os.environ.get("XDG_STATE_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
-    return base / "memento" / "pi"
-
-
 def _pi_queue_path_source() -> str:
-    if os.environ.get("MEMENTO_PI_STATE_HOME"):
-        return "memento_pi_state_home"
-    if os.environ.get("XDG_STATE_HOME"):
-        return "xdg_state_home"
-    return "default_xdg_state"
+    return capture_queue.queue_path_source()
 
 
 def _pi_queue_file() -> Path:
-    return _pi_state_root() / "queue" / "pi-captures.jsonl"
+    return capture_queue.resolved_queue_file()
 
 
 def _legacy_pi_queue_file(vault: Path) -> Path:
-    return vault / "queue" / "pi-captures.jsonl"
+    return capture_queue.legacy_queue_file(vault)
 
 
 def _queue_capture_keys(path: Path) -> list[str]:
