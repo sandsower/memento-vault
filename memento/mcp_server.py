@@ -140,9 +140,18 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for stripped test env
 
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
+from memento.graph import build_related_view
 from memento.health import build_automation_memory_readiness
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context
-from memento.search import enhance_results, filter_by_project, has_qmd, qmd_get, qmd_search_with_extras
+from memento.search import (
+    enhance_results,
+    expand_result_links,
+    filter_by_project,
+    has_qmd,
+    qmd_get,
+    qmd_search_with_extras,
+    shape_search_results,
+)
 from memento.retrieval_policy import ExplicitSearchRequest, ExplicitSearchRuntime
 from memento.query import query_notes
 from memento.contradictions import inspect_contradictions
@@ -343,6 +352,7 @@ def memento_search(
     detail_level: str = "summary",
     include_content: bool = False,
     token_budget: int | None = 2000,
+    expand_links: bool = False,
 ) -> object:
     """Search vault notes for prior context before answering from memory.
 
@@ -366,6 +376,9 @@ def memento_search(
         detail_level: Response shape: brief, summary, or full.
         include_content: Include note content alongside the selected detail level.
         token_budget: Approximate token budget for returned content, default 2000.
+        expand_links: When true, append 1-hop wikilink neighbors of the top
+            direct hits (marked with via_link); they never outrank direct
+            hits. Default false -- no behavior change when omitted.
 
     Returns:
         Search envelope with results and metadata. Misses include structured miss metadata.
@@ -379,7 +392,7 @@ def memento_search(
         log_retrieval=log_retrieval,
         record_access=record_access,
     )
-    return runtime.search(
+    result = runtime.search(
         ExplicitSearchRequest(
             query=query,
             limit=limit,
@@ -392,6 +405,71 @@ def memento_search(
             token_budget=token_budget,
         )
     )
+
+    if expand_links and result.get("results"):
+        expanded_raw = expand_result_links(result["results"], config=get_config())
+        if expanded_raw:
+            shaped = shape_search_results(
+                expanded_raw,
+                vault=get_vault(),
+                detail_level=detail_level,
+                include_content=include_content,
+                token_budget=token_budget,
+            )
+            via_link_by_path = {entry["path"]: entry.get("via_link", "") for entry in expanded_raw}
+            for entry in shaped["results"]:
+                entry["via_link"] = via_link_by_path.get(entry["path"], "")
+            result["results"].extend(shaped["results"])
+            result.setdefault("metadata", {})["expand_links"] = True
+            result["metadata"]["expanded_count"] = len(shaped["results"])
+
+    return result
+
+
+@mcp.tool()
+def memento_related(
+    note: str,
+    direction: str = "both",
+    depth: int = 1,
+) -> dict:
+    """Explore the wikilink graph around a note: pure topology, no relevance scoring.
+
+    Use this to answer "what links to X", "what does X link to", walk a
+    supersession chain to find the current/superseded version of a note, or
+    expand a small neighborhood around a note. Use memento_search instead for
+    topical/semantic retrieval; use this only when the question is about
+    graph structure.
+
+    Args:
+        note: Note stem (e.g. "redis-cache-ttl"), relative path (e.g.
+            "notes/redis-cache-ttl.md"), or exact frontmatter title to
+            resolve.
+        direction: Neighborhood BFS direction: "out" (notes this note links
+            to), "in" (notes linking to this note), or "both". Only affects
+            the neighborhood field -- outbound/inbound are always returned.
+        depth: Neighborhood BFS depth, clamped to 0-3.
+
+    Returns:
+        Dict with note/path/title, outbound, inbound, neighborhood
+        ({"nodes": [...], "truncated": bool}), and supersession_chain
+        (oldest to newest). An unresolved note returns a structured error
+        with close-match suggestions; a missing networkx dependency returns
+        a structured error instead of raising.
+    """
+    result = build_related_view(note, direction=direction, depth=depth)
+
+    action = "related_error" if result.get("error") else "related"
+    log_retrieval("mcp", action, note=note, reason=result.get("reason", ""))
+
+    if not result.get("error"):
+        paths = (
+            [result["path"]]
+            + [entry["path"] for entry in result.get("outbound", [])]
+            + [entry["path"] for entry in result.get("inbound", [])]
+        )
+        record_access(paths, hook="mcp", tool="related", query=note, result_count=len(paths))
+
+    return result
 
 
 @mcp.tool()

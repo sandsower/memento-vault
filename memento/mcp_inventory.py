@@ -49,6 +49,12 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
         "Use when comparing competing notes about the same topic or when you need explicit superseded notes marked alongside their source paths and certainty/date context.",
     ),
     McpToolInventoryItem(
+        "memento_related",
+        "Read",
+        "Walk the wikilink graph around a note: outbound/inbound links, a depth-limited neighborhood, and its supersession chain. Pure topology, no relevance scoring.",
+        'Use for "what links to X", neighborhood expansion, or finding the current/superseded version of a note; use `memento_search` instead for topical/semantic retrieval.',
+    ),
+    McpToolInventoryItem(
         "memento_briefing",
         "Lifecycle",
         "Build a compact session-start briefing payload for host adapters.",

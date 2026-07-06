@@ -30,6 +30,7 @@ from memento.mcp_server import (
     memento_list,
     memento_preserve,
     memento_query,
+    memento_related,
     memento_replace_note,
     memento_reindex,
     memento_search,
@@ -374,6 +375,166 @@ class TestMementoSearch:
         assert result["results"][0]["content"].endswith("use memento_get for full note")
         assert result["metadata"]["truncated"] is True
         assert result["metadata"]["expandable_paths"] == ["notes/long.md"]
+
+
+# --- memento_search: expand_links (MEM-159) ---
+
+
+class TestMementoSearchExpandLinks:
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.search.qmd_get")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[{"path": "notes/a.md", "title": "Note A", "score": 0.8, "snippet": "..."}],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_expand_links_appends_marked_entries_after_direct_hits(
+        self, _qmd, _search, _enhance, mock_get, _log, tmp_vault
+    ):
+        def get_side_effect(path, **kwargs):
+            if path == "notes/a.md":
+                return {"path": "notes/a.md", "content": "See [[b]]."}
+            if path == "notes/b.md":
+                return {"path": "notes/b.md", "title": "Note B", "content": "B content"}
+            return None
+
+        mock_get.side_effect = get_side_effect
+
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("note a", expand_links=True)
+
+        assert [r["path"] for r in result["results"]] == ["notes/a.md", "notes/b.md"]
+        assert result["results"][0].get("via_link", "") == ""
+        assert result["results"][1]["via_link"] == "a"
+        assert result["metadata"]["expand_links"] is True
+        assert result["metadata"]["expanded_count"] == 1
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[{"path": "notes/a.md", "title": "Note A", "score": 0.8, "snippet": "..."}],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_expand_links_defaults_to_false_no_behavior_change(self, _qmd, _search, _enhance, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("note a")
+
+        assert len(result["results"]) == 1
+        assert "expand_links" not in result["metadata"]
+
+    @patch("memento.mcp_server.log_retrieval")
+    @patch("memento.search.qmd_get", return_value=None)
+    @patch("memento.mcp_server.enhance_results", side_effect=lambda r, **kw: r)
+    @patch(
+        "memento.mcp_server.qmd_search_with_extras",
+        return_value=[{"path": "notes/a.md", "title": "Note A", "score": 0.8, "snippet": "..."}],
+    )
+    @patch("memento.mcp_server.has_qmd", return_value=True)
+    def test_expand_links_no_neighbors_leaves_results_unchanged(self, _qmd, _search, _enhance, _get, _log, tmp_vault):
+        with patch("memento.mcp_server.get_vault", return_value=tmp_vault):
+            result = memento_search("note a", expand_links=True)
+
+        assert len(result["results"]) == 1
+        assert result["metadata"].get("expand_links") is not True
+
+
+# --- memento_related (MEM-159) ---
+
+
+class TestMementoRelated:
+    def test_returns_outbound_inbound_and_neighborhood(self, tmp_vault):
+        (tmp_vault / "notes" / "alpha.md").write_text("---\ntitle: Alpha\n---\n\nSee [[beta]].\n")
+        (tmp_vault / "notes" / "beta.md").write_text("---\ntitle: Beta\n---\n\nNo links.\n")
+        (tmp_vault / "notes" / "gamma.md").write_text("---\ntitle: Gamma\n---\n\nSee [[alpha]].\n")
+
+        with (
+            patch("memento.graph.get_vault", return_value=tmp_vault),
+            patch("memento.graph._GRAPH_CACHE_PATH", str(tmp_vault / "cache-1.json")),
+            patch("memento.graph._GRAPH_CACHE", [None]),
+            patch("memento.mcp_server.log_retrieval"),
+            patch("memento.mcp_server.record_access") as mock_record,
+        ):
+            result = memento_related("alpha")
+
+        assert "error" not in result
+        assert result["note"] == "alpha"
+        assert result["path"] == "notes/alpha.md"
+        assert [e["stem"] for e in result["outbound"]] == ["beta"]
+        assert [e["stem"] for e in result["inbound"]] == ["gamma"]
+        assert result["neighborhood"]["truncated"] is False
+        mock_record.assert_called_once()
+
+    def test_resolves_by_title_and_path(self, tmp_vault):
+        (tmp_vault / "notes" / "alpha.md").write_text("---\ntitle: The Alpha Note\n---\n\nSee [[beta]].\n")
+        (tmp_vault / "notes" / "beta.md").write_text("---\ntitle: Beta\n---\n\nNo links.\n")
+
+        with (
+            patch("memento.graph.get_vault", return_value=tmp_vault),
+            patch("memento.graph._GRAPH_CACHE_PATH", str(tmp_vault / "cache-2.json")),
+            patch("memento.graph._GRAPH_CACHE", [None]),
+            patch("memento.mcp_server.log_retrieval"),
+            patch("memento.mcp_server.record_access"),
+        ):
+            by_title = memento_related("The Alpha Note")
+
+        with (
+            patch("memento.graph.get_vault", return_value=tmp_vault),
+            patch("memento.graph._GRAPH_CACHE_PATH", str(tmp_vault / "cache-2.json")),
+            patch("memento.graph._GRAPH_CACHE", [None]),
+            patch("memento.mcp_server.log_retrieval"),
+            patch("memento.mcp_server.record_access"),
+        ):
+            by_path = memento_related("notes/alpha.md")
+
+        assert by_title["note"] == "alpha"
+        assert by_path["note"] == "alpha"
+
+    def test_unresolved_note_returns_structured_error_with_suggestions(self, tmp_vault):
+        (tmp_vault / "notes" / "redis-cache-ttl.md").write_text("---\ntitle: Redis TTL\n---\n\nBody.\n")
+
+        with (
+            patch("memento.graph.get_vault", return_value=tmp_vault),
+            patch("memento.graph._GRAPH_CACHE_PATH", str(tmp_vault / "cache-3.json")),
+            patch("memento.graph._GRAPH_CACHE", [None]),
+            patch("memento.mcp_server.log_retrieval"),
+            patch("memento.mcp_server.record_access") as mock_record,
+        ):
+            result = memento_related("redis-cache-tt")  # typo
+
+        assert result["reason"] == "note_not_found"
+        assert "redis-cache-ttl" in result["suggestions"]
+        mock_record.assert_not_called()
+
+    def test_depth_is_clamped_to_max_three(self, tmp_vault):
+        (tmp_vault / "notes" / "alpha.md").write_text("---\ntitle: Alpha\n---\n\nSee [[beta]].\n")
+        (tmp_vault / "notes" / "beta.md").write_text("---\ntitle: Beta\n---\n\nNo links.\n")
+
+        with (
+            patch("memento.graph.get_vault", return_value=tmp_vault),
+            patch("memento.graph._GRAPH_CACHE_PATH", str(tmp_vault / "cache-4.json")),
+            patch("memento.graph._GRAPH_CACHE", [None]),
+            patch("memento.mcp_server.log_retrieval"),
+            patch("memento.mcp_server.record_access"),
+        ):
+            result = memento_related("alpha", depth=99)
+
+        assert result["depth"] == 3
+
+    def test_networkx_unavailable_returns_structured_error(self, tmp_vault):
+        (tmp_vault / "notes" / "alpha.md").write_text("---\ntitle: Alpha\n---\n\nBody.\n")
+
+        with (
+            patch("memento.graph.get_vault", return_value=tmp_vault),
+            patch("memento.graph._HAS_NETWORKX", False),
+            patch("memento.mcp_server.log_retrieval"),
+            patch("memento.mcp_server.record_access") as mock_record,
+        ):
+            result = memento_related("alpha")
+
+        assert result["reason"] == "networkx_unavailable"
+        mock_record.assert_not_called()
 
 
 # --- memento_query ---
