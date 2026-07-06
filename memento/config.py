@@ -93,6 +93,22 @@ DEFAULT_CONFIG = {
     "fleeting_lifecycle_enabled": False,
     "fleeting_promote_min_resurfaced": 2,
     "fleeting_expire_days": 14,
+    # Project hub regeneration & vault map (MEM-160): mechanical, idempotent
+    # rebuild of projects/<slug>.md from frontmatter + the link graph --
+    # replaces the old free-text ## Sessions/## Activity log append that
+    # corrupted real hubs into multi-hundred-line files with duplicate
+    # headers and truncated entries. hub_regeneration_enabled gates the
+    # periodic sweep (memento.hub.regenerate_stale_hubs, run from
+    # hooks/memento-sweeper.py); disabled by default -- flip it once you've
+    # reviewed a regenerated hub. hub_max_bytes/vault_map_max_bytes cap the
+    # regenerated hub and the two-tier vault map (memento.hub.vault_map)
+    # respectively. vault_map_in_briefing wires vault_map() into
+    # memento.lifecycle.build_briefing; off by default -- flip it once
+    # you've inspected the injected output.
+    "hub_regeneration_enabled": False,
+    "hub_max_bytes": 25_000,
+    "vault_map_max_bytes": 25_000,
+    "vault_map_in_briefing": False,
     "wikilink_expansion": True,
     "wikilink_max_hops": 1,
     "wikilink_score_factor": 0.5,

@@ -358,6 +358,33 @@ fleeting_promote_min_resurfaced: 2       # resurfaced_count threshold for promot
 fleeting_expire_days: 14                 # age threshold (date frontmatter, else mtime) for expiry
 ```
 
+### Vault map & project hubs (MEM-160)
+
+Replaces the old free-text `## Sessions`/`## Activity log` append (which
+corrupted real `projects/<slug>.md` hubs into multi-hundred-line files with
+duplicate headers and truncated entries) with mechanical, idempotent
+regeneration. `memento.hub.regenerate_project_hub` rebuilds a project's hub
+**from scratch** every time (frontmatter + the wikilink graph -- see
+[how-it-works.md#project-hubs--vault-map-mem-160](how-it-works.md#project-hubs--vault-map-mem-160)
+for the section schema), and `memento.hub.vault_map` assembles a capped
+two-tier index (this project's hub plus top cross-project notes) for
+briefing injection.
+
+`hub_regeneration_enabled` gates the periodic sweep
+(`memento.hub.regenerate_stale_hubs`, run from `hooks/memento-sweeper.py`
+right after the MEM-153 fleeting lifecycle sweep) that regenerates hubs for
+any project with notes newer than its hub file. `vault_map_in_briefing`
+gates injecting `vault_map()`'s output into `memento.lifecycle.build_briefing`.
+Both default to `false` -- flip them once you've reviewed a regenerated hub
+and the assembled vault map.
+
+```yaml
+hub_regeneration_enabled: false   # no-op until explicitly enabled
+hub_max_bytes: 25000              # ~25KB cap per regenerated projects/<slug>.md
+vault_map_max_bytes: 25000        # ~25KB cap for the assembled two-tier vault map
+vault_map_in_briefing: false      # inject vault_map() into the session-start briefing
+```
+
 ## Disabling features
 
 **No auto-commit** (commit manually):

@@ -318,6 +318,19 @@ Notes accumulate. `/memento-defrag` handles decay:
 
 Archived notes and preserved bundles move to `archive/`, are removed from the QMD index, but remain in git history and are searchable via grep.
 
+## Project hubs & vault map (MEM-160)
+
+`projects/<slug>.md` hub files used to grow by free-text append on every MCP store/replace/capture — a session-summary line hand-appended under `## Sessions` (or `## Activity log`) with no cap and no structural guarantee across format drift. Left running, that turns into exactly what happened in the real vault: a 300+ line file with duplicate `## Sessions` headers, truncated entries, and stray agent-output fragments — nothing curated it, and nothing navigated from it.
+
+`memento/hub.py` replaces that with mechanical, idempotent regeneration:
+
+- `regenerate_project_hub` rebuilds `projects/<slug>.md` **from scratch** every time — it never reads or parses the previous hub file, so whatever corruption accumulated there is discarded outright rather than patched around. Calling it twice with the same vault state produces byte-identical output.
+- The hub has a fixed, always-present section schema: a `# <project>` header (note count + generated-at), `## Top notes` (ranked by PageRank, falling back to a plain inbound-wikilink-count scan when `networkx` is unavailable), `## Recent decisions` (`type: decision` notes from the last 30 days), `## Recent activity` (the most recently dated notes — the bounded replacement for the old unbounded `## Sessions` append), and `## Overflow` (explicit "N notes not shown; use `memento_search --project <slug>`" counts — truncation is never silent).
+- The whole hub is capped at `hub_max_bytes` (default 25KB); sections are trimmed in reverse priority order (Recent activity first, then Recent decisions, then Top notes) to fit, and every trim is folded into the `## Overflow` counts.
+- `vault_map()` layers a second tier on top: the regenerated hub plus up to 10 of the highest-centrality notes from *other* projects, capped at `vault_map_max_bytes` (default 25KB), designed for briefing injection. Everything else stays read-on-demand via search/get.
+
+Both knobs are off by default (`hub_regeneration_enabled`, `vault_map_in_briefing`) — see [configuration.md](configuration.md) for the periodic sweep cadence and the briefing wiring. `memento/store.py`'s `update_project_index` no longer writes a session-summary line at all; only the `[[note_name]]` link under `## Notes` remains.
+
 ## Automation consumption
 
 Automated runners (Rondo, Beislið, or any orchestrator) can use the vault as automation memory: a context packet before a run, explicit search/get during it, and sanitized lesson capture after it. The boundary is strict — the vault is curated memory, never a run ledger, proof store, or coordination database. The [automation MemoryProvider contract](automation-memory-provider.md) defines the operations, failure behavior, privacy expectations, and prohibitions.

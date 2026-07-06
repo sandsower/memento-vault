@@ -16,6 +16,7 @@ from pathlib import Path
 
 from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, slugify
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
+from memento.hub import vault_map
 from memento import queue as capture_queue
 from memento import telemetry
 from memento.health import build_automation_memory_readiness
@@ -917,6 +918,19 @@ def build_briefing(
     ):
         if warning:
             lines.append(warning)
+
+    # MEM-160: capped two-tier vault map (regenerated project hub + top
+    # cross-project notes) injected behind vault_map_in_briefing -- default
+    # off until Vic reviews the output. A failure here must never break the
+    # rest of the briefing.
+    if config.get("vault_map_in_briefing", False):
+        try:
+            map_text = vault_map(vault, project_slug, config=config)
+            if map_text:
+                lines.append("")
+                lines.append(map_text)
+        except Exception:
+            pass
 
     if allow_deferred and config.get("project_maps_enabled", True) and has_qmd():
         try:

@@ -1,0 +1,23 @@
+MEM-160 vault map & project hubs -- verification gate proof log
+Branch: vic/mem-160-vault-map
+Base: 49c125c Merge pull request #183 from sandsower/integration/mem-wave-2026-07-06
+Date: 2026-07-06T14:57:55Z
+
+=== gate 1: pytest tests/test_hub.py tests/test_sweeper.py tests/test_store.py ===
+........................................................................ [ 72%]
+............................                                             [100%]
+100 passed in 29.33s
+
+=== gate 2: pytest tests/ -k "hub or briefing or vault_map" ===
+....................................                                     [100%]
+36 passed, 1760 deselected in 1.75s
+
+=== gate 3a: ruff check . ===
+All checks passed!
+
+=== gate 3b: ruff format --check . ===
+169 files already formatted
+
+=== gate 4: compileall -q memento hooks scripts ===
+
+ALL GATES: exit 0

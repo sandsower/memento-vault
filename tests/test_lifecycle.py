@@ -14,6 +14,7 @@ from memento.config import DEFAULT_CONFIG
 from memento.lifecycle import (
     LifecycleResult,
     _run_recall_lines,
+    build_briefing,
     build_recall,
     build_session_context,
     build_tool_context,
@@ -2485,3 +2486,64 @@ class TestToolContextCacheTTLAndScoping:
         incoming["dirs"]["pi::/repo::/repo/src"] = {"results": [{"path": "notes/newer.md"}], "ts": now + 300}
         merged = lifecycle_module._merge_tool_context_cache(existing, incoming)
         assert merged["dirs"]["pi::/repo::/repo/src"]["results"] == [{"path": "notes/newer.md"}]
+
+
+class TestBuildBriefingVaultMap:
+    """MEM-160: vault_map() injection into build_briefing, gated by vault_map_in_briefing."""
+
+    def _setup_vault(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        (vault / "notes").mkdir(parents=True)
+        monkeypatch.setattr("memento.lifecycle.get_vault", lambda: vault)
+        monkeypatch.setattr("memento.lifecycle.detect_project", lambda cwd, branch: ("demo-project", None))
+        monkeypatch.setattr("memento.lifecycle.get_git_branch", lambda cwd: "main")
+        monkeypatch.setattr("memento.graph._GRAPH_CACHE", [None])
+        monkeypatch.setattr("memento.graph._GRAPH_CACHE_PATH", str(tmp_path / "wikilink-graph-cache.json"))
+        return vault
+
+    def test_vault_map_excluded_by_default(self, tmp_path, monkeypatch):
+        self._setup_vault(tmp_path, monkeypatch)
+        vault_map_calls = []
+        monkeypatch.setattr(
+            "memento.lifecycle.vault_map",
+            lambda vault, project_slug, config=None: vault_map_calls.append(project_slug) or "SHOULD-NOT-APPEAR",
+        )
+
+        config = dict(DEFAULT_CONFIG)
+        with patch("memento.lifecycle.get_config", return_value=config):
+            result = build_briefing("/repo", "sess-1", allow_deferred=False)
+
+        assert result.should_inject
+        assert "SHOULD-NOT-APPEAR" not in result.content
+        assert vault_map_calls == []
+
+    def test_vault_map_injected_when_enabled(self, tmp_path, monkeypatch):
+        self._setup_vault(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "memento.lifecycle.vault_map",
+            lambda vault, project_slug, config=None: f"VAULT-MAP-FOR-{project_slug}",
+        )
+
+        config = dict(DEFAULT_CONFIG)
+        config["vault_map_in_briefing"] = True
+        with patch("memento.lifecycle.get_config", return_value=config):
+            result = build_briefing("/repo", "sess-1", allow_deferred=False)
+
+        assert result.should_inject
+        assert "VAULT-MAP-FOR-demo-project" in result.content
+
+    def test_vault_map_failure_does_not_break_briefing(self, tmp_path, monkeypatch):
+        self._setup_vault(tmp_path, monkeypatch)
+
+        def _boom(vault, project_slug, config=None):
+            raise RuntimeError("vault_map exploded")
+
+        monkeypatch.setattr("memento.lifecycle.vault_map", _boom)
+
+        config = dict(DEFAULT_CONFIG)
+        config["vault_map_in_briefing"] = True
+        with patch("memento.lifecycle.get_config", return_value=config):
+            result = build_briefing("/repo", "sess-1", allow_deferred=False)
+
+        assert result.should_inject
+        assert "demo-project" in result.content
