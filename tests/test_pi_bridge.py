@@ -1368,6 +1368,28 @@ def test_pi_bridge_queue_migrates_to_local_state_and_processes(capsys, tmp_path,
     assert payload["groups"][0]["capture_ids"] == ["q1"]
 
 
+def test_pi_bridge_queue_path_resolution_characterization(tmp_path, monkeypatch):
+    """Freeze queue-path/state-home resolution semantics across the queue-module extraction."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "pi-state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ignored-xdg"))
+    assert pi_bridge._state_root() == tmp_path / "pi-state"
+    assert pi_bridge._queue_file(vault) == tmp_path / "pi-state" / "queue" / "pi-captures.jsonl"
+    assert pi_bridge._legacy_queue_file(vault) == vault / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME")
+    assert pi_bridge._state_root() == tmp_path / "ignored-xdg" / "memento" / "pi"
+    assert pi_bridge._queue_file(vault) == tmp_path / "ignored-xdg" / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    default_root = tmp_path / "home" / ".local" / "state" / "memento" / "pi"
+    assert pi_bridge._state_root() == default_root
+    assert pi_bridge._queue_file(vault) == default_root / "queue" / "pi-captures.jsonl"
+
+
 def test_pi_bridge_process_start_rejects_active_lock(capsys, tmp_path, monkeypatch):
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"

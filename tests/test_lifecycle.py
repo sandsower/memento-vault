@@ -170,6 +170,27 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1", record=False, host_id="unknown-host")
 
 
+def test_lifecycle_queue_path_resolution_characterization(tmp_path, monkeypatch):
+    """Freeze queue-path/state-home resolution semantics across the queue-module extraction."""
+    vault = tmp_path / "vault"
+
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "pi-state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ignored-xdg"))
+    assert lifecycle._pi_queue_file() == tmp_path / "pi-state" / "queue" / "pi-captures.jsonl"
+    assert lifecycle._legacy_pi_queue_file(vault) == vault / "queue" / "pi-captures.jsonl"
+    assert lifecycle._pi_queue_path_source() == "memento_pi_state_home"
+
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME")
+    assert lifecycle._pi_queue_file() == tmp_path / "ignored-xdg" / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    assert lifecycle._pi_queue_path_source() == "xdg_state_home"
+
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    default_root = tmp_path / "home" / ".local" / "state" / "memento" / "pi"
+    assert lifecycle._pi_queue_file() == default_root / "queue" / "pi-captures.jsonl"
+    assert lifecycle._pi_queue_path_source() == "default_xdg_state"
+
+
 def test_build_session_context_explicitly_reports_legacy_queue_fallback(tmp_path, monkeypatch):
     vault = tmp_path / "vault"
     xdg_state = tmp_path / "state"
