@@ -834,9 +834,7 @@ class ExplicitSearchRuntime:
 
         vault = self.vault_loader()
         search_metadata = self._search_metadata(request, vault)
-        if not vault.exists() or not any(
-            (vault / directory).exists() for directory in indexed_dir_names()
-        ):
+        if not vault.exists() or not any((vault / directory).exists() for directory in indexed_dir_names()):
             miss = miss_envelope("empty_vault", details={"vault": str(vault)}, metadata=search_metadata)
             self.log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
             return miss

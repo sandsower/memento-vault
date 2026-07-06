@@ -440,45 +440,163 @@ def test_retrieval_health_warns_when_log_is_unreadable():
     assert "log unavailable" in check.message
 
 
-def test_automation_memory_reports_stale_embedded_index(tmp_path):
+def test_automation_memory_reports_stale_embedded_index_fails(tmp_path):
+    """Lag >1h on the active embedded backend → stale_index status fail."""
+    from memento.embedded_search import EmbeddedSearchBackend
+    from memento.search_backend import set_backend, reset_backend
+
     vault = _make_vault(tmp_path / "stale-vault")
     db = vault / ".search" / "search.db"
     db.parent.mkdir()
-    db.write_text("index")
+
+    # Create a real embedded backend and index a note to prime the schema
+    backend = EmbeddedSearchBackend(vault_path=vault, db_path=db)
     note = vault / "notes" / "newer.md"
-    note.write_text("newer")
+    note.write_text("newer content")
+    backend.index_note("notes/newer.md")
+
+    # Manually set updated_at to 2h ago in SQL (content-based lag)
     old = (datetime.now() - timedelta(hours=2)).timestamp()
+    conn = backend._get_conn()
+    conn.execute("UPDATE notes SET updated_at = ?", (old,))
+    # Update file mtime to now so newest-note-mtime is current
     now = datetime.now().timestamp()
-    os.utime(db, (old, old))
     os.utime(note, (now, now))
+    conn.commit()
 
+    set_backend(backend)
+    try:
+        readiness = health.build_automation_memory_readiness(
+            config={"vault_path": str(vault), "search_backend": "embedded"},
+            vault=vault,
+        )
+        stale = readiness["metadata"]["search"]["stale_index"]
+        assert stale["status"] == "fail", f"expected fail, got {stale['status']}"
+        assert stale["lag_seconds"] > 3600
+        assert readiness["status"] == "fail"
+        assert readiness["ready"] is False
+    finally:
+        reset_backend()
+
+
+def test_automation_memory_embedded_index_warns(tmp_path):
+    """Lag >60s but <=3600s on embedded backend → stale_index status warn."""
+    from memento.embedded_search import EmbeddedSearchBackend
+    from memento.search_backend import set_backend, reset_backend
+
+    vault = _make_vault(tmp_path / "warn-vault")
+    db = vault / ".search" / "search.db"
+    db.parent.mkdir()
+
+    backend = EmbeddedSearchBackend(vault_path=vault, db_path=db)
+    note = vault / "notes" / "newer.md"
+    note.write_text("newer content")
+    backend.index_note("notes/newer.md")
+
+    # 5 min lag → warn (between 60s and 3600s)
+    lag = 300
+    old = (datetime.now() - timedelta(seconds=lag)).timestamp()
+    conn = backend._get_conn()
+    conn.execute("UPDATE notes SET updated_at = ?", (old,))
+    now = datetime.now().timestamp()
+    os.utime(note, (now, now))
+    conn.commit()
+
+    set_backend(backend)
+    try:
+        readiness = health.build_automation_memory_readiness(
+            config={"vault_path": str(vault), "search_backend": "embedded"},
+            vault=vault,
+        )
+        stale = readiness["metadata"]["search"]["stale_index"]
+        assert stale["status"] == "warn", f"expected warn, got {stale['status']}"
+        assert 60 < stale["lag_seconds"] <= 3600
+        # Overall status should be warn (not fail)
+        assert readiness["status"] == "warn"
+    finally:
+        reset_backend()
+
+
+def test_automation_memory_embedded_index_pass_when_fresh(tmp_path):
+    """Lag <=60s on embedded backend → stale_index status pass."""
+    from memento.embedded_search import EmbeddedSearchBackend
+    from memento.search_backend import set_backend, reset_backend
+
+    vault = _make_vault(tmp_path / "fresh-vault")
+    db = vault / ".search" / "search.db"
+    db.parent.mkdir()
+
+    backend = EmbeddedSearchBackend(vault_path=vault, db_path=db)
+    note = vault / "notes" / "fresh.md"
+    note.write_text("fresh content")
+    backend.index_note("notes/fresh.md")
+    # No timestamp manipulation — index is up-to-date
+
+    set_backend(backend)
+    try:
+        readiness = health.build_automation_memory_readiness(
+            config={"vault_path": str(vault), "search_backend": "embedded"},
+            vault=vault,
+        )
+        stale = readiness["metadata"]["search"]["stale_index"]
+        assert stale["status"] == "pass", f"expected pass, got {stale['status']}"
+    finally:
+        reset_backend()
+
+
+def test_automation_memory_qmd_index_staleness(tmp_path):
+    """QMD backend: compare qmd index mtime vs newest note mtime."""
+    from memento.search_backend import set_backend, reset_backend, QMDBackend
+
+    vault = _make_vault(tmp_path / "qmd-vault")
+    note = vault / "notes" / "qmd-note.md"
+    note.write_text("qmd test note")
+    now_ts = datetime.now().timestamp()
+    os.utime(note, (now_ts, now_ts))
+
+    # Create a fake "qmd index" that is clearly stale (2h behind the note)
+    # Mock XDG_CACHE_HOME so QMDBackend resolves index from there
+    # Backend looks at XDG_CACHE_HOME/qmd/index.sqlite
+    qmd_idx = tmp_path / "qmd-cache" / "qmd" / "index.sqlite"
+    qmd_idx.parent.mkdir(parents=True)
+    qmd_idx.write_text("fake")
+    old_ts = (datetime.now() - timedelta(hours=2)).timestamp()
+    os.utime(qmd_idx, (old_ts, old_ts))
+
+    backend = QMDBackend()
+    with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path / "qmd-cache")}):
+        # INDEX_PATH takes precedence in resolution; clear it so the test
+        # exercises the XDG_CACHE_HOME path deterministically.
+        os.environ.pop("INDEX_PATH", None)
+        set_backend(backend)
+        try:
+            readiness = health.build_automation_memory_readiness(
+                config={"vault_path": str(vault)},
+                vault=vault,
+            )
+            stale = readiness["metadata"]["search"]["stale_index"]
+            # QMD index 2h old + note now → lag > 3600s → fail
+            assert stale["checked"] is True
+            assert stale["backend"] == "qmd"
+            assert stale["status"] == "fail"
+            assert stale["stale"] is True
+            assert stale["lag_seconds"] >= 3600
+        finally:
+            reset_backend()
+
+
+def test_automation_memory_grep_backend_no_staleness_warning(tmp_path):
+    """GrepBackend has no index → stale_index passes (not fail/warn)."""
+    vault = _make_vault(tmp_path / "grep-vault")
+    # Fixture sets MEMENTO_SEARCH_BACKEND=grep, so get_backend() returns GrepBackend
     readiness = health.build_automation_memory_readiness(
-        config={"vault_path": str(vault), "search_backend": "embedded", "search_db_path": ".search/search.db"},
+        config={"vault_path": str(vault)},
         vault=vault,
     )
-
-    assert readiness["status"] == "warn"
     stale = readiness["metadata"]["search"]["stale_index"]
-    assert stale["stale"] is True
-    assert stale["lag_seconds"] > 60
-
-
-def test_automation_memory_warns_when_embedded_index_missing(tmp_path):
-    vault = _make_vault(tmp_path / "missing-index-vault")
-
-    readiness = health.build_automation_memory_readiness(
-        config={"vault_path": str(vault), "search_backend": "embedded", "search_db_path": ".search/search.db"},
-        vault=vault,
-        checks=[health.CheckResult("search", health.PASS, "search ok")],
-    )
-
-    stale = readiness["metadata"]["search"]["stale_index"]
-
-    assert readiness["status"] == "warn"
     assert stale["checked"] is False
-    assert stale["status"] == "warn"
-    assert stale["reason"] == "embedded_index_missing"
-    assert stale["stale"] is None
+    assert stale["status"] == "pass", f"expected pass, got {stale['status']}"
+    assert stale["reason"] == "no_index"
 
 
 def test_automation_memory_reports_remote_sync_pending_retries(tmp_path, monkeypatch):
