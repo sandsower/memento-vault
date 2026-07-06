@@ -235,3 +235,22 @@ class TestRun:
     def test_missing_notes_dir_errors(self, tmp_path, capsys):
         assert backfill.run(tmp_path / "empty-vault", apply=False) == 1
         assert "notes directory not found" in capsys.readouterr().err
+
+
+def test_project_rules_take_precedence_over_repo_heuristic(monkeypatch):
+    """A config project_rules path_contains match wins over repo_slug_from_path."""
+    monkeypatch.setattr(
+        backfill,
+        "get_config",
+        lambda: {"project_rules": [{"path_contains": "rondo-workspaces/RON-", "slug": "rondo"}]},
+    )
+    category, slug = backfill.classify_project_value("/Users/vic/code/rondo-workspaces/RON-26")
+    assert category == "path"
+    assert slug == "rondo"
+
+
+def test_no_matching_rule_falls_back_to_repo_slug(monkeypatch):
+    monkeypatch.setattr(backfill, "get_config", lambda: {"project_rules": []})
+    category, slug = backfill.classify_project_value("/home/vic/Projects/memento-vault")
+    assert category == "path"
+    assert slug == "memento-vault"

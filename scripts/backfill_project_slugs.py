@@ -42,7 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from memento.config import get_vault, repo_slug_from_path, slugify  # noqa: E402
+from memento.config import get_config, get_vault, repo_slug_from_path, slugify  # noqa: E402
 from memento.store import _normalize_tags, _write_text_atomic, split_frontmatter  # noqa: E402
 
 # Bare branch names seen in legacy `project` fields. These cannot be mapped
@@ -76,6 +76,14 @@ def _parse_tags_value(raw: str) -> list[str] | None:
     return [_unquote(part) for part in inner.split(",")]
 
 
+def _rule_slug(value: str) -> str | None:
+    """First matching config ``project_rules`` entry wins (same as detect_project)."""
+    for rule in get_config().get("project_rules", []):
+        if isinstance(rule, dict) and rule.get("path_contains") and rule["path_contains"] in value:
+            return rule.get("slug") or None
+    return None
+
+
 def classify_project_value(value: str) -> tuple[str, str | None]:
     """Return ``(category, new_slug_or_none)`` for a raw `project` value.
 
@@ -83,7 +91,7 @@ def classify_project_value(value: str) -> tuple[str, str | None]:
     (left as-is, reported), ``slug`` (normalized in place), ``unchanged``.
     """
     if "/" in value or "\\" in value:
-        return "path", repo_slug_from_path(value)
+        return "path", _rule_slug(value) or repo_slug_from_path(value)
     if value.lower() in BRANCH_NAME_VALUES:
         return "branch", None
     normalized = slugify(value)
