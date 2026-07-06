@@ -273,11 +273,14 @@ deep_recall_backend: codex     # "codex" or "claude"
 
 ### Agentic retrieval tier (experimental)
 
-One-shot top-k injection is the SessionStart deferred-briefing worker's ceiling: a single search pass either finds the right notes or it doesn't. When enabled, the worker instead runs a bounded ReAct-style loop (`memento/retrieval_agent.py`) that calls search/query/related/get tools in-process, over as many as 6 turns and 60 seconds, before writing its final note picks to the same deferred-briefing file/TTL consumed on the next prompt.
+One-shot top-k injection is the deferred workers' ceiling: a single search pass (or a single guess-the-titles completion) either finds the right notes or it doesn't. When enabled, both background workers instead run a bounded ReAct-style loop (`memento/retrieval_agent.py`) that calls search/query/related/get tools in-process, over as many as 6 turns and 60 seconds:
+
+- **Deep recall worker** (the primary consumer): on not-confident complex prompts, the deep-recall worker's internals upgrade from a single "suggest likely note titles" completion to the tool-using agent, which actually searches and traverses the vault before writing its picks to the same suggestions file consumed on the next prompt.
+- **Deferred briefing worker**: the SessionStart background search upgrades from a one-shot semantic search to the same loop, writing to the same deferred-briefing file/TTL.
 
 The loop is driven through the same `llm_complete` backend abstraction as deep recall, so it can reuse the global `llm_backend`/`llm_model`, or route independently via `retrieval_agent_provider`/`retrieval_agent_model` -- for example to a cheaper routed model through the `pi` CLI provider (see below).
 
-This tier is strictly additive: any protocol failure (malformed tool-call JSON after one retry, a provider error or timeout, the tool-call cap, or empty results) falls back to the existing one-shot search pipeline, byte-identically to today's behavior. Disabled by default.
+This tier is strictly additive: any protocol failure (malformed tool-call JSON after one retry, a provider error or timeout, the tool-call cap, or empty results) falls back to each worker's existing pipeline, byte-identically to today's behavior. Disabled by default.
 
 ```yaml
 agentic_retrieval_enabled: false

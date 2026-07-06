@@ -573,6 +573,191 @@ class TestDeepRecallWorker:
         assert mock_complete.call_args[0][1]["llm_backend"] == "claude"
 
 
+class TestDeepRecallWorkerAgenticGate:
+    """MEM-161: run_deep_recall_worker's agentic_retrieval_enabled gate.
+
+    The not-confident deep path is the primary consumer of the bounded
+    retrieval agent: when enabled, the worker tries agentic_retrieve first
+    and writes its picks in the same suggestions format; on empty results,
+    exception, or disabled config, the existing single-completion pipeline
+    runs exactly as today.
+    """
+
+    def _write_input(self, tmp_path, prompt="What changed about caching?"):
+        input_path = str(tmp_path / "input.json")
+        with open(input_path, "w") as f:
+            json.dump(
+                {
+                    "prompt": prompt,
+                    "initial_results": ["- Redis TTL (notes/redis.md): TTL config"],
+                    "timestamp": time.time(),
+                },
+                f,
+            )
+        return input_path
+
+    def _write_pending(self, pending_path):
+        with open(pending_path, "w") as f:
+            json.dump({"status": "pending", "timestamp": time.time()}, f)
+
+    def _config(self, **overrides):
+        from memento.config import DEFAULT_CONFIG
+
+        config = dict(DEFAULT_CONFIG)
+        config.update(overrides)
+        return config
+
+    def test_disabled_config_never_calls_agentic_retrieve(self, runtime_dir, tmp_path):
+        _, pending_path = runtime_dir
+        self._write_pending(pending_path)
+        input_path = self._write_input(tmp_path)
+
+        llm_output = '[{"title": "Cache invalidation", "reason": "Related approach"}]'
+
+        with (
+            patch("memento.lifecycle.get_config", return_value=self._config(agentic_retrieval_enabled=False)),
+            patch("memento.lifecycle.agentic_retrieve") as mock_agentic,
+            patch(
+                "memento.lifecycle.llm_complete", return_value=LLMResult(text=llm_output, ok=True, error=None)
+            ) as mock_complete,
+        ):
+            run_deep_recall_worker(input_path, "codex")
+
+        mock_agentic.assert_not_called()
+        mock_complete.assert_called_once()
+        with open(pending_path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["suggestions"] == [{"title": "Cache invalidation", "reason": "Related approach"}]
+
+    def test_enabled_and_agent_succeeds_skips_llm_suggestion_pipeline(self, runtime_dir, tmp_path):
+        _, pending_path = runtime_dir
+        self._write_pending(pending_path)
+        input_path = self._write_input(tmp_path)
+
+        agentic_results = [
+            {"path": "notes/redis-ttl.md", "title": "Redis TTL", "snippet": "", "score": 1.0},
+            {"path": "notes/cache-invalidation.md", "title": "Cache invalidation", "snippet": "", "score": 0.75},
+        ]
+
+        with (
+            patch("memento.lifecycle.get_config", return_value=self._config(agentic_retrieval_enabled=True)),
+            patch("memento.lifecycle.agentic_retrieve", return_value=list(agentic_results)) as mock_agentic,
+            patch("memento.lifecycle.llm_complete") as mock_complete,
+            patch("memento.lifecycle.log_retrieval") as mock_log,
+        ):
+            run_deep_recall_worker(input_path, "codex")
+
+        mock_agentic.assert_called_once()
+        assert mock_agentic.call_args.args[0] == "What changed about caching?"
+        mock_complete.assert_not_called()
+
+        with open(pending_path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["suggestions"] == [
+            {"title": "Redis TTL", "reason": "notes/redis-ttl.md"},
+            {"title": "Cache invalidation", "reason": "notes/cache-invalidation.md"},
+        ]
+        ready_calls = [c for c in mock_log.call_args_list if c.args[1] == "deep-recall-ready"]
+        assert ready_calls[0].kwargs["source"] == "agentic"
+
+        # The agentic ready file must flow through consume_deep_recall unchanged.
+        lines = consume_deep_recall()
+        assert lines[0] == "[vault] Deep analysis suggests also reviewing:"
+        assert "Redis TTL" in lines[1]
+
+    def test_enabled_caps_suggestions_at_three(self, runtime_dir, tmp_path):
+        _, pending_path = runtime_dir
+        self._write_pending(pending_path)
+        input_path = self._write_input(tmp_path)
+
+        agentic_results = [
+            {"path": f"notes/note-{i}.md", "title": f"Note {i}", "snippet": "", "score": 1.0} for i in range(6)
+        ]
+
+        with (
+            patch("memento.lifecycle.get_config", return_value=self._config(agentic_retrieval_enabled=True)),
+            patch("memento.lifecycle.agentic_retrieve", return_value=agentic_results),
+            patch("memento.lifecycle.llm_complete") as mock_complete,
+        ):
+            run_deep_recall_worker(input_path, "codex")
+
+        mock_complete.assert_not_called()
+        with open(pending_path) as f:
+            data = json.load(f)
+        assert len(data["suggestions"]) == 3
+
+    def test_enabled_but_empty_agent_results_falls_back_to_llm_pipeline(self, runtime_dir, tmp_path):
+        _, pending_path = runtime_dir
+        self._write_pending(pending_path)
+        input_path = self._write_input(tmp_path)
+
+        llm_output = '[{"title": "Fallback suggestion", "reason": "from one-shot"}]'
+
+        with (
+            patch("memento.lifecycle.get_config", return_value=self._config(agentic_retrieval_enabled=True)),
+            patch("memento.lifecycle.agentic_retrieve", return_value=[]) as mock_agentic,
+            patch(
+                "memento.lifecycle.llm_complete", return_value=LLMResult(text=llm_output, ok=True, error=None)
+            ) as mock_complete,
+        ):
+            run_deep_recall_worker(input_path, "codex")
+
+        mock_agentic.assert_called_once()
+        mock_complete.assert_called_once()
+        with open(pending_path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["suggestions"] == [{"title": "Fallback suggestion", "reason": "from one-shot"}]
+
+    def test_enabled_but_agent_raises_falls_back_and_logs(self, runtime_dir, tmp_path):
+        _, pending_path = runtime_dir
+        self._write_pending(pending_path)
+        input_path = self._write_input(tmp_path)
+
+        llm_output = '[{"title": "Fallback suggestion", "reason": "from one-shot"}]'
+
+        with (
+            patch("memento.lifecycle.get_config", return_value=self._config(agentic_retrieval_enabled=True)),
+            patch("memento.lifecycle.agentic_retrieve", side_effect=RuntimeError("provider exploded")),
+            patch(
+                "memento.lifecycle.llm_complete", return_value=LLMResult(text=llm_output, ok=True, error=None)
+            ) as mock_complete,
+            patch("memento.lifecycle.log_retrieval") as mock_log,
+        ):
+            run_deep_recall_worker(input_path, "codex")
+
+        mock_complete.assert_called_once()
+        error_calls = [c for c in mock_log.call_args_list if c.args[1] == "agentic-retrieval-error"]
+        assert len(error_calls) == 1
+        assert error_calls[0].kwargs["error"] == "provider exploded"
+        with open(pending_path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["suggestions"] == [{"title": "Fallback suggestion", "reason": "from one-shot"}]
+
+    def test_enabled_falls_back_to_title_less_paths(self, runtime_dir, tmp_path):
+        """Hydrated entries missing a title still produce a usable suggestion."""
+        _, pending_path = runtime_dir
+        self._write_pending(pending_path)
+        input_path = self._write_input(tmp_path)
+
+        agentic_results = [{"path": "notes/untitled.md", "title": "", "snippet": "", "score": 1.0}]
+
+        with (
+            patch("memento.lifecycle.get_config", return_value=self._config(agentic_retrieval_enabled=True)),
+            patch("memento.lifecycle.agentic_retrieve", return_value=agentic_results),
+            patch("memento.lifecycle.llm_complete") as mock_complete,
+        ):
+            run_deep_recall_worker(input_path, "codex")
+
+        mock_complete.assert_not_called()
+        with open(pending_path) as f:
+            data = json.load(f)
+        assert data["suggestions"] == [{"title": "notes/untitled.md", "reason": "notes/untitled.md"}]
+
+
 class TestMainIntegration:
     """main() wires consume_deep_recall into the output pipeline."""
 

@@ -1626,6 +1626,43 @@ def run_deep_recall_worker(input_path, backend):
         _cleanup_deep_recall_pending()
         return
 
+    # MEM-161: when enabled, try the bounded tool-using retrieval agent first.
+    # It answers the same question as the one-shot suggestion prompt below
+    # ("what additional vault notes would help?") but can actually search/
+    # query/traverse the vault instead of guessing titles from the initial
+    # results. Strictly additive: on empty results or any failure, fall
+    # through to the existing single-completion pipeline unchanged.
+    config = get_config()
+    if config.get("agentic_retrieval_enabled", False):
+        try:
+            agentic_results = agentic_retrieve(prompt, config=config)
+        except Exception as exc:
+            agentic_results = None
+            log_retrieval("recall", "agentic-retrieval-error", error=str(exc))
+        if agentic_results:
+            suggestions = [
+                {
+                    "title": entry.get("title") or entry.get("path", ""),
+                    "reason": entry.get("path", ""),
+                }
+                for entry in agentic_results[:3]
+            ]
+            try:
+                with open(DEEP_RECALL_PENDING_PATH, "w") as f:
+                    json.dump(
+                        {
+                            "status": "ready",
+                            "suggestions": suggestions,
+                            "prompt": prompt,
+                            "timestamp": time.time(),
+                        },
+                        f,
+                    )
+                log_retrieval("recall", "deep-recall-ready", source="agentic", suggestion_count=len(suggestions))
+            except OSError:
+                _cleanup_deep_recall_pending()
+            return
+
     context_block = "\n".join(context_lines) if context_lines else "(no initial results)"
 
     codex_prompt = (
