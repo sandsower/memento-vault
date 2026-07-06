@@ -54,3 +54,20 @@ def test_curated_result_is_exempt_from_decay(tmp_path, monkeypatch):
     assert by_path["profile/voice.md"]["_durability_tier"] == "curated"
     # A cold, ancient regular note decays.
     assert by_path["notes/old.md"]["score"] < 1.0
+
+
+def test_curated_path_never_a_sweep_candidate(tmp_path, monkeypatch):
+    import memento.archive as archive
+
+    (tmp_path / "notes").mkdir(parents=True)
+    # Inject a curated path into the sweep scan to exercise the guard directly
+    # (_iter_vault_notes only scans notes/ today, so the guard is defensive).
+    monkeypatch.setattr(archive, "_iter_vault_notes", lambda vault: iter(["profile/voice.md"]))
+
+    cfg = dict(config.DEFAULT_CONFIG)
+    cfg["archive_sweep_enabled"] = True
+
+    report = archive.sweep_archive_candidates(tmp_path, config=cfg, dry_run=True)
+
+    assert report["candidates"] == []
+    assert {"path": "profile/voice.md", "reason": "curated (exempt)"} in report["skipped"]

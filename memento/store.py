@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import memento.frontmatter as frontmatter_module
-from memento.config import RUNTIME_DIR, get_config, get_vault_id, repo_slug_from_path, slugify
+from memento.config import RUNTIME_DIR, get_config, get_vault_id, is_curated_path, repo_slug_from_path, slugify
 
 RETRIEVAL_LOG_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
@@ -1644,6 +1644,10 @@ def fold_access_log_into_frontmatter(vault_path, *, lock_file=None):
 
         folded = 0
         for rel_path, agg in per_path.items():
+            # Curated notes (profile/) are lifecycle-exempt: never stamp
+            # resurfaced_count/last_resurfaced into a curated file.
+            if is_curated_path(rel_path):
+                continue
             try:
                 note_path = (vault / rel_path).resolve()
                 note_path.relative_to(vault)
