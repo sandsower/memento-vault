@@ -83,8 +83,8 @@ before that guard existed.
 Retrieval decay immunity is driven by a tier derived from frontmatter, not
 certainty: `memento.store.durability_tier(frontmatter, now)`. It is not a
 managed frontmatter field written by any current writer -- it's computed at
-read time by `apply_temporal_decay` (and reusable by future consumers such
-as an archive sweep) from the fields below.
+read time by `apply_temporal_decay` and by the auto-archive sweep (below)
+from the fields below.
 
 - **`pinned`** -- optional bool frontmatter field, manually set
   (`pinned: true`). Permanent decay immunity.
@@ -101,6 +101,27 @@ as an archive sweep) from the fields below.
 note's frontmatter from the access log by
 `memento.store.fold_access_log_into_frontmatter` -- they are durable
 retrieval-history fields, not something writers set directly.
+
+### Auto-archive sweep (MEM-152)
+
+`memento.archive.sweep_archive_candidates` is a scheduled sweep (triggered
+from `hooks/memento-sweeper.py`'s periodic `main()`, alongside the MEM-148
+fold) that reversibly archives `notes/*.md` files matching ALL of:
+
+- `durability_tier` is `"cold"` (never resurfaced; `pinned`/`hot`/`warm` are
+  never touched)
+- `date` frontmatter age exceeds `archive_sweep_age_days` (config, default
+  90)
+- `certainty` is present and below 4
+
+Notes missing a parseable `date` or `certainty` are skipped, not archived --
+the sweep fails safe when a criterion can't be proven. Archiving moves the
+file from `notes/` to `archive/` and appends a tombstone record via the same
+ledger (`memento.archive.record_tombstone`) portable export/import already
+use, so it is reversible (`memento.archive.restore_note`) and never a hard
+delete. Gated by `archive_sweep_enabled` (config, default `false` -- a no-op
+until enabled) and capped per run by `archive_sweep_max_per_run` (config,
+default 50).
 
 ## Note types
 

@@ -19,6 +19,7 @@ _repo_root = str(Path(__file__).parent.parent)
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
+from memento.archive import sweep_archive_candidates  # noqa: E402
 from memento.store import fold_access_log_into_frontmatter  # noqa: E402
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
@@ -248,6 +249,17 @@ def main():
             # runtime-dir cache wipe never resets access_log_half_life_days
             # history. This must never block orphan triage below.
             fold_access_log_into_frontmatter(str(VAULT))
+        except Exception:
+            pass
+
+        try:
+            # Auto-archive sweep (MEM-152): reversibly archive notes that are
+            # durability_tier "cold", older than archive_sweep_age_days, and
+            # certainty < 4 (memento.archive.sweep_archive_candidates). A
+            # no-op until archive_sweep_enabled is flipped on. Isolated the
+            # same way as the fold above -- a sweep failure must never block
+            # orphan triage.
+            sweep_archive_candidates(str(VAULT))
         except Exception:
             pass
 

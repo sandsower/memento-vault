@@ -323,6 +323,20 @@ reranker_min_score: 0.01                               # minimum reranker score
 
 Only fires on the deep path (BM25 score below `recall_high_confidence`). Adds ~15-25ms for 10-20 candidates.
 
+### Auto-archive sweep (MEM-152)
+
+Periodically archives `notes/*.md` files that are durability-tier `cold`
+(never resurfaced -- see [frontmatter-schema.md#durability-tier](frontmatter-schema.md#durability-tier)),
+older than `archive_sweep_age_days`, and `certainty` below 4. Archiving moves
+the file to `archive/` and records a reversible tombstone -- never a hard
+delete. Runs from `hooks/memento-sweeper.py`'s periodic sweep.
+
+```yaml
+archive_sweep_enabled: false     # no-op until explicitly enabled
+archive_sweep_age_days: 90       # note `date` frontmatter age threshold
+archive_sweep_max_per_run: 50    # safety valve: max notes archived per run
+```
+
 ## Disabling features
 
 **No auto-commit** (commit manually):

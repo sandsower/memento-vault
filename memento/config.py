@@ -73,6 +73,15 @@ DEFAULT_CONFIG = {
     # days; "pinned" (manual `pinned: true` frontmatter) and "hot" are the
     # only decay-immune tiers. See memento.store.durability_tier.
     "durability_hot_window_days": 30,
+    # Auto-archive sweep (MEM-152): reversibly archives notes/*.md that are
+    # durability_tier "cold" AND older than archive_sweep_age_days AND
+    # certainty < 4, using the existing tombstone machinery in
+    # memento.archive (never a hard delete). Disabled by default -- flip
+    # archive_sweep_enabled once you've reviewed a dry-run report. See
+    # memento.archive.sweep_archive_candidates.
+    "archive_sweep_enabled": False,
+    "archive_sweep_age_days": 90,
+    "archive_sweep_max_per_run": 50,
     "wikilink_expansion": True,
     "wikilink_max_hops": 1,
     "wikilink_score_factor": 0.5,

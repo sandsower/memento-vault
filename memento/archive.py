@@ -592,6 +592,241 @@ def import_archive(
     }
 
 
+# --- Auto-archive sweep (MEM-152) ---
+#
+# Nothing in the vault ages out on its own: 95.5% of notes never resurface
+# and there was no archival pressure. This scheduled sweep finds notes that
+# are durably cold (never resurfaced -- see memento.store.durability_tier),
+# old, and low-certainty, and archives them using the SAME tombstone
+# machinery export_archive()/import_archive() already rely on for portable
+# deletions -- never a second archive mechanism, never a hard delete.
+
+DEFAULT_ARCHIVE_SWEEP_AGE_DAYS = 90
+DEFAULT_ARCHIVE_SWEEP_MAX_PER_RUN = 50
+
+# Certainty must be strictly below this to qualify (criterion 3). Unlike
+# archive_sweep_age_days this is not config-driven: the acceptance criteria
+# fix it at "certainty < 4" (below "shipped"/"established"). Revisit as a
+# config knob if that turns out to need per-vault tuning.
+ARCHIVE_SWEEP_CERTAINTY_CEILING = 4
+
+
+def _archive_rel_for(notes_rel: str) -> str:
+    """Map a ``notes/...`` vault-relative path to its ``archive/...`` counterpart."""
+    if not notes_rel.startswith("notes/"):
+        raise ValueError(f"expected a notes/ relative path, got: {notes_rel}")
+    return "archive/" + notes_rel[len("notes/") :]
+
+
+def archive_note(vault: Path, notes_rel_path: str, *, reason: str = "archived", ts: str | None = None) -> dict:
+    """Move a note from ``notes/`` to ``archive/`` and record a reversible tombstone.
+
+    Reuses the same tombstone ledger (:func:`record_tombstone`) that portable
+    export/import already use to track "this notes/ path used to exist and
+    was removed" -- no new archive mechanism. The file is moved, not deleted,
+    so its content survives under ``archive/`` and :func:`restore_note` can
+    move it back. Raises :class:`ArchiveError` if the note does not exist.
+    """
+    vault = Path(vault)
+    rel = _normalize_rel(notes_rel_path)
+    if not _is_allowed_tombstone_rel(rel):
+        raise ValueError(f"unsupported archive path: {rel}")
+    src = _safe_dest(vault, rel)
+    if not src.exists() or not src.is_file():
+        raise ArchiveError(f"note not found: {rel}")
+
+    archive_rel = _archive_rel_for(rel)
+    dest = _safe_dest(vault, archive_rel)
+    content_hash = _sha256_file(src)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dest)
+    record = record_tombstone(vault, rel, reason=reason, content_hash=content_hash, ts=ts)
+    return {"path": rel, "archive_path": archive_rel, "tombstone": record}
+
+
+def restore_note(vault: Path, notes_rel_path: str, *, ts: str | None = None) -> dict:
+    """Reverse :func:`archive_note`: move a note back from ``archive/`` to ``notes/``.
+
+    ``notes_rel_path`` is the note's ORIGINAL ``notes/...`` path (as passed to
+    ``archive_note``), not its ``archive/...`` location. Appends a
+    ``reason="restored"`` tombstone record via the same restore path
+    (:func:`_restore_record`) the portable-import merge logic uses, so a
+    later portable export/import correctly sees the path as live again.
+    """
+    vault = Path(vault)
+    rel = _normalize_rel(notes_rel_path)
+    if not _is_allowed_tombstone_rel(rel):
+        raise ValueError(f"unsupported restore path: {rel}")
+
+    archive_rel = _archive_rel_for(rel)
+    src = _safe_dest(vault, archive_rel)
+    if not src.exists() or not src.is_file():
+        raise ArchiveError(f"archived note not found: {archive_rel}")
+
+    dest = _safe_dest(vault, rel)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dest)
+    record = _restore_record(vault, rel, ts=ts)
+    return {"path": rel, "archive_path": archive_rel, "tombstone": record}
+
+
+def _iter_vault_notes(vault: Path):
+    notes_dir = Path(vault) / "notes"
+    if not notes_dir.exists():
+        return
+    for path in sorted(p for p in notes_dir.rglob("*.md") if p.is_file() and not p.is_symlink()):
+        yield path.relative_to(vault).as_posix()
+
+
+def _age_days_from_date(date_str: str | None, now: datetime) -> float | None:
+    """Age in days from a raw ``date:`` frontmatter scalar, or None if absent/unparseable."""
+    if not date_str:
+        return None
+    try:
+        note_date = datetime.fromisoformat(date_str)
+    except ValueError:
+        return None
+    if note_date.tzinfo is None:
+        note_date = note_date.replace(tzinfo=timezone.utc)
+    return (now - note_date).total_seconds() / 86400.0
+
+
+def sweep_archive_candidates(vault, *, config=None, now=None, dry_run: bool = False) -> dict:
+    """Scan ``notes/`` and archive cold, aged, low-certainty notes (MEM-152).
+
+    A note qualifies only when ALL of the following hold:
+
+    1. Its durability tier (:func:`memento.store.read_durability_tier`) is
+       ``"cold"`` -- pinned, hot, and warm notes (anything ever/recently
+       resurfaced, or manually pinned) are never touched.
+    2. Its ``date`` frontmatter age exceeds ``archive_sweep_age_days`` (config,
+       default :data:`DEFAULT_ARCHIVE_SWEEP_AGE_DAYS`). Notes without a
+       parseable ``date`` are skipped -- age cannot be proven, so the fail-safe
+       is to leave them alone.
+    3. Its ``certainty`` frontmatter is present and strictly below
+       :data:`ARCHIVE_SWEEP_CERTAINTY_CEILING`. Notes without a parseable
+       certainty are skipped for the same fail-safe reason.
+
+    Gated by ``archive_sweep_enabled`` (config, default ``False``): when
+    disabled this is a no-op that logs one line and returns immediately
+    without scanning the vault. ``archive_sweep_max_per_run`` (config, default
+    :data:`DEFAULT_ARCHIVE_SWEEP_MAX_PER_RUN`) caps how many notes get
+    archived in one call regardless of how many candidates qualify --
+    overflow candidates are reported as skipped, never archived.
+
+    ``dry_run=True`` runs the full scan and returns the same report shape,
+    but never moves a file or writes a tombstone.
+
+    Mutations (the actual archive step) happen under the vault write lock,
+    re-entrant like :func:`memento.store.fold_access_log_into_frontmatter` --
+    acquires only if not already held, never releases a lock a caller holds.
+
+    Returns a report dict with keys ``enabled``, ``dry_run``,
+    ``age_days_threshold``, ``max_per_run``, ``candidates`` (list of
+    ``{path, tier, age_days, certainty}`` for every note matching all three
+    criteria), ``archived`` (list of the same shape plus ``archive_path`` for
+    notes actually archived), and ``skipped`` (list of ``{path, reason}``).
+    """
+    from memento.config import get_config as _get_config
+    from memento.store import (
+        _frontmatter_int,
+        _frontmatter_scalar,
+        acquire_vault_write_lock,
+        owns_vault_write_lock,
+        read_durability_tier,
+        release_vault_write_lock,
+        split_frontmatter,
+    )
+
+    vault = Path(vault)
+    if config is None:
+        config = _get_config()
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    enabled = bool(config.get("archive_sweep_enabled", False))
+    age_threshold = config.get("archive_sweep_age_days", DEFAULT_ARCHIVE_SWEEP_AGE_DAYS)
+    max_per_run = config.get("archive_sweep_max_per_run", DEFAULT_ARCHIVE_SWEEP_MAX_PER_RUN)
+
+    report = {
+        "enabled": enabled,
+        "dry_run": dry_run,
+        "age_days_threshold": age_threshold,
+        "max_per_run": max_per_run,
+        "candidates": [],
+        "archived": [],
+        "skipped": [],
+    }
+
+    if not enabled:
+        print("[memento] archive sweep disabled (archive_sweep_enabled: false) -- skipping", file=sys.stderr)
+        return report
+
+    for rel in _iter_vault_notes(vault):
+        try:
+            text = (vault / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            report["skipped"].append({"path": rel, "reason": f"unreadable: {exc}"})
+            continue
+
+        frontmatter, _ = split_frontmatter(text)
+
+        tier = read_durability_tier(vault, rel, config=config, now=now)
+        if tier != "cold":
+            continue  # criterion 1: pinned/hot/warm are never candidates
+
+        age_days = _age_days_from_date(_frontmatter_scalar(frontmatter, "date"), now)
+        if age_days is None or age_days <= age_threshold:
+            continue  # criterion 2
+
+        certainty = _frontmatter_int(frontmatter, "certainty")
+        if certainty is None or certainty >= ARCHIVE_SWEEP_CERTAINTY_CEILING:
+            continue  # criterion 3
+
+        report["candidates"].append({"path": rel, "tier": tier, "age_days": round(age_days, 1), "certainty": certainty})
+
+    if dry_run or not report["candidates"]:
+        return report
+
+    to_archive = report["candidates"][:max_per_run]
+    overflow = report["candidates"][max_per_run:]
+    for candidate in overflow:
+        report["skipped"].append(
+            {"path": candidate["path"], "reason": f"archive_sweep_max_per_run cap ({max_per_run}) reached"}
+        )
+
+    if not to_archive:
+        return report
+
+    already_held = owns_vault_write_lock()
+    if not already_held and not acquire_vault_write_lock():
+        for candidate in to_archive:
+            report["skipped"].append({"path": candidate["path"], "reason": "vault write lock unavailable"})
+        return report
+
+    try:
+        for candidate in to_archive:
+            try:
+                result = archive_note(vault, candidate["path"])
+            except (ArchiveError, ValueError, OSError) as exc:
+                report["skipped"].append({"path": candidate["path"], "reason": f"archive failed: {exc}"})
+                continue
+            report["archived"].append({**candidate, "archive_path": result["archive_path"]})
+            print(
+                f"[memento] archived {candidate['path']} "
+                f"(tier={candidate['tier']}, age={candidate['age_days']}d, certainty={candidate['certainty']})",
+                file=sys.stderr,
+            )
+    finally:
+        if not already_held:
+            release_vault_write_lock()
+
+    return report
+
+
 def _json_print(data: dict) -> None:
     print(json.dumps(data, indent=2, sort_keys=True))
 

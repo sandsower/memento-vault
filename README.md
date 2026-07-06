@@ -407,7 +407,7 @@ Pattern notes start at certainty 3 (subject to temporal decay and defrag). Use `
   fleeting/       Daily logs, one line per session
   notes/          Atomic permanent notes (the good stuff)
   projects/       Project indexes linking notes and sessions
-  archive/        Stale notes and preserved bundles moved here by /memento-defrag and /preserve
+  archive/        Stale notes and preserved bundles moved here by /memento-defrag, /preserve, and the auto-archive sweep (docs/configuration.md#auto-archive-sweep-mem-152)
 ```
 
 ### Skills
