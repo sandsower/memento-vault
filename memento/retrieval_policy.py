@@ -6,6 +6,7 @@ structured retrieval decisions that those adapters can format.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import time
@@ -16,6 +17,7 @@ from typing import Callable
 from memento.config import detect_project as default_detect_project
 from memento.config import get_config, get_vault, slugify
 from memento.graph import lookup_concepts, read_note_metadata
+from memento.query import is_invalidated_record, read_note_record
 from memento.search import (
     MISS_RECOVERY_HINTS,
     build_search_miss,
@@ -32,6 +34,8 @@ from memento.search import (
     rrf_fuse,
     shape_search_results,
 )
+from memento.store import _frontmatter_scalar, split_frontmatter
+from memento.store import append_stale_citation_review as default_queue_stale_citation
 from memento.store import log_retrieval as default_log_retrieval
 from memento.store import record_access as default_record_access
 
@@ -247,14 +251,33 @@ def confidence_margin(results: list[dict]) -> float:
     """Relative score gap between the top result and the runner-up.
 
     A single absolute score threshold (the old `top_score < high_conf`
-    gate) breaks down across un-normalized, per-backend score scales
-    (MEM-127 is the deferred fix for that at the source): QMD's correct
-    hits commonly score 0.96-0.97 while a barely-related catch-all note
-    scores 0.87-0.89 - both comfortably above any absolute "confident"
-    cutoff tuned for this backend, and neither number is meaningful next
-    to another backend's scale. A relative margin sidesteps that: it only
-    reads as confident when the leader is decisively clear of the field,
-    which holds regardless of the backend's absolute scale.
+    gate) breaks down across un-normalized, per-backend score scales:
+    QMD's correct hits commonly score 0.96-0.97 while a barely-related
+    catch-all note scores 0.87-0.89 - both comfortably above any absolute
+    "confident" cutoff tuned for this backend, and neither number is
+    meaningful next to another backend's scale. A relative margin sidesteps
+    that: it only reads as confident when the leader is decisively clear of
+    the field, which holds regardless of the backend's absolute scale - this
+    is why confidence_margin() (and single_strong_hit below) were already
+    backend-agnostic before MEM-127 landed, with no separate qmd-only
+    identity gate to remove here: PRF/RRF/rerank/multi_hop/deep_recall all
+    key off `confident` (this function plus single_strong_hit), never off
+    the backend's type.
+
+    MEM-127 fixed the actual root cause this function was working around:
+    per-backend score scales weren't normalized at the source. The concrete
+    bug that mattered most here was the embedded backend's FTS5 search
+    normalizing scores by `score / max_score_in_this_batch`, which forced
+    the top hit in *any* result batch to exactly 1.0 regardless of true
+    relevance - so a single mediocre embedded hit always looked like a
+    perfect match to single_strong_hit's absolute check (this function
+    can't establish a margin from a single result at all, see below), and
+    the deep pipeline never got a chance to run on it. See
+    memento.embedded_search.normalize_fts5_score /
+    normalize_vec_cosine_distance and memento.search_backend.
+    normalize_qmd_score / normalize_grep_term_coverage for the fix, and
+    every backend.search() result now also carries a `backend` field
+    (qmd | embedded-fts | embedded-vec | grep) for downstream diagnostics.
 
     Fewer than two results can never establish a margin - including zero
     results, and a single result with no runner-up to compare against -
@@ -459,6 +482,31 @@ def filter_recall_results_by_explicit_project(prompt: str, results: list[dict]) 
     return filtered, decisions
 
 
+def drop_invalidated_recall_results(vault: Path, results: list[dict]) -> tuple[list[dict], int]:
+    """Drop recall results whose note carries `invalidated_by` (MEM-163).
+
+    Runs at the same site as :func:`filter_recall_results_by_explicit_project`
+    in :class:`PromptRecallRuntime` -- automatic recall has no
+    ``include_invalidated`` opt-in (unlike ``memento_search``/``memento_query``),
+    it always excludes invalidated notes. Fails open: a result whose backing
+    file cannot be read is kept rather than dropped, since this is a
+    default-safety exclusion, not a user-requested constraint. Returns
+    ``(kept_results, excluded_count)``.
+    """
+    if not results:
+        return results, 0
+
+    excluded = 0
+    kept = []
+    for result in results:
+        record = read_note_record(vault, result.get("path", ""))
+        if record is not None and is_invalidated_record(record):
+            excluded += 1
+            continue
+        kept.append(result)
+    return kept, excluded
+
+
 def _strip_injection(text: str) -> str:
     """Strip instruction-like patterns from injected content (defense-in-depth)."""
     if not text:
@@ -499,6 +547,200 @@ def _format_result(result: dict) -> str:
     if snippet:
         return f"  - {title}: {snippet}"
     return f"  - {title}"
+
+
+# --- Citation verification at use (MEM-162) ---
+#
+# Notes assert facts about code that keeps changing; nothing checked those
+# facts still held. Citations (`{file, anchor[, commit]}` frontmatter, written
+# once at capture time by hooks/memento-triage.py) are verified here, cheaply,
+# for notes actually selected for injection -- post-ranking, top-k only,
+# never a full-vault scan. A stale citation is injected WITH an explicit
+# marker (never silently skipped) and the note is queued for supersession
+# review; an unverifiable citation (no repo context available) is injected
+# unmarked -- absence of evidence is never evidence of staleness.
+
+STALE_CITATION_PREFIX = "[stale: cited code changed]"
+DEFAULT_CITATION_MAX_VERIFY_BYTES = 262_144
+
+# Filesystem-only repo-root walk bound: a deeply nested cwd/project_path must
+# never turn a "cheap" verification into an unbounded walk to "/".
+_CITATION_REPO_ROOT_MAX_LEVELS = 8
+
+
+def _read_note_citations(vault: Path, rel_path: str) -> tuple[list[dict], str | None]:
+    """Return ``(citations, project_path)`` parsed from one note's frontmatter.
+
+    Only ever called for notes actually selected for injection (post-ranking,
+    top-k) -- never the full result set. Returns ``([], None)`` for any note
+    that can't be read or has no usable ``citations``/``project_path`` lines.
+    """
+    if not rel_path:
+        return [], None
+    try:
+        text = (vault / rel_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [], None
+    frontmatter, _ = split_frontmatter(text)
+    if not frontmatter:
+        return [], None
+
+    citations: list[dict] = []
+    raw_citations = _frontmatter_scalar(frontmatter, "citations")
+    if raw_citations:
+        try:
+            parsed = json.loads(raw_citations)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            citations = [
+                entry
+                for entry in parsed
+                if isinstance(entry, dict)
+                and str(entry.get("file") or "").strip()
+                and str(entry.get("anchor") or "").strip()
+            ]
+
+    project_path = _frontmatter_scalar(frontmatter, "project_path")
+    return citations, project_path
+
+
+def _find_repo_root_fs(start: Path, max_levels: int = _CITATION_REPO_ROOT_MAX_LEVELS) -> Path | None:
+    """Walk upward from ``start`` looking for a ``.git`` entry, stat-only.
+
+    No subprocess spawn -- recall/tool-context injection is latency-bounded,
+    so repo-root resolution here stays to cheap stat() calls capped at
+    ``max_levels``.
+    """
+    current = start
+    for _ in range(max_levels):
+        if (current / ".git").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def _resolve_citation_repo_root(project_path: str | None, cwd: str) -> Path | None:
+    """Resolve the repo root to verify a note's citations against.
+
+    Prefers the note's own ``project_path`` frontmatter (MEM-164 -- the raw
+    cwd/path the note was written from) over the caller's current cwd.
+    Returns ``None`` when neither resolves to an existing directory --
+    unverifiable, never treated as stale.
+    """
+    for candidate in (project_path, cwd):
+        if not candidate:
+            continue
+        try:
+            path = Path(candidate).expanduser()
+        except (TypeError, ValueError):
+            continue
+        try:
+            if not path.is_dir():
+                continue
+        except OSError:
+            continue
+        return _find_repo_root_fs(path) or path
+    return None
+
+
+def _citation_match(repo_root: Path, citation: dict, max_bytes: int) -> str:
+    """Return ``"verified"``, ``"mismatch"``, or ``"missing"`` for one citation.
+
+    ``"missing"`` covers every case where the citation can't be checked (bad
+    path, file gone, unreadable) -- callers must never treat that as stale.
+    ``"mismatch"`` means the file exists but the anchor substring is gone
+    (stale). Reads are bounded to ``max_bytes`` so a large cited file never
+    turns a cheap check into a slow one.
+    """
+    file_value = str(citation.get("file") or "").strip()
+    anchor_value = str(citation.get("anchor") or "").strip()
+    if not file_value or not anchor_value:
+        return "missing"
+    try:
+        resolved_root = repo_root.resolve()
+        target = (repo_root / file_value).resolve()
+        target.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return "missing"
+    if not target.is_file():
+        return "missing"
+    try:
+        with open(target, "r", encoding="utf-8", errors="replace") as handle:
+            content = handle.read(max_bytes)
+    except OSError:
+        return "missing"
+    return "verified" if anchor_value in content else "mismatch"
+
+
+def evaluate_citation_verification(
+    vault: Path,
+    result: dict,
+    *,
+    cwd: str = "",
+    config: dict | None = None,
+    queue_stale: Callable[[str, list[dict]], None] = default_queue_stale_citation,
+) -> str:
+    """Return ``"verified"``, ``"stale"``, ``"unverifiable"``, or ``"no-citations"``.
+
+    Only ever called for a result actually selected for injection --
+    post-ranking, top-k (the whole point of verify-at-use is to keep this off
+    the full result-set path). On ``"stale"``, queues the note for
+    supersession review via ``queue_stale`` before returning.
+    """
+    if config is None:
+        config = get_config()
+    if not config.get("citation_verification_enabled", True):
+        return "no-citations"
+
+    rel_path = result.get("path", "")
+    citations, project_path = _read_note_citations(vault, rel_path)
+    if not citations:
+        return "no-citations"
+
+    repo_root = _resolve_citation_repo_root(project_path, cwd)
+    if repo_root is None:
+        return "unverifiable"
+
+    max_bytes = int(config.get("citation_max_verify_bytes", DEFAULT_CITATION_MAX_VERIFY_BYTES) or 0) or (
+        DEFAULT_CITATION_MAX_VERIFY_BYTES
+    )
+
+    saw_mismatch = False
+    saw_verified = False
+    for citation in citations:
+        outcome = _citation_match(repo_root, citation, max_bytes)
+        if outcome == "mismatch":
+            saw_mismatch = True
+        elif outcome == "verified":
+            saw_verified = True
+
+    if saw_mismatch:
+        try:
+            queue_stale(rel_path, citations)
+        except Exception:
+            pass  # review-queue append must never block injection (fail-open)
+        return "stale"
+    if saw_verified:
+        return "verified"
+    return "unverifiable"
+
+
+def apply_stale_citation_marker(line: str) -> str:
+    """Prefix an already-formatted injected one-liner with the stale marker.
+
+    Decision (MEM-162, made by Vic on 2026-07-06): inject the note WITH an
+    explicit stale marker rather than silently skipping it -- silent skip
+    would hide a note that may still be directionally useful and would never
+    surface the "this needs a look" signal the review queue exists to drive.
+    """
+    stripped = line.strip()
+    if stripped.startswith("- "):
+        stripped = stripped[2:]
+    return f"  - {STALE_CITATION_PREFIX} {stripped}"
 
 
 def _empty_decision(source: str, reason: str, *, query: str = "", details: dict | None = None) -> RetrievalDecision:
@@ -825,7 +1067,7 @@ class PromptRecallRuntime:
             return None, reason, []
 
         max_notes = config.get("recall_max_notes", 3)
-        min_score = config.get("recall_min_score", 0.4)
+        min_score = config.get("recall_min_score", 0.25)
         envelope = self.remote_search_envelope(
             query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd, concrete=concrete
         )
@@ -990,7 +1232,7 @@ class PromptRecallRuntime:
                 decision.metadata["miss"] = remote_miss
             return decision
 
-        min_score = config.get("recall_min_score", 0.4)
+        min_score = config.get("recall_min_score", 0.25)
         max_notes = config.get("recall_max_notes", 3)
         confidence_margin_threshold = config.get("recall_confidence_margin", DEFAULT_RECALL_CONFIDENCE_MARGIN)
         query = prompt
@@ -1223,9 +1465,20 @@ class PromptRecallRuntime:
                 decision.metadata["miss"] = remote_miss
             return decision
 
+        excluded_invalidated_count = 0
         if not concrete_enabled:
             results = self.enhance_results(results, config=config, cwd=request.cwd)
             self._log_candidates(config, results, "enhanced", query=query)
+
+            results, excluded_invalidated_count = drop_invalidated_recall_results(vault, results)
+            if excluded_invalidated_count and config.get("recall_diagnostics_include_candidates", False):
+                self._log_diagnostic(
+                    config,
+                    "candidates",
+                    stage="invalidated-filter",
+                    excluded=excluded_invalidated_count,
+                    query=query,
+                )
 
             results, project_decisions = filter_recall_results_by_explicit_project(prompt, results)
             project_filter_applied = bool(project_decisions)
@@ -1248,7 +1501,12 @@ class PromptRecallRuntime:
                     pass
 
         if not results:
-            reason = "project-mismatch-filtered-empty" if project_filter_applied else "filtered-empty"
+            if project_filter_applied:
+                reason = "project-mismatch-filtered-empty"
+            elif excluded_invalidated_count:
+                reason = "invalidated-filtered-empty"
+            else:
+                reason = "filtered-empty"
             self.log_retrieval("recall", reason, query=query, results_before=results_before, latency_ms=latency_ms)
             self._log_diagnostic(config, "decision", decision="skipped", reason=reason, latency_ms=latency_ms)
             return _empty_decision("recall", reason, query=prompt)
@@ -1274,7 +1532,14 @@ class PromptRecallRuntime:
             results = fresh
 
         selected = results[:max_notes]
-        lines = ["[vault] Related memories:", *[_format_result(result) for result in selected]]
+        formatted_lines = []
+        for result in selected:
+            line = _format_result(result)
+            citation_status = evaluate_citation_verification(vault, result, cwd=request.cwd, config=config)
+            if citation_status == "stale":
+                line = apply_stale_citation_marker(line)
+            formatted_lines.append(line)
+        lines = ["[vault] Related memories:", *formatted_lines]
         top_path = selected[0].get("path", "")
         injected_text = "\n".join(lines)
         injected_titles = [result.get("title", "") for result in selected]
@@ -1302,11 +1567,14 @@ class PromptRecallRuntime:
             top_path=top_path,
             pipeline=pipeline_depth,
         )
+        metadata = {"cwd": request.cwd, "session_id": request.session_id, "top_path": top_path}
+        if excluded_invalidated_count:
+            metadata["excluded_invalidated_count"] = excluded_invalidated_count
         return RetrievalDecision(
             True,
             "recall",
             lines=lines,
             results=selected,
             top_path=top_path,
-            metadata={"cwd": request.cwd, "session_id": request.session_id, "top_path": top_path},
+            metadata=metadata,
         )

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from memento.llm import LLMResult
 
 # Import memento-triage.py (hyphenated filename)
@@ -29,6 +31,14 @@ sentinel_path = _mod._sentinel_path
 run_remote_triage = _mod.run_remote_triage
 retry_local_extractions = _mod.retry_local_extractions
 recover_dead_letter_extractions = _mod.recover_dead_letter_extractions
+
+
+@pytest.fixture(autouse=True)
+def _smart_store_patches(monkeypatch):
+    """Patch smart_store dependencies so tests don't hit real backends."""
+    monkeypatch.setattr("memento.smart_store.get_vault", lambda *a, **kw: _mod.get_vault())
+    monkeypatch.setattr("memento.smart_store.has_qmd", lambda: False)
+    monkeypatch.setattr("memento.smart_store.inspect_contradictions", lambda *a, **kw: {})
 
 
 def _write_transcript(tmp_path, entries):

@@ -1,5 +1,6 @@
 """Tests for LongMemEval haystack ingestion adapter."""
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -15,6 +16,13 @@ from longmemeval_adapter import (
     load_dataset,
     run_retrieval,
     run_retrieval_eval,
+)
+
+# run_retrieval/run_retrieval_eval lazily import longmemeval_retrieval, which needs
+# rank_bm25; skip just the classes that call them, not the whole module.
+_skip_without_rank_bm25 = pytest.mark.skipif(
+    importlib.util.find_spec("rank_bm25") is None,
+    reason="rank_bm25 not installed; install the 'test' extra to run this suite",
 )
 
 
@@ -210,6 +218,7 @@ class TestLoadDataset:
 # ---- run_retrieval ----
 
 
+@_skip_without_rank_bm25
 class TestRunRetrieval:
     def test_returns_results(self, sample_question):
         """run_retrieval should return a non-empty list of result dicts."""
@@ -280,6 +289,7 @@ class TestComputeRetrievalMetrics:
 # ---- run_retrieval_eval ----
 
 
+@_skip_without_rank_bm25
 class TestRunRetrievalEval:
     def test_aggregates_metrics(self, tmp_path, sample_question):
         """run_retrieval_eval should return aggregated metrics."""

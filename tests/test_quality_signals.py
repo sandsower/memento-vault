@@ -194,6 +194,64 @@ class TestRequireProjectMatch:
         assert any(k.get("reason") == "no-metadata" for _, k in logged)
 
 
+class TestSlugBasedProjectMatch:
+    """MEM-164: project filtering compares slugs, not realpath prefixes."""
+
+    def test_slug_note_matches_cwd_of_same_repo(self, vault, tmp_path):
+        project_dir = tmp_path / "My-API"
+        project_dir.mkdir()
+        matching = _write_note(vault, "scoped", ["title: Scoped", "type: decision", "project: my-api"])
+        results = [_result(matching)]
+
+        with patch("memento.graph.get_vault", return_value=vault):
+            kept = filter_by_project(results, str(project_dir), require_match=True)
+
+        assert [r["path"] for r in kept] == [matching]
+
+    def test_legacy_path_project_from_other_machine_matches_by_derived_slug(self, vault, tmp_path):
+        """Notes not yet backfilled keep a raw path; the slug is derived on the fly."""
+        project_dir = tmp_path / "my-api"
+        project_dir.mkdir()
+        legacy = _write_note(
+            vault,
+            "legacy",
+            ["title: Legacy", "type: decision", "project: /home/vic/other-machine/my-api"],
+        )
+        results = [_result(legacy)]
+
+        with patch("memento.graph.get_vault", return_value=vault):
+            kept = filter_by_project(results, str(project_dir), require_match=True)
+
+        assert [r["path"] for r in kept] == [legacy]
+
+    def test_other_project_slug_is_excluded(self, vault, tmp_path):
+        project_dir = tmp_path / "my-api"
+        project_dir.mkdir()
+        other = _write_note(vault, "other", ["title: Other", "type: decision", "project: another-service"])
+        results = [_result(other)]
+
+        logged = []
+        with (
+            patch("memento.graph.get_vault", return_value=vault),
+            patch("memento.search.log_retrieval", side_effect=lambda *a, **k: logged.append((a, k))),
+        ):
+            kept = filter_by_project(results, str(project_dir), require_match=True)
+
+        assert kept == []
+        assert any(k.get("reason") == "slug-mismatch" for _, k in logged)
+
+    def test_slug_comparison_is_case_insensitive(self, vault, tmp_path):
+        project_dir = tmp_path / "my-api"
+        project_dir.mkdir()
+        cased = _write_note(vault, "cased", ["title: Cased", "type: decision", "project: My-API"])
+        results = [_result(cased)]
+
+        with patch("memento.graph.get_vault", return_value=vault):
+            kept = filter_by_project(results, str(project_dir), require_match=True)
+
+        assert [r["path"] for r in kept] == [cased]
+
+
 class TestToolContextRequiresProjectMatch:
     def test_build_tool_context_passes_require_project_match(self, tmp_path):
         from memento.lifecycle import build_tool_context

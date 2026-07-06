@@ -27,6 +27,7 @@ WRITER_SOURCE_PATHS = (
     REPO_ROOT / "memento" / "store.py",
     REPO_ROOT / "memento" / "mcp_server.py",
     REPO_ROOT / "memento" / "pi_bridge.py",
+    REPO_ROOT / "memento" / "smart_store.py",
     REPO_ROOT / "hooks" / "memento-triage.py",
 )
 
@@ -54,10 +55,12 @@ MANAGED_FIELD_TYPES = {
     "supersedes": "wikilink or title",
     "synthesized_from": "list",
     "project": "string",
+    "project_path": "string",
     "branch": "string",
     "date": "datetime",
     "session_id": "uuid/string",
     "repo_slug": "string",
+    "citations": "list",
 }
 
 
@@ -106,6 +109,7 @@ def _write_note_fixture(vault: Path, *, note_type: str = "discovery", source: st
         project="/tmp/memento-vault",
         branch="schema-checker",
         session_id=f"session-{source}",
+        citations=[{"file": "memento/store.py", "anchor": "def write_note(", "commit": "abc1234"}],
     )
     return path.read_text(encoding="utf-8")
 
@@ -194,8 +198,13 @@ def implemented_atomic_sources(source_paths: tuple[Path, ...] | None = None) -> 
     """
     source_paths = WRITER_SOURCE_PATHS if source_paths is None else source_paths
     sources: set[str] = set()
-    functions_with_source_default = {"normalize_note_contract", "write_note"}
-    calls_with_source_keyword = {"normalize_note_contract", "write_note"}
+    functions_with_source_default = {"normalize_note_contract", "write_note", "suggest_store_action"}
+    calls_with_source_keyword = {
+        "normalize_note_contract",
+        "write_note",
+        "write_smart_store_note",
+        "suggest_store_action",
+    }
 
     for path in source_paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

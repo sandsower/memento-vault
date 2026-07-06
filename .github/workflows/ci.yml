@@ -81,7 +81,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install package and test deps
-        run: python -m pip install -e ".[mcp,embedded]" pytest pyyaml networkx scipy hdbscan rank_bm25 optuna
+        run: python -m pip install -e ".[mcp,embedded,test]" pytest
       - name: pytest
         run: python -m pytest -q
 

@@ -67,6 +67,17 @@ git log --oneline vPREVIOUS..vX.Y.Z
 
 Create the GitHub release with the drafted notes.
 
+## Pi bridge release smoke checklist
+
+Before cutting a pi bridge release, run this interactive smoke checklist from a checkout:
+
+```bash
+pi -e ./extensions/memento.ts
+```
+
+Then verify `/memento-status`, `/memento-queue`, `/reload`, `/new`, `/resume`, `/fork`, `/compact`, and quit.
+The bridge uses short-lived `python3 -m memento.pi_bridge` calls rather than a persistent child process, so shutdown cleanup should leave no memento-owned child process behind.
+
 ## Homebrew tap
 
 The public tap is `sandsower/homebrew-tap`.

@@ -20,6 +20,7 @@ sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 from memento.config import detect_project, get_config, get_vault  # noqa: E402
 from memento.llm import llm_complete  # noqa: E402
+from memento.smart_store import write_smart_store_note  # noqa: E402
 from memento.store import (  # noqa: E402
     acquire_vault_write_lock,
     append_project_session_line,
@@ -27,8 +28,6 @@ from memento.store import (  # noqa: E402
     log_retrieval,
     log_triage_health,
     release_vault_write_lock,
-    update_project_index,
-    write_note,
 )
 from memento.adapters import parse_transcript, render_transcript_text, truncate_transcript  # noqa: E402
 from memento.utils import normalize_note_tags, read_hook_input, sanitize_secrets  # noqa: E402
@@ -413,6 +412,18 @@ TRIAGE_NOTES_JSON_SCHEMA = {
                     "certainty": {"type": "integer", "minimum": 1, "maximum": 5},
                     "validity_context": {"type": "string"},
                     "supersedes": {"type": "string"},
+                    "citations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": {"type": "string"},
+                                "anchor": {"type": "string"},
+                                "commit": {"type": "string"},
+                            },
+                            "required": ["file", "anchor"],
+                        },
+                    },
                 },
                 "required": ["title", "body", "type", "tags", "certainty"],
             },
@@ -437,7 +448,13 @@ def _build_structured_notes_prompt(session_id, transcript_text, meta, project_sl
         'Return either a JSON array of notes or {"notes": [...]}.\n'
         "Each note must include: title, body, type, tags, certainty.\n"
         "certainty must be an integer from 1 to 5, not a word such as confirmed.\n"
-        "Optional fields: validity_context, supersedes.\n"
+        "Optional fields: validity_context, supersedes, citations.\n"
+        "When a note asserts something about specific code you saw in the transcript, "
+        "add citations: a list of {file, anchor} objects, where file is the repo-relative "
+        "path you saw and anchor is a short, verbatim, distinctive line from that file "
+        "(under 120 characters) that would let someone verify the claim still holds. "
+        "commit is an optional short git sha for provenance only. Omit citations entirely "
+        "when the note isn't about specific code.\n"
         "Do not include any prose outside JSON.\n\n"
         f"Session ID: {session_id}\n"
         f"Project slug: {project_slug}\n"
@@ -487,7 +504,6 @@ def _note_already_written(vault, title, session_id):
 
 
 def _write_structured_notes(notes, vault, session_id, meta, project_slug, llm_telemetry, transcript_path=None):
-    summary = build_session_summary(meta)
     if not acquire_vault_write_lock():
         log_retrieval(
             "triage",
@@ -515,23 +531,25 @@ def _write_structured_notes(notes, vault, session_id, meta, project_slug, llm_te
             if _note_already_written(vault, note["title"], session_id):
                 skipped_duplicates += 1
                 continue
-            path = write_note(
-                vault,
+            result = write_smart_store_note(
                 title=note["title"],
                 body=sanitize_secrets(note["body"]),
                 note_type=note.get("type", "discovery"),
                 tags=note.get("tags", []),
                 certainty=note.get("certainty"),
-                source="session",
-                origin=f"claude_triage:{meta.get('agent') or 'claude'}",
-                validity_context=note.get("validity_context") or note.get("validity-context"),
-                supersedes=note.get("supersedes"),
                 project=meta.get("cwd"),
                 branch=meta.get("git_branch"),
                 session_id=session_id,
+                validity_context=note.get("validity_context") or note.get("validity-context"),
+                supersedes=note.get("supersedes"),
+                origin=f"claude_triage:{meta.get('agent') or 'claude'}",
+                source="session",
+                citations=note.get("citations"),
             )
-            update_project_index(vault, project_slug, path.stem, f"`{session_id}` — {summary}")
-            written += 1
+            if result.get("decision") in ("created", "merged_into"):
+                written += 1
+            elif result.get("decision") == "already_covered":
+                skipped_duplicates += 1
         log_triage_health(
             "structured_notes_written",
             session_id=session_id,

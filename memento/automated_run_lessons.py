@@ -111,6 +111,7 @@ class AutomatedRunLessonCandidate(TypedDict, total=False):
     certainty: int
     validity_context: str
     related_refs: list[str]
+    extra_tags: list[str]
 
 
 def queue_path() -> Path:
@@ -220,6 +221,7 @@ def normalize_lesson_candidate(value: Any) -> dict[str, Any]:
 
     artifact_refs = _string_list(value.get("artifact_refs") or value.get("artifact_references") or [])
     related_refs = _string_list(value.get("related_refs") or value.get("related") or [])
+    extra_tags = _string_list(value.get("extra_tags") or value.get("tags") or [])
 
     candidate: AutomatedRunLessonCandidate = {
         "schema": AUTOMATED_RUN_LESSON_SCHEMA,
@@ -240,6 +242,7 @@ def normalize_lesson_candidate(value: Any) -> dict[str, Any]:
         "certainty": certainty,
         "validity_context": text("validity_context", "validity-context"),
         "related_refs": related_refs,
+        "extra_tags": extra_tags,
     }
     return {"candidate": candidate}
 
@@ -250,6 +253,9 @@ def lesson_to_note_payload(candidate: AutomatedRunLessonCandidate) -> dict[str, 
     tags = ["automation", "automated-run", candidate["lesson_type"], candidate["outcome"]]
     if candidate.get("ticket"):
         tags.append(candidate["ticket"])
+    for extra in candidate.get("extra_tags") or []:
+        if extra not in tags:
+            tags.append(extra)
 
     lines = [
         candidate.get("body") or candidate["evidence_summary"],

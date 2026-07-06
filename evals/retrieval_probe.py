@@ -172,9 +172,9 @@ def fixture_checks(root: Path) -> list[dict]:
     results = [_result("quasar-retry-policy-high-certainty")]
     search.apply_temporal_decay(results, config)
     check(
-        "decay_immunity_high_certainty",
-        "A certainty-5 note is immune to temporal decay",
-        _score_of(results, "quasar-retry-policy-high-certainty") == 1.0,
+        "decay_ignores_certainty_immunity",
+        "A certainty-5 never-resurfaced (cold) note decays like any other (MEM-150)",
+        (_score_of(results, "quasar-retry-policy-high-certainty") or 1.0) < 1.0,
         f"score={_score_of(results, 'quasar-retry-policy-high-certainty')}",
     )
 

@@ -15,7 +15,7 @@ import struct
 import threading
 from pathlib import Path
 
-from memento.search_backend import SearchBackend, _literal_score, _literal_snippet
+from memento.search_backend import SearchBackend, _literal_score, _literal_snippet, normalize_grep_term_coverage
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,83 @@ _MAX_EMBED_BATCH = 64
 _MAX_NOTE_SIZE_FOR_EMBED = 100_000  # 100KB
 _METADATA_TABLE = "index_metadata"
 _EMBEDDING_SIGNATURE_KEY = "embedding_signature"
+_VEC_DISTANCE_METRIC = "cosine"
+
+# Bounded-transform constant for FTS5 BM25 rank normalization (MEM-127): see
+# normalize_fts5_score() below for the empirical rationale. Read from config
+# ("fts5_score_k") by callers that construct this backend from the singleton
+# (memento.search_backend._make_embedded); this module-level default is only
+# the fallback for direct instantiation (e.g. tests, scripts).
+_DEFAULT_FTS5_SCORE_K = 2.0
+
+
+def normalize_fts5_score(raw_score: float, k: float = _DEFAULT_FTS5_SCORE_K) -> float:
+    """Map a raw FTS5 BM25 rank value to [0, 1] via a bounded transform (MEM-127).
+
+    Replaces the old ``score / max_score_in_this_batch`` normalization, which
+    forced the *top hit in any result batch* to exactly 1.0 regardless of its
+    true relevance - a single mediocre FTS5 hit therefore looked like a
+    perfect match to the ``single_strong_hit`` / ``confidence_margin`` gates
+    in retrieval_policy.py, which incorrectly skipped the deep pipeline
+    (PRF/RRF/rerank) on the embedded backend even for weak matches. This is
+    the concrete instance of "the deep pipeline never fires on the embedded
+    backend" from the MEM-127 ticket.
+
+    ``score / (score + k)`` is monotonic increasing, 0 at raw <= 0, and
+    approaches 1 as raw -> infinity - a proper bounded transform rather than
+    a batch-relative rescale. ``k`` calibrates how much raw BM25 magnitude
+    counts as "strong": the default (2.0) was chosen empirically against a
+    small fixture vault (see tests/test_embedded_search.py and the MEM-127
+    report) where a single rare, discriminating term match raw-scored
+    ~1.0-1.7 (mapping to ~0.4-0.6), stacking toward 0.8+ with multiple
+    distinguishing terms, while common-term-only matches (near-zero raw,
+    since FTS5's BM25 IDF collapses toward zero when a term appears in most
+    indexed documents) stay near 0. Raw BM25 magnitude scales with corpus
+    size and term rarity, so ``k`` is a coarse, vault-size-independent
+    starting point - tune via ``fts5_score_k`` in config if a specific vault's
+    score distribution warrants it (benchmark/optuna_sweep.py is the existing
+    harness for that kind of calibration sweep).
+    """
+    try:
+        score = float(raw_score)
+    except (TypeError, ValueError):
+        return 0.0
+    if score != score or score <= 0:  # NaN or non-positive
+        return 0.0
+    if k <= 0:
+        k = 1e-6
+    return max(0.0, min(1.0, score / (score + k)))
+
+
+def normalize_vec_cosine_distance(distance: float) -> float:
+    """Map a sqlite-vec cosine distance to a [0, 1] relevance score (MEM-127).
+
+    ``notes_vec`` is declared with ``distance_metric=cosine`` (MEM-127;
+    previously unspecified, which sqlite-vec defaults to L2). Empirically
+    (see MEM-127 report), sqlite-vec's default L2 distance for unit vectors
+    ranges [0, 2]: identical vectors -> 0, orthogonal (unrelated) -> sqrt(2)
+    ~= 1.414, opposite -> 2.0. The old ``max(0.0, 1.0 - distance)`` transform
+    therefore collapsed BOTH orthogonal and opposite vectors to a score of
+    0, discarding the negative-similarity signal entirely (everything past
+    distance=1 read identically as "no relevance"). It also silently assumed
+    every embedding provider L2-normalizes its output, which is only
+    guaranteed for the local Nomic provider (see memento.embedding
+    ``_truncate_and_normalize``), not the remote Voyage/OpenAI/Google
+    providers.
+
+    Cosine distance is magnitude-independent and defined as
+    ``1 - cosine_similarity``, range [0, 2] regardless of vector norm.
+    Rescale to the conventional ``(cos + 1) / 2`` relevance band: identical
+    direction -> 1.0, orthogonal (no relationship) -> 0.5, opposite -> 0.0.
+    """
+    try:
+        d = float(distance)
+    except (TypeError, ValueError):
+        return 0.0
+    if d != d:  # NaN
+        return 0.0
+    cos_sim = 1.0 - d
+    return max(0.0, min(1.0, (cos_sim + 1.0) / 2.0))
 
 
 def _is_within_vault(path: Path, vault: Path) -> bool:
@@ -106,7 +183,13 @@ class EmbeddedSearchBackend(SearchBackend):
     from the markdown files and can be rebuilt at any time via reindex().
     """
 
-    def __init__(self, vault_path: Path | str, db_path: Path | str | None = None, embedding_provider=None):
+    def __init__(
+        self,
+        vault_path: Path | str,
+        db_path: Path | str | None = None,
+        embedding_provider=None,
+        fts5_score_k: float = _DEFAULT_FTS5_SCORE_K,
+    ):
         self._vault_path = Path(vault_path)
         if db_path is None:
             db_path = self._vault_path / ".search" / "search.db"
@@ -116,6 +199,7 @@ class EmbeddedSearchBackend(SearchBackend):
         self._lock = threading.RLock()
         self._indexed: bool = False
         self._provider = embedding_provider
+        self._fts5_score_k = fts5_score_k if fts5_score_k and fts5_score_k > 0 else _DEFAULT_FTS5_SCORE_K
         self._vec_available: bool = False
         self._needs_reindex: bool = False
         try:
@@ -189,6 +273,12 @@ class EmbeddedSearchBackend(SearchBackend):
         metadata: dict[str, object] = {
             "provider_class": f"{provider_type.__module__}.{provider_type.__qualname__}",
             "dimensions": int(self._provider.dimensions()),
+            # MEM-127: notes_vec now declares distance_metric=cosine (was
+            # unspecified, i.e. sqlite-vec's default L2). Folding this into
+            # the signature reuses the existing rebuild-on-mismatch path
+            # (see _init_vec below) to migrate any pre-MEM-127 index built
+            # under the old L2 table without a separate migration step.
+            "distance_metric": _VEC_DISTANCE_METRIC,
         }
         for attr in ("_model", "model", "_api_base", "api_base"):
             value = getattr(self._provider, attr, None)
@@ -284,7 +374,7 @@ class EmbeddedSearchBackend(SearchBackend):
             try:
                 conn.execute(f"""
                     CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec
-                    USING vec0(path TEXT PRIMARY KEY, embedding float[{dim}])
+                    USING vec0(path TEXT PRIMARY KEY, embedding float[{dim}] distance_metric={_VEC_DISTANCE_METRIC})
                 """)
             except sqlite3.OperationalError as exc:
                 if not self._table_exists(conn, "notes_vec"):
@@ -293,7 +383,7 @@ class EmbeddedSearchBackend(SearchBackend):
                 self._drop_vec_table(conn)
                 conn.execute(f"""
                     CREATE VIRTUAL TABLE notes_vec
-                    USING vec0(path TEXT PRIMARY KEY, embedding float[{dim}])
+                    USING vec0(path TEXT PRIMARY KEY, embedding float[{dim}] distance_metric={_VEC_DISTANCE_METRIC})
                 """)
                 self._needs_reindex = True
             if signature is not None:
@@ -410,6 +500,7 @@ class EmbeddedSearchBackend(SearchBackend):
                     "title": title,
                     "score": round(score, 4),
                     "snippet": _literal_snippet(query, content),
+                    "backend": "embedded-fts",
                 }
             )
         results.sort(key=lambda r: r["score"], reverse=True)
@@ -445,22 +536,24 @@ class EmbeddedSearchBackend(SearchBackend):
         if not rows:
             return []
 
-        # Normalize scores to 0-1 range
-        max_score = max(r[3] for r in rows) if rows else 1.0
-        if max_score <= 0:
-            max_score = 1.0
-
+        # MEM-127: bounded transform (score / (score + k)), not a
+        # batch-relative rescale - see normalize_fts5_score() for why the
+        # old `score / max_score_in_this_batch` approach was a bug (it
+        # always forced the top hit in any batch to score exactly 1.0,
+        # regardless of true relevance, which made single-hit FTS5 results
+        # look artificially confident to the deep-pipeline gate).
         results = []
         for path, title, content, score in rows:
-            normalized = score / max_score
+            normalized = round(normalize_fts5_score(score, self._fts5_score_k), 4)
             if normalized < min_score:
                 continue
             results.append(
                 {
                     "path": path,
                     "title": title,
-                    "score": round(normalized, 4),
+                    "score": normalized,
                     "snippet": _extract_snippet(content, query),
+                    "backend": "embedded-fts",
                 }
             )
 
@@ -477,7 +570,7 @@ class EmbeddedSearchBackend(SearchBackend):
             matched = sum(1 for t in terms if t in lower)
             if matched == 0:
                 continue
-            score = matched / len(terms)
+            score = normalize_grep_term_coverage(matched / len(terms))
             if score < min_score:
                 continue
             results.append(
@@ -486,6 +579,7 @@ class EmbeddedSearchBackend(SearchBackend):
                     "title": title,
                     "score": round(score, 4),
                     "snippet": _extract_snippet(content, query),
+                    "backend": "embedded-fts",
                 }
             )
         results.sort(key=lambda r: r["score"], reverse=True)
@@ -540,18 +634,25 @@ class EmbeddedSearchBackend(SearchBackend):
         if not rows:
             return []
 
-        # Convert cosine distance to similarity score (0-1)
+        # MEM-127: notes_vec is declared distance_metric=cosine, so `distance`
+        # here is cosine distance (1 - cosine_similarity) in [0, 2], magnitude
+        # -independent regardless of whether the embedding provider
+        # normalizes its vectors. See normalize_vec_cosine_distance() for why
+        # the old `max(0.0, 1.0 - distance)` (assuming L2 distance on unit
+        # vectors) collapsed orthogonal and opposite vectors to the same
+        # score of 0.
         results = []
         for path, distance, title, content in rows:
-            score = max(0.0, 1.0 - distance)
+            score = round(normalize_vec_cosine_distance(distance), 4)
             if score < min_score:
                 continue
             results.append(
                 {
                     "path": path,
                     "title": title,
-                    "score": round(score, 4),
+                    "score": score,
                     "snippet": _extract_snippet(content, query),
+                    "backend": "embedded-vec",
                 }
             )
 
@@ -617,6 +718,71 @@ class EmbeddedSearchBackend(SearchBackend):
                 "content": row[2],
                 "score": 0.0,
             }
+
+    def vector_dimensions(self) -> int | None:
+        """Return the embedding dimensionality backing this index, or None.
+
+        Prefers the live provider's own metadata (see ``_embedding_signature``,
+        MEM-46) so callers never have to hardcode a dimension. Falls back to
+        the persisted ``index_metadata`` signature so dimensionality is still
+        known when inspecting an index without a live provider attached
+        (e.g. a QMD-less install being read by an external process).
+        Returns None if no vector index has been built yet.
+        """
+        if self._provider is not None:
+            try:
+                return int(self._provider.dimensions())
+            except Exception:
+                pass
+        with self._lock:
+            conn = self._get_conn()
+            raw = self._read_metadata(conn, _EMBEDDING_SIGNATURE_KEY)
+        if not raw:
+            return None
+        try:
+            dims = json.loads(raw).get("dimensions")
+        except (ValueError, AttributeError, json.JSONDecodeError):
+            return None
+        return int(dims) if dims is not None else None
+
+    def get_note_vectors(self, paths: list[str] | None = None) -> dict[str, list[float]]:
+        """Read stored per-note embedding vectors from ``notes_vec``.
+
+        Unlike QMD (which chunks documents and requires mean-pooling), this
+        backend stores exactly one whole-document vector per note keyed by
+        its vault-relative path (e.g. ``"notes/foo.md"``) -- no pooling
+        needed. Returns {} if vector search isn't available (sqlite-vec
+        missing, no embedding provider configured, or nothing indexed yet).
+
+        Returns plain float lists rather than numpy arrays so this module
+        can stay numpy-free; callers that want arrays should wrap the result.
+        """
+        if not self._vec_available:
+            return {}
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                if paths is not None:
+                    if not paths:
+                        return {}
+                    placeholders = ",".join("?" * len(paths))
+                    rows = conn.execute(
+                        f"SELECT path, embedding FROM notes_vec WHERE path IN ({placeholders})",
+                        list(paths),
+                    ).fetchall()
+                else:
+                    rows = conn.execute("SELECT path, embedding FROM notes_vec").fetchall()
+            except sqlite3.Error as exc:
+                logger.warning("Failed to read note vectors: %s", exc)
+                return {}
+
+        result: dict[str, list[float]] = {}
+        for path, blob in rows:
+            if not blob:
+                continue
+            count = len(blob) // 4
+            result[path] = list(struct.unpack(f"<{count}f", blob))
+        return result
 
     def reindex(self, collection: str, embed: bool = True) -> bool:
         """Rebuild the search index from all markdown files in the vault."""

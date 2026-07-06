@@ -9,27 +9,40 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
-import threading
 import time
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any, Optional
 
 from memento import telemetry
+from memento.automated_run_lessons import capture_automated_run_lesson
 from memento.capture_runtime import CaptureProcessRequest, CaptureRuntime
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context, strip_injection
+from memento import sync_ledger
+from memento.queue import (
+    PiQueueStore,
+    QueueLockUnavailable,
+    atomic_write_text as _atomic_write_text,
+    legacy_queue_file as _legacy_queue_file,
+    load_queue as _load_queue,
+    queue_count as _queue_count,
+    queue_file as _queue_file,
+    queue_lock as _queue_lock,
+    state_root as _state_root,
+    write_queue as _write_queue,
+)
 from memento.search_backend import get_backend
-from memento.store import acquire_vault_write_lock, release_vault_write_lock, write_note
+from memento.smart_store import write_smart_store_note
+from memento.store import acquire_vault_write_lock, release_vault_write_lock
 from memento.search import (
     enhance_results,
     filter_by_project,
@@ -150,182 +163,6 @@ def _run_lifecycle(
         metadata = dict(health_metadata or {})
         _log_bridge_health(source, error=exc, **metadata)
         return _emit(_error_payload(source, exc))
-
-
-def _state_root() -> Path:
-    raw = os.environ.get("MEMENTO_PI_STATE_HOME")
-    if raw:
-        return Path(raw).expanduser()
-    xdg = os.environ.get("XDG_STATE_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
-    return base / "memento" / "pi"
-
-
-def _queue_file(vault: Path | None = None) -> Path:
-    _migrate_legacy_queue(vault)
-    return _state_root() / "queue" / "pi-captures.jsonl"
-
-
-def _legacy_queue_file(vault: Path | None = None) -> Path:
-    return (vault or get_vault()) / "queue" / "pi-captures.jsonl"
-
-
-def _read_queue_file(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    captures = []
-    for line in path.read_text(errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            captures.append(json.loads(line))
-        except json.JSONDecodeError:
-            captures.append({"id": f"invalid-{len(captures) + 1}", "error": "invalid-json", "raw": line})
-    return captures
-
-
-_QUEUE_LOCK_STATE = threading.local()
-
-
-def _queue_lock_file(vault: Path | None = None) -> Path:
-    return _state_root() / "queue" / "pi-captures.lock"
-
-
-@contextlib.contextmanager
-def _queue_lock(vault: Path | None = None) -> Generator[None, None, None]:
-    """Acquire an exclusive flock on the queue lock file.
-
-    The lock is blocking and re-entrant within a thread so nested queue
-    migrations can safely reuse the same critical section.
-    """
-    path = _queue_lock_file(vault)
-    depth = getattr(_QUEUE_LOCK_STATE, "depth", 0)
-    if depth:
-        _QUEUE_LOCK_STATE.depth = depth + 1
-        try:
-            yield
-        finally:
-            _QUEUE_LOCK_STATE.depth = depth
-        return
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
-    except OSError:
-        yield
-        return
-
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        _QUEUE_LOCK_STATE.depth = 1
-        try:
-            yield
-        finally:
-            _QUEUE_LOCK_STATE.depth = 0
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex[:8]}")
-    try:
-        tmp_path.write_text(content, encoding="utf-8")
-        fd = os.open(str(tmp_path), os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(str(tmp_path), str(path))
-        dir_flag = getattr(os, "O_DIRECTORY", None)
-        if dir_flag is not None:
-            try:
-                dir_fd = os.open(str(path.parent), dir_flag)
-            except OSError:
-                dir_fd = None
-            if dir_fd is not None:
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
-    except Exception:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-
-
-def _write_queue_file(captures: list[dict[str, Any]], path: Path) -> None:
-    """Atomically write the queue file using tmp+fsync+rename."""
-    _atomic_write_text(path, "".join(json.dumps(capture, ensure_ascii=False) + "\n" for capture in captures))
-
-
-def _write_queue(captures: list[dict[str, Any]], vault: Path | None = None) -> None:
-    _write_queue_file(captures, _queue_file(vault))
-
-
-def _migrate_legacy_queue(vault: Path | None = None) -> dict[str, Any]:
-    legacy = _legacy_queue_file(vault)
-    if not legacy.exists():
-        return {"migrated": False, "reason": "no_legacy_queue"}
-    old = _read_queue_file(legacy)
-    if not old:
-        legacy.unlink()
-        return {"migrated": True, "migrated_count": 0, "deleted_legacy_queue": True}
-    new_path = _state_root() / "queue" / "pi-captures.jsonl"
-    with _queue_lock(vault):
-        current = _read_queue_file(new_path)
-        seen = {capture.get("id") for capture in current if capture.get("id")}
-        migrated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        additions = []
-        for capture in old:
-            capture_id = capture.get("id")
-            if capture_id and capture_id in seen:
-                continue
-            item = dict(capture)
-            metadata = dict(item.get("metadata") or {})
-            metadata.setdefault("migrated_from", str(legacy))
-            metadata.setdefault("migrated_at", migrated_at)
-            item["metadata"] = metadata
-            additions.append(item)
-            if capture_id:
-                seen.add(capture_id)
-        combined = current + additions
-        _write_queue_file(combined, new_path)
-        reread_ids = {capture.get("id") for capture in _read_queue_file(new_path)}
-        old_ids = {capture.get("id") for capture in old if capture.get("id")}
-        if not old_ids.issubset(reread_ids):
-            return {
-                "migrated": False,
-                "reason": "verification_failed",
-                "legacy_queue_path": str(legacy),
-                "queue_path": str(new_path),
-            }
-    legacy.unlink()
-    try:
-        legacy.parent.rmdir()
-    except OSError:
-        pass
-    return {
-        "migrated": True,
-        "migrated_count": len(additions),
-        "deleted_legacy_queue": True,
-        "legacy_queue_path": str(legacy),
-        "queue_path": str(new_path),
-    }
-
-
-def _load_queue(vault: Path | None = None) -> list[dict[str, Any]]:
-    return _read_queue_file(_queue_file(vault))
-
-
-def _queue_count(vault: Path | None = None) -> int:
-    return len(_load_queue(vault))
 
 
 _LIFECYCLE_SOURCE_EVENTS = {"agent_end", "session_shutdown", "session_before_compact", "session_compact"}
@@ -824,6 +661,16 @@ def _status(cwd: str = "") -> dict[str, Any]:
         for rec in _iter_jsonl(audit_path):
             audit_count += 1
             last_audit = rec
+    try:
+        queued_capture_count: Any = _queue_count(vault)
+        queue_path_value: Any = str(_queue_file(vault))
+    except QueueLockUnavailable as exc:
+        # Read-only status lookup: skip rather than crash the whole status
+        # payload over a contended queue lock (narrow window, only possible
+        # while a legacy queue migration is pending).
+        print(f"[memento] status queue lookup skipped: {exc}", file=sys.stderr)
+        queued_capture_count = {"skipped": "lock_unavailable"}
+        queue_path_value = None
     return {
         "vault_path": str(vault),
         "vault_exists": vault.exists(),
@@ -834,8 +681,8 @@ def _status(cwd: str = "") -> dict[str, Any]:
         "remote_error": remote_error,
         "note_count": len(list(notes_dir.glob("*.md"))) if notes_dir.exists() else 0,
         "project_count": len(list(projects_dir.glob("*.md"))) if projects_dir.exists() else 0,
-        "queued_capture_count": _queue_count(vault),
-        "queue_path": str(_queue_file(vault)),
+        "queued_capture_count": queued_capture_count,
+        "queue_path": queue_path_value,
         "legacy_queue_path": str(_legacy_queue_file(vault)),
         "legacy_queue_exists": _legacy_queue_file(vault).exists(),
         "capture_audit_path": str(audit_path),
@@ -1113,6 +960,77 @@ def _capture_note_tags(tags: list[str], project_slug: str, source_event: str = "
     return deduped
 
 
+_QUEUE_LOCK_RETRY_ATTEMPTS = 3
+_QUEUE_LOCK_RETRY_BACKOFF_SECONDS = 0.2
+_DEAD_LETTER_ENQUEUE_KIND = "pi-queue-enqueue"
+
+
+def _dead_letter_capture(vault: Path, capture: dict[str, Any], error: Exception) -> dict[str, Any]:
+    """Durably record a capture that could not be enqueued.
+
+    Reuses the MEM-149 sync-ledger spool+record primitives (the same ones
+    the ``--recover-dead-letters`` operator workflow already understands)
+    so a capture that loses the race for the queue lock is recoverable
+    later instead of silently dropped.
+    """
+    capture_id = str(capture.get("id") or "unknown")
+    payload = json.dumps(capture, ensure_ascii=False)
+    spool_path: str | None = None
+    try:
+        spool_path = str(sync_ledger.spool_payload(vault, _DEAD_LETTER_ENQUEUE_KIND, capture_id, payload))
+    except OSError as spool_exc:
+        print(f"[memento] pi capture {capture_id} spool failed: {spool_exc}", file=sys.stderr)
+    try:
+        sync_ledger.record(
+            vault,
+            _DEAD_LETTER_ENQUEUE_KIND,
+            capture_id,
+            status="dead-letter",
+            content_hash=sync_ledger.content_hash(payload),
+            error=str(error),
+            spool_path=spool_path,
+        )
+    except OSError as ledger_exc:
+        print(f"[memento] pi capture {capture_id} dead-letter ledger record failed: {ledger_exc}", file=sys.stderr)
+    print(
+        f"[memento] pi capture {capture_id} dead-lettered: queue lock unavailable after "
+        f"{_QUEUE_LOCK_RETRY_ATTEMPTS} attempts: {error}",
+        file=sys.stderr,
+    )
+    return {
+        "id": capture_id,
+        "queued": False,
+        "dead_lettered": True,
+        "reason": "queue_lock_unavailable",
+        "spool_path": spool_path,
+    }
+
+
+def _enqueue_or_dead_letter(vault: Path, capture: dict[str, Any], title_stripped: str) -> dict[str, Any]:
+    """Enqueue ``capture`` with fail-closed lock retries.
+
+    Retries lock acquisition up to ``_QUEUE_LOCK_RETRY_ATTEMPTS`` times with
+    ``_QUEUE_LOCK_RETRY_BACKOFF_SECONDS`` backoff between attempts. A
+    capture is never silently dropped: on final failure it is dead-lettered
+    (see ``_dead_letter_capture``) and one stderr line is logged.
+    """
+    last_error: QueueLockUnavailable | None = None
+    for attempt in range(1, _QUEUE_LOCK_RETRY_ATTEMPTS + 1):
+        try:
+            with _queue_lock(vault):
+                captures = _load_queue(vault)
+                captures.append(capture)
+                _write_queue(captures, vault)
+                queue_path = str(_queue_file(vault))
+            return {"id": capture["id"], "title": title_stripped, "queued": True, "queue_path": queue_path}
+        except QueueLockUnavailable as exc:
+            last_error = exc
+            if attempt < _QUEUE_LOCK_RETRY_ATTEMPTS:
+                time.sleep(_QUEUE_LOCK_RETRY_BACKOFF_SECONDS)
+    assert last_error is not None  # loop always sets it before falling through
+    return _dead_letter_capture(vault, capture, last_error)
+
+
 def _capture_certainty(certainty: int | str | None) -> int | dict[str, str]:
     """Normalize Pi capture certainty, rejecting values outside the 1-5 contract."""
     if certainty in (None, ""):
@@ -1217,30 +1135,27 @@ def _capture(
             "source_event": source_event,
             "metadata": metadata,
         }
-        with _queue_lock(vault):
-            captures = _load_queue(vault)
-            captures.append(capture)
-            _write_queue(captures, vault)
-        return {"id": capture_id, "title": title.strip(), "queued": True, "queue_path": str(_queue_file(vault))}
+        return _enqueue_or_dead_letter(vault, capture, title.strip())
 
     clean_title = title.strip()
     clean_body = body.strip()
     with _vault_write_lock() as acquired:
         if not acquired:
             return {"error": "vault write lock unavailable"}
-        note_path = write_note(
-            vault,
-            clean_title,
-            clean_body,
-            clean_note_type,
-            merged_tags,
+        decision = write_smart_store_note(
+            title=clean_title,
+            body=clean_body,
+            note_type=clean_note_type,
+            tags=merged_tags,
             certainty=clean_certainty,
-            source="pi-capture",
-            origin=f"pi_bridge:{source_event or reason or 'manual'}",
             project=cwd or None,
             branch=branch,
             session_id=session_id if session_id != "unknown" else None,
+            origin=f"pi_bridge:{source_event or reason or 'manual'}",
+            source="pi-capture",
         )
+        if decision.get("error"):
+            return decision
         if reason == "manual" or source_event in {"manual", "tool"}:
             _mark_manual_capture_state(
                 session_id,
@@ -1253,7 +1168,98 @@ def _capture(
                 lifecycle_metadata_value,
             )
         _commit_and_reindex_locked(vault, f"pi: capture {clean_title[:80]}")
-    return {"path": str(note_path.relative_to(vault)), "title": clean_title, "queued": False}
+    result_path = decision.get("canonical_path") or decision.get("path") or ""
+    return {"path": result_path, "title": clean_title, "queued": False}
+
+
+_RUN_LESSON_REQUIRED_FIELDS = ("run_id", "ticket_id")
+_RUN_LESSON_PASSTHROUGH_FIELDS = (
+    "repo",
+    "project",
+    "branch",
+    "slice",
+    "outcome",
+    "lesson_type",
+    "note_type",
+    "certainty",
+    "validity_context",
+    "related_refs",
+)
+
+
+def _run_lesson_ingest(payload_path: str) -> dict[str, Any]:
+    """Ingest one Rondo/operator run-lesson payload as a recallable vault note.
+
+    This is the explicit MEM-145 ingest command: an external runner (or a human
+    operator) hands over a compact JSON payload describing what happened on a
+    finished run, and this command writes exactly one curated note through the
+    existing automated-run-lesson machinery. It never queues for later review;
+    "captures a note" means a note lands in the vault immediately, because a
+    queued-only candidate is not the deterministic recall guarantee this
+    command exists to provide.
+
+    Payload contract (JSON object):
+        run_id (required): stable identifier for the run.
+        ticket_id (required): tracker ticket the run is tied to.
+        title (optional): note title; defaults to a title derived from
+            ``ticket_id`` and ``run_id`` when omitted.
+        lesson_text (optional): the lesson body/evidence summary; defaults to
+            the title when omitted.
+        evidence_paths (optional list): artifact references for the run.
+        tags (optional list): extra tags merged onto the automatic
+            automation/lesson-type/outcome/ticket tags.
+
+    Both ``run_id`` and ``ticket_id`` are embedded verbatim in the produced
+    note's provenance section and title/tags, which is what lets
+    ``search.is_literal_like_query`` route lookups for either identifier to
+    literal matching and return this note deterministically.
+    """
+    clean_path = str(payload_path or "").strip()
+    if not clean_path:
+        return {"error": "--payload is required", "reason": "missing_payload"}
+
+    path = Path(clean_path).expanduser()
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"error": f"could not read --payload file: {exc}", "reason": "payload_read_error", "path": clean_path}
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        return {"error": f"--payload file is not valid JSON: {exc}", "reason": "payload_invalid_json"}
+    if not isinstance(payload, dict):
+        return {"error": "--payload JSON must be an object", "reason": "payload_invalid_shape"}
+
+    run_id = str(payload.get("run_id") or "").strip()
+    ticket_id = str(payload.get("ticket_id") or "").strip()
+    missing = [name for name in _RUN_LESSON_REQUIRED_FIELDS if not str(payload.get(name) or "").strip()]
+    if missing:
+        return {
+            "error": f"missing required payload field(s): {', '.join(missing)}",
+            "reason": "missing_required_field",
+        }
+
+    title = str(payload.get("title") or "").strip() or f"Automated run lesson: {ticket_id} ({run_id})"
+    lesson_text = str(payload.get("lesson_text") or "").strip() or title
+    evidence_paths = payload.get("evidence_paths") or []
+    tags = payload.get("tags") or []
+
+    candidate: dict[str, Any] = {
+        "external_system": str(payload.get("external_system") or "rondo").strip() or "rondo",
+        "run_id": run_id,
+        "ticket": ticket_id,
+        "title": title,
+        "body": lesson_text,
+        "evidence_summary": lesson_text,
+        "artifact_refs": evidence_paths,
+        "extra_tags": tags,
+    }
+    for field in _RUN_LESSON_PASSTHROUGH_FIELDS:
+        if field in payload:
+            candidate[field] = payload[field]
+
+    return capture_automated_run_lesson(candidate, approve_write=True)
 
 
 def _triage(
@@ -1683,7 +1689,11 @@ def _capture_lifecycle_snapshot(capture: dict[str, Any]) -> dict[str, Any]:
 def _queue_list(
     limit: int = 20, include_body: bool = False, include_generated_summaries: bool = False
 ) -> dict[str, Any]:
-    captures = _load_queue()
+    try:
+        captures = _load_queue()
+    except QueueLockUnavailable as exc:
+        print(f"[memento] queue list skipped: {exc}", file=sys.stderr)
+        return {"skipped": "lock_unavailable"}
     visible = []
     cache = _read_summary_cache() if include_generated_summaries else None
     cache_changed = False
@@ -1740,26 +1750,20 @@ def _classify_queued_capture(capture: dict[str, Any]) -> tuple[str, str]:
     return "durable_candidate", "lifecycle capture with durable-signal keywords"
 
 
-def _queue_cleanup(
-    apply: bool = False,
-    discard_classes: list[str] | None = None,
-    samples: int = 3,
-    vault: Path | None = None,
-) -> dict[str, Any]:
-    """Classify queued captures and optionally archive the low-value ones.
+def _classify_captures_for_cleanup(
+    captures: list[dict[str, Any]], discard_set: set[str], samples: int
+) -> tuple[
+    dict[str, int],
+    dict[str, list[dict[str, Any]]],
+    list[dict[str, Any]],
+    list[tuple[dict[str, Any], str, str]],
+]:
+    """Classify captures into retained/discarded buckets, with report stats.
 
-    Dry-run by default: nothing is written unless apply=True. Applying never
-    deletes data — discarded captures move to a timestamped archive JSONL
-    next to the queue (full original entry plus discard provenance), and the
-    pre-cleanup queue is kept as a .bak copy.
+    Shared by the cheap up-front report pass and the lock-protected apply
+    pass so both always run identical classification logic on whatever
+    snapshot they are given.
     """
-    discard_set = set(discard_classes or _CLEANUP_DEFAULT_DISCARD_CLASSES)
-    unknown = discard_set.difference(_CLEANUP_DISCARDABLE_CLASSES)
-    if unknown:
-        return {"error": f"non-discardable classes requested: {sorted(unknown)}"}
-
-    queue_path = _queue_file(vault)
-    captures = _load_queue(vault)
     by_class: dict[str, int] = {}
     sample_by_class: dict[str, list[dict[str, Any]]] = {}
     retained: list[dict[str, Any]] = []
@@ -1782,6 +1786,42 @@ def _queue_cleanup(
             discarded.append((capture, klass, reason))
         else:
             retained.append(capture)
+    return by_class, sample_by_class, retained, discarded
+
+
+def _queue_cleanup(
+    apply: bool = False,
+    discard_classes: list[str] | None = None,
+    samples: int = 3,
+    vault: Path | None = None,
+) -> dict[str, Any]:
+    """Classify queued captures and optionally archive the low-value ones.
+
+    Dry-run by default: nothing is written unless apply=True. Applying never
+    deletes data — discarded captures move to a timestamped archive JSONL
+    next to the queue (full original entry plus discard provenance), and the
+    pre-cleanup queue is kept as a .bak copy.
+
+    The apply path takes the queue lock once and does the whole
+    read-classify-archive-rewrite span inside that single critical section
+    (MEM-123/M2): a capture enqueued after the up-front report snapshot but
+    before the lock is acquired blocks on the lock, so it is present in the
+    fresh snapshot taken under the lock and is never silently deleted
+    without being archived.
+    """
+    discard_set = set(discard_classes or _CLEANUP_DEFAULT_DISCARD_CLASSES)
+    unknown = discard_set.difference(_CLEANUP_DISCARDABLE_CLASSES)
+    if unknown:
+        return {"error": f"non-discardable classes requested: {sorted(unknown)}"}
+
+    queue_path = _queue_file(vault)
+    try:
+        captures = _load_queue(vault)
+    except QueueLockUnavailable as exc:
+        print(f"[memento] queue cleanup skipped: {exc}", file=sys.stderr)
+        return {"skipped": "lock_unavailable", "queue_path": str(queue_path)}
+
+    by_class, sample_by_class, retained, discarded = _classify_captures_for_cleanup(captures, discard_set, samples)
 
     result: dict[str, Any] = {
         "queue_path": str(queue_path),
@@ -1806,25 +1846,39 @@ def _queue_cleanup(
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_path = queue_path.with_name(f"{queue_path.name}.bak-{stamp}-cleanup")
-    backup_path.write_text(queue_path.read_text(errors="replace") if queue_path.exists() else "")
     archive_path = queue_path.with_name(f"pi-captures-discarded-{stamp}.jsonl")
     discarded_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    with archive_path.open("a") as handle:
-        for capture, klass, reason in discarded:
-            entry = dict(capture)
-            entry["cleanup"] = {"discarded_at": discarded_at, "class": klass, "reason": reason}
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    with _queue_lock(vault):
-        current = _load_queue(vault)
-        still_discardable = []
-        for capture in current:
-            klass, _reason = _classify_queued_capture(capture)
-            if klass in discard_set:
-                still_discardable.append(capture)
-        final_retained = [c for c in current if c not in still_discardable]
-        _write_queue(final_retained, vault)
+
+    try:
+        with _queue_lock(vault):
+            # One snapshot for the whole critical section. Anything enqueued
+            # after the report pass above blocks on this lock, so it is
+            # included here and either retained or archived - never both
+            # skipped from the archive and dropped from the rewrite.
+            current = _load_queue(vault)
+            backup_path.write_text(queue_path.read_text(errors="replace") if queue_path.exists() else "")
+            current_by_class, current_samples, current_retained, current_discarded = _classify_captures_for_cleanup(
+                current, discard_set, samples
+            )
+            with archive_path.open("a") as handle:
+                for capture, klass, reason in current_discarded:
+                    entry = dict(capture)
+                    entry["cleanup"] = {"discarded_at": discarded_at, "class": klass, "reason": reason}
+                    handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            _write_queue(current_retained, vault)
+    except QueueLockUnavailable as exc:
+        print(f"[memento] queue cleanup skipped: {exc}", file=sys.stderr)
+        result["skipped"] = "lock_unavailable"
+        result["dry_run"] = True
+        return result
+
     result["backup_path"] = str(backup_path)
     result["archive_path"] = str(archive_path)
+    result["total"] = len(current)
+    result["retained"] = len(current_retained)
+    result["discarded"] = len(current_discarded)
+    result["by_class"] = current_by_class
+    result["samples"] = current_samples
     return result
 
 
@@ -1871,7 +1925,11 @@ def _queue_discard(
         return {"error": "at least one capture id is required", "reason": "missing_capture_ids"}
 
     queue_path = _queue_file(vault)
-    captures = _load_queue(vault)
+    try:
+        captures = _load_queue(vault)
+    except QueueLockUnavailable as exc:
+        print(f"[memento] queue discard skipped: {exc}", file=sys.stderr)
+        return {"skipped": "lock_unavailable", "queue_path": str(queue_path)}
     capture_id_set = set(capture_ids)
     found = [capture for capture in captures if str(capture.get("id")) in capture_id_set]
     found_ids = {str(capture.get("id")) for capture in found}
@@ -1902,25 +1960,31 @@ def _queue_discard(
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_path = queue_path.with_name(f"{queue_path.name}.bak-{stamp}-discard")
-    backup_path.write_text(queue_path.read_text(errors="replace") if queue_path.exists() else "")
     archive_path = queue_path.with_name(f"pi-captures-discarded-{stamp}.jsonl")
     discarded_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    with _queue_lock(vault):
-        current = _load_queue(vault)
-        current_ids = {str(capture.get("id")) for capture in current}
-        if not capture_id_set.issubset(current_ids):
-            result["error"] = "capture ids not found"
-            result["missing_ids"] = sorted(capture_id_set.difference(current_ids))
-            return result
-        current_map = {str(capture.get("id")): capture for capture in current}
-        retained = [capture for capture in current if str(capture.get("id")) not in capture_id_set]
-        with archive_path.open("a") as handle:
-            for capture_id in capture_ids:
-                capture = current_map[capture_id]
-                entry = dict(capture)
-                entry["discard"] = {"discarded_at": discarded_at, "reason": reason, "source": source}
-                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        _write_queue(retained, vault)
+    try:
+        with _queue_lock(vault):
+            current = _load_queue(vault)
+            backup_path.write_text(queue_path.read_text(errors="replace") if queue_path.exists() else "")
+            current_ids = {str(capture.get("id")) for capture in current}
+            if not capture_id_set.issubset(current_ids):
+                result["error"] = "capture ids not found"
+                result["missing_ids"] = sorted(capture_id_set.difference(current_ids))
+                return result
+            current_map = {str(capture.get("id")): capture for capture in current}
+            retained = [capture for capture in current if str(capture.get("id")) not in capture_id_set]
+            with archive_path.open("a") as handle:
+                for capture_id in capture_ids:
+                    capture = current_map[capture_id]
+                    entry = dict(capture)
+                    entry["discard"] = {"discarded_at": discarded_at, "reason": reason, "source": source}
+                    handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            _write_queue(retained, vault)
+    except QueueLockUnavailable as exc:
+        print(f"[memento] queue discard skipped: {exc}", file=sys.stderr)
+        result["skipped"] = "lock_unavailable"
+        result["dry_run"] = True
+        return result
     result["backup_path"] = str(backup_path)
     result["archive_path"] = str(archive_path)
     result["retained"] = len(retained)
@@ -2467,20 +2531,6 @@ def _clean_transcript(path: Path, per_tool_cap: int = 3000, total_cap: int = 200
     return "\n\n".join(lines)
 
 
-class _PiQueueStore:
-    def load(self, vault: Path) -> list[dict[str, Any]]:
-        return _load_queue(vault)
-
-    def write(self, captures: list[dict[str, Any]], vault: Path) -> None:
-        _write_queue(captures, vault)
-
-    def path(self, vault: Path) -> Path:
-        return _queue_file(vault)
-
-    def lock(self):
-        return _queue_lock()
-
-
 class _PiProcessingStore:
     def root(self) -> Path:
         return _processing_root()
@@ -2540,7 +2590,7 @@ class _PiVaultWriter:
 def _capture_runtime() -> CaptureRuntime:
     return CaptureRuntime(
         vault=get_vault,
-        queue=_PiQueueStore(),
+        queue=PiQueueStore(),
         processing=_PiProcessingStore(),
         preparer=_PiGroupPreparer(),
         writer=_PiVaultWriter(),
@@ -2559,19 +2609,23 @@ def _queue_process_start(
     transcript_max_bytes: int = 2 * 1024 * 1024,
     owner_pid: int = 0,
 ) -> dict[str, Any]:
-    return _capture_runtime().process(
-        CaptureProcessRequest(
-            capture_id=capture_id,
-            project=project,
-            branch=branch,
-            session_id=session_id,
-            limit=limit,
-            newest=newest,
-            dry_run=dry_run,
-            transcript_max_bytes=transcript_max_bytes,
-            owner_pid=owner_pid,
+    try:
+        return _capture_runtime().process(
+            CaptureProcessRequest(
+                capture_id=capture_id,
+                project=project,
+                branch=branch,
+                session_id=session_id,
+                limit=limit,
+                newest=newest,
+                dry_run=dry_run,
+                transcript_max_bytes=transcript_max_bytes,
+                owner_pid=owner_pid,
+            )
         )
-    )
+    except QueueLockUnavailable as exc:
+        print(f"[memento] queue process start skipped: {exc}", file=sys.stderr)
+        return {"skipped": "lock_unavailable"}
 
 
 def _latest_processing_run_id() -> str:
@@ -2779,7 +2833,11 @@ def _reported_note_exists_in_vault(vault: Path, path: str) -> bool:
 def _queue_process_finalize(run_id: str) -> dict[str, Any]:
     if not _valid_processing_run_id(run_id):
         return {"error": f"invalid processing run id: {run_id}", "reason": "invalid_run_id"}
-    return _capture_runtime().finalize(run_id)
+    try:
+        return _capture_runtime().finalize(run_id)
+    except QueueLockUnavailable as exc:
+        print(f"[memento] queue process finalize skipped: {exc}", file=sys.stderr)
+        return {"skipped": "lock_unavailable", "run_id": run_id}
 
 
 def _run_json(
@@ -2886,6 +2944,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--lifecycle-metadata",
         default=None,
         help="Optional JSON object with richer Pi lifecycle context and audit metadata",
+    )
+
+    run_lesson = sub.add_parser(
+        "run-lesson", help="Ingest an external-run lesson payload as a recallable, curated vault note"
+    )
+    run_lesson.add_argument(
+        "--payload",
+        required=True,
+        help=(
+            "Path to a JSON file with fields: run_id (required), ticket_id (required), "
+            "title, lesson_text, evidence_paths[], tags[]"
+        ),
     )
 
     triage = sub.add_parser("triage", help="Run Pi SessionEnd-style triage from a persisted session JSONL")
@@ -3077,6 +3147,8 @@ def main(argv: list[str] | None = None) -> int:
             args.lifecycle_metadata,
             health_metadata={"cwd": args.cwd, "session_id": args.session_id},
         )
+    if args.command == "run-lesson":
+        return _run_json("run-lesson", _run_lesson_ingest, args.payload)
     if args.command == "triage":
         return _run_json(
             "triage",

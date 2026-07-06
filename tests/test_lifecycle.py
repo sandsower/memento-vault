@@ -14,6 +14,7 @@ from memento.config import DEFAULT_CONFIG
 from memento.lifecycle import (
     LifecycleResult,
     _run_recall_lines,
+    build_briefing,
     build_recall,
     build_session_context,
     build_tool_context,
@@ -168,6 +169,27 @@ def test_build_session_context_combines_briefing_recall_status_and_queue(tmp_pat
     assert payload["metadata"]["used_chars"] <= payload["metadata"]["packet_char_budget"]
     mock_briefing.assert_called_once_with("/repo", "s1", allow_deferred=False, host_id="unknown-host")
     mock_recall.assert_called_once_with("how should cache work?", "/repo", "s1", record=False, host_id="unknown-host")
+
+
+def test_lifecycle_queue_path_resolution_characterization(tmp_path, monkeypatch):
+    """Freeze queue-path/state-home resolution semantics across the queue-module extraction."""
+    vault = tmp_path / "vault"
+
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "pi-state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ignored-xdg"))
+    assert lifecycle._pi_queue_file() == tmp_path / "pi-state" / "queue" / "pi-captures.jsonl"
+    assert lifecycle._legacy_pi_queue_file(vault) == vault / "queue" / "pi-captures.jsonl"
+    assert lifecycle._pi_queue_path_source() == "memento_pi_state_home"
+
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME")
+    assert lifecycle._pi_queue_file() == tmp_path / "ignored-xdg" / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    assert lifecycle._pi_queue_path_source() == "xdg_state_home"
+
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    default_root = tmp_path / "home" / ".local" / "state" / "memento" / "pi"
+    assert lifecycle._pi_queue_file() == default_root / "queue" / "pi-captures.jsonl"
+    assert lifecycle._pi_queue_path_source() == "default_xdg_state"
 
 
 def test_build_session_context_explicitly_reports_legacy_queue_fallback(tmp_path, monkeypatch):
@@ -2464,3 +2486,209 @@ class TestToolContextCacheTTLAndScoping:
         incoming["dirs"]["pi::/repo::/repo/src"] = {"results": [{"path": "notes/newer.md"}], "ts": now + 300}
         merged = lifecycle_module._merge_tool_context_cache(existing, incoming)
         assert merged["dirs"]["pi::/repo::/repo/src"]["results"] == [{"path": "notes/newer.md"}]
+
+
+class TestBuildBriefingVaultMap:
+    """MEM-160: vault_map() injection into build_briefing, gated by vault_map_in_briefing."""
+
+    def _setup_vault(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        (vault / "notes").mkdir(parents=True)
+        monkeypatch.setattr("memento.lifecycle.get_vault", lambda: vault)
+        monkeypatch.setattr("memento.lifecycle.detect_project", lambda cwd, branch: ("demo-project", None))
+        monkeypatch.setattr("memento.lifecycle.get_git_branch", lambda cwd: "main")
+        monkeypatch.setattr("memento.graph._GRAPH_CACHE", [None])
+        monkeypatch.setattr("memento.graph._GRAPH_CACHE_PATH", str(tmp_path / "wikilink-graph-cache.json"))
+        return vault
+
+    def test_vault_map_excluded_by_default(self, tmp_path, monkeypatch):
+        self._setup_vault(tmp_path, monkeypatch)
+        vault_map_calls = []
+        monkeypatch.setattr(
+            "memento.lifecycle.vault_map",
+            lambda vault, project_slug, config=None: vault_map_calls.append(project_slug) or "SHOULD-NOT-APPEAR",
+        )
+
+        config = dict(DEFAULT_CONFIG)
+        with patch("memento.lifecycle.get_config", return_value=config):
+            result = build_briefing("/repo", "sess-1", allow_deferred=False)
+
+        assert result.should_inject
+        assert "SHOULD-NOT-APPEAR" not in result.content
+        assert vault_map_calls == []
+
+    def test_vault_map_injected_when_enabled(self, tmp_path, monkeypatch):
+        self._setup_vault(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "memento.lifecycle.vault_map",
+            lambda vault, project_slug, config=None: f"VAULT-MAP-FOR-{project_slug}",
+        )
+
+        config = dict(DEFAULT_CONFIG)
+        config["vault_map_in_briefing"] = True
+        with patch("memento.lifecycle.get_config", return_value=config):
+            result = build_briefing("/repo", "sess-1", allow_deferred=False)
+
+        assert result.should_inject
+        assert "VAULT-MAP-FOR-demo-project" in result.content
+
+    def test_vault_map_failure_does_not_break_briefing(self, tmp_path, monkeypatch):
+        self._setup_vault(tmp_path, monkeypatch)
+
+        def _boom(vault, project_slug, config=None):
+            raise RuntimeError("vault_map exploded")
+
+        monkeypatch.setattr("memento.lifecycle.vault_map", _boom)
+
+        config = dict(DEFAULT_CONFIG)
+        config["vault_map_in_briefing"] = True
+        with patch("memento.lifecycle.get_config", return_value=config):
+            result = build_briefing("/repo", "sess-1", allow_deferred=False)
+
+        assert result.should_inject
+        assert "demo-project" in result.content
+
+
+class TestRunDeferredBriefingSearchAgenticGate:
+    """MEM-161: run_deferred_briefing_search's agentic_retrieval_enabled gate.
+
+    The deferred SessionStart briefing worker is today a one-shot
+    qmd_search + enhance_results pass. This upgrades its internals to try
+    the bounded retrieval agent first when configured, falling back to the
+    unchanged one-shot pipeline on any failure or when disabled.
+    """
+
+    def _write_pending(self, path, *, query="api-service", max_notes=5, min_score=0.3, cwd=""):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        params = {
+            "query": query,
+            "max_notes": max_notes,
+            "min_score": min_score,
+            "linked_notes": [],
+            "cwd": cwd,
+            "timestamp": time.time(),
+            "ttl_seconds": lifecycle.DEFERRED_BRIEFING_TTL_SECONDS,
+            "scope": {"project_slug": "unknown", "session_id": "unknown", "host_id": "unknown-host"},
+        }
+        with open(path, "w") as f:
+            json.dump(
+                {"status": "pending", "params": params, "scope": params["scope"], "timestamp": params["timestamp"]}, f
+            )
+
+    def test_disabled_config_never_calls_agentic_retrieve(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "deferred.json")
+        monkeypatch.setattr(lifecycle, "DEFERRED_BRIEFING_PATH", path)
+        self._write_pending(path)
+
+        one_shot_results = [{"path": "notes/a.md", "title": "A", "snippet": "x", "score": 0.5}]
+        config = dict(DEFAULT_CONFIG)
+        config["agentic_retrieval_enabled"] = False
+
+        with (
+            patch.object(lifecycle, "get_config", return_value=config),
+            patch.object(lifecycle, "agentic_retrieve") as mock_agentic,
+            patch.object(lifecycle, "qmd_search", return_value=list(one_shot_results)) as mock_qmd,
+            patch.object(lifecycle, "enhance_results", side_effect=lambda results, **kwargs: results),
+            patch.object(lifecycle, "record_access"),
+            patch.object(lifecycle, "log_retrieval") as mock_log,
+        ):
+            lifecycle.run_deferred_briefing_search(path)
+
+        mock_agentic.assert_not_called()
+        mock_qmd.assert_called_once()
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["note_lines"] == ["  - A: x"]
+        ready_log_calls = [c for c in mock_log.call_args_list if c.args[1] == "deferred-ready"]
+        assert ready_log_calls[0].kwargs["source"] == "one-shot"
+
+    def test_enabled_and_agent_succeeds_skips_one_shot_pipeline(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "deferred.json")
+        monkeypatch.setattr(lifecycle, "DEFERRED_BRIEFING_PATH", path)
+        self._write_pending(path)
+
+        agentic_results = [
+            {"path": "notes/agentic.md", "title": "Agentic hit", "snippet": "found by agent", "score": 0.9}
+        ]
+        config = dict(DEFAULT_CONFIG)
+        config["agentic_retrieval_enabled"] = True
+
+        with (
+            patch.object(lifecycle, "get_config", return_value=config),
+            patch.object(lifecycle, "agentic_retrieve", return_value=list(agentic_results)) as mock_agentic,
+            patch.object(lifecycle, "qmd_search") as mock_qmd,
+            patch.object(lifecycle, "enhance_results", side_effect=lambda results, **kwargs: results),
+            patch.object(lifecycle, "record_access"),
+            patch.object(lifecycle, "log_retrieval") as mock_log,
+        ):
+            lifecycle.run_deferred_briefing_search(path)
+
+        mock_agentic.assert_called_once()
+        assert mock_agentic.call_args.args[0] == "api-service"
+        mock_qmd.assert_not_called()
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["note_lines"] == ["  - Agentic hit: found by agent"]
+        ready_log_calls = [c for c in mock_log.call_args_list if c.args[1] == "deferred-ready"]
+        assert ready_log_calls[0].kwargs["source"] == "agentic"
+
+    def test_enabled_but_empty_agent_results_falls_back_to_one_shot(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "deferred.json")
+        monkeypatch.setattr(lifecycle, "DEFERRED_BRIEFING_PATH", path)
+        self._write_pending(path)
+
+        one_shot_results = [{"path": "notes/a.md", "title": "A", "snippet": "x", "score": 0.5}]
+        config = dict(DEFAULT_CONFIG)
+        config["agentic_retrieval_enabled"] = True
+
+        with (
+            patch.object(lifecycle, "get_config", return_value=config),
+            patch.object(lifecycle, "agentic_retrieve", return_value=[]) as mock_agentic,
+            patch.object(lifecycle, "qmd_search", return_value=list(one_shot_results)) as mock_qmd,
+            patch.object(lifecycle, "enhance_results", side_effect=lambda results, **kwargs: results),
+            patch.object(lifecycle, "record_access"),
+            patch.object(lifecycle, "log_retrieval") as mock_log,
+        ):
+            lifecycle.run_deferred_briefing_search(path)
+
+        mock_agentic.assert_called_once()
+        mock_qmd.assert_called_once()
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["note_lines"] == ["  - A: x"]
+        ready_log_calls = [c for c in mock_log.call_args_list if c.args[1] == "deferred-ready"]
+        assert ready_log_calls[0].kwargs["source"] == "one-shot"
+
+    def test_enabled_but_agent_raises_falls_back_to_one_shot(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "deferred.json")
+        monkeypatch.setattr(lifecycle, "DEFERRED_BRIEFING_PATH", path)
+        self._write_pending(path)
+
+        one_shot_results = [{"path": "notes/a.md", "title": "A", "snippet": "x", "score": 0.5}]
+        config = dict(DEFAULT_CONFIG)
+        config["agentic_retrieval_enabled"] = True
+
+        with (
+            patch.object(lifecycle, "get_config", return_value=config),
+            patch.object(lifecycle, "agentic_retrieve", side_effect=RuntimeError("provider exploded")),
+            patch.object(lifecycle, "qmd_search", return_value=list(one_shot_results)) as mock_qmd,
+            patch.object(lifecycle, "enhance_results", side_effect=lambda results, **kwargs: results),
+            patch.object(lifecycle, "record_access"),
+            patch.object(lifecycle, "log_retrieval") as mock_log,
+        ):
+            lifecycle.run_deferred_briefing_search(path)
+
+        mock_qmd.assert_called_once()
+        error_log_calls = [c for c in mock_log.call_args_list if c.args[1] == "agentic-retrieval-error"]
+        assert len(error_log_calls) == 1
+        assert error_log_calls[0].kwargs["error"] == "provider exploded"
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["note_lines"] == ["  - A: x"]

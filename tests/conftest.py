@@ -54,6 +54,30 @@ def isolate_access_log_state(monkeypatch, tmp_path):
     monkeypatch.setattr("memento.store._ACCESS_LOG_CACHE", {"signature": None, "stats": {}}, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def isolate_stale_citation_queue(monkeypatch, tmp_path):
+    """Keep the citation-staleness review queue out of the user's real runtime dir (MEM-162)."""
+    monkeypatch.setattr(
+        "memento.store.STALE_CITATIONS_QUEUE_PATH", str(tmp_path / "stale-citations.jsonl"), raising=False
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolate_vault_write_lock(monkeypatch, tmp_path):
+    """Default the vault write lock to a per-test file, not the user's real runtime dir.
+
+    Without this, any test path that goes through write_smart_store_note()/
+    acquire_vault_write_lock() (e.g. hooks/memento-triage.py's structured-notes
+    writer) contends for the real ``~/.cache/memento-vault/vault-write.lock``
+    -- shared with whatever live memento-vault MCP server or sibling
+    ticket-worktree agent happens to be running on the same machine. A test
+    class that needs the real default (or a specific shared lock file for a
+    lock-contention test) can still override this with its own
+    ``monkeypatch.setattr("memento.store.VAULT_WRITE_LOCK_PATH", ...)``.
+    """
+    monkeypatch.setattr("memento.store.VAULT_WRITE_LOCK_PATH", str(tmp_path / "vault-write.lock"), raising=False)
+
+
 @pytest.fixture
 def tmp_vault(tmp_path):
     """Create a temporary vault with standard directory structure."""

@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import subprocess
@@ -6,9 +7,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from memento.lifecycle import LifecycleResult
 from memento.llm import LLMResult
 from memento import pi_bridge
+from memento import queue as capture_queue
+from memento import sync_ledger
+from memento.queue import QueueLockUnavailable
+
+
+@pytest.fixture(autouse=True)
+def _smart_store_patches(monkeypatch):
+    """Patch smart_store dependencies so pi_bridge tests don't hit real backends.
+
+    Individual tests must still patch ``memento.config.get_vault`` (or
+    ``memento.smart_store.get_vault``) when they need a specific vault path.
+    """
+    monkeypatch.setattr("memento.smart_store.get_vault", lambda: None)
+    monkeypatch.setattr("memento.smart_store.has_qmd", lambda: False)
+    monkeypatch.setattr("memento.smart_store.inspect_contradictions", lambda *a, **kw: {})
 
 
 def test_bridge_health_status_normalizes_offset_aware_timestamps(tmp_path, monkeypatch):
@@ -357,6 +375,7 @@ def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     (tmp_path / "notes").mkdir()
     with (
         patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
     ):
         code = pi_bridge.main(
@@ -382,7 +401,10 @@ def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     assert "source: pi-capture" in note_text
     assert "origin: pi_bridge:manual" in note_text
     assert "certainty: 2" in note_text
-    assert "project: /repo" in note_text
+    # write_note splits the raw cwd into a project slug plus a separate
+    # project_path field carrying the original value verbatim (MEM-164).
+    assert "project: repo" in note_text
+    assert "project_path: /repo" in note_text
 
 
 def test_pi_bridge_capture_runs_commit_and_reindex_under_vault_lock(capsys, tmp_path, monkeypatch):
@@ -401,7 +423,7 @@ def test_pi_bridge_capture_runs_commit_and_reindex_under_vault_lock(capsys, tmp_
 
     def fake_write_note(*_args, **_kwargs):
         call_order.append("write")
-        return note_path
+        return {"decision": "created", "path": "notes/pi-bridge.md", "created": True}
 
     def fake_sync(vault, commit_message, collection=None):
         call_order.append("sync")
@@ -418,7 +440,8 @@ def test_pi_bridge_capture_runs_commit_and_reindex_under_vault_lock(capsys, tmp_
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
         patch("memento.pi_bridge.acquire_vault_write_lock", side_effect=fake_acquire),
         patch("memento.pi_bridge.release_vault_write_lock", side_effect=fake_release),
-        patch("memento.pi_bridge.write_note", side_effect=fake_write_note),
+        patch("memento.pi_bridge.write_smart_store_note", side_effect=fake_write_note),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge._commit_and_reindex_locked", side_effect=fake_sync),
     ):
         code = pi_bridge.main(
@@ -500,6 +523,7 @@ def test_pi_bridge_capture_records_manual_session_state(capsys, tmp_path, monkey
     (tmp_path / "notes").mkdir()
     with (
         patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):
@@ -908,6 +932,7 @@ def test_pi_bridge_lifecycle_after_manual_capture_skips_low_signal_body(capsys, 
     (tmp_path / "notes").mkdir()
     with (
         patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):
@@ -1261,6 +1286,7 @@ def test_pi_bridge_capture_writes_type_tags_certainty_and_session_metadata_as_fr
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
     with (
         patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.smart_store.get_vault", return_value=tmp_path),
         patch("memento.pi_bridge.detect_project", return_value=("repo", None)),
         patch("memento.pi_bridge._git_branch", return_value="feature/pi"),
     ):
@@ -1296,7 +1322,10 @@ def test_pi_bridge_capture_writes_type_tags_certainty_and_session_metadata_as_fr
     assert "type: decision" in frontmatter
     assert 'tags: ["pi", "manual", "repo", "dedup", "curation"]' in frontmatter
     assert "certainty: 4" in frontmatter
-    assert "project: /repo" in frontmatter
+    # write_note splits the raw cwd into a project slug plus a separate
+    # project_path field carrying the original value verbatim (MEM-164).
+    assert "project: repo" in frontmatter
+    assert "project_path: /repo" in frontmatter
     assert "branch: original/pi-branch" in frontmatter
     assert "session_id: /Users/vic/.pi/agent/sessions/session.jsonl" in frontmatter
     assert "/Users/vic/.pi/agent/sessions/session.jsonl" not in body
@@ -1347,7 +1376,10 @@ def test_pi_bridge_queue_migrates_to_local_state_and_processes(capsys, tmp_path,
         + "\n"
     )
 
-    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.queue.get_vault", return_value=tmp_path),
+    ):
         code = pi_bridge.main(["queue", "list"])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1366,6 +1398,28 @@ def test_pi_bridge_queue_migrates_to_local_state_and_processes(capsys, tmp_path,
     assert payload["selected_capture_count"] == 1
     assert payload["group_count"] == 1
     assert payload["groups"][0]["capture_ids"] == ["q1"]
+
+
+def test_pi_bridge_queue_path_resolution_characterization(tmp_path, monkeypatch):
+    """Freeze queue-path/state-home resolution semantics across the queue-module extraction."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "pi-state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ignored-xdg"))
+    assert pi_bridge._state_root() == tmp_path / "pi-state"
+    assert pi_bridge._queue_file(vault) == tmp_path / "pi-state" / "queue" / "pi-captures.jsonl"
+    assert pi_bridge._legacy_queue_file(vault) == vault / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME")
+    assert pi_bridge._state_root() == tmp_path / "ignored-xdg" / "memento" / "pi"
+    assert pi_bridge._queue_file(vault) == tmp_path / "ignored-xdg" / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    default_root = tmp_path / "home" / ".local" / "state" / "memento" / "pi"
+    assert pi_bridge._state_root() == default_root
+    assert pi_bridge._queue_file(vault) == default_root / "queue" / "pi-captures.jsonl"
 
 
 def test_pi_bridge_process_start_rejects_active_lock(capsys, tmp_path, monkeypatch):
@@ -2814,7 +2868,7 @@ def test_pi_bridge_concurrent_append_during_finalize_preserves_new_capture(capsy
     write_started = threading.Event()
     release_write = threading.Event()
     write_paused = {"value": False}
-    original_write_queue_file = pi_bridge._write_queue_file
+    original_write_queue_file = capture_queue.write_queue_file
     errors: list[BaseException] = []
 
     def gated_write(captures, path):
@@ -2864,7 +2918,7 @@ def test_pi_bridge_concurrent_append_during_finalize_preserves_new_capture(capsy
         except BaseException as exc:  # pragma: no cover - surfaced through assertions below
             errors.append(exc)
 
-    with patch("memento.pi_bridge._write_queue_file", new=gated_write):
+    with patch("memento.queue.write_queue_file", new=gated_write):
         finalize_thread = threading.Thread(target=run_finalize, name="finalize-thread")
         finalize_thread.start()
         assert write_started.wait(5)
@@ -3171,3 +3225,265 @@ def test_pi_bridge_queue_cleanup_apply_blocked_during_active_processing_run(caps
     assert "processing run active" in payload["blocked"]
     assert payload["dry_run"] is True
     assert queue_file.read_text() == before
+
+
+# --- MEM-123: fail-closed queue lock caller policy -------------------------
+
+
+def _always_unavailable_queue_lock(call_counter=None):
+    """Replacement for pi_bridge._queue_lock that always fails to acquire.
+
+    Mirrors real queue_lock()'s fail-closed contract (raises before ever
+    yielding) so caller policy - retry+dead-letter for enqueue, skip for
+    read-only/cleanup/processing paths - can be exercised deterministically
+    without real inter-process lock contention.
+    """
+
+    @contextlib.contextmanager
+    def fake_lock(vault=None):
+        if call_counter is not None:
+            call_counter["count"] += 1
+        raise QueueLockUnavailable("simulated: queue lock unavailable")
+        yield  # pragma: no cover - unreachable; keeps this a generator function
+
+    return fake_lock
+
+
+def test_pi_bridge_capture_enqueue_retries_then_dead_letters_when_lock_unavailable(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    calls = {"count": 0}
+    sleeps: list[float] = []
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge._queue_lock", new=_always_unavailable_queue_lock(calls)),
+        patch("memento.pi_bridge.time.sleep", new=lambda seconds: sleeps.append(seconds)),
+    ):
+        code = pi_bridge.main(
+            [
+                "capture",
+                "--title",
+                "Never lose this",
+                "--body",
+                "This capture must survive a contended queue lock.",
+                "--session-id",
+                "s1",
+                "--queue",
+                "--reason",
+                "manual",
+                "--source-event",
+                "manual",
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    # Never silently dropped: the capture is explicitly marked dead-lettered,
+    # not silently "queued": True and not a bare crash.
+    assert payload["queued"] is False
+    assert payload["dead_lettered"] is True
+    assert payload["reason"] == "queue_lock_unavailable"
+
+    # Retried 3x with 0.2s backoff between attempts (2 sleeps, not 3).
+    assert calls["count"] == 3
+    assert sleeps == [0.2, 0.2]
+
+    # Durably recorded via the existing MEM-149 sync-ledger dead-letter
+    # mechanism so it is recoverable later, not just logged and forgotten.
+    dead = sync_ledger.dead_letters(tmp_path)
+    assert len(dead) == 1
+    assert dead[0]["kind"] == "pi-queue-enqueue"
+    spool_path = Path(dead[0]["spool_path"])
+    assert spool_path.exists()
+    spooled = json.loads(spool_path.read_text())
+    assert spooled["title"] == "Never lose this"
+    assert spooled["body"] == "This capture must survive a contended queue lock."
+
+    # Never a silent unlocked proceed: nothing was ever written to the queue.
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    assert not queue_file.exists()
+
+
+def test_pi_bridge_queue_list_skips_with_structured_result_when_lock_unavailable(capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(json.dumps({"id": "q1", "title": "keep", "body": "b"}) + "\n")
+
+    def failing_load_queue(vault=None):
+        raise QueueLockUnavailable("simulated: legacy migration lock contended")
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge._load_queue", new=failing_load_queue),
+    ):
+        code = pi_bridge.main(["queue", "list"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"skipped": "lock_unavailable"}
+
+
+def test_pi_bridge_queue_cleanup_apply_skips_with_structured_result_when_lock_unavailable(
+    capsys, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = _seed_cleanup_queue(tmp_path)
+    before = queue_file.read_text()
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge._queue_lock", new=_always_unavailable_queue_lock()),
+    ):
+        code = pi_bridge.main(
+            ["queue", "cleanup", "--apply", "--discard-class", "raw_dump", "--discard-class", "invalid"]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["skipped"] == "lock_unavailable"
+    assert payload["dry_run"] is True
+    # Skip means skip: nothing archived, nothing rewritten, next cycle retries.
+    assert queue_file.read_text() == before
+    assert not list(queue_file.parent.glob("pi-captures-discarded-*.jsonl"))
+
+
+def test_pi_bridge_queue_discard_apply_skips_with_structured_result_when_lock_unavailable(
+    capsys, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(json.dumps({"id": "q1", "title": "keep", "body": "b"}) + "\n")
+    before = queue_file.read_text()
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge._queue_lock", new=_always_unavailable_queue_lock()),
+    ):
+        code = pi_bridge.main(["queue", "discard", "--id", "q1", "--apply"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["skipped"] == "lock_unavailable"
+    assert payload["dry_run"] is True
+    assert queue_file.read_text() == before
+
+
+def test_pi_bridge_queue_cleanup_race_enqueue_between_snapshot_and_lock_is_archived(capsys, tmp_path, monkeypatch):
+    """MEM-123/M2: a capture enqueued between the report read and the lock
+
+    must never be deleted without being archived. Simulates the race by
+    injecting a real write to the on-disk queue file the first time
+    _load_queue runs (the pre-lock report pass), so the second call (the
+    fresh snapshot taken under the lock) picks it up - exactly like a
+    concurrent enqueuer that landed in the window.
+    """
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = _seed_cleanup_queue(tmp_path)
+    raced_capture_id = "raced-in-1"
+    raced_capture = {
+        "id": raced_capture_id,
+        "title": "Raced-in capture",
+        "body": '- assistant: [{"type":"thinking","thinking":"secret reasoning"}]',
+        "created_at": "2026-05-25T13:00:00Z",
+        "reason": "lifecycle",
+        "source_event": "agent_end",
+        "metadata": {"project": "repo"},
+    }
+
+    original_load_queue = pi_bridge._load_queue
+    call_count = {"n": 0}
+
+    def racing_load_queue(vault=None):
+        call_count["n"] += 1
+        result = original_load_queue(vault)
+        if call_count["n"] == 1:
+            # A concurrent enqueuer lands in the window between the
+            # up-front report snapshot and the lock-protected apply pass.
+            with queue_file.open("a") as handle:
+                handle.write(json.dumps(raced_capture, ensure_ascii=False) + "\n")
+        return result
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.pi_bridge._load_queue", new=racing_load_queue),
+    ):
+        code = pi_bridge.main(["queue", "cleanup", "--apply"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "archive_path" in payload
+
+    remaining_ids = {json.loads(line)["id"] for line in queue_file.read_text().splitlines() if line.strip()}
+    archive = Path(payload["archive_path"])
+    archived_ids = {json.loads(line)["id"] for line in archive.read_text().splitlines() if line.strip()}
+
+    # The raced-in capture is a raw_dump (default-discardable): it must be
+    # archived, not silently deleted without a trace.
+    assert raced_capture_id in archived_ids
+    assert raced_capture_id not in remaining_ids
+
+
+def test_pi_bridge_queue_process_start_skips_with_structured_result_when_lock_unavailable(
+    capsys, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+
+    def failing_load(self, vault):
+        raise QueueLockUnavailable("simulated: queue lock unavailable")
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch.object(capture_queue.PiQueueStore, "load", failing_load),
+    ):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"skipped": "lock_unavailable"}
+
+
+def test_pi_bridge_queue_process_finalize_skips_with_structured_result_when_lock_unavailable(
+    capsys, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "state"))
+    queue_file = tmp_path / "state" / "queue" / "pi-captures.jsonl"
+    queue_file.parent.mkdir(parents=True)
+    queue_file.write_text(
+        json.dumps(
+            {
+                "id": "q1",
+                "title": "Discard me",
+                "body": "Candidate",
+                "created_at": "2026-05-25T12:00:00Z",
+                "reason": "lifecycle",
+                "source_event": "agent_end",
+                "metadata": {"project": "repo", "branch": "feature/pi", "session_id": "s1"},
+            }
+        )
+        + "\n"
+    )
+
+    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+        code = pi_bridge.main(["queue", "process-start", "--project", "repo"])
+    assert code == 0
+    started = json.loads(capsys.readouterr().out)
+    run_id = started["run_id"]
+
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch.object(capture_queue.PiQueueStore, "lock", new=_always_unavailable_queue_lock()),
+    ):
+        code = pi_bridge.main(["queue", "process-finalize", "--run-id", run_id])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"skipped": "lock_unavailable", "run_id": run_id}
+
+    # Skipped, not lost: the manifest is untouched and a later finalize
+    # retry can still succeed against the same run.
+    manifest_path = tmp_path / "state" / "processing" / run_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["status"] == "running"

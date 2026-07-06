@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -34,13 +36,30 @@ DEFAULT_CONFIG = {
     "briefing_min_score": 0.55,
     "prompt_recall": True,
     "recall_concrete_mode": False,
-    "recall_min_score": 0.6,
+    # Recalibrated 0.6 -> 0.25 (MEM-127). 0.6 was tuned for QMD's native BM25
+    # band (0.9+ per docs/quality-analysis-2026-07-02.md); applied uniformly
+    # to whichever backend answered, it silently discarded valid embedded
+    # -backend hits (FTS5's bounded score/(score+k) transform and vec's
+    # cosine-based (cos+1)/2 both commonly land well under 0.6 for a genuine
+    # match - see normalize_fts5_score()/normalize_vec_cosine_distance() in
+    # memento.embedded_search). 0.25 stays inside the range
+    # benchmark/optuna_sweep.py already sweeps (0.0-0.3, best-found ~0.14-
+    # 0.16 against LongMemEval's own BM25 adapter) while remaining a
+    # meaningful noise floor: QMD's own measured "barely related" junk still
+    # scores 0.87-0.89 (see confidence_margin() docstring), well above it.
+    "recall_min_score": 0.25,
     "recall_max_notes": 3,
-    # No longer read by the deep-pipeline gate in retrieval_policy.py (MEM-135
-    # replaced the absolute-score gate with recall_confidence_margin below,
-    # since an absolute cutoff cannot hold across un-normalized backend score
-    # scales - see confidence_margin() in retrieval_policy.py). Kept only for
-    # the benchmark/optuna_sweep.py tuning harness and longmemeval_adapter.py.
+    # Read by the single_strong_hit check in retrieval_policy.py's
+    # PromptRecallRuntime.run(): a lone BM25/embedded/vec/grep result whose
+    # score clears this bar counts as confident enough to skip PRF/RRF/
+    # rerank, even though confidence_margin() can't establish a margin from
+    # a single result (see confidence_margin() docstring). Left at 0.55
+    # post-MEM-127: benchmark/sweep-findings-2026-03-23.md found production's
+    # existing 0.55 already near-optimal against LongMemEval, and under the
+    # new vec cosine scale (neutral/uncorrelated = 0.5, see
+    # normalize_vec_cosine_distance()) 0.55 still requires genuinely
+    # positive relatedness rather than merely non-negative, so it doesn't
+    # need to move for the embedded backend either.
     "recall_high_confidence": 0.55,
     # Relative rank-1-vs-rank-2 score gap (fraction of the top score) the
     # deep-pipeline gate requires before treating a result set as confident
@@ -63,8 +82,60 @@ DEFAULT_CONFIG = {
     # Retrieval enhancements
     "temporal_decay": True,
     "temporal_decay_half_life": 90,
+    # Deprecated (MEM-150): no longer confers decay immunity. Kept parseable
+    # for config-file backwards compatibility, but apply_temporal_decay() now
+    # derives immunity from the durability tier (see durability_hot_window_days
+    # below and memento.store.durability_tier) instead of certainty.
     "temporal_decay_certainty_floor": 4,
     "temporal_decay_undated_factor": 0.5,
+    # Durability tiers (MEM-150): "hot" is last_resurfaced within this many
+    # days; "pinned" (manual `pinned: true` frontmatter) and "hot" are the
+    # only decay-immune tiers. See memento.store.durability_tier.
+    "durability_hot_window_days": 30,
+    # Auto-archive sweep (MEM-152): reversibly archives notes/*.md that are
+    # durability_tier "cold" AND older than archive_sweep_age_days AND
+    # certainty < 4, using the existing tombstone machinery in
+    # memento.archive (never a hard delete). Disabled by default -- flip
+    # archive_sweep_enabled once you've reviewed a dry-run report. See
+    # memento.archive.sweep_archive_candidates.
+    "archive_sweep_enabled": False,
+    "archive_sweep_age_days": 90,
+    "archive_sweep_max_per_run": 50,
+    # Fleeting note lifecycle (MEM-153): promotes fleeting/*.md notes to
+    # notes/ when resurfaced_count >= fleeting_promote_min_resurfaced or
+    # they're cited by a session-summary note, and reversibly expires
+    # (archives) whatever's left once older than fleeting_expire_days.
+    # Disabled by default -- flip fleeting_lifecycle_enabled once you've
+    # reviewed a dry-run report. See memento.archive.fleeting_lifecycle_sweep.
+    "fleeting_lifecycle_enabled": False,
+    "fleeting_promote_min_resurfaced": 2,
+    "fleeting_expire_days": 14,
+    # Project hub regeneration & vault map (MEM-160): mechanical, idempotent
+    # rebuild of projects/<slug>.md from frontmatter + the link graph --
+    # replaces the old free-text ## Sessions/## Activity log append that
+    # corrupted real hubs into multi-hundred-line files with duplicate
+    # headers and truncated entries. hub_regeneration_enabled gates the
+    # periodic sweep (memento.hub.regenerate_stale_hubs, run from
+    # hooks/memento-sweeper.py); disabled by default -- flip it once you've
+    # reviewed a regenerated hub. hub_max_bytes/vault_map_max_bytes cap the
+    # regenerated hub and the two-tier vault map (memento.hub.vault_map)
+    # respectively. vault_map_in_briefing wires vault_map() into
+    # memento.lifecycle.build_briefing; off by default -- flip it once
+    # you've inspected the injected output.
+    "hub_regeneration_enabled": False,
+    "hub_max_bytes": 25_000,
+    "vault_map_max_bytes": 25_000,
+    "vault_map_in_briefing": False,
+    # Citation verification at use (MEM-162): notes may carry `citations`
+    # ({file, anchor[, commit]}) frontmatter written at capture time. Recall
+    # and the tool-context path verify cheaply (file exists + anchor
+    # substring present, read bounded to citation_max_verify_bytes) only for
+    # the top-k notes actually being injected -- never a full-vault scan.
+    # Enabled by default, unlike the sweeps above: it's additive (an
+    # unverifiable citation is injected unmarked, never blocked) and cheap.
+    # See memento.retrieval_policy.evaluate_citation_verification.
+    "citation_verification_enabled": True,
+    "citation_max_verify_bytes": 262_144,
     "wikilink_expansion": True,
     "wikilink_max_hops": 1,
     "wikilink_score_factor": 0.5,
@@ -90,6 +161,14 @@ DEFAULT_CONFIG = {
     "inception_dry_run": False,
     "inception_pre_reason": True,
     "inception_parallel": 4,
+    # Per-run processing budget (MEM-154): the number of notes a single
+    # Inception run aims to consolidate, in notes rather than clusters, so
+    # the backlog doesn't grow unbounded when capture volume spikes. Actual
+    # budget = max(inception_budget_floor, notes ingested since the last
+    # run), capped at inception_budget_cap. See hooks/memento-inception.py's
+    # compute_inception_budget().
+    "inception_budget_floor": 20,
+    "inception_budget_cap": 200,
     # Personalized PageRank expansion
     "ppr_enabled": True,
     "ppr_max_expanded": 5,
@@ -127,7 +206,22 @@ DEFAULT_CONFIG = {
     # Deep recall — background codex analysis (experimental)
     "deep_recall_enabled": False,
     "deep_recall_backend": "codex",
-    # Tag normalization
+    # Agentic retrieval tier — bounded tool-using retrieval agent that upgrades
+    # the SessionStart deferred-briefing worker's internals from one-shot
+    # top-k search to a ReAct-style loop over search/query/related/get
+    # (memento/retrieval_agent.py, wired in memento.lifecycle's
+    # run_deferred_briefing_search). Disabled by default; any protocol or
+    # provider failure falls back to the existing one-shot pipeline
+    # byte-identically. provider/model default to llm_backend/llm_model when
+    # unset, so this can reuse the same backend or route to a cheaper one
+    # (e.g. "pi" with an openrouter/deepseek model) independently.
+    "agentic_retrieval_enabled": False,
+    "retrieval_agent_provider": None,
+    "retrieval_agent_model": None,
+    # Tag normalization: controlled-vocabulary merge map applied at write time
+    # (memento/store.py), by the post-write hook fixer (memento/utils.py), and
+    # by scripts/backfill_project_slugs.py (MEM-164). Merging the long tail of
+    # near-duplicate tags is a config change here, never a code change.
     "tag_aliases": {
         "k8s": "kubernetes",
         "js": "javascript",
@@ -147,12 +241,28 @@ DEFAULT_CONFIG = {
     # Search backend
     "search_backend": "auto",  # auto | qmd | embedded | grep
     "search_db_path": ".search/search.db",  # relative to vault_path
+    # Bounded-transform constant for the embedded backend's FTS5 BM25 score
+    # normalization (MEM-127): score / (score + fts5_score_k), replacing the
+    # old batch-relative `score / max_score_in_this_batch` (which always
+    # forced the top hit in any result batch to exactly 1.0 - see
+    # normalize_fts5_score() in memento.embedded_search). Default chosen
+    # empirically against a small fixture vault: a single rare, discriminating
+    # term match raw-scores ~1.0-1.7 (mapping to ~0.4-0.6 with k=2.0), while
+    # common-term-only matches (near-zero raw BM25, since IDF collapses when
+    # a term appears in most documents) stay near 0. Raw BM25 magnitude
+    # scales with corpus size and term rarity, so this is a coarse starting
+    # point - tune via benchmark/optuna_sweep.py if a vault's score
+    # distribution warrants it.
+    "fts5_score_k": 2.0,
     # Embedding (for embedded search backend)
     "embedding_provider": "local",  # local | voyage | openai | google
     "embedding_model": "nomic-embed-text-v1.5",
     "embedding_dimensions": 512,
     "embedding_api_key": None,
     "embedding_api_base": None,
+    # Dedup/merge at capture
+    "dedup_embed_threshold": 0.86,
+    "dedup_embed_min_title_overlap": 0,  # 0=disabled; >0 requires title-token overlap fraction in addition to embed similarity
     # LLM backend (agent-agnostic)
     "llm_backend": "claude",
     "llm_model": None,  # None = use agent_model for backwards compat
@@ -162,6 +272,25 @@ DEFAULT_CONFIG = {
     "llm_max_tokens": 4096,
     "llm_api_retries": 3,
     "llm_api_initial_backoff_seconds": 1.0,
+    # Bitemporal supersession (MEM-163): `valid_from`/`invalidated_by`
+    # frontmatter give deterministic validity intervals instead of the sparse
+    # `supersedes` field alone. Background candidate pass + LLM adjudication
+    # ride the Inception hook's cadence (hooks/memento-inception.py's
+    # run_contradiction_detection) and auto-set `invalidated_by` only when a
+    # contradicting pair's newer note wins with high confidence and both
+    # share a project; everything else queues for human review. Disabled by
+    # default -- flip contradiction_detection_enabled once you've reviewed
+    # the review-queue output from a run.
+    "contradiction_detection_enabled": False,
+    "contradiction_similarity_threshold": 0.85,
+    "contradiction_max_pairs_per_run": 20,
+    "contradiction_confidence_threshold": 0.75,
+    # Keep the pre-MEM-163 lexical polarity-matching contradiction report
+    # (memento.contradictions.inspect_contradictions) available as an
+    # explicit fallback rather than deleting it outright; default false uses
+    # the new validity-chain report (note -> invalidated_by -> ... with
+    # dates).
+    "contradictions_lexical_fallback": False,
 }
 
 _CONFIG = None
@@ -478,6 +607,69 @@ def slugify(text):
     return text[:80]
 
 
+@functools.lru_cache(maxsize=256)
+def _repo_toplevel_name(path):
+    """Return the main-repo directory name for the git checkout at ``path``, or None.
+
+    Uses ``--git-common-dir`` (the main repository's ``.git``), not
+    ``--show-toplevel``: in a linked worktree the toplevel is the worktree
+    directory itself (e.g. ``.claude/worktrees/agent-xyz``), which would
+    fragment one project into per-worktree scopes - the exact failure MEM-164
+    removes. The common dir's parent is the main repo for both ordinary
+    checkouts and linked worktrees.
+
+    Cached because the same cwd is resolved repeatedly across a session
+    (every write, every retrieval query) and the repo layout for a given path
+    is stable for the lifetime of the process.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    common_dir = result.stdout.strip()
+    if not common_dir:
+        return None
+    common_path = Path(common_dir)
+    if not common_path.is_absolute():
+        # Relative output is relative to the queried path (e.g. plain ".git").
+        common_path = Path(path) / common_path
+    repo_dir = common_path
+    # Peel the git-dir layer: ordinary checkouts end in ".git"; bare-repo
+    # worktree layouts (repo/.bare + repo/<branch> worktrees) end in ".bare".
+    if repo_dir.name in (".git", ".bare"):
+        repo_dir = repo_dir.parent
+    name = repo_dir.name or None
+    # Bare clone directories are conventionally named "<repo>.git".
+    if name and name != ".git" and name.endswith(".git"):
+        name = name[: -len(".git")]
+    return name or None
+
+
+def repo_slug_from_path(path):
+    """Return a stable project slug for the git repo (or plain dir) at ``path``.
+
+    Resolves the git worktree/toplevel directory first, so per-ticket
+    worktree checkouts (``.claude/worktrees/<slice>/``) and machine-specific
+    absolute paths (``/Users/...`` vs ``/home/...``) for the *same* repo
+    collapse onto one slug instead of fragmenting project scope (MEM-164).
+    Falls back to the directory's own basename when git is unavailable or
+    ``path`` is not inside a repo.
+    """
+    if not path:
+        return None
+    repo_name = _repo_toplevel_name(str(path))
+    if not repo_name:
+        repo_name = Path(path).name
+    return slugify(repo_name) or None
+
+
 def detect_project(cwd, git_branch):
     """Derive a project slug and optional ticket from cwd and branch.
     Returns (project_slug, ticket_or_none).
@@ -495,7 +687,7 @@ def detect_project(cwd, git_branch):
                 match = re.search(rule["ticket_pattern"], git_branch, re.IGNORECASE)
                 if match:
                     ticket = match.group(1).upper() if match.lastindex else match.group(0).upper()
-            return rule.get("slug", slugify(Path(cwd).name)), ticket
+            return rule.get("slug") or repo_slug_from_path(cwd) or "misc", ticket
 
     ticket = None
     if git_branch:
@@ -503,4 +695,4 @@ def detect_project(cwd, git_branch):
         if match:
             ticket = match.group(1).upper()
 
-    return slugify(Path(cwd).name) or "misc", ticket
+    return repo_slug_from_path(cwd) or "misc", ticket

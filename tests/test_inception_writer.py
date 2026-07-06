@@ -194,6 +194,74 @@ class TestWritePatternNote:
         assert result.suffix == ".md"
         assert result.parent == tmp_vault / "notes"
 
+    def test_resurfacing_signal_defaults_to_zero_without_notes_dict(self, tmp_vault):
+        """No notes_dict supplied -> resurfaced_count: 0, no last_resurfaced line."""
+        from memento_inception import write_pattern_note
+
+        synthesis = self._make_synthesis()
+        result = write_pattern_note(synthesis, ["redis-cache-ttl"], tmp_vault)
+
+        text = result.read_text()
+        assert "resurfaced_count: 0" in text
+        assert "last_resurfaced:" not in text
+
+    def test_resurfacing_signal_sums_and_takes_max(self, tmp_vault):
+        """Pattern note inherits summed resurfaced_count and max last_resurfaced
+        (MEM-148 signal) from its source notes (MEM-154)."""
+        from memento_inception import NoteRecord, write_pattern_note
+
+        notes_dict = {
+            "a": NoteRecord(
+                stem="a",
+                path=tmp_vault / "notes" / "a.md",
+                title="A",
+                note_type="discovery",
+                tags=[],
+                date="",
+                resurfaced_count=3,
+                last_resurfaced="2026-06-01T00:00:00Z",
+            ),
+            "b": NoteRecord(
+                stem="b",
+                path=tmp_vault / "notes" / "b.md",
+                title="B",
+                note_type="discovery",
+                tags=[],
+                date="",
+                resurfaced_count=5,
+                last_resurfaced="2026-07-01T00:00:00Z",
+            ),
+        }
+        synthesis = self._make_synthesis()
+        result = write_pattern_note(synthesis, ["a", "b"], tmp_vault, notes_dict=notes_dict)
+
+        text = result.read_text()
+        assert "resurfaced_count: 8" in text
+        assert "last_resurfaced: 2026-07-01T00:00:00Z" in text
+
+    def test_resurfacing_signal_ignores_missing_source_records(self, tmp_vault):
+        """A stem absent from notes_dict contributes nothing (no crash)."""
+        from memento_inception import NoteRecord, write_pattern_note
+
+        notes_dict = {
+            "a": NoteRecord(
+                stem="a",
+                path=tmp_vault / "notes" / "a.md",
+                title="A",
+                note_type="discovery",
+                tags=[],
+                date="",
+                resurfaced_count=2,
+                last_resurfaced="2026-05-01T00:00:00Z",
+            ),
+        }
+        synthesis = self._make_synthesis()
+        result = write_pattern_note(synthesis, ["a", "missing-stem"], tmp_vault, notes_dict=notes_dict)
+
+        text = result.read_text()
+        assert "resurfaced_count: 2" in text
+        assert "last_resurfaced: 2026-05-01T00:00:00Z" in text
+
 
 class TestBacklinkSources:
     """Tests for backlink_sources."""

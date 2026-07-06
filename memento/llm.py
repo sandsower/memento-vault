@@ -256,6 +256,36 @@ def _gemini_complete(prompt, model=None, timeout=30):
     return _run_cli(cmd, timeout=timeout, stdin_input=prompt)
 
 
+def _pi_complete(prompt, model=None, timeout=30):
+    # `pi` is the local coding-agent CLI (https://pi.dev) that already routes
+    # to cheap models via provider/model patterns like
+    # "openrouter/deepseek/deepseek-v4-pro" (see WORKFLOW.md's model_routing
+    # table). Note: this is unrelated to memento/pi_bridge.py, which is the
+    # reverse direction -- the pi runtime embedding memento as an extension.
+    # Same ARG_MAX hazard as codex/gemini: keep the prompt off argv, over
+    # stdin. -p/--print makes it process-and-exit instead of interactive;
+    # --no-tools/--no-session/--no-* strip pi's own agentic toolbelt and
+    # session persistence so this is a bare text-in/text-out completion, not
+    # an agent run (memento's own retrieval_agent drives its own tool loop
+    # over this text contract).
+    cmd = [
+        "pi",
+        "--print",
+        "--mode",
+        "text",
+        "--no-tools",
+        "--no-session",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+    ]
+    if model:
+        cmd.extend(["--model", model])
+    return _run_cli(cmd, timeout=timeout, stdin_input=prompt)
+
+
 def _as_int(value, default):
     try:
         return int(value)
@@ -431,6 +461,8 @@ def llm_complete(prompt, config=None, timeout=None):
         result = _codex_complete(prompt, model, timeout=effective_timeout)
     elif backend == "gemini":
         result = _gemini_complete(prompt, model, timeout=effective_timeout)
+    elif backend == "pi":
+        result = _pi_complete(prompt, model, timeout=effective_timeout)
     elif backend == "anthropic-api":
         result = _anthropic_api_complete(
             prompt,
@@ -464,8 +496,8 @@ def preflight_check(config=None):
     resolved = _resolved_config(config)
     backend = resolved.get("llm_backend", "claude")
 
-    if backend in {"claude", "codex", "gemini"}:
-        binary = {"claude": "claude", "codex": "codex", "gemini": "gemini"}[backend]
+    if backend in {"claude", "codex", "gemini", "pi"}:
+        binary = {"claude": "claude", "codex": "codex", "gemini": "gemini", "pi": "pi"}[backend]
         try:
             result = subprocess.run(
                 [_resolve_cli_binary(binary), "--version"], capture_output=True, text=True, timeout=10

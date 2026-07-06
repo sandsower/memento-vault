@@ -5,11 +5,12 @@ import math
 import json
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memento.config import RUNTIME_DIR, get_config, get_vault_id, slugify
+from memento.config import RUNTIME_DIR, get_config, get_vault_id, repo_slug_from_path, slugify
 
 RETRIEVAL_LOG_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
@@ -31,6 +32,11 @@ AUTOMATION_MEMORY_HEALTH_LOG_PATH = os.path.join(
 
 ACCESS_LOG_PATH = os.path.join(RUNTIME_DIR, "access-log.jsonl")
 ACCESS_LOG_STATS_PATH = os.path.join(RUNTIME_DIR, "access-log-stats.json")
+
+# Citation-staleness review queue (MEM-162): verify-at-use appends here when
+# a cited anchor no longer matches, fold_stale_citations_into_frontmatter
+# drains it into durable `citation_stale: true` frontmatter.
+STALE_CITATIONS_QUEUE_PATH = os.path.join(RUNTIME_DIR, "stale-citations.jsonl")
 
 INCEPTION_STATE_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
@@ -135,6 +141,13 @@ def log_automation_memory_health(action, **kwargs):
 
 _ACCESS_LOG_CACHE = {"signature": None, "stats": {}}
 _ACCESS_LOG_EVENT_CAP = 200
+
+# Below this many cached events for a candidate, apply_access_log_boost() also
+# checks the note's own frontmatter (resurfaced_count/last_resurfaced) so a
+# purged runtime-dir cache (or one that never caught up on old history) does
+# not silently reset the resurfacing signal. Notes that already have a
+# healthy cached history skip the extra frontmatter read entirely.
+_ACCESS_LOG_SEED_THRESHOLD = 3
 
 
 def _should_track_access():
@@ -396,6 +409,37 @@ def load_access_log_stats():
     return stats
 
 
+def write_access_log_stats(stats: dict) -> None:
+    """Replace access-log aggregated stats for this vault's paths.
+
+    *stats* should be in the same ``{path: {"events": [{"ts": ..., "rank": ...}]}}``
+    shape returned by ``load_access_log_stats``.  The cache is invalidated so
+    subsequent reads re-read the persisted file.
+    """
+    vault_id = _current_vault_id()
+    data = _read_access_log_stats_file()
+    data.setdefault("vaults", {})[vault_id] = {
+        "paths": {
+            path: {
+                "events": [
+                    {
+                        "ts": event.get("ts").isoformat()
+                        if hasattr(event.get("ts"), "isoformat")
+                        else str(event.get("ts", "")),
+                        "rank": int(event.get("rank", 1)),
+                    }
+                    for event in (bucket.get("events", []) or [])[-_ACCESS_LOG_EVENT_CAP:]
+                ]
+            }
+            for path, bucket in stats.items()
+        },
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    _write_access_log_stats_file(data)
+    # Invalidate the in-memory cache so next load re-reads.
+    _ACCESS_LOG_CACHE["signature"] = (vault_id, None, None)
+
+
 def apply_access_log_boost(results, config=None, now=None):
     """Boost scores for notes that have been repeatedly and recently accessed."""
     if config is None:
@@ -419,12 +463,32 @@ def apply_access_log_boost(results, config=None, now=None):
 
     current = now or datetime.now(timezone.utc)
     stats = load_access_log_stats()
-    if not stats:
+
+    vault_path = str(config.get("vault_path") or "")
+    vault = None
+    if vault_path:
+        try:
+            vault = Path(vault_path).expanduser().resolve()
+        except OSError:
+            vault = None
+
+    if not stats and vault is None:
         return results
 
     for result in results:
         path = str(result.get("path") or "")
-        events = stats.get(path, {}).get("events", [])
+        events = list(stats.get(path, {}).get("events", []))
+
+        # A cache wipe (or a note whose access history predates the cache)
+        # leaves few or no events here even though the note's own frontmatter
+        # remembers being resurfaced. Seed/merge from that durable signal so
+        # the boost below still sees it -- the decay formula itself is
+        # unchanged, it just gets a richer event list to sum over.
+        if vault is not None and path and len(events) < _ACCESS_LOG_SEED_THRESHOLD:
+            fm_count, fm_last = _frontmatter_resurfacing_signal(vault, path)
+            if fm_count > len(events) and fm_last is not None:
+                events = events + [{"ts": fm_last, "rank": 1} for _ in range(fm_count - len(events))]
+
         if not events:
             continue
 
@@ -445,6 +509,123 @@ def apply_access_log_boost(results, config=None, now=None):
 
     results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
     return results
+
+
+def _frontmatter_resurfacing_signal(vault, rel_path):
+    """Read ``(resurfaced_count, last_resurfaced)`` from a note's frontmatter.
+
+    These two fields are the durable side of the resurfacing signal, kept in
+    sync with the (purgeable) access-log cache by
+    :func:`fold_access_log_into_frontmatter`. Returns ``(0, None)`` for any
+    missing note, unreadable file, absent frontmatter block, or note that has
+    never been folded -- callers treat that as "no durable signal to seed
+    from," never as an error.
+    """
+    try:
+        note_path = (vault / rel_path).resolve()
+        note_path.relative_to(vault)
+    except (OSError, ValueError):
+        return 0, None
+    try:
+        text = note_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0, None
+
+    frontmatter, _ = split_frontmatter(text)
+    last_ts = _parse_access_log_ts(_frontmatter_scalar(frontmatter, "last_resurfaced"))
+    if last_ts is None:
+        return 0, None
+    return _frontmatter_int(frontmatter, "resurfaced_count") or 0, last_ts
+
+
+# Default window (days) for the "hot" durability tier -- configurable via
+# get_config()["durability_hot_window_days"] (MEM-150).
+DEFAULT_DURABILITY_HOT_WINDOW_DAYS = 30
+
+# Ordered so callers can treat earlier tiers as "more durable" if useful.
+DURABILITY_TIERS = ("pinned", "hot", "warm", "cold")
+
+
+def durability_tier(frontmatter, now=None, *, hot_window_days=None):
+    """Derive a note's durability tier from its raw frontmatter text (MEM-150).
+
+    Certainty keeps meaning "how sure this is true"; it no longer confers
+    decay immunity on its own. This is the one pure, side-effect-free
+    computation that decides what *does*: :func:`memento.search.apply_temporal_decay`
+    treats ``pinned``/``hot`` as decay-immune and lets ``warm``/``cold`` decay
+    normally (a certainty-5 note nobody has looked at in 90 days sinks like
+    any other). MEM-152's archive sweep is expected to reuse this same
+    function rather than re-deriving the tier.
+
+    Tiers, most to least durable:
+    - ``"pinned"``: frontmatter has ``pinned: true`` (manual, permanent).
+    - ``"hot"``: ``last_resurfaced`` is within ``hot_window_days`` of ``now``
+      (default :data:`DEFAULT_DURABILITY_HOT_WINDOW_DAYS`, 30).
+    - ``"warm"``: ``resurfaced_count`` > 0 at some point, but not within the
+      hot window.
+    - ``"cold"``: never resurfaced.
+
+    ``now`` defaults to the current UTC time. A naive ``now`` (or a naive
+    ``last_resurfaced``, which should not happen post-MEM-148 but is handled
+    defensively) is treated as UTC, matching :func:`_parse_access_log_ts`'s
+    convention elsewhere in this module.
+
+    Pure: no file I/O and no config lookups -- callers resolve the
+    frontmatter text and the hot-window override themselves (see
+    :func:`read_durability_tier` for the file-reading convenience wrapper).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if hot_window_days is None:
+        hot_window_days = DEFAULT_DURABILITY_HOT_WINDOW_DAYS
+
+    if _frontmatter_bool(frontmatter, "pinned"):
+        return "pinned"
+
+    last_ts = _parse_access_log_ts(_frontmatter_scalar(frontmatter, "last_resurfaced"))
+    if last_ts is not None:
+        age_days = (now - last_ts).total_seconds() / 86400.0
+        if age_days <= hot_window_days:
+            return "hot"
+
+    count = _frontmatter_int(frontmatter, "resurfaced_count") or 0
+    if count > 0:
+        return "warm"
+
+    return "cold"
+
+
+def read_durability_tier(vault, rel_path, config=None, now=None):
+    """Read a note's frontmatter off disk and compute its durability tier.
+
+    Thin file-I/O wrapper around the pure :func:`durability_tier` so callers
+    (``memento.search.apply_temporal_decay``, and MEM-152's archive sweep)
+    don't each duplicate the read. ``vault`` may be a path-like or ``Path``;
+    ``rel_path`` is vault-relative (e.g. ``"notes/example.md"``). Tolerates
+    the same missing/unreadable/traversal cases
+    :func:`_frontmatter_resurfacing_signal` does -- returns ``"cold"``
+    (never an error) since "no signal to read" and "never resurfaced"
+    collapse to the same tier.
+    """
+    if config is None:
+        config = get_config()
+    hot_window_days = config.get("durability_hot_window_days", DEFAULT_DURABILITY_HOT_WINDOW_DAYS)
+
+    try:
+        vault_path = Path(vault).resolve()
+        note_path = (vault_path / rel_path).resolve()
+        note_path.relative_to(vault_path)
+    except (OSError, ValueError):
+        return "cold"
+    try:
+        text = note_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "cold"
+
+    frontmatter, _ = split_frontmatter(text)
+    return durability_tier(frontmatter, now=now, hot_window_days=hot_window_days)
 
 
 def load_inception_state(state_path=None):
@@ -527,6 +708,21 @@ def release_inception_lock(lock_path=None):
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def owns_vault_write_lock(lock_file=None):
+    """Return True when the vault write lock exists and is held by this process.
+
+    The lock file stores the owner's pid, so write paths that may be called both
+    standalone and from callers that already hold the lock (e.g. the MCP server)
+    can stay re-entrant: acquire only when the lock is not already ours, and
+    never release a lock the caller owns.
+    """
+    path = Path(lock_file or VAULT_WRITE_LOCK_PATH)
+    try:
+        return int(path.read_text().strip()) == os.getpid()
+    except (OSError, ValueError):
+        return False
 
 
 def acquire_vault_write_lock(lock_file=None, timeout=5.0, poll_interval=0.05, *, lock_path=None):
@@ -715,6 +911,17 @@ def append_project_session_line(content, line):
 
     Hubs that have opted into ``## Activity log`` keep auto-captures there.
     Older hubs continue to receive entries under ``## Sessions``.
+
+    MEM-160: this unbounded append is the corruption source identified in
+    mem-156-through-166-track-the-retrieval-surface-plan -- it is retired
+    at :func:`update_project_index` (that call site no longer invokes this
+    function at all; ``## Recent activity`` in a regenerated hub,
+    :func:`memento.hub.regenerate_project_hub`, is the bounded replacement).
+    This function itself is left unchanged, since ``memento/mcp_server.py``'s
+    fleeting-only capture path and ``hooks/memento-triage.py``'s
+    ``append_session_to_project`` still call it directly for their own
+    session markers -- retiring those call sites is a follow-up, not part of
+    this slice.
     """
     if _has_heading(content, "## Activity log"):
         return _append_under_heading(content, "## Activity log", line)
@@ -792,18 +999,112 @@ def _normalize_note_type(note_type):
 
 
 def _normalize_tags(tags):
-    """Return stable, non-empty tags for frontmatter."""
+    """Return stable, deduped, vocabulary-normalized tags for frontmatter.
+
+    Mechanical normalization only: lowercase, trim, spaces collapsed to
+    dashes. Merging near-duplicate tags (plurals, synonyms, casing drift) is
+    controlled entirely via the ``tag_aliases`` config map - no stemming
+    library - so consolidating the long tail is a config change, not a code
+    change (MEM-164).
+    """
+    try:
+        aliases = get_config().get("tag_aliases") or {}
+    except Exception:
+        aliases = {}
     normalized = []
     seen = set()
     for tag in tags or []:
         safe = _safe_yaml_scalar(tag).strip()
         if not safe:
             continue
-        key = safe.lower()
+        key = re.sub(r"\s+", "-", safe.lower()).strip("-")
+        if not key:
+            continue
+        key = aliases.get(key, key)
         if key in seen:
             continue
-        normalized.append(safe)
+        normalized.append(key)
         seen.add(key)
+    return normalized
+
+
+def _looks_like_project_path(value):
+    return "/" in value or "\\" in value
+
+
+def _derive_project_fields(project, project_path=None):
+    """Split a raw ``project`` write-path value into ``(slug, raw_path)``.
+
+    Callers historically pass the session cwd verbatim as ``project`` (an
+    absolute path). Path-like values are collapsed to a stable repo-name
+    slug via ``repo_slug_from_path`` (git toplevel basename, so cross-machine
+    paths and per-ticket worktree checkouts of the same repo converge on one
+    slug) and the original value is preserved verbatim in the separate
+    ``project_path`` field so nothing is lost. Bare tokens (an already-derived
+    slug, or a legacy bare branch name on some very old notes) are only
+    lightly normalized - lowercased and dash-separated - never reinterpreted
+    as a path (MEM-164).
+    """
+    raw_project = str(project).strip() if project else ""
+    raw_path = str(project_path).strip() if project_path else ""
+
+    if not raw_project:
+        return None, (_safe_yaml_scalar(raw_path) or None if raw_path else None)
+
+    if _looks_like_project_path(raw_project):
+        if not raw_path:
+            raw_path = raw_project
+        slug = repo_slug_from_path(raw_project) or slugify(Path(raw_project).name) or None
+    else:
+        slug = slugify(raw_project) or None
+
+    return slug, (_safe_yaml_scalar(raw_path) or None if raw_path else None)
+
+
+_MAX_CITATION_ANCHOR_CHARS = 120
+_MAX_CITATION_COMMIT_CHARS = 40
+
+
+def _normalize_citation_entry(entry):
+    """Return a sanitized ``{file, anchor[, commit]}`` citation dict, or ``None``.
+
+    Citations (MEM-162) are code-fact provenance the retrieval path verifies
+    cheaply against a live repo before injection, not something a bad
+    LLM/tool response should ever be allowed to block capture over -- an
+    entry missing a usable ``file``/``anchor`` is dropped, never raised.
+    ``anchor`` is truncated (not dropped) past
+    :data:`_MAX_CITATION_ANCHOR_CHARS`: a long anchor is still a valid,
+    if less precise, substring to verify against. ``commit`` is optional
+    provenance only -- ``anchor`` is the verification key.
+    """
+    if not isinstance(entry, dict):
+        return None
+    file_value = _safe_yaml_scalar(entry.get("file")).strip()
+    anchor_value = _safe_yaml_scalar(entry.get("anchor")).strip()
+    if not file_value or not anchor_value:
+        return None
+    if len(anchor_value) > _MAX_CITATION_ANCHOR_CHARS:
+        anchor_value = anchor_value[:_MAX_CITATION_ANCHOR_CHARS]
+    citation = {"file": file_value, "anchor": anchor_value}
+    commit_value = _safe_yaml_scalar(entry.get("commit")).strip()
+    if commit_value:
+        citation["commit"] = commit_value[:_MAX_CITATION_COMMIT_CHARS]
+    return citation
+
+
+def _normalize_citations(citations):
+    """Return a sanitized citations list, dropping malformed entries (MEM-162).
+
+    Never raises: a non-list ``citations`` (a bad LLM response shape) returns
+    ``[]`` rather than iterating character-by-character over a string.
+    """
+    if not isinstance(citations, list):
+        return []
+    normalized = []
+    for entry in citations:
+        cleaned = _normalize_citation_entry(entry)
+        if cleaned:
+            normalized.append(cleaned)
     return normalized
 
 
@@ -817,8 +1118,10 @@ def normalize_note_contract(
     validity_context=None,
     supersedes=None,
     project=None,
+    project_path=None,
     branch=None,
     session_id=None,
+    citations=None,
 ):
     """Normalize metadata to the shared durable-note contract.
 
@@ -826,7 +1129,17 @@ def normalize_note_contract(
     is written so Claude triage, Pi capture, Pi curation, and MCP writes use the
     same typed schema. Legacy `type: session` inputs are accepted and written as
     typed discoveries; existing legacy notes are handled in retrieval metadata.
+
+    ``project`` is normalized to a stable slug (MEM-164): path-like values are
+    collapsed via ``repo_slug_from_path`` and the original raw value is kept
+    verbatim in ``project_path`` so cross-machine/worktree paths never leak
+    into the field retrieval filtering compares on.
+
+    ``citations`` (MEM-162) is an optional list of ``{file, anchor[, commit]}``
+    dicts asserting a note's claim against specific code; see
+    :func:`_normalize_citations` for the defensive parsing rules.
     """
+    project_slug, project_path_value = _derive_project_fields(project, project_path)
     return {
         "note_type": _normalize_note_type(note_type),
         "tags": _normalize_tags(tags),
@@ -835,14 +1148,23 @@ def normalize_note_contract(
         "origin": _safe_yaml_scalar(origin) or None,
         "validity_context": _safe_yaml_scalar(validity_context) or None,
         "supersedes": _safe_yaml_scalar(supersedes) or None,
-        "project": _safe_yaml_scalar(project) or None,
+        "project": project_slug,
+        "project_path": project_path_value,
         "branch": _safe_yaml_scalar(branch) or None,
         "session_id": _safe_yaml_scalar(session_id) or None,
+        "citations": _normalize_citations(citations),
     }
 
 
 def _coerce_certainty(certainty):
-    """Return a schema-valid certainty int, or None for unusable input."""
+    """Return a schema-valid certainty int, or None for unusable input.
+
+    Out-of-range integers (e.g. a `95`/`97` typo meant to be `5`) are clamped
+    into 1-5 with a logged warning rather than dropped (MEM-150) -- capture
+    must never hard-fail a write over a bad certainty value. Genuinely
+    unusable input (missing, empty, unparseable) still returns None, same as
+    before.
+    """
     if certainty is None or certainty == "":
         return None
     if isinstance(certainty, str):
@@ -856,7 +1178,11 @@ def _coerce_certainty(certainty):
         return None
     if 1 <= value <= 5:
         return value
-    return None
+    clamped = max(1, min(5, value))
+    import sys as _sys
+
+    print(f"[memento] warning: certainty {value} out of range 1-5, clamped to {clamped}", file=_sys.stderr)
+    return clamped
 
 
 def _render_note_markdown(
@@ -870,8 +1196,11 @@ def _render_note_markdown(
     validity_context=None,
     supersedes=None,
     project=None,
+    project_path=None,
     branch=None,
     session_id=None,
+    citations=None,
+    extra_frontmatter_lines=None,
 ):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
@@ -886,8 +1215,10 @@ def _render_note_markdown(
         validity_context=validity_context,
         supersedes=supersedes,
         project=project,
+        project_path=project_path,
         branch=branch,
         session_id=session_id,
+        citations=citations,
     )
 
     lines = [
@@ -905,13 +1236,20 @@ def _render_note_markdown(
         lines.append(f"validity-context: {contract['validity_context']}")
     if contract["supersedes"]:
         lines.append(f"supersedes: {json.dumps(contract['supersedes'], ensure_ascii=False)}")
+    if contract["citations"]:
+        lines.append(f"citations: {json.dumps(contract['citations'], ensure_ascii=False)}")
     if contract["project"]:
         lines.append(f"project: {contract['project']}")
+    if contract["project_path"]:
+        lines.append(f"project_path: {contract['project_path']}")
     if contract["branch"]:
         lines.append(f"branch: {contract['branch']}")
     lines.append(f"date: {now}")
     if contract["session_id"]:
         lines.append(f"session_id: {contract['session_id']}")
+    # Verbatim round-trip of frontmatter keys this renderer does not manage
+    # (rewrite paths pass the existing note's unmanaged lines through).
+    lines.extend(extra_frontmatter_lines or [])
 
     # Append the canonical "## Related" placeholder only if the body doesn't
     # already contain one — otherwise callers that include their own ## Related
@@ -938,6 +1276,149 @@ def _index_written_note(vault_path, target):
         pass  # Indexing failure must not block note storage
 
 
+def _write_text_atomic(target, text):
+    """Write ``text`` to ``target`` via a unique same-directory tmp file plus atomic rename.
+
+    The tmp name embeds a random per-writer component (``tempfile.mkstemp``) so
+    concurrent writers aimed at the same target can never clobber or steal each
+    other's in-flight tmp file, which slug-derived tmp names allowed (audit M6).
+    """
+    target = Path(target)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".tmp-{target.stem}-", suffix=target.suffix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+_LEADING_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)(.*)\Z", re.DOTALL)
+
+
+def split_frontmatter(text):
+    """Split note text into ``(frontmatter, body)``.
+
+    Only a LEADING ``---`` block counts as frontmatter — ``---`` lines inside
+    the body must never fabricate one (audit M6). Returns ``("", text)`` when
+    the text does not start with a closed frontmatter block.
+    """
+    match = _LEADING_FRONTMATTER_RE.match(text or "")
+    if not match:
+        return "", text or ""
+    return match.group(1), match.group(2)
+
+
+# Frontmatter keys owned by _render_note_markdown. Anything else found on an
+# existing note must round-trip rewrites unchanged.
+#
+# ``citations`` (MEM-162) is deliberately NOT in this set even though
+# _render_note_markdown writes it at create time: replace_note_at_path (the
+# only rewrite path) does not take a ``citations`` argument, so if it were
+# "managed" here a rewrite that doesn't pass citations would silently drop an
+# existing note's citations line. Leaving it unmanaged means
+# _unmanaged_frontmatter_lines() round-trips it like a hand-added key on
+# every rewrite -- the same reasoning _RESURFACING_FRONTMATTER_KEYS documents
+# below for resurfaced_count/last_resurfaced.
+_MANAGED_NOTE_FRONTMATTER_KEYS = {
+    "title",
+    "type",
+    "tags",
+    "source",
+    "origin",
+    "certainty",
+    "validity-context",
+    "supersedes",
+    "project",
+    "project_path",
+    "branch",
+    "date",
+    "session_id",
+}
+
+_FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:")
+
+# Keys owned by fold_access_log_into_frontmatter(). Kept deliberately out of
+# _MANAGED_NOTE_FRONTMATTER_KEYS: from the write path's point of view these
+# are just another unmanaged key it round-trips unchanged, which is exactly
+# what should happen when e.g. an MCP edit rewrites a note's title/body —
+# the resurfacing signal must survive that rewrite untouched.
+_RESURFACING_FRONTMATTER_KEYS = {"resurfaced_count", "last_resurfaced"}
+
+# Key owned by fold_stale_citations_into_frontmatter() (MEM-162). Same
+# round-trip reasoning as _RESURFACING_FRONTMATTER_KEYS above.
+_CITATION_FRONTMATTER_KEYS = {"citation_stale"}
+
+
+def _frontmatter_scalar(frontmatter, key):
+    """Return the raw single-line scalar value for a frontmatter key, or None.
+
+    Same tiny per-key regex lookup smart_store.py already uses for its own
+    read-only frontmatter comparisons (MEM-166 will consolidate frontmatter
+    parsing later) — this is this module's copy of that existing convention
+    for the two keys it owns (resurfacing), not a new parsing strategy.
+    """
+    match = re.search(rf"^{re.escape(key)}:\s*(.+)$", frontmatter or "", re.MULTILINE)
+    if not match:
+        return None
+    return match.group(1).strip().strip("\"'")
+
+
+def _frontmatter_int(frontmatter, key):
+    """Return a frontmatter scalar as ``int``, or None if absent/unparseable."""
+    raw = _frontmatter_scalar(frontmatter, key)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+_FRONTMATTER_TRUE_VALUES = {"true", "yes", "1"}
+
+
+def _frontmatter_bool(frontmatter, key):
+    """Return a frontmatter scalar as ``bool``. Absent/unparseable values are False."""
+    raw = _frontmatter_scalar(frontmatter, key)
+    if raw is None:
+        return False
+    return raw.strip().lower() in _FRONTMATTER_TRUE_VALUES
+
+
+def _unmanaged_frontmatter_lines(frontmatter, managed_keys=None):
+    """Return raw frontmatter lines for keys ``managed_keys`` does not cover.
+
+    Defaults to ``_MANAGED_NOTE_FRONTMATTER_KEYS`` (the write-path contract
+    fields) — this is what ``replace_note_at_path`` uses to round-trip
+    unknown keys on rewrite. ``fold_access_log_into_frontmatter`` instead
+    passes ``_RESURFACING_FRONTMATTER_KEYS`` so it can drop just the two
+    resurfacing lines it is about to rewrite while preserving every other
+    key — managed or not — unchanged.
+
+    Each preserved ``key:`` line is kept verbatim together with its indented
+    continuation lines so rewrites round-trip multi-line values unchanged.
+    """
+    if managed_keys is None:
+        managed_keys = _MANAGED_NOTE_FRONTMATTER_KEYS
+    preserved = []
+    keep = False
+    for line in (frontmatter or "").splitlines():
+        if line[:1] in (" ", "\t"):
+            if keep:
+                preserved.append(line)
+            continue
+        match = _FRONTMATTER_KEY_RE.match(line)
+        keep = bool(match) and match.group(1) not in managed_keys
+        if keep:
+            preserved.append(line)
+    return preserved
+
+
 def write_note(
     vault_path,
     title,
@@ -950,10 +1431,18 @@ def write_note(
     validity_context=None,
     supersedes=None,
     project=None,
+    project_path=None,
     branch=None,
     session_id=None,
+    citations=None,
 ):
-    """Write an atomic note with normalized frontmatter to notes/ using an atomic rename."""
+    """Write an atomic note with normalized frontmatter to notes/ using an atomic rename.
+
+    ``citations`` (MEM-162) is an optional list of ``{file, anchor[, commit]}``
+    dicts written once at create time; citations accrue on new notes only
+    (no backfill). See :func:`_normalize_citations` for how malformed entries
+    are dropped without failing the write.
+    """
     notes_dir = Path(vault_path) / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
 
@@ -966,8 +1455,8 @@ def write_note(
             if not candidate.exists():
                 target = candidate
                 break
-    tmp = notes_dir / f".tmp-{slug}.md"
-    tmp.write_text(
+    _write_text_atomic(
+        target,
         _render_note_markdown(
             title,
             body,
@@ -979,11 +1468,12 @@ def write_note(
             validity_context=validity_context,
             supersedes=supersedes,
             project=project,
+            project_path=project_path,
             branch=branch,
+            citations=citations,
             session_id=session_id,
-        )
+        ),
     )
-    os.replace(tmp, target)
     _index_written_note(vault_path, target)
     return target
 
@@ -1001,6 +1491,7 @@ def replace_note_at_path(
     validity_context=None,
     supersedes=None,
     project=None,
+    project_path=None,
     branch=None,
     session_id=None,
 ):
@@ -1018,8 +1509,13 @@ def replace_note_at_path(
     if not target.exists():
         raise FileNotFoundError(str(rel))
 
-    tmp = target.with_name(f".tmp-{target.stem}.md")
-    tmp.write_text(
+    # Round-trip frontmatter keys this write path does not manage (audit M6):
+    # sync rewrites must not drop keys added by hand or by other tools.
+    existing_frontmatter, _ = split_frontmatter(target.read_text(encoding="utf-8", errors="replace"))
+    preserved_lines = _unmanaged_frontmatter_lines(existing_frontmatter)
+
+    _write_text_atomic(
+        target,
         _render_note_markdown(
             title,
             body,
@@ -1031,13 +1527,311 @@ def replace_note_at_path(
             validity_context=validity_context,
             supersedes=supersedes,
             project=project,
+            project_path=project_path,
             branch=branch,
             session_id=session_id,
-        )
+            extra_frontmatter_lines=preserved_lines,
+        ),
     )
-    os.replace(tmp, target)
     _index_written_note(vault_path, target)
     return target
+
+
+def _read_vault_access_log_entries(vault_id, log_path=None):
+    """Read ordered, parsed access-log entries for one vault, oldest first.
+
+    Unlike :func:`_events_from_raw_access_log` (which buckets by path and
+    caps each bucket to the boost's decay window), this keeps a single flat,
+    file-order list so the fold cursor in
+    :func:`fold_access_log_into_frontmatter` can tell exactly how many
+    entries at a given timestamp have already been folded.
+    """
+    entries = []
+    try:
+        with open(log_path or ACCESS_LOG_PATH) as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if str(entry.get("vault_id") or "") != vault_id:
+                    continue
+                path = str(entry.get("path") or "").strip()
+                if not path:
+                    continue
+                ts_raw = entry.get("ts")
+                ts = _parse_access_log_ts(ts_raw)
+                if ts is None:
+                    continue
+                entries.append({"path": path, "ts": ts, "ts_raw": str(ts_raw)})
+    except OSError:
+        return []
+    return entries
+
+
+def _fold_note_frontmatter(note_path, new_events, last_ts):
+    """Merge newly delivered access events into one note's frontmatter.
+
+    Increments ``resurfaced_count`` by ``new_events`` and advances
+    ``last_resurfaced`` to the max of the existing value and ``last_ts``. All
+    other frontmatter lines — managed or not — round-trip unchanged, via the
+    same ``_unmanaged_frontmatter_lines`` helper ``replace_note_at_path`` uses
+    to preserve unknown keys; this only ever touches the two resurfacing
+    lines. Returns True when the note was actually rewritten.
+    """
+    text = note_path.read_text(encoding="utf-8", errors="replace")
+    frontmatter, body = split_frontmatter(text)
+    if not frontmatter:
+        return False  # No frontmatter block -- nothing safe to fold into.
+
+    existing_count = _frontmatter_int(frontmatter, "resurfaced_count") or 0
+    existing_last = _parse_access_log_ts(_frontmatter_scalar(frontmatter, "last_resurfaced"))
+
+    new_count = existing_count + new_events
+    new_last = last_ts if existing_last is None or last_ts > existing_last else existing_last
+    new_last_raw = new_last.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    preserved = _unmanaged_frontmatter_lines(frontmatter, managed_keys=_RESURFACING_FRONTMATTER_KEYS)
+    new_frontmatter = "\n".join([*preserved, f"resurfaced_count: {new_count}", f"last_resurfaced: {new_last_raw}"])
+    new_text = f"---\n{new_frontmatter}\n---\n{body}"
+    if new_text == text:
+        return False
+    _write_text_atomic(note_path, new_text)
+    return True
+
+
+def fold_access_log_into_frontmatter(vault_path, *, lock_file=None):
+    """Fold the derived access-log (write-ahead buffer) into note frontmatter.
+
+    The access log lives under the runtime dir so cache cleaners can purge it
+    freely, but that means the ``access_log_half_life_days`` boost never
+    accumulates real history and never crosses machines (MEM-148). This fold
+    makes each note's frontmatter (``resurfaced_count``, ``last_resurfaced``)
+    the durable source of truth: it aggregates newly delivered events per
+    note path since the last fold and rewrites only the touched notes, under
+    the vault write lock, using the same atomic tmp+rename write as the rest
+    of this module.
+
+    Idempotent: a per-vault fold cursor (timestamp plus a same-timestamp
+    tie-breaker count) is persisted in ``ACCESS_LOG_STATS_PATH`` so re-running
+    the fold with no new access-log entries is a no-op, and entries that
+    share a timestamp with the cursor are never double-counted.
+
+    Only call this from a periodic trigger (e.g. hooks/memento-sweeper.py's
+    ``main()``) — never inline on every ``record_access``, which would
+    rewrite notes (and dirty git) on every recall.
+
+    Re-entrant like ``write_smart_store_note``: acquires the vault write lock
+    only if not already held by this process, and never releases a lock a
+    caller holds.
+
+    Like ``write_note``/``replace_note_at_path``, ``vault_path`` is a required
+    positional argument — the caller resolves it (e.g. from config), this
+    function does not fall back to ``get_config()`` for it. Vault *identity*
+    (for matching this vault's access-log entries) still comes from the
+    ambient config via ``_current_vault_id()``, consistent with
+    ``record_access``/``apply_access_log_boost`` elsewhere in this module.
+
+    Returns a dict with ``folded_notes`` (int notes touched), ``new_events``
+    (int access-log entries folded), and ``error`` (str, only on lock
+    contention).
+    """
+    vault = Path(vault_path).expanduser().resolve()
+
+    vault_id = _current_vault_id()
+    entries = _read_vault_access_log_entries(vault_id)
+    if not entries:
+        return {"folded_notes": 0, "new_events": 0}
+
+    already_held = owns_vault_write_lock(lock_file)
+    if not already_held and not acquire_vault_write_lock(lock_file=lock_file):
+        return {"folded_notes": 0, "new_events": 0, "error": "lock_unavailable"}
+
+    try:
+        data = _read_access_log_stats_file()
+        vaults = data.setdefault("vaults", {})
+        vault_entry = vaults.setdefault(vault_id, {"paths": {}, "updated_at": None})
+        cursor = vault_entry.get("fold_cursor") or {}
+        cursor_ts = _parse_access_log_ts(cursor.get("ts"))
+        cursor_count_at_ts = int(cursor.get("count_at_ts") or 0)
+
+        new_entries = []
+        seen_at_cursor = 0
+        for entry in entries:
+            if cursor_ts is not None and entry["ts"] < cursor_ts:
+                continue
+            if cursor_ts is not None and entry["ts"] == cursor_ts:
+                seen_at_cursor += 1
+                if seen_at_cursor <= cursor_count_at_ts:
+                    continue
+            new_entries.append(entry)
+
+        if not new_entries:
+            return {"folded_notes": 0, "new_events": 0}
+
+        per_path = {}
+        for entry in new_entries:
+            bucket = per_path.setdefault(entry["path"], {"count": 0, "last_ts": entry["ts"]})
+            bucket["count"] += 1
+            if entry["ts"] >= bucket["last_ts"]:
+                bucket["last_ts"] = entry["ts"]
+
+        folded = 0
+        for rel_path, agg in per_path.items():
+            try:
+                note_path = (vault / rel_path).resolve()
+                note_path.relative_to(vault)
+            except (OSError, ValueError):
+                continue
+            if not note_path.is_file():
+                continue
+            try:
+                if _fold_note_frontmatter(note_path, agg["count"], agg["last_ts"]):
+                    folded += 1
+            except OSError:
+                continue
+
+        last_entry = entries[-1]
+        vault_entry["fold_cursor"] = {
+            "ts": last_entry["ts_raw"],
+            "count_at_ts": sum(1 for entry in entries if entry["ts"] == last_entry["ts"]),
+        }
+        vault_entry["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _write_access_log_stats_file(data)
+
+        return {"folded_notes": folded, "new_events": len(new_entries)}
+    finally:
+        if not already_held:
+            release_vault_write_lock(lock_file=lock_file)
+
+
+def append_stale_citation_review(note_path, citations, *, queue_path=None, checked_at=None):
+    """Queue one note for citation-staleness supersession review (MEM-162).
+
+    Called from the inject-time verification path
+    (``memento.retrieval_policy``/the tool-context path) when a selected
+    note's cited anchor no longer appears in its file. Never rewrites the
+    note inline -- this only appends a JSONL line to a runtime-dir queue;
+    :func:`fold_stale_citations_into_frontmatter` (run periodically from
+    ``hooks/memento-sweeper.py``) is the only writer that turns queued
+    entries into durable ``citation_stale: true`` frontmatter.
+
+    Best-effort like ``log_retrieval``: a write failure warns once (via
+    ``_append_jsonl``) and never raises, so a broken runtime dir can never
+    block recall/tool-context injection.
+    """
+    entry = {
+        "note_path": str(note_path),
+        "citations": citations,
+        "checked_at": checked_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _append_jsonl(queue_path or STALE_CITATIONS_QUEUE_PATH, entry, "_stale_citation_warned")
+
+
+def _mark_citation_stale(note_path):
+    """Set ``citation_stale: true`` on one note's frontmatter, idempotently.
+
+    Round-trips every other frontmatter line unchanged (same
+    ``_unmanaged_frontmatter_lines`` helper the MEM-148 fold uses) and only
+    ever touches this one key. Returns False (no rewrite performed) when the
+    note has no frontmatter block or is already flagged.
+    """
+    text = note_path.read_text(encoding="utf-8", errors="replace")
+    frontmatter, body = split_frontmatter(text)
+    if not frontmatter:
+        return False
+    if _frontmatter_bool(frontmatter, "citation_stale"):
+        return False  # already flagged -- idempotent no-op
+    preserved = _unmanaged_frontmatter_lines(frontmatter, managed_keys=_CITATION_FRONTMATTER_KEYS)
+    new_frontmatter = "\n".join([*preserved, "citation_stale: true"])
+    new_text = f"---\n{new_frontmatter}\n---\n{body}"
+    _write_text_atomic(note_path, new_text)
+    return True
+
+
+def fold_stale_citations_into_frontmatter(vault_path, *, queue_path=None, lock_file=None):
+    """Fold queued citation-staleness flags into note frontmatter (MEM-162).
+
+    Verify-at-use appends one JSONL record per stale citation encountered to
+    a runtime-dir review queue (:data:`STALE_CITATIONS_QUEUE_PATH`) instead
+    of rewriting the note on the hot recall/tool-context injection path.
+    This periodic fold is the only writer that turns that queue into durable
+    frontmatter (``citation_stale: true``) -- the supersession-review signal
+    consumed downstream by MEM-152's archive sweep / MEM-163's supersession
+    review, never applied inline.
+
+    Same failure-isolated, lock-scoped pattern as
+    ``fold_access_log_into_frontmatter``: re-entrant vault write lock, atomic
+    tmp+rename note rewrites, one bad note path never blocks the rest.
+
+    Idempotent: the queue file is drained (read, then truncated) up front,
+    so concurrent appends made *during* the fold land in a fresh empty file
+    rather than being lost, and notes already marked ``citation_stale: true``
+    are simply left unchanged (:func:`_mark_citation_stale` skips the
+    rewrite). Re-running with an empty/absent queue is a no-op.
+
+    Returns a dict with ``folded_notes`` (int notes newly flagged),
+    ``queued_events`` (int queue lines processed), and ``error`` (str, only
+    on lock contention).
+    """
+    vault = Path(vault_path).expanduser().resolve()
+    queue_file = Path(queue_path) if queue_path else Path(STALE_CITATIONS_QUEUE_PATH)
+
+    if not queue_file.exists():
+        return {"folded_notes": 0, "queued_events": 0}
+
+    already_held = owns_vault_write_lock(lock_file)
+    if not already_held and not acquire_vault_write_lock(lock_file=lock_file):
+        return {"folded_notes": 0, "queued_events": 0, "error": "lock_unavailable"}
+
+    try:
+        try:
+            drained_text = queue_file.read_text(encoding="utf-8")
+        except OSError:
+            return {"folded_notes": 0, "queued_events": 0}
+        try:
+            queue_file.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+
+        rel_paths = set()
+        queued_events = 0
+        for line in drained_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rel_path = str(record.get("note_path") or "").strip()
+            if not rel_path:
+                continue
+            queued_events += 1
+            rel_paths.add(rel_path)
+
+        folded = 0
+        for rel_path in rel_paths:
+            try:
+                note_path = (vault / rel_path).resolve()
+                note_path.relative_to(vault)
+            except (OSError, ValueError):
+                continue
+            if not note_path.is_file():
+                continue
+            try:
+                if _mark_citation_stale(note_path):
+                    folded += 1
+            except OSError:
+                continue
+
+        return {"folded_notes": folded, "queued_events": queued_events}
+    finally:
+        if not already_held:
+            release_vault_write_lock(lock_file=lock_file)
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1163,9 +1957,7 @@ def write_daily_snapshot(
     else:
         lines.extend(["---", "", body, "", "## Related", ""])
 
-    tmp = notes_dir / f".tmp-{target.name}"
-    tmp.write_text("\n".join(lines))
-    os.replace(tmp, target)
+    _write_text_atomic(target, "\n".join(lines))
 
     try:
         from memento.search_backend import get_backend
@@ -1186,7 +1978,27 @@ def write_daily_snapshot(
 
 
 def update_project_index(vault_path, project_slug, note_name, session_summary):
-    """Ensure project index exists and append note/session references."""
+    """Ensure a project index exists and record a ``[[note_name]]`` link under ``## Notes``.
+
+    MEM-160: this used to also hand-append a free-text session-summary line
+    (formerly under ``## Sessions``, later ``## Activity log`` --
+    :func:`append_project_session_line`) on every MCP store/replace/capture.
+    That unbounded, ever-growing append -- with no cap and no structural
+    guarantee across format drift -- is what corrupted real hubs into
+    multi-hundred-line files with duplicate headers, truncated entries, and
+    stray fragments. This call site's session-summary append is retired
+    outright (``session_summary`` is accepted only for call-site
+    compatibility with ``memento/mcp_server.py``, ``memento/smart_store.py``,
+    and ``memento/dedup_merge.py``, and is otherwise unused): the bounded
+    replacement is :func:`memento.hub.regenerate_project_hub`'s ``## Recent
+    activity`` section, mechanically derived from note frontmatter dates on
+    every regeneration rather than hand-maintained here.
+
+    ``memento/mcp_server.py``'s fleeting-only capture path and
+    ``hooks/memento-triage.py``'s ``append_session_to_project`` still call
+    :func:`append_project_session_line` directly for their own session
+    markers -- that call path is unchanged and out of scope for this retirement.
+    """
     project_dir = Path(vault_path) / "projects"
     project_dir.mkdir(parents=True, exist_ok=True)
     project_file = project_dir / f"{project_slug}.md"
@@ -1203,8 +2015,6 @@ def update_project_index(vault_path, project_slug, note_name, session_summary):
                 "",
                 "## Notes",
                 "",
-                "## Sessions",
-                "",
             ]
         )
 
@@ -1215,9 +2025,4 @@ def update_project_index(vault_path, project_slug, note_name, session_summary):
         else:
             content = content.rstrip() + "\n\n## Notes\n\n" + note_line + "\n"
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    session_line = f"- {today} {session_summary}"
-    if session_line not in content:
-        content = append_project_session_line(content, session_line)
-
-    project_file.write_text(content)
+    _write_text_atomic(project_file, content)
