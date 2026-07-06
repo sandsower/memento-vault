@@ -40,6 +40,10 @@ MISS_RECOVERY_HINTS = {
     "semantic_mode_not_available": ["Try semantic=false.", "Run memento_reindex if index state looks stale."],
     "empty_vault": ["Capture or sync notes first.", "Run memento_status to verify the vault path."],
     "index_stale_or_missing": ["Run memento_reindex if index state looks stale."],
+    "filters_eliminated_all": [
+        "Broaden or remove the search filters.",
+        "Use memento_query to inspect raw metadata without ranking.",
+    ],
 }
 
 _REASON_ALIASES = {
@@ -631,6 +635,77 @@ def multi_hop_search(query, initial_results, config=None):
 
     all_results.sort(key=lambda r: r["score"], reverse=True)
     return all_results
+
+
+def expand_result_links(shaped_results, config=None, top_n=3, max_expanded=None):
+    """Fetch 1-hop wikilink neighbors of the top shaped search results.
+
+    Thin exposure shim over the same primitives multi_hop_search uses
+    (qmd_get + extract_wikilinks), for memento_search's opt-in
+    `expand_links` parameter. Unlike multi_hop_search, entries are returned
+    separately -- never merged or re-sorted with the direct hits -- so a
+    caller can append them after direct results without an expanded note
+    ever outranking a direct one.
+
+    Args:
+        shaped_results: already-shaped search result dicts (must have "path").
+        config: dict with multi_hop_max (default 2); reused as max_expanded
+            when max_expanded is not given explicitly.
+        top_n: only follow links from this many top results.
+        max_expanded: cap on the number of expanded entries returned.
+
+    Returns:
+        List of dicts: path, title, score (0.0), snippet, via_link (the
+        stem of the direct-hit result the entry was discovered through).
+    """
+    if not shaped_results:
+        return []
+
+    if config is None:
+        config = get_config()
+    if max_expanded is None:
+        max_expanded = config.get("multi_hop_max", 2)
+
+    seen_paths = {r.get("path", "") for r in shaped_results}
+    expanded = []
+    added = 0
+
+    for result in shaped_results[:top_n]:
+        if added >= max_expanded:
+            break
+
+        source_path = result.get("path", "")
+        source_stem = Path(source_path).stem if source_path else ""
+
+        note = qmd_get(source_path)
+        if not note:
+            continue
+
+        for slug in extract_wikilinks(note.get("content", "")):
+            if added >= max_expanded:
+                break
+
+            linked_path = f"notes/{slug}.md"
+            if linked_path in seen_paths:
+                continue
+
+            linked = qmd_get(linked_path)
+            if not linked:
+                continue
+
+            seen_paths.add(linked_path)
+            expanded.append(
+                {
+                    "path": linked.get("path", linked_path),
+                    "title": linked.get("title", slug),
+                    "score": 0.0,
+                    "snippet": (linked.get("content", "") or "").strip()[:160],
+                    "via_link": source_stem,
+                }
+            )
+            added += 1
+
+    return expanded
 
 
 # --- Retrieval enhancements ---

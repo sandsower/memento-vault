@@ -33,8 +33,8 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
     McpToolInventoryItem(
         "memento_search",
         "Read",
-        "Search vault notes with BM25, optional semantic search, hybrid ranking, temporal decay, PageRank/access-log boosts, and `concrete: auto|true|false` for exact identifiers and quoted phrases.",
-        "Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers. Do not use it to read a known note path.",
+        "Search vault notes with BM25, optional semantic search, hybrid ranking, temporal decay, PageRank/access-log boosts, `concrete: auto|true|false` for exact identifiers and quoted phrases, and optional typed post-filters (type, tags, certainty, dates, branch, session_id, project) that mirror `memento_query`'s filter semantics.",
+        "Use before answering questions about past decisions, prior fixes, project history, session context, recurring patterns, or exact identifiers, including when ranked retrieval also needs metadata constraints. Do not use it to read a known note path.",
     ),
     McpToolInventoryItem(
         "memento_query",
@@ -47,6 +47,12 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
         "Read",
         "Inspect a topic for disagreements, stale conclusions, supersession chains, and opposite-language hints.",
         "Use when comparing competing notes about the same topic or when you need explicit superseded notes marked alongside their source paths and certainty/date context.",
+    ),
+    McpToolInventoryItem(
+        "memento_related",
+        "Read",
+        "Walk the wikilink graph around a note: outbound/inbound links, a depth-limited neighborhood, and its supersession chain. Pure topology, no relevance scoring.",
+        'Use for "what links to X", neighborhood expansion, or finding the current/superseded version of a note; use `memento_search` instead for topical/semantic retrieval.',
     ),
     McpToolInventoryItem(
         "memento_briefing",

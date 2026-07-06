@@ -17,10 +17,10 @@ def read_note_metadata(note_name):
         note_name: Note filename stem (e.g., 'some-note') or relative path.
 
     Returns:
-        Dict with: date (str|None), certainty (int|None), type (str|None),
-        source/origin/supersedes/project metadata, tags (list of str), and
-        links (list of wikilink target names). Returns None if the note file
-        doesn't exist.
+        Dict with: title (str|None), date (str|None), certainty (int|None),
+        type (str|None), source/origin/supersedes/project metadata, tags
+        (list of str), and links (list of wikilink target names). Returns
+        None if the note file doesn't exist.
     """
     vault = get_vault()
     # Normalize: accept both 'some-note' and 'notes/some-note.md'
@@ -32,6 +32,7 @@ def read_note_metadata(note_name):
     if not note_path.exists():
         return None
 
+    title = None
     date = None
     certainty = None
     note_type = None
@@ -57,7 +58,9 @@ def read_note_metadata(note_name):
                         past_frontmatter = True
                         continue
                 if in_frontmatter:
-                    if stripped.startswith("date:"):
+                    if stripped.startswith("title:"):
+                        title = stripped[len("title:") :].strip().strip('"').strip("'")
+                    elif stripped.startswith("date:"):
                         date = stripped[5:].strip().strip('"').strip("'")
                     elif stripped.startswith("certainty:"):
                         try:
@@ -86,6 +89,7 @@ def read_note_metadata(note_name):
         return None
 
     return {
+        "title": title,
         "date": date,
         "certainty": certainty,
         "type": note_type,
@@ -292,11 +296,37 @@ def _deserialize_graph(cache_path):
     return graph, pagerank
 
 
+def _vault_notes_max_mtime(vault_path):
+    """Return the newest mtime among notes/*.md, or 0.0 if none exist.
+
+    A stat-only scan (no file reads), so it stays cheap even at vault sizes
+    around ~5k notes -- see test_tenet_graph.py::test_notes_mtime_scan_is_cheap
+    for a benchmark assertion backing this claim.
+    """
+    notes_dir = Path(vault_path) / "notes"
+    if not notes_dir.is_dir():
+        return 0.0
+
+    max_mtime = 0.0
+    for md_file in notes_dir.glob("*.md"):
+        try:
+            mtime = md_file.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > max_mtime:
+            max_mtime = mtime
+    return max_mtime
+
+
 def load_or_build_graph(vault_path=None, cache_path=None):
     """Load the wikilink graph from cache or build it fresh.
 
     Uses a two-level cache: in-process (_GRAPH_CACHE) and on-disk (JSON).
-    Disk cache expires after 1 hour.
+    The disk cache is only considered fresh when both hold:
+      1. its build timestamp is >= the newest note mtime in the vault
+         (so a note written after the cache was built invalidates it), and
+      2. it is younger than the 1-hour TTL ceiling (belt-and-suspenders
+         against clock skew / missed writes).
 
     Args:
         vault_path: Override vault path (default: from config).
@@ -316,10 +346,15 @@ def load_or_build_graph(vault_path=None, cache_path=None):
     if _GRAPH_CACHE[0] is not None:
         return _GRAPH_CACHE[0]
 
+    if vault_path is None:
+        vault_path = str(get_vault())
+
     # Check disk cache
     try:
-        age = _time.time() - os.path.getmtime(cache_file)
-        if age < _GRAPH_CACHE_MAX_AGE:
+        cache_mtime = os.path.getmtime(cache_file)
+        age = _time.time() - cache_mtime
+        notes_mtime = _vault_notes_max_mtime(vault_path)
+        if age < _GRAPH_CACHE_MAX_AGE and cache_mtime >= notes_mtime:
             graph, pagerank = _deserialize_graph(cache_file)
             _GRAPH_CACHE[0] = (graph, pagerank)
             return graph, pagerank
@@ -327,9 +362,6 @@ def load_or_build_graph(vault_path=None, cache_path=None):
         pass
 
     # Build fresh
-    if vault_path is None:
-        vault_path = str(get_vault())
-
     graph = build_wikilink_graph(vault_path)
     config = get_config()
     alpha = config.get("pagerank_alpha", 0.85)
@@ -432,6 +464,260 @@ def ppr_expand(results, graph, config=None):
         )
 
     return expanded
+
+
+# --- Related notes (topology only, no scoring) ---
+
+NEIGHBORHOOD_MAX_DEPTH = 3
+NEIGHBORHOOD_DEFAULT_CAP = 50
+
+
+def _related_entry(stem, hop):
+    """Build a {stem, title, path, hop} entry using cheap frontmatter metadata."""
+    meta = read_note_metadata(stem) or {}
+    return {
+        "stem": stem,
+        "title": meta.get("title"),
+        "path": f"notes/{stem}.md",
+        "hop": hop,
+    }
+
+
+def resolve_note_reference(note, graph=None):
+    """Resolve a stem, relative path, or exact title into a canonical note stem.
+
+    Tries, in order: exact stem match (after stripping a leading "notes/" and
+    trailing ".md"), then an exact case-insensitive frontmatter title match.
+    Falls back to close-match suggestions (by stem and by title) when nothing
+    resolves, so callers can surface a helpful error instead of a bare miss.
+
+    Args:
+        note: user-supplied stem, path, or title.
+        graph: optional nx.DiGraph (nodes = all note stems) to resolve
+            against; when omitted, falls back to scanning notes/*.md.
+
+    Returns:
+        Tuple of (stem, suggestions). stem is None when unresolved;
+        suggestions is a list of up to 5 close-match stems.
+    """
+    raw = (note or "").strip()
+    if not raw:
+        return None, []
+
+    candidate = raw
+    if candidate.startswith("notes/"):
+        candidate = candidate[len("notes/") :]
+    if candidate.endswith(".md"):
+        candidate = candidate[: -len(".md")]
+    candidate = candidate.strip()
+
+    if graph is not None:
+        existing_stems = set(graph.nodes)
+    else:
+        vault = get_vault()
+        notes_dir = vault / "notes"
+        existing_stems = {p.stem for p in notes_dir.glob("*.md")} if notes_dir.is_dir() else set()
+
+    if candidate in existing_stems:
+        return candidate, []
+
+    title_matches = []
+    for stem in existing_stems:
+        meta = read_note_metadata(stem) or {}
+        title = (meta.get("title") or "").strip()
+        if title and title.lower() == raw.lower():
+            title_matches.append(stem)
+
+    if len(title_matches) == 1:
+        return title_matches[0], []
+
+    import difflib
+
+    close = difflib.get_close_matches(candidate, sorted(existing_stems), n=5, cutoff=0.4)
+    suggestions = sorted(set(close) | set(title_matches))[:5]
+    return None, suggestions
+
+
+def graph_neighborhood(graph, stem, direction="both", depth=1, cap=NEIGHBORHOOD_DEFAULT_CAP):
+    """BFS outward from *stem*, following outbound/inbound wikilink edges.
+
+    Args:
+        graph: nx.DiGraph with note stems as nodes.
+        stem: starting note stem (must already be a canonical stem).
+        direction: "out" (successors only), "in" (predecessors only), or
+            "both". Falls back to "both" for unrecognized values.
+        depth: hops to traverse, clamped to [0, NEIGHBORHOOD_MAX_DEPTH].
+        cap: maximum number of nodes to return.
+
+    Returns:
+        Tuple of (entries, truncated). entries are {stem, title, path, hop}
+        dicts in BFS discovery order (excludes the start node itself).
+        truncated is True when more nodes exist beyond the cap.
+    """
+    direction = direction if direction in ("out", "in", "both") else "both"
+    try:
+        depth = max(0, min(int(depth), NEIGHBORHOOD_MAX_DEPTH))
+    except (TypeError, ValueError):
+        depth = 1
+
+    entries = []
+    truncated = False
+    if graph is None or depth == 0 or stem not in graph:
+        return entries, truncated
+
+    visited = {stem}
+    frontier = [stem]
+    for hop in range(1, depth + 1):
+        next_frontier = []
+        for node in frontier:
+            neighbors = []
+            if direction in ("out", "both"):
+                neighbors.extend(graph.successors(node))
+            if direction in ("in", "both"):
+                neighbors.extend(graph.predecessors(node))
+            for neighbor in neighbors:
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                if len(entries) >= cap:
+                    truncated = True
+                    continue
+                entries.append(_related_entry(neighbor, hop))
+                next_frontier.append(neighbor)
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    return entries, truncated
+
+
+def _parse_supersedes_target(raw):
+    """Normalize a raw `supersedes:` frontmatter value down to a bare stem."""
+    if not raw:
+        return None
+    value = str(raw).strip().strip('"').strip("'")
+    if value.startswith("[[") and value.endswith("]]"):
+        value = value[2:-2]
+    if "|" in value:
+        value = value.split("|", 1)[0]
+    if value.startswith("notes/"):
+        value = value[len("notes/") :]
+    if value.endswith(".md"):
+        value = value[: -len(".md")]
+    value = value.strip()
+    return value or None
+
+
+def supersession_chain(stem):
+    """Walk `supersedes` edges in both directions from *stem*, oldest to newest.
+
+    A note's own `supersedes` frontmatter points to the older note it
+    replaces; `note_is_superseded` finds the newer note (if any) that
+    replaced it. Both directions are walked until no further link is found
+    or a cycle is detected.
+
+    Returns:
+        List of {stem, title, path, hop} entries, oldest first. hop is the
+        signed distance from *stem* (negative = older, 0 = stem itself,
+        positive = newer).
+    """
+    seen = {stem}
+
+    older = []
+    current = stem
+    hop = 0
+    while True:
+        meta = read_note_metadata(current) or {}
+        target = _parse_supersedes_target(meta.get("supersedes"))
+        if not target or target in seen:
+            break
+        seen.add(target)
+        hop -= 1
+        older.append(_related_entry(target, hop))
+        current = target
+
+    newer = []
+    current = stem
+    hop = 0
+    while True:
+        next_stem = note_is_superseded(current)
+        if not next_stem or next_stem in seen:
+            break
+        seen.add(next_stem)
+        hop += 1
+        newer.append(_related_entry(next_stem, hop))
+        current = next_stem
+
+    return list(reversed(older)) + [_related_entry(stem, 0)] + newer
+
+
+def build_related_view(note, direction="both", depth=1, cap=NEIGHBORHOOD_DEFAULT_CAP):
+    """Build the full topology view for a note: outbound/inbound links, a BFS
+    neighborhood, and its supersession chain.
+
+    Pure topology -- no embedding/scoring work. Reuses load_or_build_graph
+    (the same cache the hook recall pipeline uses) instead of building a
+    second graph. Returns a structured error dict (never raises) when
+    networkx is unavailable or *note* can't be resolved.
+
+    Args:
+        note: stem, relative path, or exact title to resolve.
+        direction: neighborhood traversal direction: "out", "in", or "both".
+        depth: neighborhood BFS depth, clamped to [0, NEIGHBORHOOD_MAX_DEPTH].
+        cap: maximum neighborhood nodes to return before truncating.
+
+    Returns:
+        Dict with note/path/title, outbound, inbound, neighborhood
+        ({"nodes": [...], "truncated": bool}), and supersession_chain. On
+        failure: {"error": str, "reason": str, [suggestions: list]}.
+    """
+    if not _HAS_NETWORKX:
+        return {
+            "error": "graph features require networkx, which is not installed in this environment",
+            "reason": "networkx_unavailable",
+        }
+
+    vault = get_vault()
+    graph, _pagerank = load_or_build_graph(vault)
+    if graph is None:
+        return {
+            "error": "graph features require networkx, which is not installed in this environment",
+            "reason": "networkx_unavailable",
+        }
+
+    stem, suggestions = resolve_note_reference(note, graph=graph)
+    if stem is None:
+        return {
+            "error": f"note not found: {note!r}",
+            "reason": "note_not_found",
+            "suggestions": suggestions,
+        }
+
+    normalized_direction = direction if direction in ("out", "in", "both") else "both"
+    try:
+        clamped_depth = max(0, min(int(depth), NEIGHBORHOOD_MAX_DEPTH))
+    except (TypeError, ValueError):
+        clamped_depth = 1
+
+    outbound = [_related_entry(target, 1) for target in graph.successors(stem)]
+    inbound = [_related_entry(source, 1) for source in graph.predecessors(stem)]
+    neighborhood_nodes, truncated = graph_neighborhood(
+        graph, stem, direction=normalized_direction, depth=clamped_depth, cap=cap
+    )
+    chain = supersession_chain(stem)
+    self_entry = _related_entry(stem, 0)
+
+    return {
+        "note": stem,
+        "path": self_entry["path"],
+        "title": self_entry["title"],
+        "direction": normalized_direction,
+        "depth": clamped_depth,
+        "outbound": outbound,
+        "inbound": inbound,
+        "neighborhood": {"nodes": neighborhood_nodes, "truncated": truncated},
+        "supersession_chain": chain,
+    }
 
 
 # --- Concept index (Tenet) ---

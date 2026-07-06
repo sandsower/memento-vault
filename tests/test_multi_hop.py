@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 
 from memento.graph import extract_wikilinks
-from memento.search import multi_hop_search, qmd_get
+from memento.search import expand_result_links, multi_hop_search, qmd_get
 from memento.search_backend import reset_backend
 
 
@@ -263,3 +263,111 @@ class TestMultiHopSearch:
 
         # Should only fetch content for top 3, not all 10
         assert len(get_calls) <= 3
+
+
+class TestExpandResultLinks:
+    """expand_result_links (MEM-159): thin shim for memento_search's
+    expand_links opt-in. Unlike multi_hop_search, entries are returned
+    separately -- never merged/re-sorted with the direct hits."""
+
+    def _shaped(self, path, title, score=0.5):
+        return {"path": path, "title": title, "score": score}
+
+    def test_returns_via_link_marked_entries(self):
+        shaped = [self._shaped("notes/a.md", "Note A", 0.6)]
+
+        def mock_get(path, **kwargs):
+            if path == "notes/a.md":
+                return {"path": "notes/a.md", "content": "See [[note-b]]."}
+            if path == "notes/note-b.md":
+                return {"path": "notes/note-b.md", "title": "Note B", "content": "B content."}
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expanded = expand_result_links(shaped, config={"multi_hop_max": 2})
+
+        assert len(expanded) == 1
+        assert expanded[0]["path"] == "notes/note-b.md"
+        assert expanded[0]["via_link"] == "a"
+        assert expanded[0]["score"] == 0.0
+
+    def test_does_not_mutate_or_reorder_direct_hits(self):
+        shaped = [
+            self._shaped("notes/low.md", "Low", 0.1),
+            self._shaped("notes/high.md", "High", 0.9),
+        ]
+        original = [dict(entry) for entry in shaped]
+
+        def mock_get(path, **kwargs):
+            if path == "notes/low.md":
+                return {"path": "notes/low.md", "content": "See [[linked]]."}
+            if path == "notes/linked.md":
+                return {"path": "notes/linked.md", "title": "Linked", "content": "text"}
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expand_result_links(shaped, config={"multi_hop_max": 2})
+
+        # Direct hits list must be untouched: same dicts, same order.
+        assert shaped == original
+
+    def test_skips_paths_already_in_direct_hits(self):
+        shaped = [
+            self._shaped("notes/a.md", "Note A", 0.6),
+            self._shaped("notes/note-b.md", "Note B", 0.5),
+        ]
+
+        def mock_get(path, **kwargs):
+            if path == "notes/a.md":
+                return {"path": "notes/a.md", "content": "See [[note-b]] and [[note-c]]."}
+            if path == "notes/note-c.md":
+                return {"path": "notes/note-c.md", "title": "Note C", "content": "C"}
+            return None
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expanded = expand_result_links(shaped, config={"multi_hop_max": 5})
+
+        paths = [e["path"] for e in expanded]
+        assert "notes/note-b.md" not in paths  # already a direct hit
+        assert "notes/note-c.md" in paths
+
+    def test_respects_max_expanded_from_config(self):
+        shaped = [self._shaped("notes/a.md", "Note A", 0.6)]
+
+        def mock_get(path, **kwargs):
+            if path == "notes/a.md":
+                return {"path": "notes/a.md", "content": "See [[b]], [[c]], [[d]]."}
+            return {"path": path, "title": Path(path).stem, "content": "text"}
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expanded = expand_result_links(shaped, config={"multi_hop_max": 1})
+
+        assert len(expanded) == 1
+
+    def test_only_follows_top_n_direct_hits(self):
+        shaped = [self._shaped(f"notes/{i}.md", f"Note {i}", 0.9 - i * 0.1) for i in range(10)]
+
+        get_calls = []
+
+        def mock_get(path, **kwargs):
+            get_calls.append(path)
+            return {"path": path, "content": "No links here."}
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expand_result_links(shaped, config={"multi_hop_max": 5}, top_n=3)
+
+        assert len(get_calls) <= 3
+
+    def test_empty_results_returns_empty(self):
+        assert expand_result_links([], config={"multi_hop_max": 2}) == []
+
+    def test_no_wikilinks_returns_empty(self):
+        shaped = [self._shaped("notes/a.md", "Note A", 0.6)]
+
+        def mock_get(path, **kwargs):
+            return {"path": path, "content": "Plain text with no links."}
+
+        with patch("memento.search.qmd_get", side_effect=mock_get):
+            expanded = expand_result_links(shaped, config={"multi_hop_max": 2})
+
+        assert expanded == []

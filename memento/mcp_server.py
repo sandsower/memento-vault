@@ -140,11 +140,21 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for stripped test env
 
 
 from memento.config import detect_project, get_config, get_vault, get_vault_id, slugify
+from memento.graph import build_related_view
 from memento.health import build_automation_memory_readiness
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context
-from memento.search import enhance_results, filter_by_project, has_qmd, qmd_get, qmd_search_with_extras
-from memento.retrieval_policy import ExplicitSearchRequest, ExplicitSearchRuntime
-from memento.query import query_notes
+from memento.search import (
+    enhance_results,
+    expand_result_links,
+    filter_by_project,
+    has_qmd,
+    miss_envelope,
+    qmd_get,
+    qmd_search_with_extras,
+    shape_search_results,
+)
+from memento.retrieval_policy import ExplicitSearchRequest, ExplicitSearchRuntime, _project_slug_from_value
+from memento.query import QueryValidationError, build_metadata_filter, query_notes, read_note_record
 from memento.contradictions import inspect_contradictions
 from memento.store import (
     acquire_vault_write_lock,
@@ -332,6 +342,98 @@ def _vault_relative_access_path(vault: Path, path: str) -> str:
         return text.replace("\\", "/")
 
 
+def _search_filters_requested(
+    *,
+    note_type: str,
+    tags: str,
+    certainty_min: int | None,
+    certainty_max: int | None,
+    date_from: str,
+    date_to: str,
+    branch: str,
+    session_id: str,
+    project: str,
+) -> bool:
+    return bool(
+        note_type
+        or tags
+        or certainty_min is not None
+        or certainty_max is not None
+        or date_from
+        or date_to
+        or branch
+        or session_id
+        or project
+    )
+
+
+def _apply_search_metadata_filters(
+    result: dict,
+    *,
+    vault: Path,
+    limit: int,
+    note_type: str,
+    tags: str,
+    certainty_min: int | None,
+    certainty_max: int | None,
+    date_from: str,
+    date_to: str,
+    branch: str,
+    session_id: str,
+    project: str,
+) -> dict:
+    """Post-filter ranked search results using memento_query's filter semantics.
+
+    Reuses ``build_metadata_filter`` (the same predicate ``query_notes`` uses)
+    for type/tag/certainty/date/branch/session_id, and layers a slug-based
+    project comparison on top via the existing recall project-slug helper
+    (``_project_slug_from_value``) so path-like and bare project values match
+    consistently -- ``query_notes``'s own project filter stays exact-match and
+    is untouched by this.
+    """
+    try:
+        predicate, filters = build_metadata_filter(
+            note_type=note_type,
+            tag=tags,
+            certainty_min=certainty_min,
+            certainty_max=certainty_max,
+            date_start=date_from,
+            date_end=date_to,
+            branch=branch,
+            session_id=session_id,
+        )
+    except QueryValidationError as exc:
+        return {"error": str(exc), "metadata": {"valid": False}}
+
+    # Copy before echoing project -- `filters` is the exact dict `predicate`
+    # closes over, so mutating it in place would silently turn "project" into
+    # an active exact-match filter inside the shared _matches() core.
+    filters_echo = dict(filters)
+    filters_echo["project"] = project or None
+    project_slug = _project_slug_from_value(project) if project else None
+
+    def passes(entry: dict) -> bool:
+        record = read_note_record(vault, entry.get("path", ""))
+        if record is None:
+            return False
+        if project_slug and _project_slug_from_value(record.get("project")) != project_slug:
+            return False
+        return predicate(record)
+
+    filtered = [entry for entry in result.get("results", []) if passes(entry)]
+    result["results"] = filtered[:limit]
+    result.setdefault("metadata", {})["filters_applied"] = filters_echo
+
+    if not result["results"]:
+        return miss_envelope(
+            "filters_eliminated_all",
+            details={"filters_applied": filters_echo},
+            metadata=result.get("metadata"),
+        )
+
+    return result
+
+
 @mcp.tool()
 def memento_search(
     query: str,
@@ -343,6 +445,16 @@ def memento_search(
     detail_level: str = "summary",
     include_content: bool = False,
     token_budget: int | None = 2000,
+    expand_links: bool = False,
+    type: str = "",
+    tags: str = "",
+    certainty_min: int | None = None,
+    certainty_max: int | None = None,
+    date_from: str = "",
+    date_to: str = "",
+    branch: str = "",
+    session_id: str = "",
+    project: str = "",
 ) -> object:
     """Search vault notes for prior context before answering from memory.
 
@@ -356,6 +468,22 @@ def memento_search(
     After search, call memento_get when a result's snippet/content is not enough
     and you need the full note for a returned path.
 
+    Optional typed filters (type, tags, certainty_min, certainty_max,
+    date_from, date_to, branch, session_id, project) let you combine ranked
+    semantic/keyword retrieval with metadata constraints in one call --
+    for example "semantically search X, certainty >= 4, type decision, last
+    30 days". They reuse memento_query's filter semantics (same validation,
+    same match logic) and run as a post-filter around the ranking pipeline:
+    with any filter set, candidates are over-fetched (up to limit*3, capped
+    at 50), ranked as usual, filtered by frontmatter metadata, then trimmed
+    to `limit`; filtered-out candidates never affect the ranking of
+    survivors. Omitting all filter params leaves search behavior byte-for-byte
+    unchanged. There is no aggregation support here -- use memento_query for
+    counts/aggregations, or when you only need metadata rows and no ranking.
+    When expand_links is also set, link expansion runs AFTER filtering, on
+    the filtered top hits; expanded neighbors are via_link context and are
+    NOT themselves subject to the filters.
+
     Args:
         query: Natural-language question or exact identifier to search for.
         limit: Maximum number of results to return.
@@ -366,10 +494,49 @@ def memento_search(
         detail_level: Response shape: brief, summary, or full.
         include_content: Include note content alongside the selected detail level.
         token_budget: Approximate token budget for returned content, default 2000.
+        expand_links: When true, append 1-hop wikilink neighbors of the top
+            direct hits (marked with via_link); they never outrank direct
+            hits. Default false -- no behavior change when omitted.
+        type: Optional exact note type filter (mirrors memento_query's note_type,
+            e.g. discovery, decision, bugfix).
+        tags: Optional tag that must be present in the note's frontmatter tags
+            (mirrors memento_query's tag; a single tag, not a list).
+        certainty_min: Optional minimum certainty 1-5 (mirrors memento_query).
+        certainty_max: Optional maximum certainty 1-5 (mirrors memento_query).
+        date_from: Optional inclusive ISO date/datetime lower bound (mirrors
+            memento_query's date_start).
+        date_to: Optional inclusive ISO date/datetime upper bound (mirrors
+            memento_query's date_end).
+        branch: Optional exact branch frontmatter filter (mirrors memento_query).
+        session_id: Optional exact session_id frontmatter filter (mirrors memento_query).
+        project: Optional project filter compared by slug (path-like values are
+            normalized the same way recall project-scoping does), not exact string match.
 
     Returns:
-        Search envelope with results and metadata. Misses include structured miss metadata.
+        Search envelope with results and metadata. Misses include structured
+        miss metadata. When filters are active, metadata also carries
+        filters_applied; if filters eliminate every hit, the standard empty
+        miss envelope is returned with a filters_applied echo and a hint to
+        use memento_query for raw metadata inspection.
     """
+    has_filters = _search_filters_requested(
+        note_type=type,
+        tags=tags,
+        certainty_min=certainty_min,
+        certainty_max=certainty_max,
+        date_from=date_from,
+        date_to=date_to,
+        branch=branch,
+        session_id=session_id,
+        project=project,
+    )
+
+    try:
+        normalized_limit = max(1, min(int(limit), 50))
+    except (TypeError, ValueError):
+        normalized_limit = 5
+    search_limit = min(normalized_limit * 3, 50) if has_filters else limit
+
     runtime = ExplicitSearchRuntime(
         vault_loader=get_vault,
         has_backend=has_qmd,
@@ -379,10 +546,10 @@ def memento_search(
         log_retrieval=log_retrieval,
         record_access=record_access,
     )
-    return runtime.search(
+    result = runtime.search(
         ExplicitSearchRequest(
             query=query,
-            limit=limit,
+            limit=search_limit,
             semantic=semantic,
             min_score=min_score,
             cwd=cwd,
@@ -392,6 +559,89 @@ def memento_search(
             token_budget=token_budget,
         )
     )
+
+    if has_filters and result.get("results"):
+        result = _apply_search_metadata_filters(
+            result,
+            vault=get_vault(),
+            limit=normalized_limit,
+            note_type=type,
+            tags=tags,
+            certainty_min=certainty_min,
+            certainty_max=certainty_max,
+            date_from=date_from,
+            date_to=date_to,
+            branch=branch,
+            session_id=session_id,
+            project=project,
+        )
+        if "error" in result or not result.get("results"):
+            return result
+
+    if expand_links and result.get("results"):
+        expanded_raw = expand_result_links(result["results"], config=get_config())
+        if expanded_raw:
+            shaped = shape_search_results(
+                expanded_raw,
+                vault=get_vault(),
+                detail_level=detail_level,
+                include_content=include_content,
+                token_budget=token_budget,
+            )
+            via_link_by_path = {entry["path"]: entry.get("via_link", "") for entry in expanded_raw}
+            for entry in shaped["results"]:
+                entry["via_link"] = via_link_by_path.get(entry["path"], "")
+            result["results"].extend(shaped["results"])
+            result.setdefault("metadata", {})["expand_links"] = True
+            result["metadata"]["expanded_count"] = len(shaped["results"])
+
+    return result
+
+
+@mcp.tool()
+def memento_related(
+    note: str,
+    direction: str = "both",
+    depth: int = 1,
+) -> dict:
+    """Explore the wikilink graph around a note: pure topology, no relevance scoring.
+
+    Use this to answer "what links to X", "what does X link to", walk a
+    supersession chain to find the current/superseded version of a note, or
+    expand a small neighborhood around a note. Use memento_search instead for
+    topical/semantic retrieval; use this only when the question is about
+    graph structure.
+
+    Args:
+        note: Note stem (e.g. "redis-cache-ttl"), relative path (e.g.
+            "notes/redis-cache-ttl.md"), or exact frontmatter title to
+            resolve.
+        direction: Neighborhood BFS direction: "out" (notes this note links
+            to), "in" (notes linking to this note), or "both". Only affects
+            the neighborhood field -- outbound/inbound are always returned.
+        depth: Neighborhood BFS depth, clamped to 0-3.
+
+    Returns:
+        Dict with note/path/title, outbound, inbound, neighborhood
+        ({"nodes": [...], "truncated": bool}), and supersession_chain
+        (oldest to newest). An unresolved note returns a structured error
+        with close-match suggestions; a missing networkx dependency returns
+        a structured error instead of raising.
+    """
+    result = build_related_view(note, direction=direction, depth=depth)
+
+    action = "related_error" if result.get("error") else "related"
+    log_retrieval("mcp", action, note=note, reason=result.get("reason", ""))
+
+    if not result.get("error"):
+        paths = (
+            [result["path"]]
+            + [entry["path"] for entry in result.get("outbound", [])]
+            + [entry["path"] for entry in result.get("inbound", [])]
+        )
+        record_access(paths, hook="mcp", tool="related", query=note, result_count=len(paths))
+
+    return result
 
 
 @mcp.tool()
