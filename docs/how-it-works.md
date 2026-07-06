@@ -152,8 +152,16 @@ memento-triage.py (existing)
           memento-inception.py (background, non-blocking)
                 |
                 +---> Phase 1: Local clustering (zero LLM cost)
-                |     Read QMD embeddings from SQLite
-                |     Mean-pool chunk vectors -> doc-level 768-dim vectors
+                |     Read note vectors from the active search backend:
+                |       - QMD: mean-pool chunked SQLite vectors -> doc-level
+                |       - Embedded (QMD-less default): read notes_vec
+                |         directly -- already one vector per note, no pooling
+                |       - Grep-only / no backend: no vectors available --
+                |         skip clustering with an explicit logged reason
+                |     Dimensionality comes from the backend's own metadata
+                |     (768 for QMD's default model, 512 for the embedded
+                |     backend's default Matryoshka-truncated model) --
+                |     never a hardcoded constant.
                 |     HDBSCAN clustering (leaf method, cosine metric)
                 |     Score clusters: size + tag diversity + temporal spread
                 |                     + project diversity + mean certainty
@@ -259,7 +267,7 @@ Pattern notes follow the same lifecycle as all vault notes:
 
 - **No invalidation of wrong patterns.** Inception can refresh a pattern when new evidence extends it, but it can't detect when a pattern's conclusion has been contradicted. If the source notes are archived or superseded by newer work, the pattern note persists until you delete it. Periodic `--full` runs re-cluster everything and may produce updated patterns, but there's no automated "this is now wrong" signal. This would require the LLM to evaluate its own past output against new evidence -- an open research problem.
 - **No cross-system dedup.** The triage agent and Inception are independent pipelines. Both can write notes covering similar ground -- an atomic note "Redis TTL matters" and a pattern note "Cache TTL is the recurring footgun" may coexist. The Tenet hooks resolve this at query time (higher-scoring note wins the injection slot), but both consume index space.
-- **Clustering depends on QMD embeddings.** Semantically similar notes using different vocabulary may not cluster together. The 768-dim model captures meaning reasonably well but isn't perfect.
+- **Clustering depends on the active backend's embeddings.** Semantically similar notes using different vocabulary may not cluster together. Neither the 768-dim QMD model nor the 512-dim embedded-backend model captures meaning perfectly. If the active backend has no vector support at all (grep-only), Inception skips clustering entirely and logs why, rather than running with stale or wrong assumptions.
 - **HDBSCAN has tuning parameters.** `min_cluster_size=3` and `leaf` selection work well for ~550 notes but may need adjustment past 1000+.
 - **LLM synthesis dominates runtime.** Clusters are synthesized in parallel (4 workers by default via `inception_parallel`), but each call still takes 10-30s. Typical run: 30-90s for 10 clusters.
 - **First-run bias.** On a full backfill, the LLM sees all clusters at once and may over-synthesize. Incremental runs (5+ new notes) produce more focused patterns.

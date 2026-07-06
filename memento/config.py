@@ -90,6 +90,14 @@ DEFAULT_CONFIG = {
     "inception_dry_run": False,
     "inception_pre_reason": True,
     "inception_parallel": 4,
+    # Per-run processing budget (MEM-154): the number of notes a single
+    # Inception run aims to consolidate, in notes rather than clusters, so
+    # the backlog doesn't grow unbounded when capture volume spikes. Actual
+    # budget = max(inception_budget_floor, notes ingested since the last
+    # run), capped at inception_budget_cap. See hooks/memento-inception.py's
+    # compute_inception_budget().
+    "inception_budget_floor": 20,
+    "inception_budget_cap": 200,
     # Personalized PageRank expansion
     "ppr_enabled": True,
     "ppr_max_expanded": 5,

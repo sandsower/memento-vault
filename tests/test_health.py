@@ -630,6 +630,166 @@ def test_inception_health_surfaces_recent_run_summary_and_error(monkeypatch):
     assert "last run note count 7" in report.message
 
 
+def test_inception_health_omits_coverage_when_no_run_has_it(monkeypatch):
+    """State files predating MEM-154 (or with no completed run since
+    upgrading) must not report bogus coverage numbers."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": datetime.now().isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": [
+                    {"iso": datetime.now().isoformat(timespec="seconds"), "clusters_found": 1, "notes_written": 0}
+                ],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "pass"
+    assert "coverage" not in report.details
+
+
+def test_inception_health_reports_coverage_without_trend_on_single_run(monkeypatch):
+    """A single run with total_notes/processed_notes_total gives a coverage
+    ratio but no trend flags (not enough history to confirm a direction)."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    now = datetime.now()
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": now.isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": [
+                    {
+                        "iso": now.isoformat(timespec="seconds"),
+                        "clusters_found": 1,
+                        "notes_written": 1,
+                        "total_notes": 100,
+                        "processed_notes_total": 20,
+                    }
+                ],
+                "processed_notes": [f"n{i}" for i in range(20)],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "pass"
+    assert report.details["coverage"]["total_notes"] == 100
+    assert report.details["coverage"]["processed_notes_total"] == 20
+    assert report.details["coverage"]["coverage_ratio"] == pytest.approx(0.2)
+    assert report.details["coverage"]["backlog"] == 80
+    assert report.details["coverage"]["backlog_growing"] is False
+    assert report.details["coverage"]["coverage_falling"] is False
+    assert "coverage 20.0%" in report.message
+
+
+def test_inception_health_warns_when_backlog_grows_across_runs(monkeypatch):
+    """Backlog strictly increasing across 3 consecutive runs -> WARN, not FAIL."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    now = datetime.now()
+    runs = []
+    # total_notes grows faster than processed_notes_total each run, so
+    # backlog (total - processed) strictly increases: 80, 90, 100.
+    for i, (total, processed) in enumerate([(100, 20), (110, 20), (120, 20)]):
+        runs.append(
+            {
+                "iso": (now - timedelta(hours=3 - i)).isoformat(timespec="seconds"),
+                "clusters_found": 1,
+                "notes_written": 0,
+                "total_notes": total,
+                "processed_notes_total": processed,
+            }
+        )
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": now.isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": runs,
+                "processed_notes": [f"n{i}" for i in range(20)],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "warn"
+    assert report.details["coverage"]["backlog_growing"] is True
+    assert "backlog growing" in report.message
+
+
+def test_inception_health_warns_when_coverage_falls_across_runs(monkeypatch):
+    """Coverage ratio strictly decreasing across 3 consecutive runs -> WARN."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    now = datetime.now()
+    runs = []
+    for i, (total, processed) in enumerate([(100, 50), (150, 50), (200, 50)]):
+        runs.append(
+            {
+                "iso": (now - timedelta(hours=3 - i)).isoformat(timespec="seconds"),
+                "clusters_found": 1,
+                "notes_written": 0,
+                "total_notes": total,
+                "processed_notes_total": processed,
+            }
+        )
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": now.isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": runs,
+                "processed_notes": [f"n{i}" for i in range(50)],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.status == "warn"
+    assert report.details["coverage"]["coverage_falling"] is True
+    assert "coverage falling" in report.message
+
+
+def test_inception_health_does_not_warn_on_a_single_noisy_run(monkeypatch):
+    """A single backwards blip doesn't trip the trend flag -- needs
+    min_consecutive confirmations."""
+    monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
+    now = datetime.now()
+    # backlog: 80, 70 (improves), 90 (blip) -- not a confirmed growing trend.
+    runs = []
+    for i, (total, processed) in enumerate([(100, 20), (100, 30), (100, 10)]):
+        runs.append(
+            {
+                "iso": (now - timedelta(hours=3 - i)).isoformat(timespec="seconds"),
+                "clusters_found": 1,
+                "notes_written": 0,
+                "total_notes": total,
+                "processed_notes_total": processed,
+            }
+        )
+    Path(health.INCEPTION_STATE_PATH).write_text(
+        json.dumps(
+            {
+                "last_run_iso": now.isoformat(timespec="seconds"),
+                "last_run_note_count": 1,
+                "runs": runs,
+                "processed_notes": [f"n{i}" for i in range(10)],
+            }
+        )
+    )
+
+    report = health._check_inception({"inception_enabled": True})
+
+    assert report.details["coverage"]["backlog_growing"] is False
+    assert report.status == "pass"
+
+
 def test_inception_health_reports_live_lock(monkeypatch):
     monkeypatch.setattr(health, "_missing_inception_dependencies", lambda: [])
     Path(health.INCEPTION_STATE_PATH).write_text(
