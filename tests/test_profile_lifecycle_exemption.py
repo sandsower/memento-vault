@@ -71,3 +71,60 @@ def test_curated_path_never_a_sweep_candidate(tmp_path, monkeypatch):
 
     assert report["candidates"] == []
     assert {"path": "profile/voice.md", "reason": "curated (exempt)"} in report["skipped"]
+
+
+def test_check_profile_absent_is_pass(tmp_path):
+    from memento.health import _check_profile
+
+    (tmp_path / "notes").mkdir(parents=True)  # vault without profile/
+    result = _check_profile(tmp_path, config.DEFAULT_CONFIG)
+    assert result.status == "pass"
+    assert result.details.get("present") is False
+
+
+def test_check_profile_present_reports_facets(tmp_path):
+    from memento.health import _check_profile
+
+    pdir = tmp_path / "profile"
+    pdir.mkdir(parents=True)
+    (pdir / "PROFILE.md").write_text("# index\n\n- voice")
+    (pdir / "README.md").write_text("docs")
+    (pdir / "voice.md").write_text("---\nname: voice\n---\n")
+    (pdir / "identity.md").write_text("---\nname: identity\n---\n")
+
+    result = _check_profile(tmp_path, config.DEFAULT_CONFIG)
+    assert result.status == "pass"
+    assert result.details["facets"] == 2  # PROFILE.md + README.md excluded
+    assert result.details["index_present"] is True
+
+
+def test_check_profile_facets_without_index_warns(tmp_path):
+    from memento.health import _check_profile
+
+    pdir = tmp_path / "profile"
+    pdir.mkdir(parents=True)
+    (pdir / "voice.md").write_text("---\nname: voice\n---\n")
+
+    result = _check_profile(tmp_path, config.DEFAULT_CONFIG)
+    assert result.status == "warn"
+
+
+def test_index_staleness_scans_profile_dir(tmp_path):
+    import os
+    import time
+
+    from memento.health import _embedded_index_staleness
+
+    (tmp_path / "notes").mkdir(parents=True)
+    (tmp_path / "profile").mkdir(parents=True)
+    db = tmp_path / ".search" / "search.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("x")
+    # Age the db an hour; a fresh profile edit must read as stale.
+    old = time.time() - 3600
+    os.utime(db, (old, old))
+    (tmp_path / "profile" / "voice.md").write_text("---\nname: voice\n---\n")
+
+    meta = _embedded_index_staleness(tmp_path, {"search_db_path": ".search/search.db"})
+    assert meta["stale"] is True
+    assert meta["status"] == "warn"
