@@ -1036,6 +1036,23 @@ def test_pi_bridge_health_warns_when_log_missing():
     assert "unavailable" in check.message
 
 
+def test_health_queue_path_resolution_characterization(tmp_path, monkeypatch):
+    """Freeze queue-path/state-home resolution semantics across the queue-module extraction."""
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "pi-state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ignored-xdg"))
+    assert health._pi_queue_file() == tmp_path / "pi-state" / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME")
+    assert health._pi_queue_file() == tmp_path / "ignored-xdg" / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert (
+        health._pi_queue_file()
+        == tmp_path / "home" / ".local" / "state" / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+    )
+
+
 def test_queue_health_warns_on_backlog_size(tmp_path, monkeypatch):
     state_home = tmp_path / "state"
     monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(state_home))
