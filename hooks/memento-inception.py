@@ -857,9 +857,11 @@ def write_pattern_note(synthesis, cluster_stems, vault_path, merge_target=None, 
     tags_str = "[" + ", ".join(synthesis.get("tags", [])) + "]"
     synth_lines = "\n".join(f"  - {s}" for s in cluster_stems)
     resurfaced_count, last_resurfaced = aggregate_resurfacing_signal(cluster_stems, notes_dict)
-    resurfacing_lines = f"resurfaced_count: {resurfaced_count}\n"
+    # No trailing newline: the template below supplies the literal "\n---"
+    # terminator that scripts/check_frontmatter_schema.py anchors on.
+    resurfacing_lines = f"resurfaced_count: {resurfaced_count}"
     if last_resurfaced:
-        resurfacing_lines += f"last_resurfaced: {last_resurfaced}\n"
+        resurfacing_lines += f"\nlast_resurfaced: {last_resurfaced}"
 
     content = f"""---
 title: {synthesis["title"]}
@@ -870,7 +872,8 @@ certainty: {min(synthesis.get("certainty", 3), 3)}
 synthesized_from:
 {synth_lines}
 date: {now}
-{resurfacing_lines}---
+{resurfacing_lines}
+---
 
 {synthesis["body"].strip()}
 
