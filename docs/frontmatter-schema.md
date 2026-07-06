@@ -37,6 +37,7 @@ These fields are present on ordinary atomic notes written by `write_note` and it
 | `project_path` | string | Raw working-directory path the note was written from, preserved verbatim alongside the derived `project` slug (MEM-164) |
 | `branch` | string | Git branch name |
 | `session_id` | uuid/string | Agent session ID |
+| `citations` | list | Code citations backing a note's claim, each `{file, anchor[, commit]}`; written once at capture time and verified cheaply at recall/tool-context injection time (MEM-162) -- see [Citation verification](#citation-verification-at-use-mem-162) |
 
 ## Variant-specific fields
 
@@ -157,6 +158,125 @@ machinery the MEM-152 sweep uses (`fleeting/<x>.md` archives to
 neither a parseable `date` nor a readable mtime is skipped, never archived
 on ambiguity. Gated by `fleeting_lifecycle_enabled` (config, default `false`
 -- a no-op until enabled).
+
+### Citation verification at use (MEM-162)
+
+Notes assert facts about code that keeps changing, and nothing checked that
+those facts still held -- retrieval is easy to verify even though it is hard
+to solve well. Capture-side writers (currently `hooks/memento-triage.py`) may
+emit a `citations` list on a note: each entry is `{file, anchor[, commit]}`,
+where `file` is a repo-relative path, `anchor` is a short (<=120 chars)
+verbatim code substring that is the actual verification key, and `commit` is
+optional short-sha provenance only. Malformed entries (not a dict, missing
+`file`/`anchor`) are dropped at write time
+(`memento.store._normalize_citations`) -- a bad citation never blocks the
+note itself from being written. Citations accrue on new notes only; there is
+no backfill for existing notes.
+
+Verification happens at use, not at write time. `memento.retrieval_policy`
+(prompt recall) and `memento.lifecycle.build_tool_context` (the tool-context
+path) verify a note's citations only for results actually selected for
+injection -- post-ranking, top-k, never the full result set. Verification
+resolves a repo root from the note's `project_path` frontmatter (MEM-164) or
+the caller's cwd, then checks that the cited file exists and that its anchor
+substring is still present, reading at most `citation_max_verify_bytes`
+(config, default 256KiB) of the file. Three outcomes:
+
+- **verified** -- the file exists and the anchor substring is present.
+  Injected normally.
+- **stale** -- the file exists but the anchor substring is gone. Injected
+  WITH an explicit `[stale: cited code changed]` prefix (a deliberate
+  decision: never silently skip a stale note), and the note path is appended
+  to a runtime-dir review queue (`stale-citations.jsonl`) as a supersession
+  flag.
+- **unverifiable** -- the repo/file context isn't available (different
+  machine, deleted repo, citation-less note). Injected unmarked, exactly
+  like a note with no citations. Absence of evidence is never treated as
+  evidence of staleness.
+
+Gated by `citation_verification_enabled` (config, default `true` -- cheap
+and additive, unlike the disabled-by-default sweeps above).
+
+The review queue is folded into durable frontmatter, never rewritten on the
+hot injection path: `memento.store.fold_stale_citations_into_frontmatter`
+runs from the same `hooks/memento-sweeper.py` periodic sweep as the folds
+above, draining the queue and setting `citation_stale: true` on each flagged
+note (idempotent -- a note already flagged is left unchanged). This is the
+supersession signal MEM-152's archive sweep and MEM-163's supersession
+review consume; MEM-162 itself does not act on `citation_stale` beyond
+setting it.
+
+## Bitemporal supersession (MEM-163)
+
+Like `resurfaced_count`/`last_resurfaced` above, `valid_from` and
+`invalidated_by` are NOT managed fields written by `write_note` -- they are
+optional frontmatter a note may carry, set by hand, by the sweeper backlink
+pass, or by contradiction-adjudication auto-apply (below). Retrieval treats
+a note as invalid once `invalidated_by` is set.
+
+- **`valid_from`** -- optional ISO date. Defaults to the note's own `date`
+  frontmatter when absent; this default is computed at read time only and is
+  never backfilled onto the file.
+- **`invalidated_by`** -- optional note-ref (stem or `[[wikilink]]`) pointing
+  at the note that closed this one's validity out. A note is invalid once
+  this is set.
+
+### Supersession backlink pass
+
+`memento.contradictions.apply_supersession_backlinks` runs from the same
+`hooks/memento-sweeper.py` periodic sweep, right after the MEM-153 fleeting
+lifecycle sweep above. For every note Y with `supersedes: X` where X is a
+note in the vault and X does not yet carry `invalidated_by`, it sets
+`X.invalidated_by = Y` (Y's stem) via a surgical single-field frontmatter
+rewrite (`memento.contradictions.apply_invalidation`) that preserves every
+other line verbatim, using the same atomic tmp+rename write
+(`memento.store._write_text_atomic`) the rest of the write path uses.
+Idempotent -- an edge whose target already carries the correct
+`invalidated_by` is left untouched, and one that already carries a
+*different* `invalidated_by` value is never overwritten (a prior
+deterministic write wins).
+
+### Retrieval exclusion
+
+`memento_search`, `memento_query`, and the automatic prompt-recall pipeline
+exclude notes carrying `invalidated_by` by default. `memento_search` and
+`memento_query` accept `include_invalidated: bool = false` to opt back in;
+excluded counts surface as `excluded_invalidated_count` in the response
+metadata. History stays greppable/queryable -- this is a default view
+filter, not a deletion.
+
+### Contradiction detection v2 (background)
+
+Gated by `contradiction_detection_enabled` (config, default `false`), a
+stage inside `hooks/memento-inception.py`'s run (`run_contradiction_detection`)
+rides the Inception hook's cadence and reuses the SAME
+backend-aware embedding vectors already loaded for clustering (never a
+second embedding load):
+
+1. **Candidate pass** (`find_contradiction_candidates`): embedding-similarity
+   pairs at or above `contradiction_similarity_threshold` (config, default
+   0.85), both notes in the same `project` scope, both non-invalidated, and
+   with no existing direct `supersedes` edge between them (that case is
+   already resolved deterministically by the backlink pass above).
+2. **Adjudication**: `memento.llm.llm_complete` per candidate pair, bounded
+   by `contradiction_max_pairs_per_run` (config, default 20), for a strict
+   JSON verdict `{"contradicts": bool, "newer_wins": bool, "confidence":
+   0.0-1.0}`. Malformed/out-of-range verdicts are never guessed at -- they
+   route to the review queue below.
+3. **Apply policy**: `invalidated_by` is auto-set on the older note ONLY
+   when `contradicts` AND `newer_wins` AND `confidence` is at or above
+   `contradiction_confidence_threshold` (config, default 0.75) -- same
+   project is already guaranteed by the candidate pass. Every other
+   candidate (below-threshold, `newer_wins: false`, unparseable/tied dates,
+   or a malformed verdict) is appended as one JSON line to a review-queue
+   file under the runtime directory
+   (`CONTRADICTION_REVIEW_QUEUE_PATH`, `hooks/memento-inception.py`) for
+   human triage. Every auto-application logs one line.
+
+`memento_contradictions` reports the resulting validity chains (see
+[how-it-works.md](how-it-works.md)) instead of the pre-MEM-163 lexical
+polarity-guessing report; the old report is kept available behind
+`contradictions_lexical_fallback` (config, default `false`).
 
 ## Note types
 

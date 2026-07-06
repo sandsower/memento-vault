@@ -55,6 +55,10 @@ vault-briefing.py (SessionStart hook)
     |       if maps have enough notes for this project: write ready immediately
     |       else: fall through to async vsearch
     +---> ASYNC: spawn background subprocess for QMD vsearch
+    |       if agentic_retrieval_enabled: try a bounded ReAct loop first
+    |       (memento/retrieval_agent.py -- search/query/related/get tools,
+    |       max 6 calls / 60s); any protocol/provider failure falls back to
+    |       the one-shot vsearch below, byte-identically
     |     writes results to a session/project-scoped deferred file with a short TTL
     |     picked up by vault-recall.py only for the matching first prompt context
     |
@@ -82,6 +86,11 @@ vault-recall.py (UserPromptSubmit hook)
     +---> multi-hop: if low confidence + multi_hop_enabled,
     |       follow [[wikilinks]] from top results via qmd get
     |       add linked notes (up to multi_hop_max)
+    +---> deep recall: if low confidence + deep_recall_enabled,
+    |       spawn a background worker; results injected on the next prompt
+    |       if agentic_retrieval_enabled: the worker runs the bounded ReAct
+    |       loop (memento/retrieval_agent.py) instead of a single
+    |       suggest-titles completion; falls back on any failure
     +---> dedup: skip if same top result as last injection (within 3 prompts)
     +---> print [vault] related memories to stdout --> Claude sees them
     |
@@ -317,6 +326,23 @@ Notes accumulate. `/memento-defrag` handles decay:
 - Certainty 4-5 -> never archive
 
 Archived notes and preserved bundles move to `archive/`, are removed from the QMD index, but remain in git history and are searchable via grep.
+
+## Project hubs and vault map (MEM-160)
+
+`projects/<slug>.md` hub files used to grow by free-text append on every MCP store/replace/capture — a session-summary line hand-appended under `## Sessions` (or `## Activity log`) with no cap and no structural guarantee across format drift. Left running, that turns into exactly what happened in the real vault: a 300+ line file with duplicate `## Sessions` headers, truncated entries, and stray agent-output fragments — nothing curated it, and nothing navigated from it.
+
+`memento/hub.py` replaces that with mechanical, idempotent regeneration:
+
+- `regenerate_project_hub` rebuilds `projects/<slug>.md` **from scratch** every time — it never reads or parses the previous hub file, so whatever corruption accumulated there is discarded outright rather than patched around. Calling it twice with the same vault state produces byte-identical output.
+- The hub has a fixed, always-present section schema: a `# <project>` header (note count + generated-at), `## Top notes` (ranked by PageRank, falling back to a plain inbound-wikilink-count scan when `networkx` is unavailable), `## Recent decisions` (`type: decision` notes from the last 30 days), `## Recent activity` (the most recently dated notes — the bounded replacement for the old unbounded `## Sessions` append), and `## Overflow` (explicit "N notes not shown; use `memento_search --project <slug>`" counts — truncation is never silent).
+- The whole hub is capped at `hub_max_bytes` (default 25KB); sections are trimmed in reverse priority order (Recent activity first, then Recent decisions, then Top notes) to fit, and every trim is folded into the `## Overflow` counts.
+- `vault_map()` layers a second tier on top: the regenerated hub plus up to 10 of the highest-centrality notes from *other* projects, capped at `vault_map_max_bytes` (default 25KB), designed for briefing injection. Everything else stays read-on-demand via search/get.
+
+Both knobs are off by default (`hub_regeneration_enabled`, `vault_map_in_briefing`) — see [configuration.md](configuration.md) for the periodic sweep cadence and the briefing wiring. `memento/store.py`'s `update_project_index` no longer writes a session-summary line at all; only the `[[note_name]]` link under `## Notes` remains.
+
+## Contradiction detection and validity chains (MEM-163)
+
+The sparse `supersedes` field alone can't answer "what did we believe on date X" or deterministically close out an invalidated fact. `valid_from`/`invalidated_by` frontmatter give deterministic validity intervals: a note is invalid once `invalidated_by` is set (never backfilled, never a hard delete -- history stays greppable). A backlink pass in the periodic sweeper turns every `supersedes` edge into the target's `invalidated_by`; a background stage inside Inception's run (gated by `contradiction_detection_enabled`, default off) additionally finds embedding-similar note pairs and asks an LLM for a strict contradicts/newer-wins/confidence verdict, auto-applying only high-confidence same-project cases and queuing everything else for human review. This only ever touches atomic notes -- Inception's own generated pattern notes are still excluded from clustering/candidate scope, so the "no invalidation of wrong patterns" limitation above still applies to Inception's synthesized output specifically. `memento_search`/`memento_query` exclude invalidated notes by default (`include_invalidated` opts back in); `memento_contradictions` reports the resulting validity chains. Full field semantics and the apply policy live in [frontmatter-schema.md](frontmatter-schema.md#bitemporal-supersession-mem-163).
 
 ## Automation consumption
 

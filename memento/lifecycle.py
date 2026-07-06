@@ -16,11 +16,18 @@ from pathlib import Path
 
 from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, slugify
 from memento.graph import load_or_build_graph, lookup_concepts, lookup_project_notes, read_note_metadata
+from memento.hub import vault_map
 from memento import queue as capture_queue
 from memento import telemetry
 from memento.health import build_automation_memory_readiness
 from memento.llm import is_invalid_mcp_config_error, llm_complete
-from memento.retrieval_policy import PromptRecallRequest, PromptRecallRuntime
+from memento.retrieval_agent import agentic_retrieve
+from memento.retrieval_policy import (
+    PromptRecallRequest,
+    PromptRecallRuntime,
+    apply_stale_citation_marker,
+    evaluate_citation_verification,
+)
 from memento.search import (
     MISS_RECOVERY_HINTS,
     build_search_miss,
@@ -738,13 +745,31 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
         import time as _time
 
         t0 = _time.time()
-        results = qmd_search(
-            query,
-            limit=max_notes + 3,
-            semantic=True,
-            timeout=12,
-            min_score=min_score,
-        )
+        config = get_config()
+        results = None
+        used_agentic = False
+        if config.get("agentic_retrieval_enabled", False):
+            try:
+                agentic_results = agentic_retrieve(query, config=config)
+            except Exception as exc:
+                agentic_results = None
+                log_retrieval("briefing", "agentic-retrieval-error", error=str(exc))
+            if agentic_results:
+                results = agentic_results
+                used_agentic = True
+
+        if results is None:
+            # Existing one-shot pipeline -- the fallback for both
+            # agentic_retrieval_enabled=False and any agentic-tier failure
+            # (malformed protocol, provider error/timeout, tool-call cap, or
+            # empty results). Byte-identical to pre-MEM-161 behavior.
+            results = qmd_search(
+                query,
+                limit=max_notes + 3,
+                semantic=True,
+                timeout=12,
+                min_score=min_score,
+            )
         latency_ms = int((_time.time() - t0) * 1000)
 
         results = enhance_results(results, cwd=params.get("cwd", ""))
@@ -801,6 +826,7 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
             latency_ms=latency_ms,
             injected_count=len(final_notes),
             injected_chars=injected_chars,
+            source="agentic" if used_agentic else "one-shot",
         )
 
     except Exception:
@@ -917,6 +943,19 @@ def build_briefing(
     ):
         if warning:
             lines.append(warning)
+
+    # MEM-160: capped two-tier vault map (regenerated project hub + top
+    # cross-project notes) injected behind vault_map_in_briefing -- default
+    # off until Vic reviews the output. A failure here must never break the
+    # rest of the briefing.
+    if config.get("vault_map_in_briefing", False):
+        try:
+            map_text = vault_map(vault, project_slug, config=config)
+            if map_text:
+                lines.append("")
+                lines.append(map_text)
+        except Exception:
+            pass
 
     if allow_deferred and config.get("project_maps_enabled", True) and has_qmd():
         try:
@@ -1605,6 +1644,43 @@ def run_deep_recall_worker(input_path, backend):
     if not prompt:
         _cleanup_deep_recall_pending()
         return
+
+    # MEM-161: when enabled, try the bounded tool-using retrieval agent first.
+    # It answers the same question as the one-shot suggestion prompt below
+    # ("what additional vault notes would help?") but can actually search/
+    # query/traverse the vault instead of guessing titles from the initial
+    # results. Strictly additive: on empty results or any failure, fall
+    # through to the existing single-completion pipeline unchanged.
+    config = get_config()
+    if config.get("agentic_retrieval_enabled", False):
+        try:
+            agentic_results = agentic_retrieve(prompt, config=config)
+        except Exception as exc:
+            agentic_results = None
+            log_retrieval("recall", "agentic-retrieval-error", error=str(exc))
+        if agentic_results:
+            suggestions = [
+                {
+                    "title": entry.get("title") or entry.get("path", ""),
+                    "reason": entry.get("path", ""),
+                }
+                for entry in agentic_results[:3]
+            ]
+            try:
+                with open(DEEP_RECALL_PENDING_PATH, "w") as f:
+                    json.dump(
+                        {
+                            "status": "ready",
+                            "suggestions": suggestions,
+                            "prompt": prompt,
+                            "timestamp": time.time(),
+                        },
+                        f,
+                    )
+                log_retrieval("recall", "deep-recall-ready", source="agentic", suggestion_count=len(suggestions))
+            except OSError:
+                _cleanup_deep_recall_pending()
+            return
 
     context_block = "\n".join(context_lines) if context_lines else "(no initial results)"
 
@@ -2943,8 +3019,13 @@ def build_tool_context(
     selected = filtered[:max_notes]
     lines = ["[connected-to-vault]"]
     injected_paths = []
+    vault = get_vault()
     for result in selected:
-        lines.append(format_tool_context_result(result))
+        line = format_tool_context_result(result)
+        citation_status = evaluate_citation_verification(vault, result, cwd=cwd, config=config)
+        if citation_status == "stale":
+            line = apply_stale_citation_marker(line)
+        lines.append(line)
         injected_paths.append(result.get("path", ""))
 
     injected_text = "\n".join(lines)

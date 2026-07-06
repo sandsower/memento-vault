@@ -311,5 +311,5 @@ It is curated memory: lessons in, context packets out, sanitized everywhere.
 
 - [How it works](how-it-works.md) — capture flow, retrieval (Tenet), Inception consolidation
 - [Configuration](configuration.md) — health diagnostics, retrieval hooks, project rules
-- Execution envelope for this contract: `docs/plans/envelopes/mem-17-memoryprovider-contract.envelope.yaml`
-- Health-check implementation: MEM-9 (`docs/plans/envelopes/mem-9-automation-memory-health.envelope.yaml`)
+- Execution envelope for this contract: `docs/history/plans/envelopes/mem-17-memoryprovider-contract.envelope.yaml`
+- Health-check implementation: MEM-9 (`docs/history/plans/envelopes/mem-9-automation-memory-health.envelope.yaml`)

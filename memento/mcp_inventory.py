@@ -45,8 +45,8 @@ MCP_TOOL_INVENTORY: tuple[McpToolInventoryItem, ...] = (
     McpToolInventoryItem(
         "memento_contradictions",
         "Read",
-        "Inspect a topic for disagreements, stale conclusions, supersession chains, and opposite-language hints.",
-        "Use when comparing competing notes about the same topic or when you need explicit superseded notes marked alongside their source paths and certainty/date context.",
+        "Inspect a topic for deterministic validity chains (note -> invalidated_by -> ... with dates) built from `valid_from`/`invalidated_by` frontmatter; the pre-MEM-163 lexical polarity-guessing report is available behind `contradictions_lexical_fallback` config.",
+        "Use when comparing competing notes about the same topic, checking whether a note has been explicitly invalidated, or walking a note's full validity history alongside certainty/date context.",
     ),
     McpToolInventoryItem(
         "memento_related",
