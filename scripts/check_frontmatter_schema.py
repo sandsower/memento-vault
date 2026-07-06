@@ -27,6 +27,7 @@ WRITER_SOURCE_PATHS = (
     REPO_ROOT / "memento" / "store.py",
     REPO_ROOT / "memento" / "mcp_server.py",
     REPO_ROOT / "memento" / "pi_bridge.py",
+    REPO_ROOT / "memento" / "smart_store.py",
     REPO_ROOT / "hooks" / "memento-triage.py",
 )
 
@@ -194,8 +195,13 @@ def implemented_atomic_sources(source_paths: tuple[Path, ...] | None = None) -> 
     """
     source_paths = WRITER_SOURCE_PATHS if source_paths is None else source_paths
     sources: set[str] = set()
-    functions_with_source_default = {"normalize_note_contract", "write_note"}
-    calls_with_source_keyword = {"normalize_note_contract", "write_note"}
+    functions_with_source_default = {"normalize_note_contract", "write_note", "suggest_store_action"}
+    calls_with_source_keyword = {
+        "normalize_note_contract",
+        "write_note",
+        "write_smart_store_note",
+        "suggest_store_action",
+    }
 
     for path in source_paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

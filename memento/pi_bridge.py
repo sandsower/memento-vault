@@ -29,7 +29,8 @@ from memento.capture_runtime import CaptureProcessRequest, CaptureRuntime
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context, strip_injection
 from memento.search_backend import get_backend
-from memento.store import acquire_vault_write_lock, release_vault_write_lock, write_note
+from memento.smart_store import write_smart_store_note
+from memento.store import acquire_vault_write_lock, release_vault_write_lock
 from memento.search import (
     enhance_results,
     filter_by_project,
@@ -1228,19 +1229,20 @@ def _capture(
     with _vault_write_lock() as acquired:
         if not acquired:
             return {"error": "vault write lock unavailable"}
-        note_path = write_note(
-            vault,
-            clean_title,
-            clean_body,
-            clean_note_type,
-            merged_tags,
+        decision = write_smart_store_note(
+            title=clean_title,
+            body=clean_body,
+            note_type=clean_note_type,
+            tags=merged_tags,
             certainty=clean_certainty,
-            source="pi-capture",
-            origin=f"pi_bridge:{source_event or reason or 'manual'}",
             project=cwd or None,
             branch=branch,
             session_id=session_id if session_id != "unknown" else None,
+            origin=f"pi_bridge:{source_event or reason or 'manual'}",
+            source="pi-capture",
         )
+        if decision.get("error"):
+            return decision
         if reason == "manual" or source_event in {"manual", "tool"}:
             _mark_manual_capture_state(
                 session_id,
@@ -1253,7 +1255,8 @@ def _capture(
                 lifecycle_metadata_value,
             )
         _commit_and_reindex_locked(vault, f"pi: capture {clean_title[:80]}")
-    return {"path": str(note_path.relative_to(vault)), "title": clean_title, "queued": False}
+    result_path = decision.get("canonical_path") or decision.get("path") or ""
+    return {"path": result_path, "title": clean_title, "queued": False}
 
 
 def _triage(

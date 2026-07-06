@@ -7,6 +7,7 @@ from pathlib import Path
 
 from memento.config import get_vault, slugify
 from memento.contradictions import inspect_contradictions
+from memento.dedup_merge import find_merge_target, merge_into_canonical
 from memento.search import has_qmd, qmd_search_with_extras, resolve_concrete_mode
 from memento.store import find_dedup_candidates, normalize_note_contract, update_project_index, write_note
 from memento.utils import sanitize_secrets
@@ -259,6 +260,7 @@ def suggest_store_action(
     validity_context: str | None = None,
     supersedes: str | None = None,
     origin: str | None = None,
+    source: str = "mcp",
     candidate_limit: int = 5,
 ) -> dict:
     """Return a write decision for a smart-store request.
@@ -283,7 +285,7 @@ def suggest_store_action(
         note_type=note_type,
         tags=tags,
         certainty=certainty,
-        source="mcp",
+        source=source,
         origin=origin or "mcp_store",
         validity_context=validity_context,
         supersedes=supersedes,
@@ -292,6 +294,8 @@ def suggest_store_action(
         session_id=session_id,
     )
 
+    # Fast exact-duplicate check: if a note with the same title/body/contract
+    # already exists, return already_covered without running the embed gate.
     candidates = _combine_candidate_sources(vault, title, sanitized_body, tags, candidate_limit)
     if not candidates:
         return {
@@ -336,6 +340,34 @@ def suggest_store_action(
                 "title": title,
                 "candidates": candidates,
                 "reason": "exact duplicate already exists",
+            }
+
+    # Embed-match gate: check for near-duplicate via vector similarity.
+    # Only runs after the exact-duplicate check above so exact matches
+    # are never routed through the merge path.
+    if candidate_limit > 0:
+        try:
+            merge_target = find_merge_target(title, sanitized_body, tags=tags, threshold=None)
+        except Exception:
+            merge_target = None
+        if merge_target is not None:
+            return {
+                "decision": "merged_into",
+                "created": False,
+                "path": merge_target.path,
+                "title": title,
+                "candidates": [],
+                "reason": (
+                    f"embed match (similarity={merge_target.similarity:.3f})"
+                    " suggests merging into existing note instead of creating a new one"
+                ),
+                "best_candidate": {
+                    "path": merge_target.path,
+                    "title": merge_target.title,
+                    "score": merge_target.similarity,
+                    "contract": merge_target.contract,
+                    "reasons": [f"embed vector similarity {merge_target.similarity:.3f} meets threshold"],
+                },
             }
 
     best = max(candidates, key=lambda item: (item["score"], len(item["reasons"]), item["path"]))
@@ -418,6 +450,7 @@ def write_smart_store_note(
     validity_context: str | None = None,
     supersedes: str | None = None,
     origin: str | None = None,
+    source: str = "mcp",
     candidate_limit: int = 5,
 ) -> dict:
     """Smart-store helper that writes only when no close match exists."""
@@ -433,10 +466,39 @@ def write_smart_store_note(
         validity_context=validity_context,
         supersedes=supersedes,
         origin=origin,
+        source=source,
         candidate_limit=candidate_limit,
     )
     if decision.get("error"):
         return decision
+
+    # merged_into: perform the append-merge instead of creating a new note
+    if decision.get("decision") == "merged_into":
+        vault = get_vault()
+        bc = decision.get("best_candidate", {})
+        sanitized_body = sanitize_secrets(body).strip()
+        merge_result = merge_into_canonical(
+            vault,
+            bc.get("path", decision["path"]),
+            title=title,
+            body=sanitized_body,
+            note_type=note_type,
+            tags=tags,
+            certainty=certainty,
+            source=source,
+            origin=origin or "mcp_store",
+            validity_context=validity_context,
+            supersedes=supersedes,
+            project=project,
+            branch=branch,
+            session_id=session_id,
+        )
+        return {
+            **decision,
+            "merged": merge_result.get("merged", True),
+            "canonical_path": merge_result.get("canonical_path", decision["path"]),
+        }
+
     if decision.get("decision") != "created":
         return decision
 
@@ -449,7 +511,7 @@ def write_smart_store_note(
         note_type=payload["note_type"],
         tags=payload["tags"],
         certainty=payload["certainty"],
-        source="mcp",
+        source=source,
         origin=payload["origin"],
         validity_context=payload["validity_context"],
         supersedes=payload["supersedes"],
