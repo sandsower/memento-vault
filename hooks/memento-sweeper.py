@@ -15,6 +15,12 @@ import sys
 import time
 from pathlib import Path
 
+_repo_root = str(Path(__file__).parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from memento.store import fold_access_log_into_frontmatter  # noqa: E402
+
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 CLAUDE_SESSIONS = Path.home() / ".claude" / "sessions"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
@@ -236,6 +242,15 @@ def main():
         sys.exit(0)
 
     try:
+        try:
+            # Durable resurfacing signal (MEM-148): fold the derived
+            # access-log write-ahead buffer into note frontmatter so a
+            # runtime-dir cache wipe never resets access_log_half_life_days
+            # history. This must never block orphan triage below.
+            fold_access_log_into_frontmatter(str(VAULT))
+        except Exception:
+            pass
+
         known = collect_known_session_ids()
         active = collect_active_session_ids()
         recent = find_recent_transcripts()

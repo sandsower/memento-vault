@@ -9,11 +9,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from memento import store
 from memento.store import (
     acquire_vault_write_lock,
     append_fleeting_session,
+    apply_access_log_boost,
     find_dedup_candidates,
+    fold_access_log_into_frontmatter,
     log_triage_health,
+    owns_vault_write_lock,
+    record_access,
     release_vault_write_lock,
     replace_note_at_path,
     update_project_index,
@@ -935,3 +940,156 @@ class TestAppendFleetingSession:
         )
         text = (tmp_vault / "fleeting" / "2026-05-12.md").read_text()
         assert "`ses'bad next` /tmp/project extra (main'branch) — open code" in text
+
+
+class TestFoldAccessLogIntoFrontmatter:
+    """MEM-148: the runtime access log is a write-ahead buffer; frontmatter
+    (``resurfaced_count``/``last_resurfaced``) is the durable source of truth.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_vault_write_lock(self, monkeypatch, tmp_path):
+        """Point the vault write lock at a per-test file (never the real runtime dir)."""
+        lock_file = tmp_path / "locks" / "vault-write.lock"
+        monkeypatch.setattr("memento.store.VAULT_WRITE_LOCK_PATH", str(lock_file))
+        return lock_file
+
+    @pytest.fixture(autouse=True)
+    def _patch_config(self, monkeypatch, tmp_vault):
+        """Pin both config bindings (memento.config and memento.store) to tmp_vault.
+
+        record_access()/_should_track_access() and _current_vault_id()/
+        get_vault_id() resolve get_config() from their own defining module's
+        globals, so both bindings need patching for a fully hermetic vault_id
+        and access_log_enabled regardless of the real host config.
+        """
+        cfg = {"vault_path": str(tmp_vault), "access_log_enabled": True}
+        monkeypatch.setattr("memento.config.get_config", lambda: cfg, raising=False)
+        monkeypatch.setattr("memento.store.get_config", lambda: cfg, raising=False)
+        return cfg
+
+    @staticmethod
+    def _seed_note(tmp_vault, stem="example", extra_frontmatter=""):
+        note_path = tmp_vault / "notes" / f"{stem}.md"
+        note_path.write_text(f"---\ntitle: Example\ntype: discovery\ntags: [redis]\n{extra_frontmatter}---\n\nBody.\n")
+        return note_path
+
+    def test_fold_writes_count_and_last_resurfaced(self, tmp_vault):
+        note_path = self._seed_note(tmp_vault)
+
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q2", result_count=1)
+
+        result = fold_access_log_into_frontmatter(str(tmp_vault))
+
+        assert result == {"folded_notes": 1, "new_events": 2}
+        text = note_path.read_text()
+        assert "resurfaced_count: 2" in text
+        assert "last_resurfaced: " in text
+        # Untouched fields and body survive verbatim.
+        assert "title: Example" in text
+        assert "tags: [redis]" in text
+        assert text.endswith("Body.\n")
+
+    def test_fold_survives_a_full_cache_wipe(self, tmp_vault):
+        """Acceptance test (MEM-148): a runtime-dir wipe must not reset the signal."""
+        self._seed_note(tmp_vault)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="redis ttl", result_count=1)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="redis ttl", result_count=1)
+
+        first = fold_access_log_into_frontmatter(str(tmp_vault))
+        assert first["folded_notes"] == 1
+
+        # Simulate a cache cleaner wiping the runtime dir out from under us.
+        Path(store.ACCESS_LOG_PATH).unlink(missing_ok=True)
+        Path(store.ACCESS_LOG_STATS_PATH).unlink(missing_ok=True)
+        store._ACCESS_LOG_CACHE["signature"] = None
+        store._ACCESS_LOG_CACHE["stats"] = {}
+
+        baseline = apply_access_log_boost(
+            [{"path": "notes/untouched.md", "score": 1.0}],
+            config={"access_log_enabled": True, "access_log_boost_weight": 0.2, "vault_path": str(tmp_vault)},
+        )
+        boosted = apply_access_log_boost(
+            [{"path": "notes/example.md", "score": 1.0}],
+            config={"access_log_enabled": True, "access_log_boost_weight": 0.2, "vault_path": str(tmp_vault)},
+        )
+
+        assert boosted[0]["score"] > baseline[0]["score"]
+
+    def test_fold_is_idempotent(self, tmp_vault):
+        note_path = self._seed_note(tmp_vault)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+
+        first = fold_access_log_into_frontmatter(str(tmp_vault))
+        assert first == {"folded_notes": 1, "new_events": 1}
+
+        second = fold_access_log_into_frontmatter(str(tmp_vault))
+        assert second == {"folded_notes": 0, "new_events": 0}
+
+        text = note_path.read_text()
+        assert text.count("resurfaced_count:") == 1
+        assert "resurfaced_count: 1" in text
+
+    def test_fold_accumulates_across_separate_runs(self, tmp_vault):
+        note_path = self._seed_note(tmp_vault)
+
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+        fold_access_log_into_frontmatter(str(tmp_vault))
+
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q2", result_count=1)
+        second = fold_access_log_into_frontmatter(str(tmp_vault))
+
+        assert second == {"folded_notes": 1, "new_events": 1}
+        text = note_path.read_text()
+        assert "resurfaced_count: 2" in text
+
+    def test_fold_preserves_unknown_frontmatter_keys(self, tmp_vault):
+        note_path = self._seed_note(
+            tmp_vault,
+            extra_frontmatter='custom_field: keep-me\nsynthesized_from: ["a", "b"]\n',
+        )
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+
+        fold_access_log_into_frontmatter(str(tmp_vault))
+
+        text = note_path.read_text()
+        assert "custom_field: keep-me" in text
+        assert 'synthesized_from: ["a", "b"]' in text
+        assert "resurfaced_count: 1" in text
+        assert "last_resurfaced: " in text
+        assert "title: Example" in text
+        assert text.endswith("Body.\n")
+
+    def test_fold_skips_notes_without_a_frontmatter_block(self, tmp_vault):
+        note_path = tmp_vault / "notes" / "no-frontmatter.md"
+        note_path.write_text("Just a body, no frontmatter.\n")
+        record_access(["notes/no-frontmatter.md"], hook="mcp", tool="search", query="q1", result_count=1)
+
+        result = fold_access_log_into_frontmatter(str(tmp_vault))
+
+        assert result["folded_notes"] == 0
+        assert note_path.read_text() == "Just a body, no frontmatter.\n"
+
+    def test_fold_ignores_missing_notes_and_traversal_paths(self, tmp_vault):
+        record_access(["notes/does-not-exist.md"], hook="mcp", tool="search", query="q1", result_count=1)
+        record_access(["../outside-vault.md"], hook="mcp", tool="search", query="q2", result_count=1)
+
+        result = fold_access_log_into_frontmatter(str(tmp_vault))
+
+        assert result["folded_notes"] == 0
+
+    def test_fold_is_reentrant_with_a_caller_held_lock(self, tmp_vault):
+        note_path = self._seed_note(tmp_vault)
+        record_access(["notes/example.md"], hook="mcp", tool="search", query="q1", result_count=1)
+
+        assert acquire_vault_write_lock() is True
+        try:
+            result = fold_access_log_into_frontmatter(str(tmp_vault))
+            assert result["folded_notes"] == 1
+            # fold() must not release a lock it did not acquire itself.
+            assert owns_vault_write_lock() is True
+        finally:
+            release_vault_write_lock()
+
+        assert "resurfaced_count: 1" in note_path.read_text()
