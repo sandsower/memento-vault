@@ -2485,3 +2485,148 @@ class TestToolContextCacheTTLAndScoping:
         incoming["dirs"]["pi::/repo::/repo/src"] = {"results": [{"path": "notes/newer.md"}], "ts": now + 300}
         merged = lifecycle_module._merge_tool_context_cache(existing, incoming)
         assert merged["dirs"]["pi::/repo::/repo/src"]["results"] == [{"path": "notes/newer.md"}]
+
+
+class TestRunDeferredBriefingSearchAgenticGate:
+    """MEM-161: run_deferred_briefing_search's agentic_retrieval_enabled gate.
+
+    The deferred SessionStart briefing worker is today a one-shot
+    qmd_search + enhance_results pass. This upgrades its internals to try
+    the bounded retrieval agent first when configured, falling back to the
+    unchanged one-shot pipeline on any failure or when disabled.
+    """
+
+    def _write_pending(self, path, *, query="api-service", max_notes=5, min_score=0.3, cwd=""):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        params = {
+            "query": query,
+            "max_notes": max_notes,
+            "min_score": min_score,
+            "linked_notes": [],
+            "cwd": cwd,
+            "timestamp": time.time(),
+            "ttl_seconds": lifecycle.DEFERRED_BRIEFING_TTL_SECONDS,
+            "scope": {"project_slug": "unknown", "session_id": "unknown", "host_id": "unknown-host"},
+        }
+        with open(path, "w") as f:
+            json.dump(
+                {"status": "pending", "params": params, "scope": params["scope"], "timestamp": params["timestamp"]}, f
+            )
+
+    def test_disabled_config_never_calls_agentic_retrieve(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "deferred.json")
+        monkeypatch.setattr(lifecycle, "DEFERRED_BRIEFING_PATH", path)
+        self._write_pending(path)
+
+        one_shot_results = [{"path": "notes/a.md", "title": "A", "snippet": "x", "score": 0.5}]
+        config = dict(DEFAULT_CONFIG)
+        config["agentic_retrieval_enabled"] = False
+
+        with (
+            patch.object(lifecycle, "get_config", return_value=config),
+            patch.object(lifecycle, "agentic_retrieve") as mock_agentic,
+            patch.object(lifecycle, "qmd_search", return_value=list(one_shot_results)) as mock_qmd,
+            patch.object(lifecycle, "enhance_results", side_effect=lambda results, **kwargs: results),
+            patch.object(lifecycle, "record_access"),
+            patch.object(lifecycle, "log_retrieval") as mock_log,
+        ):
+            lifecycle.run_deferred_briefing_search(path)
+
+        mock_agentic.assert_not_called()
+        mock_qmd.assert_called_once()
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["note_lines"] == ["  - A: x"]
+        ready_log_calls = [c for c in mock_log.call_args_list if c.args[1] == "deferred-ready"]
+        assert ready_log_calls[0].kwargs["source"] == "one-shot"
+
+    def test_enabled_and_agent_succeeds_skips_one_shot_pipeline(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "deferred.json")
+        monkeypatch.setattr(lifecycle, "DEFERRED_BRIEFING_PATH", path)
+        self._write_pending(path)
+
+        agentic_results = [
+            {"path": "notes/agentic.md", "title": "Agentic hit", "snippet": "found by agent", "score": 0.9}
+        ]
+        config = dict(DEFAULT_CONFIG)
+        config["agentic_retrieval_enabled"] = True
+
+        with (
+            patch.object(lifecycle, "get_config", return_value=config),
+            patch.object(lifecycle, "agentic_retrieve", return_value=list(agentic_results)) as mock_agentic,
+            patch.object(lifecycle, "qmd_search") as mock_qmd,
+            patch.object(lifecycle, "enhance_results", side_effect=lambda results, **kwargs: results),
+            patch.object(lifecycle, "record_access"),
+            patch.object(lifecycle, "log_retrieval") as mock_log,
+        ):
+            lifecycle.run_deferred_briefing_search(path)
+
+        mock_agentic.assert_called_once()
+        assert mock_agentic.call_args.args[0] == "api-service"
+        mock_qmd.assert_not_called()
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["note_lines"] == ["  - Agentic hit: found by agent"]
+        ready_log_calls = [c for c in mock_log.call_args_list if c.args[1] == "deferred-ready"]
+        assert ready_log_calls[0].kwargs["source"] == "agentic"
+
+    def test_enabled_but_empty_agent_results_falls_back_to_one_shot(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "deferred.json")
+        monkeypatch.setattr(lifecycle, "DEFERRED_BRIEFING_PATH", path)
+        self._write_pending(path)
+
+        one_shot_results = [{"path": "notes/a.md", "title": "A", "snippet": "x", "score": 0.5}]
+        config = dict(DEFAULT_CONFIG)
+        config["agentic_retrieval_enabled"] = True
+
+        with (
+            patch.object(lifecycle, "get_config", return_value=config),
+            patch.object(lifecycle, "agentic_retrieve", return_value=[]) as mock_agentic,
+            patch.object(lifecycle, "qmd_search", return_value=list(one_shot_results)) as mock_qmd,
+            patch.object(lifecycle, "enhance_results", side_effect=lambda results, **kwargs: results),
+            patch.object(lifecycle, "record_access"),
+            patch.object(lifecycle, "log_retrieval") as mock_log,
+        ):
+            lifecycle.run_deferred_briefing_search(path)
+
+        mock_agentic.assert_called_once()
+        mock_qmd.assert_called_once()
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["note_lines"] == ["  - A: x"]
+        ready_log_calls = [c for c in mock_log.call_args_list if c.args[1] == "deferred-ready"]
+        assert ready_log_calls[0].kwargs["source"] == "one-shot"
+
+    def test_enabled_but_agent_raises_falls_back_to_one_shot(self, tmp_path, monkeypatch):
+        path = str(tmp_path / "deferred.json")
+        monkeypatch.setattr(lifecycle, "DEFERRED_BRIEFING_PATH", path)
+        self._write_pending(path)
+
+        one_shot_results = [{"path": "notes/a.md", "title": "A", "snippet": "x", "score": 0.5}]
+        config = dict(DEFAULT_CONFIG)
+        config["agentic_retrieval_enabled"] = True
+
+        with (
+            patch.object(lifecycle, "get_config", return_value=config),
+            patch.object(lifecycle, "agentic_retrieve", side_effect=RuntimeError("provider exploded")),
+            patch.object(lifecycle, "qmd_search", return_value=list(one_shot_results)) as mock_qmd,
+            patch.object(lifecycle, "enhance_results", side_effect=lambda results, **kwargs: results),
+            patch.object(lifecycle, "record_access"),
+            patch.object(lifecycle, "log_retrieval") as mock_log,
+        ):
+            lifecycle.run_deferred_briefing_search(path)
+
+        mock_qmd.assert_called_once()
+        error_log_calls = [c for c in mock_log.call_args_list if c.args[1] == "agentic-retrieval-error"]
+        assert len(error_log_calls) == 1
+        assert error_log_calls[0].kwargs["error"] == "provider exploded"
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data["status"] == "ready"
+        assert data["note_lines"] == ["  - A: x"]

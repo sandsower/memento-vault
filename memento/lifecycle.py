@@ -20,6 +20,7 @@ from memento import queue as capture_queue
 from memento import telemetry
 from memento.health import build_automation_memory_readiness
 from memento.llm import is_invalid_mcp_config_error, llm_complete
+from memento.retrieval_agent import agentic_retrieve
 from memento.retrieval_policy import PromptRecallRequest, PromptRecallRuntime
 from memento.search import (
     MISS_RECOVERY_HINTS,
@@ -738,13 +739,31 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
         import time as _time
 
         t0 = _time.time()
-        results = qmd_search(
-            query,
-            limit=max_notes + 3,
-            semantic=True,
-            timeout=12,
-            min_score=min_score,
-        )
+        config = get_config()
+        results = None
+        used_agentic = False
+        if config.get("agentic_retrieval_enabled", False):
+            try:
+                agentic_results = agentic_retrieve(query, config=config)
+            except Exception as exc:
+                agentic_results = None
+                log_retrieval("briefing", "agentic-retrieval-error", error=str(exc))
+            if agentic_results:
+                results = agentic_results
+                used_agentic = True
+
+        if results is None:
+            # Existing one-shot pipeline -- the fallback for both
+            # agentic_retrieval_enabled=False and any agentic-tier failure
+            # (malformed protocol, provider error/timeout, tool-call cap, or
+            # empty results). Byte-identical to pre-MEM-161 behavior.
+            results = qmd_search(
+                query,
+                limit=max_notes + 3,
+                semantic=True,
+                timeout=12,
+                min_score=min_score,
+            )
         latency_ms = int((_time.time() - t0) * 1000)
 
         results = enhance_results(results, cwd=params.get("cwd", ""))
@@ -801,6 +820,7 @@ def run_deferred_briefing_search(deferred_path: str | None = None):
             latency_ms=latency_ms,
             injected_count=len(final_notes),
             injected_chars=injected_chars,
+            source="agentic" if used_agentic else "one-shot",
         )
 
     except Exception:

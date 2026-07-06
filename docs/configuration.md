@@ -271,6 +271,31 @@ deep_recall_enabled: false
 deep_recall_backend: codex     # "codex" or "claude"
 ```
 
+### Agentic retrieval tier (experimental)
+
+One-shot top-k injection is the SessionStart deferred-briefing worker's ceiling: a single search pass either finds the right notes or it doesn't. When enabled, the worker instead runs a bounded ReAct-style loop (`memento/retrieval_agent.py`) that calls search/query/related/get tools in-process, over as many as 6 turns and 60 seconds, before writing its final note picks to the same deferred-briefing file/TTL consumed on the next prompt.
+
+The loop is driven through the same `llm_complete` backend abstraction as deep recall, so it can reuse the global `llm_backend`/`llm_model`, or route independently via `retrieval_agent_provider`/`retrieval_agent_model` -- for example to a cheaper routed model through the `pi` CLI provider (see below).
+
+This tier is strictly additive: any protocol failure (malformed tool-call JSON after one retry, a provider error or timeout, the tool-call cap, or empty results) falls back to the existing one-shot search pipeline, byte-identically to today's behavior. Disabled by default.
+
+```yaml
+agentic_retrieval_enabled: false
+retrieval_agent_provider: null   # null = fall back to llm_backend
+retrieval_agent_model: null      # null = fall back to llm_model
+```
+
+### The `pi` LLM backend
+
+`llm_backend`/`retrieval_agent_provider` accept `pi`, a fifth CLI provider alongside `claude`/`codex`/`gemini`/`anthropic-api`/`openai-compat`. `pi` is the local coding-agent CLI (see https://pi.dev) that already routes to a wide range of provider/model combinations, including cheap ones like OpenRouter-hosted DeepSeek models:
+
+```yaml
+llm_backend: pi
+llm_model: openrouter/deepseek/deepseek-v4-pro
+```
+
+Memento invokes `pi` in a bare, non-interactive text-in/text-out mode (`--print --no-tools --no-session`, among other flags) -- it is a single completion call, not an agent run; memento's own retrieval agent (above) drives its own tool loop on top of that text contract. If `pi` is not resolvable on `PATH`, `preflight_check` reports a clear error rather than crashing the calling worker. Note: this is unrelated to `memento/pi_bridge.py`, which is the reverse integration -- the `pi` runtime embedding memento as an extension.
+
 ### Tier 1 retrieval enhancements (v1.2.0)
 
 These features improve recall quality with zero per-query LLM cost. All default to enabled and degrade gracefully if dependencies are missing.
