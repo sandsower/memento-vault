@@ -11,7 +11,7 @@ Every session starts from zero: agents forget everything between sessions.
 ## What a note looks like
 
 Every durable note carries epistemic metadata: how confident is this, and under what conditions would it stop being true?
-This is the worked example from [docs/frontmatter-schema.md](docs/frontmatter-schema.md#example):
+This is trimmed from the worked example in [docs/frontmatter-schema.md](docs/frontmatter-schema.md#example) (full version there has `project_path` and `session_id` too):
 
 ```yaml
 ---
