@@ -247,14 +247,33 @@ def confidence_margin(results: list[dict]) -> float:
     """Relative score gap between the top result and the runner-up.
 
     A single absolute score threshold (the old `top_score < high_conf`
-    gate) breaks down across un-normalized, per-backend score scales
-    (MEM-127 is the deferred fix for that at the source): QMD's correct
-    hits commonly score 0.96-0.97 while a barely-related catch-all note
-    scores 0.87-0.89 - both comfortably above any absolute "confident"
-    cutoff tuned for this backend, and neither number is meaningful next
-    to another backend's scale. A relative margin sidesteps that: it only
-    reads as confident when the leader is decisively clear of the field,
-    which holds regardless of the backend's absolute scale.
+    gate) breaks down across un-normalized, per-backend score scales:
+    QMD's correct hits commonly score 0.96-0.97 while a barely-related
+    catch-all note scores 0.87-0.89 - both comfortably above any absolute
+    "confident" cutoff tuned for this backend, and neither number is
+    meaningful next to another backend's scale. A relative margin sidesteps
+    that: it only reads as confident when the leader is decisively clear of
+    the field, which holds regardless of the backend's absolute scale - this
+    is why confidence_margin() (and single_strong_hit below) were already
+    backend-agnostic before MEM-127 landed, with no separate qmd-only
+    identity gate to remove here: PRF/RRF/rerank/multi_hop/deep_recall all
+    key off `confident` (this function plus single_strong_hit), never off
+    the backend's type.
+
+    MEM-127 fixed the actual root cause this function was working around:
+    per-backend score scales weren't normalized at the source. The concrete
+    bug that mattered most here was the embedded backend's FTS5 search
+    normalizing scores by `score / max_score_in_this_batch`, which forced
+    the top hit in *any* result batch to exactly 1.0 regardless of true
+    relevance - so a single mediocre embedded hit always looked like a
+    perfect match to single_strong_hit's absolute check (this function
+    can't establish a margin from a single result at all, see below), and
+    the deep pipeline never got a chance to run on it. See
+    memento.embedded_search.normalize_fts5_score /
+    normalize_vec_cosine_distance and memento.search_backend.
+    normalize_qmd_score / normalize_grep_term_coverage for the fix, and
+    every backend.search() result now also carries a `backend` field
+    (qmd | embedded-fts | embedded-vec | grep) for downstream diagnostics.
 
     Fewer than two results can never establish a margin - including zero
     results, and a single result with no runner-up to compare against -
@@ -825,7 +844,7 @@ class PromptRecallRuntime:
             return None, reason, []
 
         max_notes = config.get("recall_max_notes", 3)
-        min_score = config.get("recall_min_score", 0.4)
+        min_score = config.get("recall_min_score", 0.25)
         envelope = self.remote_search_envelope(
             query=prompt, limit=max_notes + 3, min_score=min_score, cwd=cwd, concrete=concrete
         )
@@ -990,7 +1009,7 @@ class PromptRecallRuntime:
                 decision.metadata["miss"] = remote_miss
             return decision
 
-        min_score = config.get("recall_min_score", 0.4)
+        min_score = config.get("recall_min_score", 0.25)
         max_notes = config.get("recall_max_notes", 3)
         confidence_margin_threshold = config.get("recall_confidence_margin", DEFAULT_RECALL_CONFIDENCE_MARGIN)
         query = prompt

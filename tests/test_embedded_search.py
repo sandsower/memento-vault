@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from memento.config import reset_config
+from memento.embedded_search import normalize_fts5_score, normalize_vec_cosine_distance
 from memento.search_backend import SearchBackend, reset_backend
 
 
@@ -84,6 +85,83 @@ def backend(embedded_vault):
     vault, db_path = embedded_vault
     b = EmbeddedSearchBackend(vault_path=vault, db_path=db_path)
     return b
+
+
+class TestNormalizeFts5Score:
+    """MEM-127: bounded score/(score+k) transform, not batch-relative rescale."""
+
+    def test_zero_raw_is_zero(self):
+        assert normalize_fts5_score(0.0) == 0.0
+
+    def test_negative_raw_is_zero(self):
+        assert normalize_fts5_score(-1.0) == 0.0
+
+    def test_monotonic_increasing(self):
+        scores = [normalize_fts5_score(raw, k=2.0) for raw in (0.0, 0.1, 1.0, 1.7, 5.0, 50.0)]
+        assert scores == sorted(scores)
+
+    def test_bounded_below_one(self):
+        assert normalize_fts5_score(1_000_000.0, k=2.0) < 1.0
+        assert normalize_fts5_score(1_000_000.0, k=2.0) > 0.99
+
+    def test_default_k_matches_config_default(self):
+        # score/(score+k): raw=2.0 with k=2.0 lands exactly at the midpoint.
+        assert normalize_fts5_score(2.0, k=2.0) == pytest.approx(0.5)
+
+    def test_top_hit_is_not_forced_to_one(self):
+        """The bug this replaces: batch-relative normalization always gave the
+        top hit in ANY result set a score of exactly 1.0, regardless of true
+        relevance. A single weak raw hit must stay well below 1.0 now."""
+        assert normalize_fts5_score(0.05, k=2.0) < 0.1
+
+    def test_non_numeric_is_zero(self):
+        assert normalize_fts5_score("nan-ish") == 0.0
+
+    def test_non_positive_k_falls_back(self):
+        # Guards against a misconfigured k=0 (division by zero).
+        result = normalize_fts5_score(1.0, k=0.0)
+        assert 0.0 <= result <= 1.0
+
+
+class TestNormalizeVecCosineDistance:
+    """MEM-127: (cos+1)/2 on true cosine distance, not L2-distance heuristic."""
+
+    def test_identical_vectors_score_one(self):
+        assert normalize_vec_cosine_distance(0.0) == pytest.approx(1.0)
+
+    def test_orthogonal_vectors_score_half(self):
+        # cosine distance = 1 for orthogonal (cos_sim = 0)
+        assert normalize_vec_cosine_distance(1.0) == pytest.approx(0.5)
+
+    def test_opposite_vectors_score_zero(self):
+        # cosine distance = 2 for opposite (cos_sim = -1)
+        assert normalize_vec_cosine_distance(2.0) == pytest.approx(0.0)
+
+    def test_monotonic_decreasing_in_distance(self):
+        scores = [normalize_vec_cosine_distance(d) for d in (0.0, 0.5, 1.0, 1.5, 2.0)]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_clamps_out_of_range_distance(self):
+        assert normalize_vec_cosine_distance(-0.1) <= 1.0
+        assert normalize_vec_cosine_distance(2.5) >= 0.0
+
+    def test_non_numeric_is_zero(self):
+        assert normalize_vec_cosine_distance(None) == 0.0
+
+    def test_old_l2_heuristic_lost_the_negative_similarity_signal(self):
+        """Documents the bug this replaces: max(0, 1 - distance) on an L2
+        distance in [0, 2] collapsed BOTH orthogonal (sqrt(2)) and opposite
+        (2.0) vectors to a score of 0, discarding the negative-similarity
+        signal. The new cosine-distance-based mapping keeps them distinct."""
+        orthogonal_cosine_distance = 1.0
+        opposite_cosine_distance = 2.0
+        old_l2_orthogonal = max(0.0, 1.0 - (2**0.5))
+        old_l2_opposite = max(0.0, 1.0 - 2.0)
+        assert old_l2_orthogonal == old_l2_opposite == 0.0
+
+        assert normalize_vec_cosine_distance(orthogonal_cosine_distance) != normalize_vec_cosine_distance(
+            opposite_cosine_distance
+        )
 
 
 class TestEmbeddedSearchBackendSchema:
@@ -178,6 +256,23 @@ class TestEmbeddedSearchFTS5:
         assert "title" in r
         assert "score" in r
         assert "snippet" in r
+
+    def test_search_tags_backend_embedded_fts(self, backend):
+        backend.reindex("memento")
+        results = backend.search("Redis cache TTL", "memento")
+        assert results
+        assert all(r["backend"] == "embedded-fts" for r in results)
+
+    def test_search_top_hit_not_forced_to_one(self, backend):
+        """MEM-127 regression guard: the old normalization forced the top-of
+        -batch result to score exactly 1.0 regardless of true relevance. A
+        query matched only by common terms (present in most notes, so BM25
+        IDF collapses toward zero) must not read as a perfect match."""
+        backend.reindex("memento")
+        results = backend.search("cache", "memento")
+        assert results
+        assert all(0.0 <= r["score"] <= 1.0 for r in results)
+        assert results[0]["score"] < 1.0
 
     def test_search_respects_limit(self, backend):
         backend.reindex("memento")
@@ -396,6 +491,21 @@ class TestVectorSearch:
         assert "score" in r
         assert "snippet" in r
 
+    def test_semantic_search_tags_backend_embedded_vec(self, vec_backend):
+        results = vec_backend.search("Redis", "memento", semantic=True)
+        assert results
+        assert all(r["backend"] == "embedded-vec" for r in results)
+
+    def test_vec_table_uses_cosine_distance_metric(self, vec_backend, embedded_vault):
+        """MEM-127: notes_vec must declare distance_metric=cosine, not the
+        sqlite-vec default (L2), so vector search is magnitude-independent
+        and normalize_vec_cosine_distance()'s assumptions hold."""
+        _, db_path = embedded_vault
+        conn = sqlite3.connect(str(db_path))
+        schema = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'notes_vec'").fetchone()[0]
+        conn.close()
+        assert "cosine" in schema.lower()
+
     def test_semantic_respects_limit(self, vec_backend):
         results = vec_backend.search("Redis", "memento", semantic=True, limit=1)
         assert len(results) <= 1
@@ -449,6 +559,42 @@ class TestVectorSearch:
         vec_count = conn.execute("SELECT COUNT(*) FROM notes_vec").fetchone()[0]
         note_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
         assert vec_count == note_count == 4
+
+    def test_legacy_l2_vector_index_migrates_to_cosine_on_reopen(self, embedded_vault):
+        """MEM-127: a vec index built before this change (implicit L2 default,
+        no distance_metric in the signature) must be rebuilt automatically on
+        the next open, not silently kept around with mismatched distance
+        semantics. Reuses the existing embedding-signature-mismatch rebuild
+        path (see _init_vec) rather than a bespoke migration."""
+        if not _sqlite_vec_available():
+            pytest.skip("sqlite-vec extension loading is unavailable")
+        from memento.embedded_search import EmbeddedSearchBackend
+
+        vault, db_path = embedded_vault
+        first = EmbeddedSearchBackend(vault_path=vault, db_path=db_path, embedding_provider=MockEmbeddingProvider(8))
+        first.reindex("memento")
+        # Simulate a pre-MEM-127 signature: strip the new "distance_metric"
+        # key so it looks like an index built by the old code.
+        conn = first._get_conn()
+        raw = conn.execute("SELECT value FROM index_metadata WHERE key = ?", ("embedding_signature",)).fetchone()[0]
+        legacy_signature = json.loads(raw)
+        legacy_signature.pop("distance_metric", None)
+        conn.execute(
+            "UPDATE index_metadata SET value = ? WHERE key = ?",
+            (json.dumps(legacy_signature, sort_keys=True, separators=(",", ":")), "embedding_signature"),
+        )
+        conn.commit()
+        first.close()
+
+        second = EmbeddedSearchBackend(vault_path=vault, db_path=db_path, embedding_provider=MockEmbeddingProvider(8))
+        results = second.search("Redis cache", "memento", semantic=True)
+
+        assert results
+        conn = second._get_conn()
+        schema = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'notes_vec'").fetchone()[0]
+        assert "cosine" in schema.lower()
+        raw = conn.execute("SELECT value FROM index_metadata WHERE key = ?", ("embedding_signature",)).fetchone()[0]
+        assert json.loads(raw)["distance_metric"] == "cosine"
 
 
 class TestEmbeddedSearchSelfHealing:

@@ -10,6 +10,8 @@ from memento.search_backend import (
     _clean_snippet,
     _literal_score,
     get_backend,
+    normalize_grep_term_coverage,
+    normalize_qmd_score,
     reset_backend,
     set_backend,
 )
@@ -76,6 +78,46 @@ class TestCleanSnippet:
     def test_empty_input(self):
         assert _clean_snippet("") == ""
         assert _clean_snippet(None) == ""
+
+
+class TestNormalizeQmdScore:
+    """MEM-127: QMD's own score is already ~bounded, clamp defensively only."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (0.97, 0.97),  # observed BM25 hit band (0.9-0.98)
+            (0.6, 0.6),  # observed semantic vsearch band (0.5-0.7)
+            (0.0, 0.0),
+            (1.0, 1.0),
+        ],
+    )
+    def test_within_range_passes_through(self, raw, expected):
+        assert normalize_qmd_score(raw) == pytest.approx(expected)
+
+    def test_clamps_above_one(self):
+        assert normalize_qmd_score(1.5) == 1.0
+
+    def test_clamps_negative(self):
+        assert normalize_qmd_score(-0.3) == 0.0
+
+    def test_non_numeric_is_zero(self):
+        assert normalize_qmd_score("not-a-number") == 0.0
+        assert normalize_qmd_score(None) == 0.0
+
+
+class TestNormalizeGrepTermCoverage:
+    """MEM-127: grep's matched/total fraction is already bounded by construction."""
+
+    @pytest.mark.parametrize(("raw", "expected"), [(1.0, 1.0), (0.5, 0.5), (0.0, 0.0)])
+    def test_within_range_passes_through(self, raw, expected):
+        assert normalize_grep_term_coverage(raw) == pytest.approx(expected)
+
+    def test_clamps_above_one(self):
+        assert normalize_grep_term_coverage(1.2) == 1.0
+
+    def test_clamps_negative(self):
+        assert normalize_grep_term_coverage(-0.1) == 0.0
 
 
 class TestBackendSingleton:
@@ -381,6 +423,43 @@ class TestGrepBackendPathTraversal:
             result = backend.get("notes/test.md")
         assert result is not None
         assert result["title"] == "Test"
+
+
+class TestBackendResultTagging:
+    """MEM-127: every backend.search() result carries a `backend` field."""
+
+    def _make_vault(self, tmp_path):
+        vault = tmp_path / "vault"
+        notes = vault / "notes"
+        notes.mkdir(parents=True)
+        (notes / "redis.md").write_text("---\ntitle: Redis TTL\n---\n\nRedis cache TTL discovery.\n")
+        return vault
+
+    def test_grep_search_tags_backend(self, tmp_path):
+        vault = self._make_vault(tmp_path)
+        backend = GrepBackend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("memento.config.get_vault", lambda: vault)
+            results = backend.search("Redis TTL", "memento")
+        assert results
+        assert all(r["backend"] == "grep" for r in results)
+
+    def test_grep_concrete_search_tags_backend(self, tmp_path):
+        vault = self._make_vault(tmp_path)
+        backend = GrepBackend()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("memento.config.get_vault", lambda: vault)
+            results = backend.search("Redis TTL", "memento", concrete=True)
+        assert results
+        assert all(r["backend"] == "grep" for r in results)
+
+    def test_qmd_concrete_search_tags_backend(self, tmp_path, monkeypatch):
+        vault = self._make_vault(tmp_path)
+        monkeypatch.setattr("memento.config.get_vault", lambda: vault)
+        backend = QMDBackend()
+        results = backend.search("Redis TTL", "memento", concrete=True)
+        assert results
+        assert all(r["backend"] == "qmd" for r in results)
 
 
 class TestArchiveExclusion:
