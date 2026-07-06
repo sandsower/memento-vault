@@ -63,8 +63,22 @@ from memento.store import log_triage_health
 from memento.utils import sanitize_secrets
 
 
+def _json_default(value: Any) -> Any:
+    """Defense-in-depth for CLI JSON output (MEM-168).
+
+    The primary fix lives at the data source (memento.smart_store dedup-candidate
+    rows are built JSON-safe now), but this is the last line of the CLI's JSON
+    boundary: any write already happened by the time we get here, so a stray
+    ``set``/``frozenset`` reaching this point should degrade to a sorted list
+    instead of crashing the whole response with a generic error blob.
+    """
+    if isinstance(value, (set, frozenset)):
+        return sorted(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _emit(payload: dict[str, Any]) -> int:
-    print(json.dumps(payload, ensure_ascii=False))
+    print(json.dumps(payload, ensure_ascii=False, default=_json_default))
     return 0
 
 

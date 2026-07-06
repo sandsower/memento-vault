@@ -152,7 +152,13 @@ def _candidate_details(raw: dict, vault: Path, query_title: str, query_body: str
         "title": candidate_title,
         "score": score,
         "reasons": reasons or ["topic overlap"],
-        "tokens": candidate_tokens,
+        # Kept as a sorted list, not a set: this row is forwarded verbatim into
+        # JSON responses (run-lesson/capture/MCP store) whenever a decision
+        # carries "candidates" or "best_candidate" (MEM-168 -- a raw set here
+        # made `json.dumps` blow up on any vault that already had a
+        # token-overlapping note). Convert back to a set at the one internal
+        # call site (best_unique_ratio below) that needs set arithmetic.
+        "tokens": sorted(candidate_tokens),
         "body": candidate_body,
         "contract": candidate_contract,
         "status": None,
@@ -391,7 +397,7 @@ def suggest_store_action(
             }
 
     best = max(candidates, key=lambda item: (item["score"], len(item["reasons"]), item["path"]))
-    best_unique_ratio = len(search_tokens - best["tokens"]) / max(1, len(search_tokens))
+    best_unique_ratio = len(search_tokens - set(best["tokens"])) / max(1, len(search_tokens))
     best_reasons = list(best["reasons"])
     if best.get("status"):
         best_reasons.append(f"contradiction status: {best['status']}")

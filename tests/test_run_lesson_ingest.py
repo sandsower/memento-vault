@@ -134,6 +134,63 @@ def test_run_lesson_ingest_rejects_invalid_json(hermetic_vault_config, tmp_path,
     assert result["reason"] == "payload_invalid_json"
 
 
+def test_run_lesson_ingest_json_serializable_when_vault_has_token_overlap(hermetic_vault_config, tmp_path, capsys):
+    """MEM-168: a pre-existing note sharing tokens must not crash the JSON response.
+
+    ``_combine_candidate_sources`` falls back to ``find_dedup_candidates``
+    (title/tag token overlap) whenever qmd/embeddings are unavailable, exactly
+    the hermetic setup these tests use. Once the vault already contains any
+    note that shares a token with the new note's title, ``suggest_store_action``
+    builds a dedup-candidate row carrying a raw Python ``set`` under
+    ``"tokens"`` and forwards it into the JSON payload emitted by
+    ``pi_bridge._run_json``. Before the fix, ``json.dumps`` inside ``_emit``
+    raises ``TypeError: Object of type set is not JSON serializable``, which
+    ``_run_json``'s catch-all then reports as a generic ``{"error": ...}``
+    even though the note was already written to disk.
+    """
+    existing_note = hermetic_vault_config / "notes" / "oli-17-earlier-context.md"
+    existing_note.write_text(
+        "\n".join(
+            [
+                "---",
+                "title: OLI-17 specimen run earlier context",
+                "type: discovery",
+                "tags: [oli-17]",
+                "date: 2026-07-01T00:00",
+                "certainty: 3",
+                "---",
+                "",
+                "Earlier context for the OLI-17 specimen run investigation.",
+                "",
+                "## Related",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    run_id = "RON-168-20260706T000000Z-deadbeef"
+    ticket_id = "MEM-168"
+    payload_path = _write_payload(
+        tmp_path,
+        {
+            "run_id": run_id,
+            "ticket_id": ticket_id,
+            "title": "OLI-17 specimen run: dedup candidate token overlap",
+            "lesson_text": "New evidence unrelated in substance to the earlier note.",
+            "tags": ["oli-17"],
+        },
+    )
+
+    result = _run_lesson(payload_path, capsys)
+
+    assert result.get("error") is None, result
+    assert result["created"] is True
+    assert result.get("path"), result
+    note_path = hermetic_vault_config / result["path"]
+    assert note_path.exists()
+
+
 def test_run_lesson_ingest_rejects_patch_blob_lesson_text(hermetic_vault_config, tmp_path, capsys):
     """A raw diff smuggled through the mapped lesson_text field is still rejected.
 
