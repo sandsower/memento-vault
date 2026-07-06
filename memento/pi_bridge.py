@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from memento import telemetry
+from memento.automated_run_lessons import capture_automated_run_lesson
 from memento.capture_runtime import CaptureProcessRequest, CaptureRuntime
 from memento.config import detect_project, get_config, get_vault
 from memento.lifecycle import build_briefing, build_recall, build_session_context, build_tool_context, strip_injection
@@ -1087,6 +1088,96 @@ def _capture(
             )
         _commit_and_reindex_locked(vault, f"pi: capture {clean_title[:80]}")
     return {"path": str(note_path.relative_to(vault)), "title": clean_title, "queued": False}
+
+
+_RUN_LESSON_REQUIRED_FIELDS = ("run_id", "ticket_id")
+_RUN_LESSON_PASSTHROUGH_FIELDS = (
+    "repo",
+    "project",
+    "branch",
+    "slice",
+    "outcome",
+    "lesson_type",
+    "note_type",
+    "certainty",
+    "validity_context",
+    "related_refs",
+)
+
+
+def _run_lesson_ingest(payload_path: str) -> dict[str, Any]:
+    """Ingest one Rondo/operator run-lesson payload as a recallable vault note.
+
+    This is the explicit MEM-145 ingest command: an external runner (or a human
+    operator) hands over a compact JSON payload describing what happened on a
+    finished run, and this command writes exactly one curated note through the
+    existing automated-run-lesson machinery. It never queues for later review;
+    "captures a note" means a note lands in the vault immediately, because a
+    queued-only candidate is not the deterministic recall guarantee this
+    command exists to provide.
+
+    Payload contract (JSON object):
+        run_id (required): stable identifier for the run.
+        ticket_id (required): tracker ticket the run is tied to.
+        title (optional): note title; defaults to a title derived from
+            ``ticket_id`` and ``run_id`` when omitted.
+        lesson_text (optional): the lesson body/evidence summary; defaults to
+            the title when omitted.
+        evidence_paths (optional list): artifact references for the run.
+        tags (optional list): extra tags merged onto the automatic
+            automation/lesson-type/outcome/ticket tags.
+
+    Both ``run_id`` and ``ticket_id`` are embedded verbatim in the produced
+    note's provenance section and title/tags, which is what lets
+    ``search.is_literal_like_query`` route lookups for either identifier to
+    literal matching and return this note deterministically.
+    """
+    clean_path = str(payload_path or "").strip()
+    if not clean_path:
+        return {"error": "--payload is required", "reason": "missing_payload"}
+
+    path = Path(clean_path).expanduser()
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"error": f"could not read --payload file: {exc}", "reason": "payload_read_error", "path": clean_path}
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        return {"error": f"--payload file is not valid JSON: {exc}", "reason": "payload_invalid_json"}
+    if not isinstance(payload, dict):
+        return {"error": "--payload JSON must be an object", "reason": "payload_invalid_shape"}
+
+    run_id = str(payload.get("run_id") or "").strip()
+    ticket_id = str(payload.get("ticket_id") or "").strip()
+    missing = [name for name in _RUN_LESSON_REQUIRED_FIELDS if not str(payload.get(name) or "").strip()]
+    if missing:
+        return {
+            "error": f"missing required payload field(s): {', '.join(missing)}",
+            "reason": "missing_required_field",
+        }
+
+    title = str(payload.get("title") or "").strip() or f"Automated run lesson: {ticket_id} ({run_id})"
+    lesson_text = str(payload.get("lesson_text") or "").strip() or title
+    evidence_paths = payload.get("evidence_paths") or []
+    tags = payload.get("tags") or []
+
+    candidate: dict[str, Any] = {
+        "external_system": str(payload.get("external_system") or "rondo").strip() or "rondo",
+        "run_id": run_id,
+        "ticket": ticket_id,
+        "title": title,
+        "body": lesson_text,
+        "evidence_summary": lesson_text,
+        "artifact_refs": evidence_paths,
+        "extra_tags": tags,
+    }
+    for field in _RUN_LESSON_PASSTHROUGH_FIELDS:
+        if field in payload:
+            candidate[field] = payload[field]
+
+    return capture_automated_run_lesson(candidate, approve_write=True)
 
 
 def _triage(
@@ -2707,6 +2798,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON object with richer Pi lifecycle context and audit metadata",
     )
 
+    run_lesson = sub.add_parser(
+        "run-lesson", help="Ingest an external-run lesson payload as a recallable, curated vault note"
+    )
+    run_lesson.add_argument(
+        "--payload",
+        required=True,
+        help=(
+            "Path to a JSON file with fields: run_id (required), ticket_id (required), "
+            "title, lesson_text, evidence_paths[], tags[]"
+        ),
+    )
+
     triage = sub.add_parser("triage", help="Run Pi SessionEnd-style triage from a persisted session JSONL")
     triage.add_argument("--transcript-path", required=True)
     triage.add_argument("--cwd", default="")
@@ -2896,6 +2999,8 @@ def main(argv: list[str] | None = None) -> int:
             args.lifecycle_metadata,
             health_metadata={"cwd": args.cwd, "session_id": args.session_id},
         )
+    if args.command == "run-lesson":
+        return _run_json("run-lesson", _run_lesson_ingest, args.payload)
     if args.command == "triage":
         return _run_json(
             "triage",
