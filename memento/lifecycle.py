@@ -21,7 +21,12 @@ from memento import queue as capture_queue
 from memento import telemetry
 from memento.health import build_automation_memory_readiness
 from memento.llm import is_invalid_mcp_config_error, llm_complete
-from memento.retrieval_policy import PromptRecallRequest, PromptRecallRuntime
+from memento.retrieval_policy import (
+    PromptRecallRequest,
+    PromptRecallRuntime,
+    apply_stale_citation_marker,
+    evaluate_citation_verification,
+)
 from memento.search import (
     MISS_RECOVERY_HINTS,
     build_search_miss,
@@ -2957,8 +2962,13 @@ def build_tool_context(
     selected = filtered[:max_notes]
     lines = ["[connected-to-vault]"]
     injected_paths = []
+    vault = get_vault()
     for result in selected:
-        lines.append(format_tool_context_result(result))
+        line = format_tool_context_result(result)
+        citation_status = evaluate_citation_verification(vault, result, cwd=cwd, config=config)
+        if citation_status == "stale":
+            line = apply_stale_citation_marker(line)
+        lines.append(line)
         injected_paths.append(result.get("path", ""))
 
     injected_text = "\n".join(lines)

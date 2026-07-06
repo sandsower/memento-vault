@@ -21,7 +21,7 @@ if _repo_root not in sys.path:
 
 from memento.archive import fleeting_lifecycle_sweep, sweep_archive_candidates  # noqa: E402
 from memento.hub import regenerate_stale_hubs  # noqa: E402
-from memento.store import fold_access_log_into_frontmatter  # noqa: E402
+from memento.store import fold_access_log_into_frontmatter, fold_stale_citations_into_frontmatter  # noqa: E402
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 CLAUDE_SESSIONS = Path.home() / ".claude" / "sessions"
@@ -286,6 +286,20 @@ def main():
             # the same way as the fold/archive/fleeting sweeps above -- a
             # failure here must never block orphan triage.
             regenerate_stale_hubs(str(VAULT))
+        except Exception:
+            pass
+
+        try:
+            # Citation staleness fold (MEM-162): verify-at-use (recall and
+            # tool-context injection) queues a note path whenever a cited
+            # anchor no longer matches its file. This periodic fold is the
+            # only writer that turns that queue into durable
+            # `citation_stale: true` frontmatter (memento.store.
+            # fold_stale_citations_into_frontmatter) -- always-on, cheap
+            # no-op when the queue is empty. Isolated the same way as the
+            # folds/sweeps above -- a failure here must never block orphan
+            # triage.
+            fold_stale_citations_into_frontmatter(str(VAULT))
         except Exception:
             pass
 

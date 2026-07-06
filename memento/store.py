@@ -33,6 +33,11 @@ AUTOMATION_MEMORY_HEALTH_LOG_PATH = os.path.join(
 ACCESS_LOG_PATH = os.path.join(RUNTIME_DIR, "access-log.jsonl")
 ACCESS_LOG_STATS_PATH = os.path.join(RUNTIME_DIR, "access-log-stats.json")
 
+# Citation-staleness review queue (MEM-162): verify-at-use appends here when
+# a cited anchor no longer matches, fold_stale_citations_into_frontmatter
+# drains it into durable `citation_stale: true` frontmatter.
+STALE_CITATIONS_QUEUE_PATH = os.path.join(RUNTIME_DIR, "stale-citations.jsonl")
+
 INCEPTION_STATE_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
     "memento-vault",
@@ -1056,6 +1061,53 @@ def _derive_project_fields(project, project_path=None):
     return slug, (_safe_yaml_scalar(raw_path) or None if raw_path else None)
 
 
+_MAX_CITATION_ANCHOR_CHARS = 120
+_MAX_CITATION_COMMIT_CHARS = 40
+
+
+def _normalize_citation_entry(entry):
+    """Return a sanitized ``{file, anchor[, commit]}`` citation dict, or ``None``.
+
+    Citations (MEM-162) are code-fact provenance the retrieval path verifies
+    cheaply against a live repo before injection, not something a bad
+    LLM/tool response should ever be allowed to block capture over -- an
+    entry missing a usable ``file``/``anchor`` is dropped, never raised.
+    ``anchor`` is truncated (not dropped) past
+    :data:`_MAX_CITATION_ANCHOR_CHARS`: a long anchor is still a valid,
+    if less precise, substring to verify against. ``commit`` is optional
+    provenance only -- ``anchor`` is the verification key.
+    """
+    if not isinstance(entry, dict):
+        return None
+    file_value = _safe_yaml_scalar(entry.get("file")).strip()
+    anchor_value = _safe_yaml_scalar(entry.get("anchor")).strip()
+    if not file_value or not anchor_value:
+        return None
+    if len(anchor_value) > _MAX_CITATION_ANCHOR_CHARS:
+        anchor_value = anchor_value[:_MAX_CITATION_ANCHOR_CHARS]
+    citation = {"file": file_value, "anchor": anchor_value}
+    commit_value = _safe_yaml_scalar(entry.get("commit")).strip()
+    if commit_value:
+        citation["commit"] = commit_value[:_MAX_CITATION_COMMIT_CHARS]
+    return citation
+
+
+def _normalize_citations(citations):
+    """Return a sanitized citations list, dropping malformed entries (MEM-162).
+
+    Never raises: a non-list ``citations`` (a bad LLM response shape) returns
+    ``[]`` rather than iterating character-by-character over a string.
+    """
+    if not isinstance(citations, list):
+        return []
+    normalized = []
+    for entry in citations:
+        cleaned = _normalize_citation_entry(entry)
+        if cleaned:
+            normalized.append(cleaned)
+    return normalized
+
+
 def normalize_note_contract(
     *,
     note_type="discovery",
@@ -1069,6 +1121,7 @@ def normalize_note_contract(
     project_path=None,
     branch=None,
     session_id=None,
+    citations=None,
 ):
     """Normalize metadata to the shared durable-note contract.
 
@@ -1081,6 +1134,10 @@ def normalize_note_contract(
     collapsed via ``repo_slug_from_path`` and the original raw value is kept
     verbatim in ``project_path`` so cross-machine/worktree paths never leak
     into the field retrieval filtering compares on.
+
+    ``citations`` (MEM-162) is an optional list of ``{file, anchor[, commit]}``
+    dicts asserting a note's claim against specific code; see
+    :func:`_normalize_citations` for the defensive parsing rules.
     """
     project_slug, project_path_value = _derive_project_fields(project, project_path)
     return {
@@ -1095,6 +1152,7 @@ def normalize_note_contract(
         "project_path": project_path_value,
         "branch": _safe_yaml_scalar(branch) or None,
         "session_id": _safe_yaml_scalar(session_id) or None,
+        "citations": _normalize_citations(citations),
     }
 
 
@@ -1141,6 +1199,7 @@ def _render_note_markdown(
     project_path=None,
     branch=None,
     session_id=None,
+    citations=None,
     extra_frontmatter_lines=None,
 ):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
@@ -1159,6 +1218,7 @@ def _render_note_markdown(
         project_path=project_path,
         branch=branch,
         session_id=session_id,
+        citations=citations,
     )
 
     lines = [
@@ -1176,6 +1236,8 @@ def _render_note_markdown(
         lines.append(f"validity-context: {contract['validity_context']}")
     if contract["supersedes"]:
         lines.append(f"supersedes: {json.dumps(contract['supersedes'], ensure_ascii=False)}")
+    if contract["citations"]:
+        lines.append(f"citations: {json.dumps(contract['citations'], ensure_ascii=False)}")
     if contract["project"]:
         lines.append(f"project: {contract['project']}")
     if contract["project_path"]:
@@ -1253,6 +1315,15 @@ def split_frontmatter(text):
 
 # Frontmatter keys owned by _render_note_markdown. Anything else found on an
 # existing note must round-trip rewrites unchanged.
+#
+# ``citations`` (MEM-162) is deliberately NOT in this set even though
+# _render_note_markdown writes it at create time: replace_note_at_path (the
+# only rewrite path) does not take a ``citations`` argument, so if it were
+# "managed" here a rewrite that doesn't pass citations would silently drop an
+# existing note's citations line. Leaving it unmanaged means
+# _unmanaged_frontmatter_lines() round-trips it like a hand-added key on
+# every rewrite -- the same reasoning _RESURFACING_FRONTMATTER_KEYS documents
+# below for resurfaced_count/last_resurfaced.
 _MANAGED_NOTE_FRONTMATTER_KEYS = {
     "title",
     "type",
@@ -1277,6 +1348,10 @@ _FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:")
 # what should happen when e.g. an MCP edit rewrites a note's title/body —
 # the resurfacing signal must survive that rewrite untouched.
 _RESURFACING_FRONTMATTER_KEYS = {"resurfaced_count", "last_resurfaced"}
+
+# Key owned by fold_stale_citations_into_frontmatter() (MEM-162). Same
+# round-trip reasoning as _RESURFACING_FRONTMATTER_KEYS above.
+_CITATION_FRONTMATTER_KEYS = {"citation_stale"}
 
 
 def _frontmatter_scalar(frontmatter, key):
@@ -1359,8 +1434,15 @@ def write_note(
     project_path=None,
     branch=None,
     session_id=None,
+    citations=None,
 ):
-    """Write an atomic note with normalized frontmatter to notes/ using an atomic rename."""
+    """Write an atomic note with normalized frontmatter to notes/ using an atomic rename.
+
+    ``citations`` (MEM-162) is an optional list of ``{file, anchor[, commit]}``
+    dicts written once at create time; citations accrue on new notes only
+    (no backfill). See :func:`_normalize_citations` for how malformed entries
+    are dropped without failing the write.
+    """
     notes_dir = Path(vault_path) / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1388,6 +1470,7 @@ def write_note(
             project=project,
             project_path=project_path,
             branch=branch,
+            citations=citations,
             session_id=session_id,
         ),
     )
@@ -1620,6 +1703,132 @@ def fold_access_log_into_frontmatter(vault_path, *, lock_file=None):
         _write_access_log_stats_file(data)
 
         return {"folded_notes": folded, "new_events": len(new_entries)}
+    finally:
+        if not already_held:
+            release_vault_write_lock(lock_file=lock_file)
+
+
+def append_stale_citation_review(note_path, citations, *, queue_path=None, checked_at=None):
+    """Queue one note for citation-staleness supersession review (MEM-162).
+
+    Called from the inject-time verification path
+    (``memento.retrieval_policy``/the tool-context path) when a selected
+    note's cited anchor no longer appears in its file. Never rewrites the
+    note inline -- this only appends a JSONL line to a runtime-dir queue;
+    :func:`fold_stale_citations_into_frontmatter` (run periodically from
+    ``hooks/memento-sweeper.py``) is the only writer that turns queued
+    entries into durable ``citation_stale: true`` frontmatter.
+
+    Best-effort like ``log_retrieval``: a write failure warns once (via
+    ``_append_jsonl``) and never raises, so a broken runtime dir can never
+    block recall/tool-context injection.
+    """
+    entry = {
+        "note_path": str(note_path),
+        "citations": citations,
+        "checked_at": checked_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _append_jsonl(queue_path or STALE_CITATIONS_QUEUE_PATH, entry, "_stale_citation_warned")
+
+
+def _mark_citation_stale(note_path):
+    """Set ``citation_stale: true`` on one note's frontmatter, idempotently.
+
+    Round-trips every other frontmatter line unchanged (same
+    ``_unmanaged_frontmatter_lines`` helper the MEM-148 fold uses) and only
+    ever touches this one key. Returns False (no rewrite performed) when the
+    note has no frontmatter block or is already flagged.
+    """
+    text = note_path.read_text(encoding="utf-8", errors="replace")
+    frontmatter, body = split_frontmatter(text)
+    if not frontmatter:
+        return False
+    if _frontmatter_bool(frontmatter, "citation_stale"):
+        return False  # already flagged -- idempotent no-op
+    preserved = _unmanaged_frontmatter_lines(frontmatter, managed_keys=_CITATION_FRONTMATTER_KEYS)
+    new_frontmatter = "\n".join([*preserved, "citation_stale: true"])
+    new_text = f"---\n{new_frontmatter}\n---\n{body}"
+    _write_text_atomic(note_path, new_text)
+    return True
+
+
+def fold_stale_citations_into_frontmatter(vault_path, *, queue_path=None, lock_file=None):
+    """Fold queued citation-staleness flags into note frontmatter (MEM-162).
+
+    Verify-at-use appends one JSONL record per stale citation encountered to
+    a runtime-dir review queue (:data:`STALE_CITATIONS_QUEUE_PATH`) instead
+    of rewriting the note on the hot recall/tool-context injection path.
+    This periodic fold is the only writer that turns that queue into durable
+    frontmatter (``citation_stale: true``) -- the supersession-review signal
+    consumed downstream by MEM-152's archive sweep / MEM-163's supersession
+    review, never applied inline.
+
+    Same failure-isolated, lock-scoped pattern as
+    ``fold_access_log_into_frontmatter``: re-entrant vault write lock, atomic
+    tmp+rename note rewrites, one bad note path never blocks the rest.
+
+    Idempotent: the queue file is drained (read, then truncated) up front,
+    so concurrent appends made *during* the fold land in a fresh empty file
+    rather than being lost, and notes already marked ``citation_stale: true``
+    are simply left unchanged (:func:`_mark_citation_stale` skips the
+    rewrite). Re-running with an empty/absent queue is a no-op.
+
+    Returns a dict with ``folded_notes`` (int notes newly flagged),
+    ``queued_events`` (int queue lines processed), and ``error`` (str, only
+    on lock contention).
+    """
+    vault = Path(vault_path).expanduser().resolve()
+    queue_file = Path(queue_path) if queue_path else Path(STALE_CITATIONS_QUEUE_PATH)
+
+    if not queue_file.exists():
+        return {"folded_notes": 0, "queued_events": 0}
+
+    already_held = owns_vault_write_lock(lock_file)
+    if not already_held and not acquire_vault_write_lock(lock_file=lock_file):
+        return {"folded_notes": 0, "queued_events": 0, "error": "lock_unavailable"}
+
+    try:
+        try:
+            drained_text = queue_file.read_text(encoding="utf-8")
+        except OSError:
+            return {"folded_notes": 0, "queued_events": 0}
+        try:
+            queue_file.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+
+        rel_paths = set()
+        queued_events = 0
+        for line in drained_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rel_path = str(record.get("note_path") or "").strip()
+            if not rel_path:
+                continue
+            queued_events += 1
+            rel_paths.add(rel_path)
+
+        folded = 0
+        for rel_path in rel_paths:
+            try:
+                note_path = (vault / rel_path).resolve()
+                note_path.relative_to(vault)
+            except (OSError, ValueError):
+                continue
+            if not note_path.is_file():
+                continue
+            try:
+                if _mark_citation_stale(note_path):
+                    folded += 1
+            except OSError:
+                continue
+
+        return {"folded_notes": folded, "queued_events": queued_events}
     finally:
         if not already_held:
             release_vault_write_lock(lock_file=lock_file)

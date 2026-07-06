@@ -60,6 +60,7 @@ MANAGED_FIELD_TYPES = {
     "date": "datetime",
     "session_id": "uuid/string",
     "repo_slug": "string",
+    "citations": "list",
 }
 
 
@@ -108,6 +109,7 @@ def _write_note_fixture(vault: Path, *, note_type: str = "discovery", source: st
         project="/tmp/memento-vault",
         branch="schema-checker",
         session_id=f"session-{source}",
+        citations=[{"file": "memento/store.py", "anchor": "def write_note(", "commit": "abc1234"}],
     )
     return path.read_text(encoding="utf-8")
 
