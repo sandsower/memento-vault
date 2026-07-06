@@ -659,7 +659,18 @@ class EmbeddedSearchBackend(SearchBackend):
         return results[:limit]
 
     def _hybrid_search(self, query: str, limit: int, min_score: float) -> list[dict]:
-        """RRF fusion of FTS5 BM25 + vector search."""
+        """RRF fusion of FTS5 BM25 + vector search.
+
+        RRF's rank-based score is purely positional: a document that is the
+        only candidate in both the FTS5 and vector lists always ranks #1 in
+        each, so rrf_score/max_rrf normalizes to 1.0 regardless of how weak
+        that document's actual score was in either backend (MEM-143). Both
+        `_fts5_search` and `_vec_search` already normalize their own scores
+        to [0, 1] (MEM-127), so the fused score is capped at the document's
+        best underlying normalized score: `fused = rrf_normalized *
+        best_quality`. Rank still decides ORDERING; it just can no longer
+        manufacture quality above what the underlying backends measured.
+        """
         fts_results = self._fts5_search(query, limit * 2, 0.0)
         vec_results = self._vec_search(query, limit * 2, 0.0)
 
@@ -674,17 +685,20 @@ class EmbeddedSearchBackend(SearchBackend):
         k = 60
         scores: dict[str, float] = {}
         metadata: dict[str, dict] = {}
+        best_quality: dict[str, float] = {}
 
         for rank, r in enumerate(fts_results):
             path = r["path"]
             scores[path] = scores.get(path, 0.0) + 1.0 / (k + rank + 1)
             metadata[path] = r
+            best_quality[path] = max(best_quality.get(path, 0.0), float(r.get("score", 0) or 0))
 
         for rank, r in enumerate(vec_results):
             path = r["path"]
             scores[path] = scores.get(path, 0.0) + 1.0 / (k + rank + 1)
             if path not in metadata:
                 metadata[path] = r
+            best_quality[path] = max(best_quality.get(path, 0.0), float(r.get("score", 0) or 0))
 
         # Normalize to 0-1
         max_rrf = max(scores.values()) if scores else 1.0
@@ -693,7 +707,8 @@ class EmbeddedSearchBackend(SearchBackend):
 
         results = []
         for path, rrf_score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
-            normalized = rrf_score / max_rrf
+            rrf_normalized = rrf_score / max_rrf
+            normalized = rrf_normalized * best_quality.get(path, 0.0)
             if normalized < min_score:
                 continue
             entry = metadata[path].copy()

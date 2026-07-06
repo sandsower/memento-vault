@@ -123,26 +123,16 @@ class TestCrossBackendThresholdConsistency:
 
 
 class TestRRFInflationInteractionMEM143:
-    """MEM-143 (separate, unblocked-not-fixed-here): RRF assigns rank-based
-    scores, not relevance-based ones, so a weak match that happens to rank
-    first in two thin candidate lists gets fused to a normalized score of
-    1.0 regardless of how weak its underlying per-backend score was."""
+    """MEM-143 (fixed): RRF's own rank-based score is purely positional, so a
+    weak match that happens to rank first in two thin candidate lists would
+    fuse to a normalized score of 1.0 regardless of how weak its underlying
+    per-backend score was, if the fused score were rank-only. Since MEM-127,
+    every backend's own score is normalized to a comparable [0, 1] scale, so
+    ``rrf_fuse`` now caps the fused score at the document's best underlying
+    normalized score (``fused = rrf_normalized * best_quality``) - rank still
+    decides ordering, but it can no longer manufacture quality above what the
+    underlying backends actually measured."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "MEM-143: RRF fusion normalizes by rrf_score / max_rrf, which is "
-            "purely rank-based - a weak match (per-backend score 0.05, well "
-            "below recall_min_score) that is the ONLY candidate in both the "
-            "FTS5 and vector result lists still ranks #1 in each, so RRF "
-            "fuses it to a normalized score of 1.0. MEM-127 normalizes each "
-            "backend's OWN score at the boundary; it does not touch RRF "
-            "fusion's internal rank-based scoring (excluded from this "
-            "slice's scope - see MEM-143). This assertion documents that "
-            "normalization at the source does not, by itself, prevent RRF "
-            "from inflating a weak match; fixing RRF fusion is MEM-143's job."
-        ),
-    )
     def test_weak_match_score_survives_rrf_fusion_below_recall_min_score(self):
         from memento.search import rrf_fuse
 
