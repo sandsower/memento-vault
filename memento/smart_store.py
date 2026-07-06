@@ -8,7 +8,16 @@ from pathlib import Path
 from memento.config import get_vault, slugify
 from memento.contradictions import inspect_contradictions
 from memento.search import has_qmd, qmd_search_with_extras, resolve_concrete_mode
-from memento.store import find_dedup_candidates, normalize_note_contract, update_project_index, write_note
+from memento.store import (
+    acquire_vault_write_lock,
+    find_dedup_candidates,
+    normalize_note_contract,
+    owns_vault_write_lock,
+    release_vault_write_lock,
+    split_frontmatter,
+    update_project_index,
+    write_note,
+)
 from memento.utils import sanitize_secrets
 
 _CLOSE_MATCH_THRESHOLD = 0.45
@@ -53,10 +62,13 @@ def _strip_related_placeholder(body: str) -> str:
 
 
 def _split_note_text(text: str) -> tuple[str, str]:
-    parts = (text or "").split("---", 2)
-    if len(parts) < 3:
-        return "", (text or "").strip()
-    return parts[1], _strip_related_placeholder(parts[2])
+    """Split a note into (frontmatter, body).
+
+    Only a LEADING ``---`` block counts as frontmatter; ``---`` lines inside the
+    body must never fabricate one or truncate the body (audit M6).
+    """
+    frontmatter, body = split_frontmatter(text or "")
+    return frontmatter, _strip_related_placeholder(body)
 
 
 def _frontmatter_value(frontmatter: str, key: str) -> str | None:
@@ -420,52 +432,67 @@ def write_smart_store_note(
     origin: str | None = None,
     candidate_limit: int = 5,
 ) -> dict:
-    """Smart-store helper that writes only when no close match exists."""
-    decision = suggest_store_action(
-        title=title,
-        body=body,
-        note_type=note_type,
-        tags=tags,
-        certainty=certainty,
-        project=project,
-        branch=branch,
-        session_id=session_id,
-        validity_context=validity_context,
-        supersedes=supersedes,
-        origin=origin,
-        candidate_limit=candidate_limit,
-    )
-    if decision.get("error"):
-        return decision
-    if decision.get("decision") != "created":
-        return decision
+    """Smart-store helper that writes only when no close match exists.
 
-    payload = decision["write"]
-    vault = get_vault()
-    path = write_note(
-        vault,
-        title=payload["title"],
-        body=payload["body"],
-        note_type=payload["note_type"],
-        tags=payload["tags"],
-        certainty=payload["certainty"],
-        source="mcp",
-        origin=payload["origin"],
-        validity_context=payload["validity_context"],
-        supersedes=payload["supersedes"],
-        project=payload["project"],
-        branch=payload["branch"],
-        session_id=payload["session_id"],
-    )
+    The dedup check and the write run atomically under the vault write lock so
+    two concurrent same-payload writers cannot both pass the check and create
+    duplicates (audit M6). Re-entrant: callers that already hold the lock (MCP
+    server, automated run lessons) keep it — it is neither re-acquired nor
+    released on their behalf.
+    """
+    already_held = owns_vault_write_lock()
+    if not already_held and not acquire_vault_write_lock():
+        return {"error": "Could not acquire vault write lock (another write in progress)"}
 
-    if payload["project"]:
-        project_slug = slugify(Path(payload["project"]).name) or None
-        if project_slug:
-            summary = f"MCP smart-store: {payload['title'][:80]}"
-            update_project_index(vault, project_slug, path.stem, summary)
+    try:
+        decision = suggest_store_action(
+            title=title,
+            body=body,
+            note_type=note_type,
+            tags=tags,
+            certainty=certainty,
+            project=project,
+            branch=branch,
+            session_id=session_id,
+            validity_context=validity_context,
+            supersedes=supersedes,
+            origin=origin,
+            candidate_limit=candidate_limit,
+        )
+        if decision.get("error"):
+            return decision
+        if decision.get("decision") != "created":
+            return decision
 
-    return {
-        **decision,
-        "path": str(path.relative_to(vault)),
-        "created": True,
-    }
+        payload = decision["write"]
+        vault = get_vault()
+        path = write_note(
+            vault,
+            title=payload["title"],
+            body=payload["body"],
+            note_type=payload["note_type"],
+            tags=payload["tags"],
+            certainty=payload["certainty"],
+            source="mcp",
+            origin=payload["origin"],
+            validity_context=payload["validity_context"],
+            supersedes=payload["supersedes"],
+            project=payload["project"],
+            branch=payload["branch"],
+            session_id=payload["session_id"],
+        )
+
+        if payload["project"]:
+            project_slug = slugify(Path(payload["project"]).name) or None
+            if project_slug:
+                summary = f"MCP smart-store: {payload['title'][:80]}"
+                update_project_index(vault, project_slug, path.stem, summary)
+
+        return {
+            **decision,
+            "path": str(path.relative_to(vault)),
+            "created": True,
+        }
+    finally:
+        if not already_held:
+            release_vault_write_lock()

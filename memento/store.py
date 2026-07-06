@@ -5,6 +5,7 @@ import math
 import json
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -529,6 +530,21 @@ def release_inception_lock(lock_path=None):
         pass
 
 
+def owns_vault_write_lock(lock_file=None):
+    """Return True when the vault write lock exists and is held by this process.
+
+    The lock file stores the owner's pid, so write paths that may be called both
+    standalone and from callers that already hold the lock (e.g. the MCP server)
+    can stay re-entrant: acquire only when the lock is not already ours, and
+    never release a lock the caller owns.
+    """
+    path = Path(lock_file or VAULT_WRITE_LOCK_PATH)
+    try:
+        return int(path.read_text().strip()) == os.getpid()
+    except (OSError, ValueError):
+        return False
+
+
 def acquire_vault_write_lock(lock_file=None, timeout=5.0, poll_interval=0.05, *, lock_path=None):
     """Acquire a short-lived vault write lock, polling until timeout.
 
@@ -872,6 +888,7 @@ def _render_note_markdown(
     project=None,
     branch=None,
     session_id=None,
+    extra_frontmatter_lines=None,
 ):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
@@ -912,6 +929,9 @@ def _render_note_markdown(
     lines.append(f"date: {now}")
     if contract["session_id"]:
         lines.append(f"session_id: {contract['session_id']}")
+    # Verbatim round-trip of frontmatter keys this renderer does not manage
+    # (rewrite paths pass the existing note's unmanaged lines through).
+    lines.extend(extra_frontmatter_lines or [])
 
     # Append the canonical "## Related" placeholder only if the body doesn't
     # already contain one — otherwise callers that include their own ## Related
@@ -936,6 +956,83 @@ def _index_written_note(vault_path, target):
             backend.reindex("memento", embed=False)
     except Exception:
         pass  # Indexing failure must not block note storage
+
+
+def _write_text_atomic(target, text):
+    """Write ``text`` to ``target`` via a unique same-directory tmp file plus atomic rename.
+
+    The tmp name embeds a random per-writer component (``tempfile.mkstemp``) so
+    concurrent writers aimed at the same target can never clobber or steal each
+    other's in-flight tmp file, which slug-derived tmp names allowed (audit M6).
+    """
+    target = Path(target)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".tmp-{target.stem}-", suffix=target.suffix)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+_LEADING_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)(.*)\Z", re.DOTALL)
+
+
+def split_frontmatter(text):
+    """Split note text into ``(frontmatter, body)``.
+
+    Only a LEADING ``---`` block counts as frontmatter — ``---`` lines inside
+    the body must never fabricate one (audit M6). Returns ``("", text)`` when
+    the text does not start with a closed frontmatter block.
+    """
+    match = _LEADING_FRONTMATTER_RE.match(text or "")
+    if not match:
+        return "", text or ""
+    return match.group(1), match.group(2)
+
+
+# Frontmatter keys owned by _render_note_markdown. Anything else found on an
+# existing note must round-trip rewrites unchanged.
+_MANAGED_NOTE_FRONTMATTER_KEYS = {
+    "title",
+    "type",
+    "tags",
+    "source",
+    "origin",
+    "certainty",
+    "validity-context",
+    "supersedes",
+    "project",
+    "branch",
+    "date",
+    "session_id",
+}
+
+_FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:")
+
+
+def _unmanaged_frontmatter_lines(frontmatter):
+    """Return raw frontmatter lines for keys the write path does not manage.
+
+    Each unmanaged ``key:`` line is preserved verbatim together with its
+    indented continuation lines so rewrites round-trip unknown keys unchanged.
+    """
+    preserved = []
+    keep = False
+    for line in (frontmatter or "").splitlines():
+        if line[:1] in (" ", "\t"):
+            if keep:
+                preserved.append(line)
+            continue
+        match = _FRONTMATTER_KEY_RE.match(line)
+        keep = bool(match) and match.group(1) not in _MANAGED_NOTE_FRONTMATTER_KEYS
+        if keep:
+            preserved.append(line)
+    return preserved
 
 
 def write_note(
@@ -966,8 +1063,8 @@ def write_note(
             if not candidate.exists():
                 target = candidate
                 break
-    tmp = notes_dir / f".tmp-{slug}.md"
-    tmp.write_text(
+    _write_text_atomic(
+        target,
         _render_note_markdown(
             title,
             body,
@@ -981,9 +1078,8 @@ def write_note(
             project=project,
             branch=branch,
             session_id=session_id,
-        )
+        ),
     )
-    os.replace(tmp, target)
     _index_written_note(vault_path, target)
     return target
 
@@ -1018,8 +1114,13 @@ def replace_note_at_path(
     if not target.exists():
         raise FileNotFoundError(str(rel))
 
-    tmp = target.with_name(f".tmp-{target.stem}.md")
-    tmp.write_text(
+    # Round-trip frontmatter keys this write path does not manage (audit M6):
+    # sync rewrites must not drop keys added by hand or by other tools.
+    existing_frontmatter, _ = split_frontmatter(target.read_text(encoding="utf-8", errors="replace"))
+    preserved_lines = _unmanaged_frontmatter_lines(existing_frontmatter)
+
+    _write_text_atomic(
+        target,
         _render_note_markdown(
             title,
             body,
@@ -1033,9 +1134,9 @@ def replace_note_at_path(
             project=project,
             branch=branch,
             session_id=session_id,
-        )
+            extra_frontmatter_lines=preserved_lines,
+        ),
     )
-    os.replace(tmp, target)
     _index_written_note(vault_path, target)
     return target
 
@@ -1163,9 +1264,7 @@ def write_daily_snapshot(
     else:
         lines.extend(["---", "", body, "", "## Related", ""])
 
-    tmp = notes_dir / f".tmp-{target.name}"
-    tmp.write_text("\n".join(lines))
-    os.replace(tmp, target)
+    _write_text_atomic(target, "\n".join(lines))
 
     try:
         from memento.search_backend import get_backend
@@ -1220,4 +1319,4 @@ def update_project_index(vault_path, project_slug, note_name, session_summary):
     if session_line not in content:
         content = append_project_session_line(content, session_line)
 
-    project_file.write_text(content)
+    _write_text_atomic(project_file, content)

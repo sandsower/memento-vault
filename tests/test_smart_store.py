@@ -184,7 +184,9 @@ class TestWriteSmartStoreLock:
         monkeypatch.setattr("memento.smart_store.has_qmd", lambda: False)
         monkeypatch.setattr("memento.smart_store.inspect_contradictions", lambda *args, **kwargs: {})
 
-    def test_write_refused_while_another_process_holds_the_lock(self, tmp_vault, monkeypatch, isolated_vault_write_lock):
+    def test_write_refused_while_another_process_holds_the_lock(
+        self, tmp_vault, monkeypatch, isolated_vault_write_lock
+    ):
         self._patch_vault(tmp_vault, monkeypatch)
         # Keep the test fast: the real acquire, just with a short timeout.
         monkeypatch.setattr(
