@@ -463,6 +463,9 @@ class TestBuildToolContextStaleMarker:
             patch("memento.lifecycle.has_qmd", return_value=True),
             patch("memento.lifecycle.get_config", return_value=config),
             patch("memento.lifecycle.get_vault", return_value=vault),
+            # pytest tmp dirs live under /tmp on Linux, which SKIP_PREFIXES
+            # excludes from tool context - bypass the fast-exit for this test.
+            patch("memento.lifecycle.should_skip_tool_context_path", return_value=False),
             patch(
                 "memento.lifecycle.qmd_search_with_extras",
                 return_value=[
