@@ -200,8 +200,14 @@ DEFAULT_CONFIG = {
     "reranker_top_k": 10,
     "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     "reranker_min_score": 0.01,
-    # Multi-hop retrieval (experimental)
-    "multi_hop_enabled": False,
+    # Multi-hop retrieval. Defaulted on (MEM-159 part 3), gated on MEM-143's
+    # RRF fusion fix: before MEM-143, a rank-inflated weak match could seed
+    # multi-hop wikilink expansion with a falsely "confident" candidate,
+    # spending qmd get calls following links from garbage. Now that
+    # rrf_fuse()/_hybrid_search() bound the fused score to the doc's own
+    # underlying normalized quality, the seeds multi-hop follows reflect
+    # real confidence, so the expansion is safe to run by default.
+    "multi_hop_enabled": True,
     "multi_hop_max": 2,
     # Deep recall — background codex analysis (experimental)
     "deep_recall_enabled": False,

@@ -275,8 +275,10 @@ Use `memento-vault retrieval-report --since 7` (or `python tools/analyze-retriev
 
 When the initial BM25 score is below the confidence threshold, `vault-recall` follows `[[wikilinks]]` from top results to pull in connected notes. It fetches the full content of the top 3 results, extracts wikilink targets, and retrieves linked notes directly via `qmd get`. Only fires on the deep path (low BM25 confidence).
 
+Enabled by default since MEM-159 (gated on MEM-143's RRF fusion fix: the fused score seeding this expansion is now bounded by the doc's own underlying normalized quality, so multi-hop no longer risks following links from a rank-inflated weak match).
+
 ```yaml
-# Enable multi-hop (default false)
+# Enable multi-hop (default true)
 multi_hop_enabled: true
 
 # Maximum linked notes to add per recall (default 2)
