@@ -906,6 +906,17 @@ def append_project_session_line(content, line):
 
     Hubs that have opted into ``## Activity log`` keep auto-captures there.
     Older hubs continue to receive entries under ``## Sessions``.
+
+    MEM-160: this unbounded append is the corruption source identified in
+    mem-156-through-166-track-the-retrieval-surface-plan -- it is retired
+    at :func:`update_project_index` (that call site no longer invokes this
+    function at all; ``## Recent activity`` in a regenerated hub,
+    :func:`memento.hub.regenerate_project_hub`, is the bounded replacement).
+    This function itself is left unchanged, since ``memento/mcp_server.py``'s
+    fleeting-only capture path and ``hooks/memento-triage.py``'s
+    ``append_session_to_project`` still call it directly for their own
+    session markers -- retiring those call sites is a follow-up, not part of
+    this slice.
     """
     if _has_heading(content, "## Activity log"):
         return _append_under_heading(content, "## Activity log", line)
@@ -1758,7 +1769,27 @@ def write_daily_snapshot(
 
 
 def update_project_index(vault_path, project_slug, note_name, session_summary):
-    """Ensure project index exists and append note/session references."""
+    """Ensure a project index exists and record a ``[[note_name]]`` link under ``## Notes``.
+
+    MEM-160: this used to also hand-append a free-text session-summary line
+    (formerly under ``## Sessions``, later ``## Activity log`` --
+    :func:`append_project_session_line`) on every MCP store/replace/capture.
+    That unbounded, ever-growing append -- with no cap and no structural
+    guarantee across format drift -- is what corrupted real hubs into
+    multi-hundred-line files with duplicate headers, truncated entries, and
+    stray fragments. This call site's session-summary append is retired
+    outright (``session_summary`` is accepted only for call-site
+    compatibility with ``memento/mcp_server.py``, ``memento/smart_store.py``,
+    and ``memento/dedup_merge.py``, and is otherwise unused): the bounded
+    replacement is :func:`memento.hub.regenerate_project_hub`'s ``## Recent
+    activity`` section, mechanically derived from note frontmatter dates on
+    every regeneration rather than hand-maintained here.
+
+    ``memento/mcp_server.py``'s fleeting-only capture path and
+    ``hooks/memento-triage.py``'s ``append_session_to_project`` still call
+    :func:`append_project_session_line` directly for their own session
+    markers -- that call path is unchanged and out of scope for this retirement.
+    """
     project_dir = Path(vault_path) / "projects"
     project_dir.mkdir(parents=True, exist_ok=True)
     project_file = project_dir / f"{project_slug}.md"
@@ -1775,8 +1806,6 @@ def update_project_index(vault_path, project_slug, note_name, session_summary):
                 "",
                 "## Notes",
                 "",
-                "## Sessions",
-                "",
             ]
         )
 
@@ -1786,10 +1815,5 @@ def update_project_index(vault_path, project_slug, note_name, session_summary):
             content = _append_under_heading(content, "## Notes", note_line)
         else:
             content = content.rstrip() + "\n\n## Notes\n\n" + note_line + "\n"
-
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    session_line = f"- {today} {session_summary}"
-    if session_line not in content:
-        content = append_project_session_line(content, session_line)
 
     _write_text_atomic(project_file, content)

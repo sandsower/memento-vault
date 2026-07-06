@@ -239,3 +239,58 @@ def test_main_still_triages_when_fleeting_lifecycle_sweep_raises(tmp_path, monke
         _mod.main()
 
     assert exc.value.code == 0
+
+
+def test_main_runs_hub_regeneration_after_fleeting_lifecycle_sweep(tmp_path, monkeypatch):
+    """MEM-160: the sweeper is also the periodic trigger for project hub regeneration."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    monkeypatch.setattr(_mod, "VAULT", vault)
+    monkeypatch.setattr(_mod, "FLEETING", vault / "fleeting")
+    monkeypatch.setattr(_mod, "LOCK_FILE", tmp_path / "sweeper.lock")
+    monkeypatch.setattr(_mod, "CLAUDE_PROJECTS", tmp_path / "no-claude-projects")
+    monkeypatch.setattr(_mod, "PI_SESSIONS", tmp_path / "no-pi-sessions")
+    monkeypatch.setattr(_mod, "PI_SUBAGENTS", tmp_path / "no-pi-subagents")
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.delenv("MEMENTO_PI_TRANSCRIPT_ROOTS", raising=False)
+    monkeypatch.setattr(_mod, "fold_access_log_into_frontmatter", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "sweep_archive_candidates", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "fleeting_lifecycle_sweep", lambda vault_path: None)
+
+    hub_calls = []
+    monkeypatch.setattr(_mod, "regenerate_stale_hubs", lambda vault_path: hub_calls.append(vault_path))
+
+    with pytest.raises(SystemExit) as exc:
+        _mod.main()
+
+    assert exc.value.code == 0
+    assert hub_calls == [str(vault)]
+
+
+def test_main_still_triages_when_hub_regeneration_raises(tmp_path, monkeypatch):
+    """A hub-regeneration failure must never block orphan triage -- isolated like the other sweeps."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    monkeypatch.setattr(_mod, "VAULT", vault)
+    monkeypatch.setattr(_mod, "FLEETING", vault / "fleeting")
+    monkeypatch.setattr(_mod, "LOCK_FILE", tmp_path / "sweeper.lock")
+    monkeypatch.setattr(_mod, "CLAUDE_PROJECTS", tmp_path / "no-claude-projects")
+    monkeypatch.setattr(_mod, "PI_SESSIONS", tmp_path / "no-pi-sessions")
+    monkeypatch.setattr(_mod, "PI_SUBAGENTS", tmp_path / "no-pi-subagents")
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.delenv("MEMENTO_PI_TRANSCRIPT_ROOTS", raising=False)
+    monkeypatch.setattr(_mod, "fold_access_log_into_frontmatter", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "sweep_archive_candidates", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "fleeting_lifecycle_sweep", lambda vault_path: None)
+
+    def _boom(vault_path):
+        raise RuntimeError("hub regeneration exploded")
+
+    monkeypatch.setattr(_mod, "regenerate_stale_hubs", _boom)
+
+    with pytest.raises(SystemExit) as exc:
+        _mod.main()
+
+    assert exc.value.code == 0

@@ -2003,7 +2003,14 @@ class TestMementoCapture:
         project_file = tmp_vault / "projects" / "my-api.md"
         assert project_file.exists()
         content = project_file.read_text()
-        assert "windsurf" in content
+        # MEM-160: update_project_index no longer hand-appends a free-text
+        # session-summary line (the unbounded ## Sessions/## Activity log
+        # growth that corrupted real hubs) -- only the [[note]] link under
+        # ## Notes remains. memento.hub.regenerate_project_hub's "## Recent
+        # activity" section is the bounded replacement for this signal.
+        assert "## Notes" in content
+        assert "[[added-caching-layer]]" in content
+        assert "windsurf" not in content
 
     @pytest.mark.usefixtures("_use_vault_config")
     def test_fleeting_only_capture_routes_to_activity_log_when_present(self, tmp_vault):

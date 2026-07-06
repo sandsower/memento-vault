@@ -516,6 +516,11 @@ class TestFindDedupCandidates:
 
 
 class TestUpdateProjectIndex:
+    """MEM-160: session-summary appends are retired here -- memento.hub.regenerate_project_hub's
+    mechanically-derived "## Recent activity" section is the bounded replacement. update_project_index
+    now only ever appends a "[[note_name]]" link under "## Notes"; session_summary is accepted for
+    call-site compatibility but is otherwise unused."""
+
     def test_update_project_index_creates_if_missing(self, tmp_vault):
         update_project_index(tmp_vault, "api-service", "redis-cache-ttl", "Fixed cache invalidation")
 
@@ -524,8 +529,8 @@ class TestUpdateProjectIndex:
         text = project_file.read_text()
         assert "## Notes" in text
         assert "- [[redis-cache-ttl]]" in text
-        assert "## Sessions" in text
-        assert "Fixed cache invalidation" in text
+        assert "## Sessions" not in text
+        assert "Fixed cache invalidation" not in text
 
     def test_update_project_index_appends_to_existing(self, tmp_vault):
         project_file = tmp_vault / "projects" / "api-service.md"
@@ -554,39 +559,23 @@ class TestUpdateProjectIndex:
         assert "- [[existing-note]]" in text
         assert "- [[redis-cache-ttl]]" in text
         assert text.count("- [[redis-cache-ttl]]") == 1
-        assert "Fixed cache invalidation" in text
+        # Legacy Sessions content round-trips untouched -- update_project_index
+        # neither adds to it nor removes it.
+        assert "- 2026-04-01 `sess-1` Existing summary" in text
+        # New session-summary text is never written.
+        assert "Fixed cache invalidation" not in text
 
-    def test_update_project_index_skips_duplicate_session_line(self, tmp_vault):
-        project_file = tmp_vault / "projects" / "api-service.md"
-        project_file.write_text(
-            "\n".join(
-                [
-                    "---",
-                    "title: api-service",
-                    "project: /home/vic/Projects/api-service",
-                    "---",
-                    "",
-                    "## Notes",
-                    "",
-                    "## Sessions",
-                    "",
-                    "- 2026-04-01 `sess-123` Fixed cache invalidation",
-                ]
-            )
-        )
+    def test_update_project_index_is_idempotent_for_repeated_note_links(self, tmp_vault):
+        update_project_index(tmp_vault, "api-service", "redis-cache-ttl", "first summary")
+        update_project_index(tmp_vault, "api-service", "redis-cache-ttl", "second summary")
 
-        with patch("memento.store.datetime") as mock_datetime:
-            mock_now = mock_datetime.now.return_value
-            mock_now.strftime.return_value = "2026-04-01"
-
-            update_project_index(tmp_vault, "api-service", "redis-cache-ttl", "`sess-123` Fixed cache invalidation")
-
-        text = project_file.read_text()
-        assert text.count("- 2026-04-01 `sess-123` Fixed cache invalidation") == 1
+        text = (tmp_vault / "projects" / "api-service.md").read_text()
         assert text.count("- [[redis-cache-ttl]]") == 1
+        assert "first summary" not in text
+        assert "second summary" not in text
 
-    def test_update_project_index_routes_to_activity_log_when_present(self, tmp_vault):
-        """When the hub splits Sessions from Activity log, auto-captures land in Activity log."""
+    def test_update_project_index_never_writes_session_summary_regardless_of_existing_headings(self, tmp_vault):
+        """Retired for every legacy hub shape: Sessions-only, Activity-log-only, or both."""
         project_file = tmp_vault / "projects" / "api-service.md"
         project_file.write_text(
             "\n".join(
@@ -596,8 +585,6 @@ class TestUpdateProjectIndex:
                     "---",
                     "",
                     "## Notes",
-                    "",
-                    "- [[existing-note]]",
                     "",
                     "## Sessions",
                     "",
@@ -611,115 +598,15 @@ class TestUpdateProjectIndex:
             )
         )
 
-        with patch("memento.store.datetime") as mock_datetime:
-            mock_now = mock_datetime.now.return_value
-            mock_now.strftime.return_value = "2026-04-15"
-
-            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
+        update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
 
         text = project_file.read_text()
-        # Handwritten Sessions entry untouched
+        # Existing handwritten/legacy content round-trips untouched.
         assert "- 2026-04-01 — handwritten session entry with full context" in text
-        # New auto-capture lands inside the Activity log section
-        activity_pos = text.index("## Activity log")
-        sessions_pos = text.index("## Sessions")
-        new_line_pos = text.index("- 2026-04-15 MCP store: New note title")
-        assert new_line_pos > activity_pos
-        # And not inside Sessions
-        assert sessions_pos < activity_pos < new_line_pos
-
-    def test_update_project_index_appends_to_mid_file_activity_log(self, tmp_vault):
-        """Activity log insertion stays inside the section, before the next heading."""
-        project_file = tmp_vault / "projects" / "api-service.md"
-        project_file.write_text(
-            "\n".join(
-                [
-                    "---",
-                    "title: api-service",
-                    "---",
-                    "",
-                    "## Notes",
-                    "",
-                    "## Activity log",
-                    "",
-                    "- 2026-04-01 — earlier auto entry",
-                    "",
-                    "## Decisions",
-                    "",
-                    "- Keep this section separate.",
-                ]
-            )
-        )
-
-        with patch("memento.store.datetime") as mock_datetime:
-            mock_now = mock_datetime.now.return_value
-            mock_now.strftime.return_value = "2026-04-15"
-
-            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
-
-        text = project_file.read_text()
-        new_line_pos = text.index("- 2026-04-15 MCP store: New note title")
-        decisions_pos = text.index("## Decisions")
-        assert text.index("## Activity log") < new_line_pos < decisions_pos
-
-    def test_update_project_index_preserves_blank_line_for_empty_activity_log(self, tmp_vault):
-        project_file = tmp_vault / "projects" / "api-service.md"
-        project_file.write_text(
-            "\n".join(
-                [
-                    "---",
-                    "title: api-service",
-                    "---",
-                    "",
-                    "## Notes",
-                    "",
-                    "## Activity log",
-                    "",
-                ]
-            )
-        )
-
-        with patch("memento.store.datetime") as mock_datetime:
-            mock_now = mock_datetime.now.return_value
-            mock_now.strftime.return_value = "2026-04-15"
-
-            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
-
-        text = project_file.read_text()
-        assert "## Activity log\n\n- 2026-04-15 MCP store: New note title\n" in text
-
-    def test_update_project_index_ignores_heading_text_in_body(self, tmp_vault):
-        """Inline heading literals must not trigger Activity log routing."""
-        project_file = tmp_vault / "projects" / "api-service.md"
-        project_file.write_text(
-            "\n".join(
-                [
-                    "---",
-                    "title: api-service",
-                    "---",
-                    "",
-                    "## Notes",
-                    "",
-                    "- This note mentions `## Activity log` but does not define it.",
-                    "",
-                    "## Sessions",
-                    "",
-                    "- 2026-04-01 — earlier entry",
-                ]
-            )
-        )
-
-        with patch("memento.store.datetime") as mock_datetime:
-            mock_now = mock_datetime.now.return_value
-            mock_now.strftime.return_value = "2026-04-15"
-
-            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
-
-        text = project_file.read_text()
-        sessions_pos = text.index("## Sessions")
-        new_line_pos = text.index("- 2026-04-15 MCP store: New note title")
-        assert sessions_pos < new_line_pos
-        assert text.count("## Activity log") == 1
+        assert "- 2026-04-01 — [[earlier-auto-capture]]" in text
+        # But no new session-summary text is ever appended anywhere.
+        assert "MCP store: New note title" not in text
+        assert "- [[new-note]]" in text
 
     def test_update_project_index_writes_via_atomic_replace(self, tmp_vault, monkeypatch):
         """The project index must be written tmp-then-rename like every other write path (audit M6)."""
@@ -741,36 +628,6 @@ class TestUpdateProjectIndex:
         assert list(project_file.parent.glob(".tmp-*")) == []
         text = project_file.read_text()
         assert "- [[redis-cache-ttl]]" in text
-        assert "Fixed cache invalidation" in text
-
-    def test_update_project_index_falls_back_to_sessions(self, tmp_vault):
-        """Hubs without an Activity log section still receive auto-captures in Sessions."""
-        project_file = tmp_vault / "projects" / "api-service.md"
-        project_file.write_text(
-            "\n".join(
-                [
-                    "---",
-                    "title: api-service",
-                    "---",
-                    "",
-                    "## Notes",
-                    "",
-                    "## Sessions",
-                    "",
-                    "- 2026-04-01 — earlier entry",
-                ]
-            )
-        )
-
-        with patch("memento.store.datetime") as mock_datetime:
-            mock_now = mock_datetime.now.return_value
-            mock_now.strftime.return_value = "2026-04-15"
-
-            update_project_index(tmp_vault, "api-service", "new-note", "MCP store: New note title")
-
-        text = project_file.read_text()
-        assert "- 2026-04-15 MCP store: New note title" in text
-        assert "## Activity log" not in text
 
 
 class TestVaultWriteLock:

@@ -20,6 +20,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from memento.archive import fleeting_lifecycle_sweep, sweep_archive_candidates  # noqa: E402
+from memento.hub import regenerate_stale_hubs  # noqa: E402
 from memento.store import fold_access_log_into_frontmatter  # noqa: E402
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
@@ -272,6 +273,19 @@ def main():
             # as the fold/archive sweep above -- a failure here must never
             # block orphan triage.
             fleeting_lifecycle_sweep(str(VAULT))
+        except Exception:
+            pass
+
+        try:
+            # Project hub regeneration (MEM-160): rebuilds projects/<slug>.md
+            # from scratch (frontmatter + link graph) for any project whose
+            # notes are newer than its hub, replacing the corrupted
+            # append-only ## Sessions/## Activity log growth with a capped,
+            # idempotent regeneration (memento.hub.regenerate_stale_hubs). A
+            # no-op until hub_regeneration_enabled is flipped on. Isolated
+            # the same way as the fold/archive/fleeting sweeps above -- a
+            # failure here must never block orphan triage.
+            regenerate_stale_hubs(str(VAULT))
         except Exception:
             pass
 
