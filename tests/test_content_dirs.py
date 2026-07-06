@@ -7,9 +7,10 @@ tuples derive from one registry.
 
 from __future__ import annotations
 
+from dataclasses import is_dataclass
+
 from memento import config
 from memento.config import (
-    DirSpec,
     archive_root_names,
     content_dirs,
     core_dir_names,
@@ -37,7 +38,9 @@ def test_default_config_has_profile_block():
 
 def test_registry_specs():
     specs = {d.name: d for d in content_dirs(config.DEFAULT_CONFIG)}
-    assert isinstance(specs["notes"], DirSpec)
+    # is_dataclass rather than isinstance: test_config.py reloads memento.config,
+    # which rebinds the DirSpec class object, so an identity check is order-dependent.
+    assert is_dataclass(specs["notes"])
 
     notes = specs["notes"]
     assert notes.indexed and notes.core and notes.health_expected and notes.archivable
