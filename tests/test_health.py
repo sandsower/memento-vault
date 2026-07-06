@@ -1549,3 +1549,143 @@ def test_pid_is_live_returns_false_for_missing_process(monkeypatch):
     monkeypatch.setattr(health.os, "kill", missing_process)
 
     assert health._pid_is_live(12345) is False
+
+
+def test_warn_message_includes_dead_letter_sources(tmp_path):
+    vault = _make_vault(tmp_path / "dl-message-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    ledger.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:abc",
+                        "status": "dead-letter",
+                        "error": "attempts exhausted",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:def",
+                        "status": "dead-letter",
+                        "error": "spool missing",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    check = health._check_local_extraction_retries(vault)
+    assert check.status == "warn"
+    assert "session:abc" in check.message
+    assert "session:def" in check.message
+
+
+def test_warn_message_with_more_than_3_dead_letter_sources_caps_with_overflow(tmp_path):
+    vault = _make_vault(tmp_path / "dl-overflow-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    lines = []
+    for i in range(5):
+        lines.append(
+            json.dumps(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "kind": "local-extraction",
+                    "source": f"session:s{i}",
+                    "status": "dead-letter",
+                    "error": "attempts exhausted",
+                }
+            )
+        )
+    ledger.write_text("\n".join(lines) + "\n")
+
+    check = health._check_local_extraction_retries(vault)
+    assert check.status == "warn"
+    assert "+2 more" in check.message
+    assert check.message.count("session:s") == 3  # only first 3 named
+
+
+def test_warn_message_uses_uncapped_count_when_dead_letter_sources_exceed_20(tmp_path):
+    """Overflow must use uncapped dead_letter_count, not len(capped sources)."""
+    vault = _make_vault(tmp_path / "dl-cap-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    lines = []
+    for i in range(25):
+        lines.append(
+            json.dumps(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "kind": "local-extraction",
+                    "source": f"session:long{i}",
+                    "status": "dead-letter",
+                    "error": "attempts exhausted",
+                }
+            )
+        )
+    ledger.write_text("\n".join(lines) + "\n")
+
+    check = health._check_local_extraction_retries(vault)
+    assert check.status == "warn"
+    # 25 - 3 = 22 remaining
+    assert "+22 more" in check.message, f"got {check.message}"
+    assert check.message.count("session:long") == 3  # only first 3 named
+
+
+def test_common_failure_reasons_excludes_dead_letter_ledger_noise(tmp_path, monkeypatch):
+    vault = _make_vault(tmp_path / "dl-noise-vault")
+    ledger = vault / ".sync" / "ledger.jsonl"
+    ledger.parent.mkdir()
+    now = datetime.now(timezone.utc)
+    ledger.write_text(
+        "\n".join(
+            [
+                # Source that ultimately dead-lettered: intermediate noise error + dead-letter.
+                json.dumps(
+                    {
+                        "ts": (now - timedelta(hours=1)).isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:dead1",
+                        "status": "error",
+                        "error": "OpenAI Codex v0.133.0\\nmodel: gpt-5.5\\nsandbox: read-only",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": (now - timedelta(minutes=30)).isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:dead1",
+                        "status": "dead-letter",
+                        "error": "attempts exhausted",
+                    }
+                ),
+                # Genuine error entry for a non-dead-letter source.
+                json.dumps(
+                    {
+                        "ts": (now - timedelta(minutes=10)).isoformat(timespec="seconds"),
+                        "kind": "local-extraction",
+                        "source": "session:other",
+                        "status": "error",
+                        "error": "backend connection refused",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+
+    reasons = health._common_automation_failure_reasons(vault, limit=10)
+    reason_texts = [r["reason"] for r in reasons]
+
+    # The dead-letter source's error text (codex banner) must NOT appear.
+    assert not any("Codex" in r for r in reason_texts), f"Codex noise found in {reason_texts}"
+    assert not any("gpt-5.5" in r for r in reason_texts), f"model name found in {reason_texts}"
+    # The genuine error should still appear.
+    assert any("connection refused" in r for r in reason_texts), f"genuine error missing in {reason_texts}"

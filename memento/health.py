@@ -853,8 +853,13 @@ def _check_local_extraction_retries(vault: Path) -> CheckResult:
     pending = int(metadata.get("pending_retry_count") or 0)
     dead_letters = int(metadata.get("dead_letter_count") or 0)
     if dead_letters:
+        sources = metadata.get("dead_letter_sources", [])
+        source_info = ", ".join(sources[:3])
+        remaining = dead_letters - len(sources[:3])
+        if remaining > 0:
+            source_info += f" … +{remaining} more"
         status = WARN
-        message = f"local extraction retry backlog has {pending} pending and {dead_letters} dead-lettered item(s)"
+        message = f"local extraction retry backlog has {pending} pending and {dead_letters} dead-lettered item(s): {source_info}"
     elif pending:
         status = WARN
         message = f"local extraction retry backlog has {pending} pending item(s)"
@@ -936,12 +941,40 @@ def _last_successful_automation_packet() -> dict[str, Any] | None:
     return latest
 
 
+def _dead_letter_source_set(vault: Path) -> set[tuple[str, str]]:
+    """Return {(kind, source)} identifying entries whose folded status is dead-letter.
+
+    Used to exclude intermediate error entries from failure-reason aggregation:
+    if a source ultimately dead-lettered, its intermediate "llm timed out" or
+    codex-banner error text is noise, not a helpful common failure signal.
+    """
+    path = vault / ".sync" / "ledger.jsonl"
+    if not path.exists():
+        return set()
+    cur: dict[tuple[str, str], dict[str, Any]] = {}
+    for rec in _iter_jsonl(path):
+        kind = str(rec.get("kind") or "")
+        source = str(rec.get("source") or "")
+        if not kind or not source:
+            continue
+        cur[(kind, source)] = rec
+    return {key for key, rec in cur.items() if rec.get("status") == "dead-letter"}
+
+
 def _common_automation_failure_reasons(vault: Path, limit: int = 5) -> list[dict[str, Any]]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=_HEALTH_WINDOW_HOURS)
+    dead_letter_keys = _dead_letter_source_set(vault)
     counts: Counter[str] = Counter()
     for path in (Path(RETRIEVAL_LOG_PATH), Path(TRIAGE_HEALTH_LOG_PATH), vault / ".sync" / "ledger.jsonl"):
         try:
             for rec in _iter_recent_jsonl(path, cutoff):
+                # Skip ledger entries whose source ultimately dead-lettered -
+                # their intermediate error text (codex banner, etc.) is noise.
+                ledger_path_part = "/.sync/ledger.jsonl"
+                if ledger_path_part in str(path):
+                    key = (str(rec.get("kind") or ""), str(rec.get("source") or ""))
+                    if key in dead_letter_keys:
+                        continue
                 reason = None
                 if rec.get("status") == "error":
                     reason = rec.get("error") or "sync_error"

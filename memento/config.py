@@ -402,17 +402,43 @@ def _runtime_dir_is_usable(path):
             shutil.rmtree(created_root, ignore_errors=True)
 
 
-def get_runtime_dir():
-    """Get a user-private directory for temp files.
+def _preferred_runtime_path() -> str:
+    """Return the best-guess runtime directory path without filesystem side effects.
 
-    Uses $XDG_RUNTIME_DIR (typically /run/user/$UID, mode 0700) with
-    fallback to ~/.cache/memento-vault/. If neither location is writable,
-    falls back to a per-user temp dir with mode 0700.
-
-    Note: this only *resolves* the path - it does not guarantee the
-    directory exists afterward. Callers that need to persist a file there
-    must create it themselves right before writing.
+    This is a pure string resolution: it picks the first candidate that is
+    *likely* writable based on environment, but does NOT probe or create it.
+    Use `get_runtime_dir(strict=True)` or `ensure_runtime_dir()` when you need
+    assurance the directory actually works.
     """
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return os.path.join(runtime, "memento-vault")
+    home = os.environ.get("HOME")
+    if home:
+        return os.path.join(home, ".cache", "memento-vault")
+    return os.path.join(tempfile.gettempdir(), f"memento-vault-{os.getuid()}")
+
+
+def get_runtime_dir(*, strict: bool = False) -> str:
+    """Get a user-private directory path for temp files.
+
+    In non-strict mode (default, used at module import) returns the preferred
+    candidate path *without* probing or creating it — the caller must create
+    the directory (``os.makedirs(..., exist_ok=True)``) before writing.
+
+    In strict mode, probes each candidate with ``_runtime_dir_is_usable`` and
+    returns the first writable one. Raises ``OSError`` if none is writable.
+
+    Candidates, in order of preference:
+      1. ``$XDG_RUNTIME_DIR/memento-vault``
+      2. ``~/.cache/memento-vault``
+      3. ``tempfile.gettempdir()/memento-vault-<uid>``
+
+    Cf. ``ensure_runtime_dir()`` when you want to guarantee existence.
+    """
+    if not strict:
+        return _preferred_runtime_path()
+
     candidates = []
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if runtime:
@@ -427,7 +453,18 @@ def get_runtime_dir():
     raise OSError("No writable runtime directory available for memento-vault")
 
 
-RUNTIME_DIR = get_runtime_dir()
+def ensure_runtime_dir() -> str:
+    """Resolve a writable runtime directory, creating it if missing.
+
+    Probes candidates (strict semantics) and creates the resolved directory
+    before returning. Raises ``OSError`` if no candidate is writable.
+    """
+    path = get_runtime_dir(strict=True)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+RUNTIME_DIR = get_runtime_dir()  # non-strict at import — never raises
 
 
 # --- Project detection ---

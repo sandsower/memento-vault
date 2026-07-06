@@ -2,12 +2,17 @@
 
 import builtins
 import os
+
+import pytest
 from pathlib import Path
 from unittest.mock import patch
+
+import importlib
 
 from memento.config import (
     DEFAULT_CONFIG,
     detect_project,
+    ensure_runtime_dir,
     get_config,
     get_runtime_dir,
     get_vault,
@@ -142,6 +147,7 @@ class TestLoadConfig:
 
 class TestRuntimeDir:
     def test_falls_back_to_temp_when_primary_locations_are_not_writable(self, tmp_path):
+        """Strict mode probes candidates and returns the first writable one."""
         xdg_runtime = tmp_path / "xdg-runtime"
         fallback_tmp = tmp_path / "tmp"
 
@@ -150,9 +156,81 @@ class TestRuntimeDir:
             patch("memento.config.tempfile.gettempdir", return_value=str(fallback_tmp)),
             patch("memento.config._runtime_dir_is_usable", side_effect=[False, False, True]),
         ):
-            runtime_dir = get_runtime_dir()
+            runtime_dir = get_runtime_dir(strict=True)
 
         assert runtime_dir == str(fallback_tmp / f"memento-vault-{os.getuid()}")
+
+    def test_non_strict_returns_xdg_path_without_probing(self, tmp_path):
+        """Non-strict default returns the preferred path string without probing or mkdirs."""
+        xdg_runtime = tmp_path / "xdg-runtime"
+
+        with (
+            patch.dict("memento.config.os.environ", {"XDG_RUNTIME_DIR": str(xdg_runtime)}, clear=False),
+            patch("memento.config._runtime_dir_is_usable", side_effect=AssertionError("must not probe")),
+        ):
+            runtime_dir = get_runtime_dir()
+
+        assert runtime_dir == str(xdg_runtime / "memento-vault")
+        # Non-strict must not create the directory.
+        assert not (xdg_runtime / "memento-vault").exists()
+
+    def test_non_strict_never_raises_when_no_candidate_is_writable(self, tmp_path):
+        """Non-strict returns a best-effort path even when strict probing would fail all candidates."""
+        xdg_runtime = tmp_path / "xdg-runtime"
+        fallback_tmp = tmp_path / "tmp"
+
+        with (
+            patch.dict("memento.config.os.environ", {"XDG_RUNTIME_DIR": str(xdg_runtime)}, clear=False),
+            patch("memento.config.tempfile.gettempdir", return_value=str(fallback_tmp)),
+            patch("memento.config._runtime_dir_is_usable", return_value=False),
+        ):
+            # Must not raise — import-time resolution is fault-tolerant.
+            runtime_dir = get_runtime_dir()
+
+        assert runtime_dir == str(xdg_runtime / "memento-vault")
+
+    def test_strict_raises_when_all_candidates_unwritable(self, tmp_path):
+        """Strict mode raises OSError when no candidate is writable."""
+        xdg_runtime = tmp_path / "xdg-runtime"
+        fallback_tmp = tmp_path / "tmp"
+
+        with (
+            patch.dict("memento.config.os.environ", {"XDG_RUNTIME_DIR": str(xdg_runtime)}, clear=False),
+            patch("memento.config.tempfile.gettempdir", return_value=str(fallback_tmp)),
+            patch("memento.config._runtime_dir_is_usable", return_value=False),
+        ):
+            with pytest.raises(OSError):
+                get_runtime_dir(strict=True)
+
+    def test_ensure_runtime_dir_creates_and_returns_writable_path(self, tmp_path):
+        """ensure_runtime_dir creates the resolved directory and returns it."""
+        xdg_runtime = tmp_path / "xdg-runtime"
+
+        with (
+            patch.dict("memento.config.os.environ", {"XDG_RUNTIME_DIR": str(xdg_runtime)}, clear=False),
+            patch("memento.config._runtime_dir_is_usable", side_effect=lambda p: True),
+        ):
+            path = ensure_runtime_dir()
+
+        assert path == str(xdg_runtime / "memento-vault")
+        assert os.path.isdir(path)
+
+    def test_module_import_is_tolerant_under_read_only_sandbox(self, monkeypatch):
+        """Reloading memento.config with no writable candidates must not raise at import time."""
+        import memento.config as mod
+
+        # Simulate a read-only sandbox: no XDG, no writable candidate.
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+
+        with patch("memento.config._runtime_dir_is_usable", return_value=False):
+            importlib.reload(mod)
+
+        try:
+            assert isinstance(mod.RUNTIME_DIR, str)
+            assert mod.RUNTIME_DIR  # non-empty path
+        finally:
+            # Restore real runtime dir so other tests don't inherit the fake sandbox.
+            importlib.reload(mod)
 
 
 class TestSlugify:

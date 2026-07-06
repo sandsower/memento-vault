@@ -619,10 +619,42 @@ def _spool_local_extraction_failure(
         print(f"[memento] local extraction retry ledger record failed: {exc}", file=sys.stderr)
 
 
-def _retry_local_extraction_entry(vault, entry):
+_LEDGER_ERROR_LIMIT = 500
+
+
+def _recovery_dead_letter_entry(vault, entry, error_msg):
+    """Append a dead-letter entry preserving the original attempt counter.
+
+    During recovery (`force=True`), a failed re-attempt writes a dead-letter
+    entry with the *same* attempt number so the operator can retry again.
+    """
+    from datetime import datetime, timezone
+
+    # Keep error bounded like sync_ledger.record() does.
+    safe_error = str(error_msg)[:_LEDGER_ERROR_LIMIT]
+
+    sync_ledger.append(
+        vault,
+        {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "kind": LOCAL_EXTRACTION_RETRY_KIND,
+            "source": entry.get("source") or "",
+            "status": "dead-letter",
+            "attempt": entry.get("attempt", 1),
+            "content_hash": entry.get("content_hash"),
+            "error": safe_error,
+            "spool_path": entry.get("spool_path"),
+        },
+    )
+    # Re-read and return the folded current state for this source.
+    folded = sync_ledger.fold_state(vault)
+    return folded.get((LOCAL_EXTRACTION_RETRY_KIND, entry.get("source") or ""), {})
+
+
+def _retry_local_extraction_entry(vault, entry, *, force=False):
     source = entry.get("source") or ""
     max_attempts = _local_extraction_retry_max_attempts()
-    if int(entry.get("attempt") or 0) >= max_attempts:
+    if not force and int(entry.get("attempt") or 0) >= max_attempts:
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
@@ -635,25 +667,31 @@ def _retry_local_extraction_entry(vault, entry):
 
     raw = sync_ledger.read_spooled(entry.get("spool_path") or "")
     if raw is None:
+        msg = "spooled payload missing"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, msg)
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
             source,
             status="dead-letter",
             content_hash=entry.get("content_hash"),
-            error="spooled payload missing",
+            error=msg,
             spool_path=entry.get("spool_path"),
         )
     try:
         envelope = json.loads(raw)
     except json.JSONDecodeError as exc:
+        msg = f"spooled payload invalid JSON: {exc}"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, msg)
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
             source,
             status="dead-letter",
             content_hash=entry.get("content_hash"),
-            error=f"spooled payload invalid JSON: {exc}",
+            error=msg,
             spool_path=entry.get("spool_path"),
         )
 
@@ -674,6 +712,8 @@ def _retry_local_extraction_entry(vault, entry):
     telemetry = _llm_telemetry(result)
     if not result.ok:
         error = result.error or "unknown llm error"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, f"recovery failed: {error}")
         status = "dead-letter" if int(entry.get("attempt") or 0) + 1 >= max_attempts else "error"
         return sync_ledger.record(
             vault,
@@ -687,13 +727,16 @@ def _retry_local_extraction_entry(vault, entry):
 
     notes = _parse_structured_notes_response(result.text)
     if not notes:
+        msg = "recovery produced no structured notes" if force else "retry produced no structured notes"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, msg)
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
             source,
             status="dead-letter",
             content_hash=entry.get("content_hash"),
-            error="retry produced no structured notes",
+            error=msg,
             spool_path=entry.get("spool_path"),
         )
 
@@ -707,13 +750,16 @@ def _retry_local_extraction_entry(vault, entry):
         transcript_path=envelope.get("transcript_path"),
     )
     if written == 0 and not all(_note_already_written(vault, note["title"], session_id) for note in notes):
+        msg = "recovery did not write notes" if force else "retry did not write notes"
+        if force:
+            return _recovery_dead_letter_entry(vault, entry, msg)
         return sync_ledger.record(
             vault,
             LOCAL_EXTRACTION_RETRY_KIND,
             source,
             status="error",
             content_hash=entry.get("content_hash"),
-            error="retry did not write notes",
+            error=msg,
             spool_path=entry.get("spool_path"),
         )
     return sync_ledger.record(
@@ -739,6 +785,24 @@ def retry_local_extractions(vault=None, limit=LOCAL_EXTRACTION_RETRY_SESSION_LIM
     results = []
     for entry in pending:
         results.append(_retry_local_extraction_entry(vault, entry))
+    return results
+
+
+def recover_dead_letter_extractions(vault=None, limit=LOCAL_EXTRACTION_RETRY_SESSION_LIMIT):
+    """Re-attempt dead-lettered local structured-note extractions.
+
+    Unlike ``retry_local_extractions`` this bypasses the max-attempts gate
+    and uses ``force=True`` so dead-lettered entries get one re-attempt per
+    invocation. On failure the attempt counter is NOT advanced, so the
+    operator can run recovery again.
+    """
+    vault = vault or get_vault()
+    dead = [entry for entry in sync_ledger.dead_letters(vault) if entry.get("kind") == LOCAL_EXTRACTION_RETRY_KIND]
+    if limit:
+        dead = dead[: max(0, int(limit))]
+    results = []
+    for entry in dead:
+        results.append(_retry_local_extraction_entry(vault, entry, force=True))
     return results
 
 
@@ -1348,5 +1412,9 @@ if __name__ == "__main__":
         limit = int(sys.argv[2]) if len(sys.argv) == 3 else 0
         results = retry_local_extractions(limit=limit)
         print(json.dumps({"retried": len(results), "results": results}, ensure_ascii=False))
+    elif len(sys.argv) in {2, 3} and sys.argv[1] == "--recover-dead-letters":
+        limit = int(sys.argv[2]) if len(sys.argv) == 3 else 0
+        results = recover_dead_letter_extractions(limit=limit)
+        print(json.dumps({"recovered": len(results), "results": results}, ensure_ascii=False))
     else:
         main()
