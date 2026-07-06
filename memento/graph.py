@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 
+from memento import frontmatter
 from memento.config import RUNTIME_DIR, get_config, get_vault
 
 # --- Note metadata ---
@@ -21,6 +22,14 @@ def read_note_metadata(note_name):
         type (str|None), source/origin/supersedes/project metadata, tags
         (list of str), and links (list of wikilink target names). Returns
         None if the note file doesn't exist.
+
+    MEM-166: parses frontmatter via :mod:`memento.frontmatter` instead of a
+    private line-prefix scanner. The one behavior change from the prior
+    implementation: ``tags`` written in block style (``tags:\n  - a\n  -
+    b``) are now visible here, same as the inline ``tags: [a, b]`` form --
+    previously only the inline form was understood, so block-style tags were
+    silently invisible to every caller of this function (search ranking,
+    quality signals, contradiction scanning, lifecycle project lookups).
     """
     vault = get_vault()
     # Normalize: accept both 'some-note' and 'notes/some-note.md'
@@ -32,71 +41,39 @@ def read_note_metadata(note_name):
     if not note_path.exists():
         return None
 
-    title = None
-    date = None
-    certainty = None
-    note_type = None
-    project = None
-    source = None
-    origin = None
-    supersedes = None
-    tags = []
-    links = []
-
     try:
-        with open(note_path) as f:
-            in_frontmatter = False
-            past_frontmatter = False
-            for line in f:
-                stripped = line.strip()
-                if stripped == "---":
-                    if not in_frontmatter and not past_frontmatter:
-                        in_frontmatter = True
-                        continue
-                    elif in_frontmatter:
-                        in_frontmatter = False
-                        past_frontmatter = True
-                        continue
-                if in_frontmatter:
-                    if stripped.startswith("title:"):
-                        title = stripped[len("title:") :].strip().strip('"').strip("'")
-                    elif stripped.startswith("date:"):
-                        date = stripped[5:].strip().strip('"').strip("'")
-                    elif stripped.startswith("certainty:"):
-                        try:
-                            certainty = int(stripped[10:].strip())
-                        except ValueError:
-                            pass
-                    elif stripped.startswith("type:"):
-                        note_type = stripped[5:].strip()
-                    elif stripped.startswith("project:"):
-                        project = stripped[8:].strip().strip('"').strip("'")
-                    elif stripped.startswith("source:"):
-                        source = stripped[7:].strip().strip('"').strip("'")
-                    elif stripped.startswith("origin:"):
-                        origin = stripped[7:].strip().strip('"').strip("'")
-                    elif stripped.startswith("supersedes:"):
-                        supersedes = stripped[len("supersedes:") :].strip().strip('"').strip("'")
-                    elif stripped.startswith("tags:"):
-                        raw_tags = stripped[5:].strip()
-                        if raw_tags.startswith("[") and raw_tags.endswith("]"):
-                            tags = [t.strip().strip('"').strip("'") for t in raw_tags[1:-1].split(",") if t.strip()]
-                if past_frontmatter:
-                    # Extract wikilinks from body
-                    for match in re.finditer(r"\[\[([^\]]+)\]\]", line):
-                        links.append(match.group(1))
+        text = note_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
 
+    fields, body = frontmatter.parse(text)
+
+    def _scalar(key):
+        value = fields.get(key)
+        return value if isinstance(value, str) else None
+
+    certainty = None
+    raw_certainty = fields.get("certainty")
+    if isinstance(raw_certainty, str) and raw_certainty:
+        try:
+            certainty = int(raw_certainty)
+        except ValueError:
+            certainty = None
+
+    tags = fields.get("tags")
+    tags = tags if isinstance(tags, list) else []
+
+    links = [match.group(1) for match in re.finditer(r"\[\[([^\]]+)\]\]", body)]
+
     return {
-        "title": title,
-        "date": date,
+        "title": _scalar("title"),
+        "date": _scalar("date"),
         "certainty": certainty,
-        "type": note_type,
-        "project": project,
-        "source": source,
-        "origin": origin,
-        "supersedes": supersedes,
+        "type": _scalar("type"),
+        "project": _scalar("project"),
+        "source": _scalar("source"),
+        "origin": _scalar("origin"),
+        "supersedes": _scalar("supersedes"),
         "tags": tags,
         "links": links,
     }

@@ -116,6 +116,64 @@ class TestReadNoteRecord:
     def test_missing_file_returns_none(self, tmp_vault):
         assert read_note_record(tmp_vault, "notes/does-not-exist.md") is None
 
+    def test_inline_tags(self, tmp_vault):
+        _write_note(tmp_vault, "inline", {"title": "Inline", "type": "discovery", "tags": "[alpha, beta]"})
+
+        record = read_note_record(tmp_vault, "notes/inline.md")
+
+        assert record["tags"] == ["alpha", "beta"]
+
+    def test_block_style_tags_are_now_visible(self, tmp_vault):
+        """MEM-166: the known fix -- block-style tags used to be invisible here,
+        same gap memento.graph.read_note_metadata had."""
+        (tmp_vault / "notes" / "block.md").write_text(
+            "---\ntitle: Block\ntype: discovery\ntags:\n  - alpha\n  - beta\n---\n\nBody.\n"
+        )
+
+        record = read_note_record(tmp_vault, "notes/block.md")
+
+        assert record["tags"] == ["alpha", "beta"]
+
+    def test_full_field_shapes(self, tmp_vault):
+        _write_note(
+            tmp_vault,
+            "full",
+            {
+                "title": "Full",
+                "type": "decision",
+                "tags": "[api]",
+                "source": "session",
+                "certainty": 5,
+                "date": "2026-06-15T10:00",
+                "project": "my-api",
+                "branch": "main",
+                "session_id": "sess-9",
+                "invalidated_by": "newer-note",
+            },
+        )
+
+        record = read_note_record(tmp_vault, "notes/full.md")
+
+        assert record["title"] == "Full"
+        assert record["type"] == "decision"
+        assert record["tags"] == ["api"]
+        assert record["source"] == "session"
+        assert record["certainty"] == 5
+        assert record["date"] == "2026-06-15T10:00"
+        assert record["project"] == "my-api"
+        assert record["branch"] == "main"
+        assert record["session_id"] == "sess-9"
+        assert record["invalidated_by"] == "newer-note"
+
+    def test_no_frontmatter_falls_back_to_stem_and_defaults(self, tmp_vault):
+        (tmp_vault / "notes" / "bare.md").write_text("Just a body, no frontmatter at all.\n")
+
+        record = read_note_record(tmp_vault, "notes/bare.md")
+
+        assert record["title"] == "bare"
+        assert record["tags"] == []
+        assert record["certainty"] is None
+
 
 class TestQueryNotesAndFilterAgree:
     """query_notes now delegates to build_metadata_filter; assert they agree."""

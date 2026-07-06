@@ -15,6 +15,8 @@ from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from memento import frontmatter as frontmatter_module
+
 ALLOWED_AGGREGATIONS = ("project", "type", "tag", "source", "month", "date", "branch", "session_id")
 MISSING_VALUE = "(missing)"
 
@@ -33,31 +35,6 @@ def _strip_injection(text: str) -> str:
     return text
 
 
-def _clean_scalar(value: str) -> str:
-    return value.strip().strip('"').strip("'")
-
-
-def _parse_inline_list(value: str) -> list[str]:
-    raw = value.strip()
-    if not (raw.startswith("[") and raw.endswith("]")):
-        return []
-    return [_clean_scalar(item) for item in raw[1:-1].split(",") if _clean_scalar(item)]
-
-
-def _split_frontmatter(text: str) -> str:
-    if not text.startswith("---"):
-        return ""
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return ""
-    frontmatter: list[str] = []
-    for line in lines[1:]:
-        if line.strip() == "---":
-            return "\n".join(frontmatter)
-        frontmatter.append(line)
-    return ""
-
-
 def read_note_record(vault: Path, path: Path) -> dict[str, Any] | None:
     """Read a single note's frontmatter metadata as a filter-ready record.
 
@@ -73,12 +50,22 @@ def read_note_record(vault: Path, path: Path) -> dict[str, Any] | None:
 
 
 def _read_note_record(vault: Path, path: Path) -> dict[str, Any] | None:
+    """Read one note's frontmatter into a filter-ready metadata record.
+
+    MEM-166: parses via :mod:`memento.frontmatter` instead of a private
+    ``split(":", 1)`` scanner. The one behavior change: ``tags`` written in
+    block style (``tags:\n  - a\n  - b``) are now visible here, same as the
+    inline ``tags: [a, b]`` form -- previously only the inline form was
+    understood by this scanner (the same gap :func:`memento.graph.read_note_metadata`
+    had), so block-style tags were silently invisible to typed queries and
+    project/type/tag filtering.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
 
-    frontmatter = _split_frontmatter(text)
+    fields, _ = frontmatter_module.parse(text)
     metadata: dict[str, Any] = {
         "title": path.stem,
         "type": "",
@@ -91,23 +78,22 @@ def _read_note_record(vault: Path, path: Path) -> dict[str, Any] | None:
         "session_id": "",
         "invalidated_by": "",
     }
-    if frontmatter:
-        for line in frontmatter.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or ":" not in stripped:
-                continue
-            key, raw_value = stripped.split(":", 1)
-            key = key.strip()
-            value = raw_value.strip()
-            if key == "tags":
-                metadata["tags"] = _parse_inline_list(value)
-            elif key == "certainty":
-                try:
-                    metadata["certainty"] = int(_clean_scalar(value))
-                except ValueError:
-                    metadata["certainty"] = None
-            elif key in {"title", "type", "source", "date", "project", "branch", "session_id", "invalidated_by"}:
-                metadata[key] = _clean_scalar(value)
+
+    tags = fields.get("tags")
+    if isinstance(tags, list):
+        metadata["tags"] = tags
+
+    raw_certainty = fields.get("certainty")
+    if isinstance(raw_certainty, str) and raw_certainty:
+        try:
+            metadata["certainty"] = int(raw_certainty)
+        except ValueError:
+            metadata["certainty"] = None
+
+    for key in ("title", "type", "source", "date", "project", "branch", "session_id", "invalidated_by"):
+        value = fields.get(key)
+        if isinstance(value, str):
+            metadata[key] = value
 
     rel_path = str(path.resolve().relative_to(vault.resolve())).replace(os.sep, "/")
     return {

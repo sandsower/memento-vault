@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sys
 
+from memento import frontmatter as frontmatter_module
 from memento.graph import read_note_metadata
 from memento.search import has_qmd, miss_envelope, qmd_search_with_extras, resolve_concrete_mode
 from memento.store import (
@@ -571,8 +572,11 @@ def _scan_notes_for_validity(vault: Path) -> dict[str, dict]:
         valid_from = _frontmatter_scalar(frontmatter, "valid_from") or date
         supersedes = _normalize_note_ref(_frontmatter_scalar(frontmatter, "supersedes"))
         invalidated_by = _normalize_note_ref(_frontmatter_scalar(frontmatter, "invalidated_by"))
-        raw_tags = _frontmatter_scalar(frontmatter, "tags") or ""
-        tags = [t.strip().strip("\"'") for t in raw_tags.strip("[]").split(",") if t.strip()]
+        # MEM-166: get_list() understands both inline `tags: [a, b]` and
+        # block-style `tags:\n  - a\n  - b` -- the naive `.strip("[]")` this
+        # replaced only handled the inline form, so block-style tags were
+        # silently invisible to validity-chain topic-overlap ranking.
+        tags = frontmatter_module.get_list(frontmatter, "tags")
 
         notes[stem] = {
             "stem": stem,
