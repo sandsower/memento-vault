@@ -6,7 +6,7 @@
       "briar-config-migration-unverified",
       "falcon-deploy-successor",
       "vortex-migration-fresh",
-      "vortex-migration-lowcert"
+      "quasar-retry-policy-undated"
     ]
   },
   "nimbus_quality_signals_stack": {
@@ -20,8 +20,8 @@
   "orchid_general_and_scoped_notes_rank": {
     "query": "orchidrouting",
     "top5": [
-      "orchid-routing-general",
       "orchid-routing-gamma-slug",
+      "orchid-routing-general",
       "orchid-routing-project-beta",
       "orchid-routing-project-alpha"
     ]
@@ -29,11 +29,11 @@
   "quasar_certainty_immunity_vs_undated": {
     "query": "quasarretry",
     "top5": [
-      "vortex-migration-fresh",
       "quasar-retry-policy-undated",
+      "vortex-migration-fresh",
       "orchid-routing-project-beta",
-      "falcon-deploy-superseded",
-      "quasar-retry-policy-high-certainty"
+      "quasar-retry-policy-high-certainty",
+      "falcon-deploy-superseded"
     ]
   },
   "vortex_certainty_beats_age": {
