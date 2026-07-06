@@ -554,17 +554,20 @@ def test_automation_memory_qmd_index_staleness(tmp_path):
     now_ts = datetime.now().timestamp()
     os.utime(note, (now_ts, now_ts))
 
-    # Create a fake "qmd index" that is 1h behind the note
+    # Create a fake "qmd index" that is clearly stale (2h behind the note)
     # Mock XDG_CACHE_HOME so QMDBackend resolves index from there
     # Backend looks at XDG_CACHE_HOME/qmd/index.sqlite
     qmd_idx = tmp_path / "qmd-cache" / "qmd" / "index.sqlite"
     qmd_idx.parent.mkdir(parents=True)
     qmd_idx.write_text("fake")
-    old_ts = (datetime.now() - timedelta(hours=1)).timestamp()
+    old_ts = (datetime.now() - timedelta(hours=2)).timestamp()
     os.utime(qmd_idx, (old_ts, old_ts))
 
     backend = QMDBackend()
     with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path / "qmd-cache")}):
+        # INDEX_PATH takes precedence in resolution; clear it so the test
+        # exercises the XDG_CACHE_HOME path deterministically.
+        os.environ.pop("INDEX_PATH", None)
         set_backend(backend)
         try:
             readiness = health.build_automation_memory_readiness(
@@ -572,9 +575,12 @@ def test_automation_memory_qmd_index_staleness(tmp_path):
                 vault=vault,
             )
             stale = readiness["metadata"]["search"]["stale_index"]
-            # QMD index 1h old + note now = lag about 3600 → borderline
+            # QMD index 2h old + note now → lag > 3600s → fail
             assert stale["checked"] is True
             assert stale["backend"] == "qmd"
+            assert stale["status"] == "fail"
+            assert stale["stale"] is True
+            assert stale["lag_seconds"] >= 3600
         finally:
             reset_backend()
 

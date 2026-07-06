@@ -268,9 +268,13 @@ class TestWriteNote:
 
         fake_backend = CountingBackend()
 
-        # Use low threshold/ms so debouncer fires quickly in test
+        # Large debounce window so the timer never fires mid-loop: only the
+        # threshold-triggered flushes count, making the assertion exact.
+        # threshold=5, 10 writes → exactly 2 batch reindexes, no timer flush.
         with patch("memento.search_backend.get_backend", return_value=fake_backend):
-            with patch("memento.store.get_config", return_value={"index_debounce_count": 5, "index_debounce_ms": 50}):
+            with patch(
+                "memento.store.get_config", return_value={"index_debounce_count": 5, "index_debounce_ms": 60000}
+            ):
                 from memento.store import _reset_debouncer
 
                 _reset_debouncer()
@@ -286,12 +290,8 @@ class TestWriteNote:
 
         # Each note should have been indexed synchronously
         assert len(fake_backend.index_calls) == 10, f"expected 10 index_note calls, got {len(fake_backend.index_calls)}"
-        # At least one batch reindex should have been triggered (the 5th
-        # write hits the threshold). At most, the timer could fire an
-        # additional flush after the window, but ≤2 is expected.
-        assert 1 <= len(fake_backend.reindex_calls) <= 2, (
-            f"expected 1-2 reindex calls, got {len(fake_backend.reindex_calls)}"
-        )
+        # Two full batches of `threshold` writes → exactly two threshold flushes.
+        assert len(fake_backend.reindex_calls) == 2, f"expected 2 reindex calls, got {len(fake_backend.reindex_calls)}"
 
     def test_write_note_debounce_single_write_no_extra_reindex(self, tmp_vault):
         """Single write: index_note called, but no debounced reindex."""

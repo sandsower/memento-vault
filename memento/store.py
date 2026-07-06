@@ -947,36 +947,45 @@ class _IndexDebouncer:
         self._counter = 0
         self._timer: threading.Timer | None = None
 
-    def note_written(self, vault_path: str) -> None:
+    def note_written(self) -> None:
+        should_flush = False
         with self._lock:
             self._counter += 1
             if self._counter >= self._threshold:
                 self._cancel_timer_locked()
                 self._counter = 0
-                self._flush_locked(vault_path)
-                return
-            self._cancel_timer_locked()
-            self._timer = threading.Timer(self._window, self._on_timer, args=[vault_path])
-            self._timer.daemon = True
-            self._timer.start()
+                should_flush = True
+            else:
+                self._cancel_timer_locked()
+                self._timer = threading.Timer(self._window, self._on_timer)
+                self._timer.daemon = True
+                self._timer.start()
+        # Reindex outside the lock so concurrent writers and the timer thread
+        # are never serialized behind a full batch reindex.
+        if should_flush:
+            self._flush()
 
     def _cancel_timer_locked(self) -> None:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
 
-    def _on_timer(self, vault_path: str) -> None:
+    def _on_timer(self) -> None:
+        should_flush = False
         with self._lock:
             if self._counter > 0:
                 self._counter = 0
-                self._flush_locked(vault_path)
+                should_flush = True
+        if should_flush:
+            self._flush()
 
-    def _flush_locked(self, vault_path: str) -> None:
+    def _flush(self) -> None:
         try:
             from memento.search_backend import get_backend
 
+            collection = str(get_config().get("qmd_collection", "memento"))
             backend = get_backend()
-            backend.reindex("memento", embed=False)
+            backend.reindex(collection, embed=False)
         except Exception:
             pass
 
@@ -1014,12 +1023,12 @@ def _index_written_note(vault_path, target):
         if hasattr(backend, "index_note"):
             backend.index_note(rel_path)
         else:
-            backend.reindex("memento", embed=False)
+            backend.reindex(str(get_config().get("qmd_collection", "memento")), embed=False)
 
         # Supplementary debounce — triggers a batch reindex when
         # rapid writes accumulate, reducing churn for backends like
         # QMD that benefit from a single update call.
-        _get_debouncer().note_written(vault_path)
+        _get_debouncer().note_written()
     except Exception:
         pass  # Indexing failure must not block note storage
 

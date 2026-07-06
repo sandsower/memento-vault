@@ -310,8 +310,11 @@ class TestEmbeddedSearchIndexNote:
     def test_write_note_retrievable_without_manual_reindex(self, backend, embedded_vault):
         """Write via write_note → retrievable via backend.search() without
         calling reindex() manually. Acceptance criterion #3."""
-        from memento.store import write_note
+        from memento.store import write_note, _reset_debouncer
 
+        # Reset the process-global debouncer so this write starts from a clean
+        # counter and no timer from a prior test lingers.
+        _reset_debouncer()
         vault, db_path = embedded_vault
         write_note(
             vault,

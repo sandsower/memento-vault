@@ -16,7 +16,14 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from memento.search_backend import SearchBackend, _literal_score, _literal_snippet
+from memento.search_backend import (
+    STALE_INDEX_WARN_SECONDS,
+    SearchBackend,
+    _literal_score,
+    _literal_snippet,
+    classify_index_lag,
+    newest_note_mtime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -820,20 +827,10 @@ class EmbeddedSearchBackend(SearchBackend):
                 "status": "pass",
             }
 
-        # Get newest note mtime from disk
-        newest_note_mtime = None
-        for dirname in ("notes", "fleeting", "projects"):
-            root = vault / dirname
-            if not root.exists():
-                continue
-            for p in root.rglob("*.md"):
-                try:
-                    mtime = p.stat().st_mtime
-                except OSError:
-                    continue
-                newest_note_mtime = mtime if newest_note_mtime is None else max(newest_note_mtime, mtime)
-
-        if newest_note_mtime is None:
+        # Get newest note mtime from disk (filesystem walk stays outside the
+        # lock so writers are not serialized behind it).
+        newest_note = newest_note_mtime(vault)
+        if newest_note is None:
             return {
                 **metadata,
                 "reason": "no_notes",
@@ -841,11 +838,15 @@ class EmbeddedSearchBackend(SearchBackend):
                 "status": "pass",
             }
 
-        # Prefer content-based updated_at from SQL (WAL-robust)
+        # Prefer content-based updated_at from SQL (WAL-robust). Guard the
+        # shared sqlite3.Connection with self._lock, matching every other
+        # method on this class, so the read cannot race the debounced
+        # reindex()/index_note() writers on the same connection.
         db_max_updated = None
         try:
-            conn = self._get_conn()
-            row = conn.execute("SELECT MAX(updated_at) FROM notes").fetchone()
+            with self._lock:
+                conn = self._get_conn()
+                row = conn.execute("SELECT MAX(updated_at) FROM notes").fetchone()
             db_max_updated = row[0] if row and row[0] is not None else None
         except sqlite3.Error:
             pass
@@ -864,25 +865,18 @@ class EmbeddedSearchBackend(SearchBackend):
             }
 
         if db_max_updated is not None:
-            lag_seconds = int(max(0, newest_note_mtime - db_max_updated))
+            lag_seconds = int(max(0, newest_note - db_max_updated))
         else:
             # File-mtime fallback when SQL data is unavailable
-            lag_seconds = int(max(0, newest_note_mtime - db_mtime_val))
-
-        if lag_seconds > 3600:
-            status = "fail"
-        elif lag_seconds > 60:
-            status = "warn"
-        else:
-            status = "pass"
+            lag_seconds = int(max(0, newest_note - db_mtime_val))
 
         result: dict = {
             **metadata,
-            "stale": lag_seconds > 60,
+            "stale": lag_seconds > STALE_INDEX_WARN_SECONDS,
             "lag_seconds": lag_seconds,
             "db_mtime": datetime.fromtimestamp(db_mtime_val).isoformat(timespec="seconds"),
-            "newest_note_mtime": datetime.fromtimestamp(newest_note_mtime).isoformat(timespec="seconds"),
-            "status": status,
+            "newest_note_mtime": datetime.fromtimestamp(newest_note).isoformat(timespec="seconds"),
+            "status": classify_index_lag(lag_seconds),
         }
         if db_max_updated is not None:
             result["db_max_updated"] = datetime.fromtimestamp(db_max_updated).isoformat(timespec="seconds")

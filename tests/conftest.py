@@ -54,6 +54,19 @@ def isolate_access_log_state(monkeypatch, tmp_path):
     monkeypatch.setattr("memento.store._ACCESS_LOG_CACHE", {"signature": None, "stats": {}}, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_index_debouncer():
+    """Cancel any pending write-debounce timer between tests.
+
+    A single ``write_note`` starts a process-global timer; without this a
+    leaked timer could fire a reindex against another test's backend.
+    """
+    yield
+    from memento.store import _reset_debouncer
+
+    _reset_debouncer()
+
+
 @pytest.fixture
 def tmp_vault(tmp_path):
     """Create a temporary vault with standard directory structure."""
