@@ -963,6 +963,20 @@ class TestFoldAccessLogIntoFrontmatter:
         assert "tags: [redis]" in text
         assert text.endswith("Body.\n")
 
+    def test_fold_skips_curated_profile_notes(self, tmp_vault):
+        """Curated notes (profile/) are lifecycle-exempt: never stamped on fold."""
+        (tmp_vault / "profile").mkdir(parents=True, exist_ok=True)
+        profile_note = tmp_vault / "profile" / "voice.md"
+        profile_note.write_text("---\nname: voice\n---\n\nBody.\n")
+        original = profile_note.read_text()
+
+        record_access(["profile/voice.md"], hook="mcp", tool="search", query="q", result_count=1)
+        result = fold_access_log_into_frontmatter(str(tmp_vault))
+
+        assert result["folded_notes"] == 0
+        assert profile_note.read_text() == original
+        assert "resurfaced_count" not in profile_note.read_text()
+
     def test_fold_survives_a_full_cache_wipe(self, tmp_vault):
         """Acceptance test (MEM-148): a runtime-dir wipe must not reset the signal."""
         self._seed_note(tmp_vault)

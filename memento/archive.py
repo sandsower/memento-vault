@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
-from memento.config import archive_root_names
+from memento.config import archive_root_names, is_curated_path
 
 ARCHIVE_FORMAT = "memento-portable-archive"
 ARCHIVE_VERSION = 1
@@ -780,6 +780,11 @@ def sweep_archive_candidates(vault, *, config=None, now=None, dry_run: bool = Fa
         return report
 
     for rel in _iter_vault_notes(vault):
+        # Curated notes (profile/) are lifecycle-exempt: never swept/tombstoned.
+        # Defensive -- _iter_vault_notes scans notes/ today, but keep intent explicit.
+        if is_curated_path(rel, config):
+            report["skipped"].append({"path": rel, "reason": "curated (exempt)"})
+            continue
         try:
             text = (vault / rel).read_text(encoding="utf-8", errors="replace")
         except OSError as exc:

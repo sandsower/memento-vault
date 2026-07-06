@@ -20,7 +20,7 @@ from typing import Any
 
 from memento import queue as capture_queue
 from memento import remote_client, telemetry
-from memento.config import core_dir_names, expected_dir_names
+from memento.config import content_dirs, core_dir_names, expected_dir_names, indexed_dir_names
 from memento.search_backend import get_backend, reset_backend
 
 
@@ -142,6 +142,7 @@ def build_report(*, deep: bool = False, probe_timeout_seconds: int = _DEEP_PROBE
 
     vault = Path(config.get("vault_path") or _DEFAULT_CONFIG["vault_path"]).expanduser()
     checks.append(_check_vault_dirs(vault))
+    checks.append(_check_profile(vault, config))
     checks.append(_check_git(vault, config))
     search_check = _check_search_backend(vault, config)
     checks.append(search_check)
@@ -492,6 +493,27 @@ def _parse_simple_yaml(path: Path) -> dict[str, Any]:
     return result
 
 
+def _check_profile(vault: Path, config: dict[str, Any]) -> CheckResult:
+    """Report the curated profile dir. Optional: absence never warns/fails."""
+    profile_dir_name = next((spec.name for spec in content_dirs(config) if spec.curated), "profile")
+    profile_dir = vault / profile_dir_name
+    if not profile_dir.is_dir():
+        return CheckResult(
+            "profile", PASS, f"profile: not present (optional) at {profile_dir_name}/", {"present": False}
+        )
+
+    facet_files = [p for p in sorted(profile_dir.glob("*.md")) if p.name not in ("PROFILE.md", "README.md")]
+    index_present = (profile_dir / "PROFILE.md").is_file()
+    details = {"present": True, "facets": len(facet_files), "index_present": index_present}
+
+    if facet_files and not index_present:
+        return CheckResult(
+            "profile", WARN, f"profile: {len(facet_files)} facets but no PROFILE.md index", details
+        )
+    index_word = "present" if index_present else "absent"
+    return CheckResult("profile", PASS, f"profile: {len(facet_files)} facets, index {index_word}", details)
+
+
 def _check_vault_dirs(vault: Path) -> CheckResult:
     if not vault.exists():
         return CheckResult("vault", FAIL, f"vault path does not exist: {vault}", {"vault_path": str(vault)})
@@ -705,7 +727,7 @@ def _embedded_index_staleness(vault: Path, config: dict[str, Any]) -> dict[str, 
         return metadata
     newest_note_mtime = None
     try:
-        for dirname in core_dir_names():
+        for dirname in indexed_dir_names():
             root = vault / dirname
             if not root.exists():
                 continue
