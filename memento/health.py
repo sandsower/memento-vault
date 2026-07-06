@@ -20,6 +20,7 @@ from typing import Any
 
 from memento import queue as capture_queue
 from memento import remote_client, telemetry
+from memento.config import core_dir_names, expected_dir_names
 from memento.search_backend import get_backend, reset_backend
 
 
@@ -27,8 +28,6 @@ PASS = "pass"
 WARN = "warn"
 FAIL = "fail"
 _STATUSES = (PASS, WARN, FAIL)
-_EXPECTED_DIRS = ("notes", "fleeting", "projects", "archive")
-_CORE_DIRS = ("notes", "fleeting", "projects")
 _HEALTH_WINDOW_HOURS = telemetry.HEALTH_WINDOW_HOURS
 _DEEP_PROBE_TIMEOUT_SECONDS = 5
 _DEEP_PROBE_QUERY = "memento-vault health probe"
@@ -499,9 +498,10 @@ def _check_vault_dirs(vault: Path) -> CheckResult:
     if not vault.is_dir():
         return CheckResult("vault", FAIL, f"vault path is not a directory: {vault}", {"vault_path": str(vault)})
 
-    present = [name for name in _EXPECTED_DIRS if (vault / name).is_dir()]
-    missing = [name for name in _EXPECTED_DIRS if name not in present]
-    if not any((vault / name).is_dir() for name in _CORE_DIRS):
+    expected = expected_dir_names()
+    present = [name for name in expected if (vault / name).is_dir()]
+    missing = [name for name in expected if name not in present]
+    if not any((vault / name).is_dir() for name in core_dir_names()):
         return CheckResult(
             "vault", FAIL, "vault has no usable notes/fleeting/projects directories", {"missing": missing}
         )
@@ -528,7 +528,7 @@ def _check_search_backend(vault: Path, config: dict[str, Any]) -> CheckResult:
     choice = str(config.get("search_backend", "auto"))
     qmd_present = shutil.which("qmd") is not None
     embedded_db = vault / str(config.get("search_db_path", ".search/search.db"))
-    grep_ready = any((vault / dirname).is_dir() for dirname in _CORE_DIRS)
+    grep_ready = any((vault / dirname).is_dir() for dirname in core_dir_names())
 
     if choice == "qmd":
         if not qmd_present:
@@ -705,7 +705,7 @@ def _embedded_index_staleness(vault: Path, config: dict[str, Any]) -> dict[str, 
         return metadata
     newest_note_mtime = None
     try:
-        for dirname in _CORE_DIRS:
+        for dirname in core_dir_names():
             root = vault / dirname
             if not root.exists():
                 continue
