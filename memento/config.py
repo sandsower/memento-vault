@@ -206,6 +206,18 @@ DEFAULT_CONFIG = {
     # Deep recall — background codex analysis (experimental)
     "deep_recall_enabled": False,
     "deep_recall_backend": "codex",
+    # Agentic retrieval tier — bounded tool-using retrieval agent that upgrades
+    # the SessionStart deferred-briefing worker's internals from one-shot
+    # top-k search to a ReAct-style loop over search/query/related/get
+    # (memento/retrieval_agent.py, wired in memento.lifecycle's
+    # run_deferred_briefing_search). Disabled by default; any protocol or
+    # provider failure falls back to the existing one-shot pipeline
+    # byte-identically. provider/model default to llm_backend/llm_model when
+    # unset, so this can reuse the same backend or route to a cheaper one
+    # (e.g. "pi" with an openrouter/deepseek model) independently.
+    "agentic_retrieval_enabled": False,
+    "retrieval_agent_provider": None,
+    "retrieval_agent_model": None,
     # Tag normalization: controlled-vocabulary merge map applied at write time
     # (memento/store.py), by the post-write hook fixer (memento/utils.py), and
     # by scripts/backfill_project_slugs.py (MEM-164). Merging the long tail of

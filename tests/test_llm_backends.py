@@ -298,6 +298,96 @@ class TestCliBackends:
         assert mock_run.call_args.kwargs["timeout"] == 160
 
     @patch("memento.llm.subprocess.run")
+    def test_pi_backend_builds_correct_command(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="pi output\n", stderr="")
+
+        result = llm_complete(
+            "test prompt",
+            {
+                "llm_backend": "pi",
+                "llm_model": "openrouter/deepseek/deepseek-v4-pro",
+            },
+        )
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0:3] == ["pi", "--print", "--mode"]
+        assert "--no-tools" in cmd
+        assert "--no-session" in cmd
+        assert "--no-extensions" in cmd
+        assert cmd[-2:] == ["--model", "openrouter/deepseek/deepseek-v4-pro"]
+        # Prompt travels over stdin, never argv (same ARG_MAX hazard as codex/gemini).
+        assert "test prompt" not in cmd
+        assert mock_run.call_args.kwargs["input"] == "test prompt"
+        assert result.ok is True
+        assert result.text == "pi output"
+
+    @patch("memento.llm.subprocess.run")
+    def test_pi_backend_omits_model_flag_when_unset(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="pi output\n", stderr="")
+
+        llm_complete("test prompt", {"llm_backend": "pi"})
+
+        cmd = mock_run.call_args[0][0]
+        assert "--model" not in cmd
+
+    @patch("memento.llm.subprocess.run")
+    def test_pi_backend_receives_scaled_timeout(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n", stderr="")
+        prompt = "x" * 500_000
+
+        llm_complete(prompt, {"llm_backend": "pi"})
+
+        assert mock_run.call_args.kwargs["timeout"] == 160
+
+    @patch("memento.llm.subprocess.run")
+    def test_pi_backend_returns_error_on_missing_binary(self, mock_run):
+        mock_run.side_effect = FileNotFoundError("pi not found")
+
+        result = llm_complete("prompt", {"llm_backend": "pi"})
+
+        assert result.ok is False
+        assert "not found" in result.error.lower()
+
+    @patch("memento.llm.subprocess.run")
+    def test_pi_backend_returns_error_on_timeout(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="pi", timeout=30)
+
+        result = llm_complete("prompt", {"llm_backend": "pi"})
+
+        assert result.ok is False
+        assert "timed out" in result.error.lower()
+
+    @patch("memento.llm.subprocess.run")
+    def test_pi_backend_surfaces_nonzero_exit_stderr(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Error: Model not found")
+
+        result = llm_complete("prompt", {"llm_backend": "pi"})
+
+        assert result.ok is False
+        assert "Model not found" in result.error
+
+    @patch("memento.llm.subprocess.run")
+    def test_preflight_check_pi(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="0.80.2\n", stderr="")
+
+        ok, message = preflight_check({"llm_backend": "pi"})
+
+        assert ok is True
+        assert "pi" in message.lower()
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0].endswith("pi")
+        assert cmd[1:] == ["--version"]
+
+    @patch("memento.llm.subprocess.run")
+    def test_preflight_check_pi_missing_binary_is_clear_not_a_crash(self, mock_run):
+        mock_run.side_effect = FileNotFoundError("[Errno 2] No such file or directory: 'pi'")
+
+        ok, message = preflight_check({"llm_backend": "pi"})
+
+        assert ok is False
+        assert "pi" in message.lower()
+
+    @patch("memento.llm.subprocess.run")
     def test_llm_complete_attaches_telemetry_on_success(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="claude output\n", stderr="")
 

@@ -55,6 +55,10 @@ vault-briefing.py (SessionStart hook)
     |       if maps have enough notes for this project: write ready immediately
     |       else: fall through to async vsearch
     +---> ASYNC: spawn background subprocess for QMD vsearch
+    |       if agentic_retrieval_enabled: try a bounded ReAct loop first
+    |       (memento/retrieval_agent.py -- search/query/related/get tools,
+    |       max 6 calls / 60s); any protocol/provider failure falls back to
+    |       the one-shot vsearch below, byte-identically
     |     writes results to a session/project-scoped deferred file with a short TTL
     |     picked up by vault-recall.py only for the matching first prompt context
     |
@@ -82,6 +86,11 @@ vault-recall.py (UserPromptSubmit hook)
     +---> multi-hop: if low confidence + multi_hop_enabled,
     |       follow [[wikilinks]] from top results via qmd get
     |       add linked notes (up to multi_hop_max)
+    +---> deep recall: if low confidence + deep_recall_enabled,
+    |       spawn a background worker; results injected on the next prompt
+    |       if agentic_retrieval_enabled: the worker runs the bounded ReAct
+    |       loop (memento/retrieval_agent.py) instead of a single
+    |       suggest-titles completion; falls back on any failure
     +---> dedup: skip if same top result as last injection (within 3 prompts)
     +---> print [vault] related memories to stdout --> Claude sees them
     |
