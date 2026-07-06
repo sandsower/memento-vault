@@ -43,6 +43,37 @@ class TestReadNoteMetadataTags:
 
         assert meta["tags"] == []
 
+    def test_parses_block_style_tag_list(self, vault):
+        """MEM-166: the known fix -- block-style tags used to be invisible here."""
+        _write_note(
+            vault,
+            "block-tagged",
+            ["title: Block Tagged", "type: session", "tags:", "  - pi", "  - queued"],
+        )
+
+        with patch("memento.graph.get_vault", return_value=vault):
+            meta = read_note_metadata("block-tagged")
+
+        assert meta["tags"] == ["pi", "queued"]
+
+    def test_block_style_tags_now_trigger_quality_signal_drop(self, vault):
+        """Downstream effect of the block-tag fix: apply_quality_signals'
+        queued-pi-session-capture rule now fires on block-style tags too,
+        where before migration it silently kept these results."""
+        from memento.search import apply_quality_signals
+
+        path = _write_note(
+            vault,
+            "block-pi-session-candidate-capture-3",
+            ["title: Pi session candidate capture", "type: session", "tags:", "  - pi", "  - queued"],
+        )
+        results = [_result(path)]
+
+        with patch("memento.graph.get_vault", return_value=vault):
+            kept = apply_quality_signals(results, config={"quality_signals_enabled": True})
+
+        assert kept == []
+
 
 class TestApplyQualitySignals:
     def test_drops_queued_pi_session_captures(self, vault):

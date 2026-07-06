@@ -81,7 +81,15 @@ def _clean_scalar(value: str) -> str:
 
 def _decode_inline_value(value: str) -> str | list[str]:
     stripped = value.strip()
-    if stripped.startswith("[") and stripped.endswith("]"):
+    # A wikilink scalar (`supersedes: [[older-note]]`) is doubly-bracketed
+    # and must NOT be mistaken for a single-bracketed inline list -- no
+    # schema list field's items are themselves `[...]`-wrapped, so this
+    # exclusion is unambiguous.
+    if (
+        stripped.startswith("[")
+        and stripped.endswith("]")
+        and not (stripped.startswith("[[") and stripped.endswith("]]"))
+    ):
         inner = stripped[1:-1]
         return [_clean_scalar(item) for item in inner.split(",") if _clean_scalar(item)]
     return _clean_scalar(stripped)

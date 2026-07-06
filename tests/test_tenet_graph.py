@@ -13,6 +13,7 @@ from memento.graph import (
     compute_pagerank,
     graph_neighborhood,
     load_or_build_graph,
+    read_note_metadata,
     resolve_note_reference,
     supersession_chain,
     _deserialize_graph,
@@ -39,6 +40,101 @@ def _write_note(vault, stem, body, frontmatter=None):
     path = vault / "notes" / f"{stem}.md"
     path.write_text("\n".join(lines))
     return path
+
+
+# --- read_note_metadata (MEM-166 characterization) ---
+
+
+class TestReadNoteMetadata:
+    """Characterization tests for memento.graph.read_note_metadata, migrated
+    to memento.frontmatter in MEM-166. Covers every schema field shape it
+    reads plus the fixture corpus edge cases (no frontmatter, missing note,
+    body-level `---`, unknown keys) so consolidation is behavior-frozen
+    except the one documented fix (block-style tags)."""
+
+    def test_missing_note_returns_none(self, tmp_vault, mock_config):
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            assert read_note_metadata("does-not-exist") is None
+
+    def test_no_frontmatter_returns_all_none_scalars_and_empty_lists(self, tmp_vault, mock_config):
+        (tmp_vault / "notes").mkdir(parents=True, exist_ok=True)
+        (tmp_vault / "notes" / "bare.md").write_text("Just a body, no frontmatter.\n")
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("bare")
+
+        assert meta["title"] is None
+        assert meta["certainty"] is None
+        assert meta["tags"] == []
+        assert meta["links"] == []
+
+    def test_full_field_shapes_and_wikilinks(self, tmp_vault, mock_config):
+        _write_note(
+            tmp_vault,
+            "full",
+            "See [[other-note]] for background.",
+            frontmatter={
+                "title": "Full Note",
+                "type": "decision",
+                "date": "2026-03-20T10:00",
+                "certainty": 4,
+                "project": "my-api",
+                "source": "session",
+                "origin": "manual",
+                "supersedes": "[[older-note]]",
+                "tags": "[alpha, beta]",
+            },
+        )
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("full")
+
+        assert meta["title"] == "Full Note"
+        assert meta["type"] == "decision"
+        assert meta["date"] == "2026-03-20T10:00"
+        assert meta["certainty"] == 4
+        assert meta["project"] == "my-api"
+        assert meta["source"] == "session"
+        assert meta["origin"] == "manual"
+        assert meta["supersedes"] == "[[older-note]]"
+        assert meta["tags"] == ["alpha", "beta"]
+        assert meta["links"] == ["other-note"]
+
+    def test_block_style_tags_are_now_visible(self, tmp_vault, mock_config):
+        """The ONE intended behavior change (MEM-166)."""
+        notes = tmp_vault / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "block-tagged.md").write_text(
+            "---\ntitle: Block Tagged\ntype: discovery\ntags:\n  - alpha\n  - beta\n---\n\nBody.\n"
+        )
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("block-tagged")
+
+        assert meta["tags"] == ["alpha", "beta"]
+
+    def test_body_level_dash_fence_not_treated_as_frontmatter(self, tmp_vault, mock_config):
+        notes = tmp_vault / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "dashes.md").write_text("---\ntitle: Has Dashes\n---\n\nBody.\n\n---\n\nMore body.\n")
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("dashes")
+
+        assert meta["title"] == "Has Dashes"
+
+    def test_unknown_frontmatter_keys_do_not_break_parsing(self, tmp_vault, mock_config):
+        notes = tmp_vault / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "unknown.md").write_text(
+            "---\ntitle: Unknown Keys\ntype: discovery\nhand-added: value\n---\n\nBody.\n"
+        )
+
+        with patch("memento.graph.get_vault", return_value=tmp_vault):
+            meta = read_note_metadata("unknown")
+
+        assert meta["title"] == "Unknown Keys"
+        assert meta["type"] == "discovery"
 
 
 # --- build_wikilink_graph ---
