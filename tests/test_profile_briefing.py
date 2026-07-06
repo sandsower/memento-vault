@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from memento import config
 from memento.lifecycle import profile_briefing_section
 
@@ -72,3 +70,53 @@ def test_custom_profile_dir_name(tmp_path):
     section = profile_briefing_section(vault, _cfg(dir="persona"))
     assert section is not None
     assert "voice fact" in section
+
+
+def test_build_briefing_includes_profile_section(tmp_path, monkeypatch):
+    """End-to-end: build_briefing surfaces the profile index in its content."""
+    import memento.lifecycle as lc
+    import memento.remote_client as rc
+
+    vault = _make_vault(tmp_path, index_text="# Agent profile index\n\n- voice - no em dashes")
+
+    monkeypatch.setattr(lc, "get_config", lambda: dict(config.DEFAULT_CONFIG))
+    monkeypatch.setattr(lc, "get_vault", lambda: vault)
+    monkeypatch.setattr(lc, "get_git_branch", lambda cwd: "main")
+    monkeypatch.setattr(lc, "detect_project", lambda cwd, branch: ("proj", None))
+    monkeypatch.setattr(lc, "read_project_index", lambda slug: ([], []))
+    monkeypatch.setattr(lc, "triage_health_warning", lambda **kw: "")
+    monkeypatch.setattr(lc, "pi_bridge_health_warning", lambda **kw: "")
+    monkeypatch.setattr(lc, "has_qmd", lambda: False)
+    monkeypatch.setattr(lc, "load_or_build_graph", lambda v: None)
+    monkeypatch.setattr(rc, "is_remote", lambda: False)
+
+    result = lc.build_briefing(cwd=str(tmp_path), session_id="s", allow_deferred=False)
+
+    assert result.should_inject
+    assert _LABEL in result.content
+    assert "voice - no em dashes" in result.content
+
+
+def test_build_briefing_omits_profile_when_disabled(tmp_path, monkeypatch):
+    import memento.lifecycle as lc
+    import memento.remote_client as rc
+
+    vault = _make_vault(tmp_path, index_text="# idx\n\n- voice fact")
+    cfg = dict(config.DEFAULT_CONFIG)
+    cfg["profile"] = {**config.DEFAULT_CONFIG["profile"], "inject_into_briefing": False}
+
+    monkeypatch.setattr(lc, "get_config", lambda: cfg)
+    monkeypatch.setattr(lc, "get_vault", lambda: vault)
+    monkeypatch.setattr(lc, "get_git_branch", lambda cwd: "main")
+    monkeypatch.setattr(lc, "detect_project", lambda cwd, branch: ("proj", None))
+    monkeypatch.setattr(lc, "read_project_index", lambda slug: ([], []))
+    monkeypatch.setattr(lc, "triage_health_warning", lambda **kw: "")
+    monkeypatch.setattr(lc, "pi_bridge_health_warning", lambda **kw: "")
+    monkeypatch.setattr(lc, "has_qmd", lambda: False)
+    monkeypatch.setattr(lc, "load_or_build_graph", lambda v: None)
+    monkeypatch.setattr(rc, "is_remote", lambda: False)
+
+    result = lc.build_briefing(cwd=str(tmp_path), session_id="s", allow_deferred=False)
+
+    assert result.should_inject
+    assert _LABEL not in result.content

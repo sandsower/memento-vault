@@ -985,6 +985,17 @@ def build_briefing(
         if warning:
             lines.append(warning)
 
+    # Curated profile index (identity, voice, standing constraints). Injected
+    # before the optional maps and the project-maps early return so it appears
+    # in every briefing. A failure here must never break the rest.
+    try:
+        profile_section = profile_briefing_section(vault, config)
+        if profile_section:
+            lines.append("")
+            lines.append(profile_section)
+    except Exception:
+        pass
+
     # MEM-160: capped two-tier vault map (regenerated project hub + top
     # cross-project notes) injected behind vault_map_in_briefing -- default
     # off until Vic reviews the output. A failure here must never break the
