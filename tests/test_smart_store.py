@@ -116,6 +116,44 @@ def test_write_smart_store_note_creates_when_no_close_match(tmp_vault, monkeypat
     assert (tmp_vault / result["path"]).exists()
 
 
+def test_write_smart_store_note_stores_project_slug_and_raw_path(tmp_vault, monkeypatch):
+    """MEM-164: raw cwd paths become a stable slug; the raw path moves to project_path."""
+    monkeypatch.setattr("memento.smart_store.get_vault", lambda: tmp_vault)
+    monkeypatch.setattr("memento.smart_store.has_qmd", lambda: False)
+    monkeypatch.setattr("memento.smart_store.inspect_contradictions", lambda *args, **kwargs: {})
+
+    result = write_smart_store_note(
+        title="Project scoped note",
+        body="Slug normalization at the smart-store write path.",
+        tags=["new"],
+        project="/home/vic/Projects/Memento-Vault",
+    )
+
+    assert result["created"] is True
+    text = (tmp_vault / result["path"]).read_text()
+    assert "project: memento-vault\n" in text
+    assert "project_path: /home/vic/Projects/Memento-Vault\n" in text
+    # The project index is filed under the slug, not the path basename.
+    assert (tmp_vault / "projects" / "memento-vault.md").exists()
+
+
+def test_suggest_store_action_write_payload_carries_slug_and_project_path(tmp_vault, monkeypatch):
+    monkeypatch.setattr("memento.smart_store.get_vault", lambda: tmp_vault)
+    monkeypatch.setattr("memento.smart_store.has_qmd", lambda: False)
+    monkeypatch.setattr("memento.smart_store.inspect_contradictions", lambda *args, **kwargs: {})
+
+    result = suggest_store_action(
+        title="Fresh scoped note",
+        body="An entirely new idea.",
+        tags=["new"],
+        project="/Users/vic/other-machine/memento-vault",
+    )
+
+    assert result["decision"] == "created"
+    assert result["write"]["project"] == "memento-vault"
+    assert result["write"]["project_path"] == "/Users/vic/other-machine/memento-vault"
+
+
 class TestSplitNoteText:
     """Only a LEADING '---' block is frontmatter; body dashes must never fabricate one (audit M6)."""
 

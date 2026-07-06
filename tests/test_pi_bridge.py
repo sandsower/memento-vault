@@ -382,7 +382,10 @@ def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     assert "source: pi-capture" in note_text
     assert "origin: pi_bridge:manual" in note_text
     assert "certainty: 2" in note_text
-    assert "project: /repo" in note_text
+    # write_note splits the raw cwd into a project slug plus a separate
+    # project_path field carrying the original value verbatim (MEM-164).
+    assert "project: repo" in note_text
+    assert "project_path: /repo" in note_text
 
 
 def test_pi_bridge_capture_runs_commit_and_reindex_under_vault_lock(capsys, tmp_path, monkeypatch):
@@ -1296,7 +1299,10 @@ def test_pi_bridge_capture_writes_type_tags_certainty_and_session_metadata_as_fr
     assert "type: decision" in frontmatter
     assert 'tags: ["pi", "manual", "repo", "dedup", "curation"]' in frontmatter
     assert "certainty: 4" in frontmatter
-    assert "project: /repo" in frontmatter
+    # write_note splits the raw cwd into a project slug plus a separate
+    # project_path field carrying the original value verbatim (MEM-164).
+    assert "project: repo" in frontmatter
+    assert "project_path: /repo" in frontmatter
     assert "branch: original/pi-branch" in frontmatter
     assert "session_id: /Users/vic/.pi/agent/sessions/session.jsonl" in frontmatter
     assert "/Users/vic/.pi/agent/sessions/session.jsonl" not in body

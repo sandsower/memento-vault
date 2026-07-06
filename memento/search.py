@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from memento.config import RUNTIME_DIR, get_config, get_vault
+from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, repo_slug_from_path
 from memento.search_backend import _clean_snippet, get_backend  # noqa: F401 (_clean_snippet re-exported for compat)
 from memento.store import apply_access_log_boost, log_retrieval
 from memento.graph import (
@@ -793,14 +793,25 @@ def filter_by_project(results, cwd, require_match=False):
     through. With require_match=True only positively matched notes survive —
     the bar for unsolicited injection surfaces like tool-context, where
     untagged junk previously slipped through as "general knowledge".
+
+    Comparison is slug-to-slug (MEM-164), not path-prefix: the query cwd is
+    resolved to its repo-name slug via ``detect_project`` (same derivation
+    used at write time), and each note's `project` field is compared
+    case-insensitively against it. Notes already backfilled to a slug compare
+    directly; notes still holding a legacy raw path (not yet backfilled) have
+    their slug derived on the fly via ``repo_slug_from_path`` so old and new
+    notes for the same repo match uniformly.
     """
     if not cwd:
         return results
 
-    # Normalize cwd: resolve symlinks, strip trailing slash
     try:
-        cwd = os.path.realpath(cwd).rstrip("/")
-    except (OSError, ValueError):
+        query_slug, _ticket = detect_project(cwd, None)
+    except Exception:
+        return results
+
+    query_slug = (query_slug or "").strip().lower()
+    if not query_slug or query_slug == "unknown":
         return results
 
     filtered = []
@@ -831,25 +842,16 @@ def filter_by_project(results, cwd, require_match=False):
         if not note_project_raw:
             continue
 
-        if "/" not in note_project_raw and "\\" not in note_project_raw:
-            note_slug = re.sub(r"[^a-z0-9]+", "-", note_project_raw.lower()).strip("-")
-            cwd_slugs = {
-                re.sub(r"[^a-z0-9]+", "-", part.lower()).strip("-")
-                for part in Path(cwd).parts
-                if part and part not in {os.sep, "/"}
-            }
-            if note_slug and note_slug in cwd_slugs:
-                filtered.append(r)
-            continue
+        if "/" in note_project_raw or "\\" in note_project_raw:
+            # Legacy note not yet backfilled to a slug - derive it on the fly.
+            note_slug = repo_slug_from_path(note_project_raw) or ""
+        else:
+            note_slug = note_project_raw
 
-        # Match if cwd starts with (or equals) the note's project path
-        try:
-            note_project_path = os.path.realpath(note_project_raw).rstrip("/")
-        except (OSError, ValueError):
-            note_project_path = note_project_raw
-
-        if cwd.startswith(note_project_path) or note_project_path.startswith(cwd):
+        if note_slug.strip().lower() == query_slug:
             filtered.append(r)
+        elif require_match:
+            log_retrieval("search", "project_match_required", path=r.get("path", ""), reason="slug-mismatch")
 
     return filtered
 

@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memento.config import RUNTIME_DIR, get_config, get_vault_id, slugify
+from memento.config import RUNTIME_DIR, get_config, get_vault_id, repo_slug_from_path, slugify
 
 RETRIEVAL_LOG_PATH = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.join(str(Path.home()), ".config")),
@@ -808,19 +808,66 @@ def _normalize_note_type(note_type):
 
 
 def _normalize_tags(tags):
-    """Return stable, non-empty tags for frontmatter."""
+    """Return stable, deduped, vocabulary-normalized tags for frontmatter.
+
+    Mechanical normalization only: lowercase, trim, spaces collapsed to
+    dashes. Merging near-duplicate tags (plurals, synonyms, casing drift) is
+    controlled entirely via the ``tag_aliases`` config map - no stemming
+    library - so consolidating the long tail is a config change, not a code
+    change (MEM-164).
+    """
+    try:
+        aliases = get_config().get("tag_aliases") or {}
+    except Exception:
+        aliases = {}
     normalized = []
     seen = set()
     for tag in tags or []:
         safe = _safe_yaml_scalar(tag).strip()
         if not safe:
             continue
-        key = safe.lower()
+        key = re.sub(r"\s+", "-", safe.lower()).strip("-")
+        if not key:
+            continue
+        key = aliases.get(key, key)
         if key in seen:
             continue
-        normalized.append(safe)
+        normalized.append(key)
         seen.add(key)
     return normalized
+
+
+def _looks_like_project_path(value):
+    return "/" in value or "\\" in value
+
+
+def _derive_project_fields(project, project_path=None):
+    """Split a raw ``project`` write-path value into ``(slug, raw_path)``.
+
+    Callers historically pass the session cwd verbatim as ``project`` (an
+    absolute path). Path-like values are collapsed to a stable repo-name
+    slug via ``repo_slug_from_path`` (git toplevel basename, so cross-machine
+    paths and per-ticket worktree checkouts of the same repo converge on one
+    slug) and the original value is preserved verbatim in the separate
+    ``project_path`` field so nothing is lost. Bare tokens (an already-derived
+    slug, or a legacy bare branch name on some very old notes) are only
+    lightly normalized - lowercased and dash-separated - never reinterpreted
+    as a path (MEM-164).
+    """
+    raw_project = str(project).strip() if project else ""
+    raw_path = str(project_path).strip() if project_path else ""
+
+    if not raw_project:
+        return None, (_safe_yaml_scalar(raw_path) or None if raw_path else None)
+
+    if _looks_like_project_path(raw_project):
+        if not raw_path:
+            raw_path = raw_project
+        slug = repo_slug_from_path(raw_project) or slugify(Path(raw_project).name) or None
+    else:
+        slug = slugify(raw_project) or None
+
+    return slug, (_safe_yaml_scalar(raw_path) or None if raw_path else None)
 
 
 def normalize_note_contract(
@@ -833,6 +880,7 @@ def normalize_note_contract(
     validity_context=None,
     supersedes=None,
     project=None,
+    project_path=None,
     branch=None,
     session_id=None,
 ):
@@ -842,7 +890,13 @@ def normalize_note_contract(
     is written so Claude triage, Pi capture, Pi curation, and MCP writes use the
     same typed schema. Legacy `type: session` inputs are accepted and written as
     typed discoveries; existing legacy notes are handled in retrieval metadata.
+
+    ``project`` is normalized to a stable slug (MEM-164): path-like values are
+    collapsed via ``repo_slug_from_path`` and the original raw value is kept
+    verbatim in ``project_path`` so cross-machine/worktree paths never leak
+    into the field retrieval filtering compares on.
     """
+    project_slug, project_path_value = _derive_project_fields(project, project_path)
     return {
         "note_type": _normalize_note_type(note_type),
         "tags": _normalize_tags(tags),
@@ -851,7 +905,8 @@ def normalize_note_contract(
         "origin": _safe_yaml_scalar(origin) or None,
         "validity_context": _safe_yaml_scalar(validity_context) or None,
         "supersedes": _safe_yaml_scalar(supersedes) or None,
-        "project": _safe_yaml_scalar(project) or None,
+        "project": project_slug,
+        "project_path": project_path_value,
         "branch": _safe_yaml_scalar(branch) or None,
         "session_id": _safe_yaml_scalar(session_id) or None,
     }
@@ -886,6 +941,7 @@ def _render_note_markdown(
     validity_context=None,
     supersedes=None,
     project=None,
+    project_path=None,
     branch=None,
     session_id=None,
     extra_frontmatter_lines=None,
@@ -903,6 +959,7 @@ def _render_note_markdown(
         validity_context=validity_context,
         supersedes=supersedes,
         project=project,
+        project_path=project_path,
         branch=branch,
         session_id=session_id,
     )
@@ -924,6 +981,8 @@ def _render_note_markdown(
         lines.append(f"supersedes: {json.dumps(contract['supersedes'], ensure_ascii=False)}")
     if contract["project"]:
         lines.append(f"project: {contract['project']}")
+    if contract["project_path"]:
+        lines.append(f"project_path: {contract['project_path']}")
     if contract["branch"]:
         lines.append(f"branch: {contract['branch']}")
     lines.append(f"date: {now}")
@@ -1007,6 +1066,7 @@ _MANAGED_NOTE_FRONTMATTER_KEYS = {
     "validity-context",
     "supersedes",
     "project",
+    "project_path",
     "branch",
     "date",
     "session_id",
@@ -1047,6 +1107,7 @@ def write_note(
     validity_context=None,
     supersedes=None,
     project=None,
+    project_path=None,
     branch=None,
     session_id=None,
 ):
@@ -1076,6 +1137,7 @@ def write_note(
             validity_context=validity_context,
             supersedes=supersedes,
             project=project,
+            project_path=project_path,
             branch=branch,
             session_id=session_id,
         ),
@@ -1097,6 +1159,7 @@ def replace_note_at_path(
     validity_context=None,
     supersedes=None,
     project=None,
+    project_path=None,
     branch=None,
     session_id=None,
 ):
@@ -1132,6 +1195,7 @@ def replace_note_at_path(
             validity_context=validity_context,
             supersedes=supersedes,
             project=project,
+            project_path=project_path,
             branch=branch,
             session_id=session_id,
             extra_frontmatter_lines=preserved_lines,

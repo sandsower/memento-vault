@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -127,7 +129,10 @@ DEFAULT_CONFIG = {
     # Deep recall — background codex analysis (experimental)
     "deep_recall_enabled": False,
     "deep_recall_backend": "codex",
-    # Tag normalization
+    # Tag normalization: controlled-vocabulary merge map applied at write time
+    # (memento/store.py), by the post-write hook fixer (memento/utils.py), and
+    # by scripts/backfill_project_slugs.py (MEM-164). Merging the long tail of
+    # near-duplicate tags is a config change here, never a code change.
     "tag_aliases": {
         "k8s": "kubernetes",
         "js": "javascript",
@@ -478,6 +483,61 @@ def slugify(text):
     return text[:80]
 
 
+@functools.lru_cache(maxsize=256)
+def _repo_toplevel_name(path):
+    """Return the main-repo directory name for the git checkout at ``path``, or None.
+
+    Uses ``--git-common-dir`` (the main repository's ``.git``), not
+    ``--show-toplevel``: in a linked worktree the toplevel is the worktree
+    directory itself (e.g. ``.claude/worktrees/agent-xyz``), which would
+    fragment one project into per-worktree scopes - the exact failure MEM-164
+    removes. The common dir's parent is the main repo for both ordinary
+    checkouts and linked worktrees.
+
+    Cached because the same cwd is resolved repeatedly across a session
+    (every write, every retrieval query) and the repo layout for a given path
+    is stable for the lifetime of the process.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    common_dir = result.stdout.strip()
+    if not common_dir:
+        return None
+    common_path = Path(common_dir)
+    if not common_path.is_absolute():
+        # Relative output is relative to the queried path (e.g. plain ".git").
+        common_path = Path(path) / common_path
+    repo_dir = common_path.parent if common_path.name == ".git" else common_path
+    return repo_dir.name or None
+
+
+def repo_slug_from_path(path):
+    """Return a stable project slug for the git repo (or plain dir) at ``path``.
+
+    Resolves the git worktree/toplevel directory first, so per-ticket
+    worktree checkouts (``.claude/worktrees/<slice>/``) and machine-specific
+    absolute paths (``/Users/...`` vs ``/home/...``) for the *same* repo
+    collapse onto one slug instead of fragmenting project scope (MEM-164).
+    Falls back to the directory's own basename when git is unavailable or
+    ``path`` is not inside a repo.
+    """
+    if not path:
+        return None
+    repo_name = _repo_toplevel_name(str(path))
+    if not repo_name:
+        repo_name = Path(path).name
+    return slugify(repo_name) or None
+
+
 def detect_project(cwd, git_branch):
     """Derive a project slug and optional ticket from cwd and branch.
     Returns (project_slug, ticket_or_none).
@@ -495,7 +555,7 @@ def detect_project(cwd, git_branch):
                 match = re.search(rule["ticket_pattern"], git_branch, re.IGNORECASE)
                 if match:
                     ticket = match.group(1).upper() if match.lastindex else match.group(0).upper()
-            return rule.get("slug", slugify(Path(cwd).name)), ticket
+            return rule.get("slug") or repo_slug_from_path(cwd) or "misc", ticket
 
     ticket = None
     if git_branch:
@@ -503,4 +563,4 @@ def detect_project(cwd, git_branch):
         if match:
             ticket = match.group(1).upper()
 
-    return slugify(Path(cwd).name) or "misc", ticket
+    return repo_slug_from_path(cwd) or "misc", ticket

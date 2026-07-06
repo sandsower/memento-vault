@@ -679,14 +679,13 @@ def memento_store(
             validity_context=contract["validity_context"],
             supersedes=contract["supersedes"],
             project=contract["project"],
+            project_path=contract["project_path"],
             branch=contract["branch"],
             session_id=contract["session_id"],
         )
 
-        # Update project index if we can derive a project slug
-        project_slug = None
-        if project:
-            project_slug = slugify(Path(project).name) or None
+        # Update project index under the same slug the note stores (MEM-164).
+        project_slug = contract["project"]
         if project_slug:
             summary = f"MCP store: {title.strip()[:80]}"
             update_project_index(vault, project_slug, path.stem, summary)

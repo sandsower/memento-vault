@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from memento.config import get_vault, slugify
+from memento.config import get_vault
 from memento.contradictions import inspect_contradictions
 from memento.search import has_qmd, qmd_search_with_extras, resolve_concrete_mode
 from memento.store import (
@@ -320,6 +320,7 @@ def suggest_store_action(
                 "tags": contract["tags"],
                 "certainty": contract["certainty"],
                 "project": contract["project"],
+                "project_path": contract["project_path"],
                 "branch": contract["branch"],
                 "session_id": contract["session_id"],
                 "validity_context": contract["validity_context"],
@@ -408,6 +409,7 @@ def suggest_store_action(
             "tags": contract["tags"],
             "certainty": contract["certainty"],
             "project": contract["project"],
+            "project_path": contract["project_path"],
             "branch": contract["branch"],
             "session_id": contract["session_id"],
             "validity_context": contract["validity_context"],
@@ -478,15 +480,16 @@ def write_smart_store_note(
             validity_context=payload["validity_context"],
             supersedes=payload["supersedes"],
             project=payload["project"],
+            project_path=payload["project_path"],
             branch=payload["branch"],
             session_id=payload["session_id"],
         )
 
         if payload["project"]:
-            project_slug = slugify(Path(payload["project"]).name) or None
-            if project_slug:
-                summary = f"MCP smart-store: {payload['title'][:80]}"
-                update_project_index(vault, project_slug, path.stem, summary)
+            # payload["project"] is already the normalized slug from
+            # normalize_note_contract (MEM-164) - no need to re-derive it.
+            summary = f"MCP smart-store: {payload['title'][:80]}"
+            update_project_index(vault, payload["project"], path.stem, summary)
 
         return {
             **decision,

@@ -153,7 +153,9 @@ class TestWriteNote:
         )
 
         text = path.read_text()
-        assert 'tags: ["cache,redis", "Alice \\"beta\\""]' in text
+        # Tags are lowercased and space-joined with dashes at write time
+        # (MEM-164 vocabulary normalization); supersedes is untouched.
+        assert 'tags: ["cache,redis", "alice-\\"beta\\""]' in text
         assert 'supersedes: "Alice \\"beta\\" note"' in text
 
     def test_write_note_maps_bug_fix_alias_to_bugfix(self, tmp_vault):
@@ -935,3 +937,114 @@ class TestAppendFleetingSession:
         )
         text = (tmp_vault / "fleeting" / "2026-05-12.md").read_text()
         assert "`ses'bad next` /tmp/project extra (main'branch) — open code" in text
+
+
+class TestProjectSlugNormalization:
+    """MEM-164: write paths store a stable project slug plus the raw path."""
+
+    def test_path_like_project_becomes_slug_with_project_path(self, tmp_vault):
+        path = write_note(
+            tmp_vault,
+            title="Slugged project note",
+            body="Body",
+            note_type="discovery",
+            tags=["sync"],
+            project="/home/vic/Projects/Memento-Vault",
+        )
+
+        text = path.read_text()
+        assert "project: memento-vault\n" in text
+        assert "project_path: /home/vic/Projects/Memento-Vault\n" in text
+
+    def test_bare_token_project_is_normalized_not_treated_as_path(self, tmp_vault):
+        path = write_note(
+            tmp_vault,
+            title="Token project note",
+            body="Body",
+            note_type="discovery",
+            tags=["sync"],
+            project="My Project",
+        )
+
+        text = path.read_text()
+        assert "project: my-project\n" in text
+        assert "project_path" not in text
+
+    def test_explicit_project_path_round_trips_alongside_slug(self, tmp_vault):
+        path = write_note(
+            tmp_vault,
+            title="Explicit path note",
+            body="Body",
+            note_type="discovery",
+            tags=["sync"],
+            project="memento-vault",
+            project_path="/Users/vic/Personal/memento-vault",
+        )
+
+        text = path.read_text()
+        assert "project: memento-vault\n" in text
+        assert "project_path: /Users/vic/Personal/memento-vault\n" in text
+
+    def test_replace_note_at_path_preserves_project_path_as_managed_key(self, tmp_vault):
+        original = write_note(
+            tmp_vault,
+            title="Replaceable note",
+            body="Original body",
+            note_type="discovery",
+            tags=["sync"],
+            project="/home/vic/Projects/memento-vault",
+        )
+
+        target = replace_note_at_path(
+            tmp_vault,
+            str(original.relative_to(tmp_vault)),
+            title="Replaceable note",
+            body="Updated body",
+            note_type="discovery",
+            tags=["sync"],
+            project="memento-vault",
+            project_path="/home/vic/Projects/memento-vault",
+        )
+
+        text = target.read_text()
+        assert "project: memento-vault\n" in text
+        assert text.count("project_path:") == 1
+
+
+class TestTagNormalization:
+    """MEM-164: tags are normalized at write time; merges come from config tag_aliases."""
+
+    def test_tags_are_lowercased_trimmed_and_dashed(self, tmp_vault):
+        path = write_note(
+            tmp_vault,
+            title="Tagged note",
+            body="Body",
+            note_type="discovery",
+            tags=["  Foo Bar  ", "SYNC", "sync"],
+        )
+
+        assert 'tags: ["foo-bar", "sync"]' in path.read_text()
+
+    def test_tag_aliases_from_config_merge_synonyms(self, tmp_vault):
+        with patch("memento.store.get_config", return_value={"tag_aliases": {"bugs": "bug", "test": "testing"}}):
+            path = write_note(
+                tmp_vault,
+                title="Aliased tags note",
+                body="Body",
+                note_type="discovery",
+                tags=["Bugs", "bug", "Test"],
+            )
+
+        assert 'tags: ["bug", "testing"]' in path.read_text()
+
+    def test_no_stemming_without_explicit_alias(self, tmp_vault):
+        with patch("memento.store.get_config", return_value={"tag_aliases": {}}):
+            path = write_note(
+                tmp_vault,
+                title="Plural tags note",
+                body="Body",
+                note_type="discovery",
+                tags=["bugs", "bug"],
+            )
+
+        assert 'tags: ["bugs", "bug"]' in path.read_text()
