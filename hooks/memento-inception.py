@@ -25,6 +25,7 @@ _repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 from memento.config import RUNTIME_DIR, get_config, slugify  # noqa: E402
+from memento.contradictions import _normalize_note_ref, apply_invalidation  # noqa: E402
 from memento.embedded_search import EmbeddedSearchBackend  # noqa: E402
 from memento.llm import llm_complete  # noqa: E402
 from memento.search import has_qmd  # noqa: E402
@@ -58,6 +59,13 @@ class NoteRecord:
     # here so pattern notes can inherit the signal (see write_pattern_note).
     resurfaced_count: int = 0
     last_resurfaced: str | None = None
+    # MEM-163 bitemporal supersession: `supersedes` (this note's declared
+    # older note, note-ref stem) and `invalidated_by` (set once this note's
+    # validity has been explicitly closed out, by the sweeper backlink pass
+    # or by contradiction-adjudication auto-apply). Both None when absent --
+    # a note is invalid once invalidated_by is set.
+    supersedes: str | None = None
+    invalidated_by: str | None = None
 
 
 def parse_note(path: Path) -> NoteRecord | None:
@@ -153,6 +161,9 @@ def parse_note(path: Path) -> NoteRecord | None:
         except (ValueError, TypeError):
             resurfaced_count = 0
 
+    supersedes = _normalize_note_ref(meta.get("supersedes")) if meta.get("supersedes") else None
+    invalidated_by = _normalize_note_ref(meta.get("invalidated_by")) if meta.get("invalidated_by") else None
+
     return NoteRecord(
         stem=path.stem,
         path=path,
@@ -168,6 +179,8 @@ def parse_note(path: Path) -> NoteRecord | None:
         wikilinks=wikilinks,
         resurfaced_count=resurfaced_count,
         last_resurfaced=meta.get("last_resurfaced") or None,
+        supersedes=supersedes,
+        invalidated_by=invalidated_by,
     )
 
 
@@ -1003,6 +1016,271 @@ def parse_synthesis(raw):
     }
 
 
+# --- Contradiction detection v2 (MEM-163) ---
+#
+# Background candidate pass (embedding-similarity pairs, same project scope,
+# both non-invalidated) + LLM adjudication, riding this hook's cadence and
+# reusing the same embeddings/notes_dict already loaded for clustering (the
+# MEM-157 backend-aware vector access above -- never a second embedding
+# load). Auto-applies `invalidated_by` (via memento.contradictions.
+# apply_invalidation) only when the LLM verdict says the pair contradicts,
+# the newer note wins, and confidence clears the configured threshold;
+# everything else queues to a review-queue file for human triage. Gated by
+# `contradiction_detection_enabled` (config, default False).
+
+DEFAULT_CONTRADICTION_SIMILARITY_THRESHOLD = 0.85
+DEFAULT_CONTRADICTION_MAX_PAIRS_PER_RUN = 20
+DEFAULT_CONTRADICTION_CONFIDENCE_THRESHOLD = 0.75
+CONTRADICTION_REVIEW_QUEUE_PATH = os.path.join(RUNTIME_DIR, "contradiction-review-queue.jsonl")
+
+
+def find_contradiction_candidates(stem_index, embedding_matrix, notes_dict, config):
+    """Find embedding-similarity candidate pairs for contradiction adjudication.
+
+    Scope: both notes in the same project (``NoteRecord.project``, compared
+    as-is -- two notes with no project are treated as sharing scope), cosine
+    similarity at or above ``contradiction_similarity_threshold`` (config),
+    and both notes non-invalidated (``NoteRecord.invalidated_by`` empty).
+    Pairs with an existing direct ``supersedes`` edge between them are
+    excluded -- the sweeper backlink pass already resolves those
+    deterministically without needing LLM adjudication.
+
+    Returns a list of ``(stem_a, stem_b, similarity)`` tuples sorted by
+    similarity descending.
+    """
+    n = len(stem_index)
+    if n < 2:
+        return []
+
+    threshold = config.get("contradiction_similarity_threshold", DEFAULT_CONTRADICTION_SIMILARITY_THRESHOLD)
+    try:
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        sims = cosine_similarity(embedding_matrix)
+    except ImportError:
+        # Vectors from load_active_backend_embeddings are L2-normalized, so
+        # a plain dot product is an equivalent fallback if sklearn is ever
+        # unavailable in a stripped environment.
+        sims = embedding_matrix @ embedding_matrix.T
+
+    candidates = []
+    for i in range(n):
+        stem_a = stem_index[i]
+        rec_a = notes_dict.get(stem_a)
+        if rec_a is None or rec_a.invalidated_by:
+            continue
+        for j in range(i + 1, n):
+            stem_b = stem_index[j]
+            rec_b = notes_dict.get(stem_b)
+            if rec_b is None or rec_b.invalidated_by:
+                continue
+            if (rec_a.project or None) != (rec_b.project or None):
+                continue
+            if rec_a.supersedes == stem_b or rec_b.supersedes == stem_a:
+                continue
+            score = float(sims[i][j])
+            if score >= threshold:
+                candidates.append((stem_a, stem_b, score))
+
+    candidates.sort(key=lambda item: item[2], reverse=True)
+    return candidates
+
+
+def _order_by_date(rec_a, rec_b):
+    """Return ``(older, newer)`` NoteRecords by parsed date, or ``(None, None)`` if unorderable."""
+    try:
+        date_a = datetime.fromisoformat(rec_a.date) if rec_a.date else None
+        date_b = datetime.fromisoformat(rec_b.date) if rec_b.date else None
+    except ValueError:
+        return None, None
+    if date_a is None or date_b is None or date_a == date_b:
+        return None, None
+    return (rec_a, rec_b) if date_a < date_b else (rec_b, rec_a)
+
+
+def build_contradiction_prompt(older, newer, similarity):
+    """Build a strict-JSON-verdict adjudication prompt for one candidate pair."""
+    return f"""You are checking whether two notes in a knowledge vault contradict each other.
+
+OLDER note (written {older.date or "unknown date"}):
+Title: {older.title}
+{older.body[:1200]}
+
+NEWER note (written {newer.date or "unknown date"}):
+Title: {newer.title}
+{newer.body[:1200]}
+
+Embedding similarity: {similarity:.3f}
+
+Decide:
+1. contradicts: do these two notes make incompatible claims about the same thing?
+2. newer_wins: IF they contradict, does the newer note represent the correct/current
+   belief (true), or does the older note still hold and the newer one is wrong/unrelated
+   (false)?
+3. confidence: your confidence in this verdict, 0.0 to 1.0.
+
+Respond with ONLY a JSON object, no markdown fences, no other text:
+{{"contradicts": true or false, "newer_wins": true or false, "confidence": 0.0 to 1.0}}"""
+
+
+def parse_contradiction_verdict(raw):
+    """Parse a strict ``{contradicts, newer_wins, confidence}`` JSON verdict.
+
+    Returns the validated dict, or ``None`` on any malformed/out-of-range
+    input (missing keys, non-bool verdict fields, unparseable or
+    out-of-[0,1]-range confidence) -- callers must route ``None`` to the
+    review queue rather than guess.
+    """
+    if not raw:
+        return None
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        if lines[-1].strip() == "```":
+            lines = lines[1:-1]
+        else:
+            lines = lines[1:]
+        stripped = "\n".join(lines)
+
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    contradicts = data.get("contradicts")
+    newer_wins = data.get("newer_wins")
+    if not isinstance(contradicts, bool) or not isinstance(newer_wins, bool):
+        return None
+
+    confidence = data.get("confidence")
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 <= confidence <= 1.0):
+        return None
+
+    return {"contradicts": contradicts, "newer_wins": newer_wins, "confidence": confidence}
+
+
+def _append_review_queue(queue_path, entry):
+    """Append one JSON line to the contradiction review queue (best-effort)."""
+    try:
+        os.makedirs(os.path.dirname(queue_path), mode=0o700, exist_ok=True)
+        record = {"ts": datetime.now().isoformat(timespec="seconds"), **entry}
+        with open(queue_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError:
+        pass  # review-queue write failure must never break the run
+
+
+def run_contradiction_detection(
+    stem_index,
+    embedding_matrix,
+    notes_dict,
+    config,
+    vault_path,
+    *,
+    review_queue_path=None,
+    verbose=False,
+):
+    """MEM-163 candidate pass + adjudication for one Inception run.
+
+    Returns a report dict: ``candidates_found``, ``pairs_adjudicated``,
+    ``auto_applied`` (list), ``queued_for_review`` (list), ``malformed``
+    (count of unparseable verdicts).
+    """
+    report = {
+        "candidates_found": 0,
+        "pairs_adjudicated": 0,
+        "auto_applied": [],
+        "queued_for_review": [],
+        "malformed": 0,
+    }
+
+    candidates = find_contradiction_candidates(stem_index, embedding_matrix, notes_dict, config)
+    report["candidates_found"] = len(candidates)
+    if not candidates:
+        return report
+
+    max_pairs = config.get("contradiction_max_pairs_per_run", DEFAULT_CONTRADICTION_MAX_PAIRS_PER_RUN)
+    try:
+        max_pairs = max(0, int(max_pairs))
+    except (TypeError, ValueError):
+        max_pairs = DEFAULT_CONTRADICTION_MAX_PAIRS_PER_RUN
+    bounded = candidates[:max_pairs]
+
+    queue_path = review_queue_path or CONTRADICTION_REVIEW_QUEUE_PATH
+    confidence_threshold = config.get("contradiction_confidence_threshold", DEFAULT_CONTRADICTION_CONFIDENCE_THRESHOLD)
+
+    for stem_a, stem_b, similarity in bounded:
+        rec_a = notes_dict[stem_a]
+        rec_b = notes_dict[stem_b]
+        older, newer = _order_by_date(rec_a, rec_b)
+        if older is None:
+            entry = {
+                "stem_a": stem_a,
+                "stem_b": stem_b,
+                "similarity": similarity,
+                "reason": "unparseable-or-tied-dates",
+            }
+            _append_review_queue(queue_path, entry)
+            report["queued_for_review"].append(entry)
+            continue
+
+        prompt = build_contradiction_prompt(older, newer, similarity)
+        raw = call_llm(prompt, config)
+        report["pairs_adjudicated"] += 1
+        verdict = parse_contradiction_verdict(raw)
+
+        if verdict is None:
+            report["malformed"] += 1
+            entry = {
+                "stem_a": older.stem,
+                "stem_b": newer.stem,
+                "similarity": similarity,
+                "reason": "malformed-verdict",
+                "raw": (raw or "")[:500],
+            }
+            _append_review_queue(queue_path, entry)
+            report["queued_for_review"].append(entry)
+            continue
+
+        if verdict["contradicts"] and verdict["newer_wins"] and verdict["confidence"] >= confidence_threshold:
+            applied = apply_invalidation(vault_path, older.path, newer.stem)
+            report["auto_applied"].append(
+                {"older": older.stem, "newer": newer.stem, "confidence": verdict["confidence"], "applied": applied}
+            )
+            if applied:
+                print(
+                    f"[memento] contradiction auto-applied: {older.stem} invalidated_by {newer.stem} "
+                    f"(confidence={verdict['confidence']:.2f})",
+                    file=sys.stderr,
+                )
+        else:
+            entry = {
+                "stem_a": older.stem,
+                "stem_b": newer.stem,
+                "similarity": similarity,
+                "verdict": verdict,
+                "reason": "below-policy-threshold",
+            }
+            _append_review_queue(queue_path, entry)
+            report["queued_for_review"].append(entry)
+
+    if verbose:
+        print(
+            f"Contradiction detection: {report['candidates_found']} candidates, "
+            f"{report['pairs_adjudicated']} adjudicated, {len(report['auto_applied'])} auto-applied, "
+            f"{len(report['queued_for_review'])} queued for review",
+            file=sys.stderr,
+        )
+
+    return report
+
+
 # --- Main Pipeline ---
 
 import argparse  # noqa: E402
@@ -1034,12 +1312,17 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def main(args=None, state_path=None, db_path=None, lock_path=None):
+def main(args=None, state_path=None, db_path=None, lock_path=None, contradiction_review_queue_path=None):
     """Run the Inception pipeline.
 
     Returns exit code: 0=success, 1=locked, 2=missing deps,
     3=no vector source available or no embeddings found (see
     load_active_backend_embeddings), 5=config error.
+
+    ``contradiction_review_queue_path`` overrides where MEM-163's
+    contradiction-detection stage appends its human-triage review queue
+    (defaults to ``CONTRADICTION_REVIEW_QUEUE_PATH`` under ``RUNTIME_DIR``) --
+    tests should always pass an isolated path.
     """
     if args is None:
         args = parse_args()
@@ -1137,6 +1420,24 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
             return 0
 
         embedding_matrix = np.array([embeddings[s] for s in stem_index])
+
+        if not args.dry_run and config.get("contradiction_detection_enabled", False):
+            try:
+                # MEM-163: background candidate pass + LLM adjudication,
+                # reusing the SAME embeddings/notes_dict this run already
+                # loaded for clustering. Failure-isolated -- never blocks
+                # clustering/synthesis below.
+                run_contradiction_detection(
+                    stem_index,
+                    embedding_matrix,
+                    notes_dict,
+                    config,
+                    vault_path,
+                    review_queue_path=contradiction_review_queue_path,
+                    verbose=args.verbose,
+                )
+            except Exception:
+                pass
 
         # Cluster ALL notes
         max_clusters = args.max_clusters or config.get("inception_max_clusters", 10)

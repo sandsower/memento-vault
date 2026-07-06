@@ -294,3 +294,58 @@ def test_main_still_triages_when_hub_regeneration_raises(tmp_path, monkeypatch):
         _mod.main()
 
     assert exc.value.code == 0
+
+
+def test_main_runs_supersession_backlinks_after_fleeting_lifecycle_sweep(tmp_path, monkeypatch):
+    """MEM-163: the sweeper is also the periodic trigger for the supersession backlink pass."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    monkeypatch.setattr(_mod, "VAULT", vault)
+    monkeypatch.setattr(_mod, "FLEETING", vault / "fleeting")
+    monkeypatch.setattr(_mod, "LOCK_FILE", tmp_path / "sweeper.lock")
+    monkeypatch.setattr(_mod, "CLAUDE_PROJECTS", tmp_path / "no-claude-projects")
+    monkeypatch.setattr(_mod, "PI_SESSIONS", tmp_path / "no-pi-sessions")
+    monkeypatch.setattr(_mod, "PI_SUBAGENTS", tmp_path / "no-pi-subagents")
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.delenv("MEMENTO_PI_TRANSCRIPT_ROOTS", raising=False)
+    monkeypatch.setattr(_mod, "fold_access_log_into_frontmatter", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "sweep_archive_candidates", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "fleeting_lifecycle_sweep", lambda vault_path: None)
+
+    backlink_calls = []
+    monkeypatch.setattr(_mod, "apply_supersession_backlinks", lambda vault_path: backlink_calls.append(vault_path))
+
+    with pytest.raises(SystemExit) as exc:
+        _mod.main()
+
+    assert exc.value.code == 0
+    assert backlink_calls == [str(vault)]
+
+
+def test_main_still_triages_when_supersession_backlinks_raises(tmp_path, monkeypatch):
+    """A backlink-pass failure must never block orphan triage -- isolated like the other sweeps."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    monkeypatch.setattr(_mod, "VAULT", vault)
+    monkeypatch.setattr(_mod, "FLEETING", vault / "fleeting")
+    monkeypatch.setattr(_mod, "LOCK_FILE", tmp_path / "sweeper.lock")
+    monkeypatch.setattr(_mod, "CLAUDE_PROJECTS", tmp_path / "no-claude-projects")
+    monkeypatch.setattr(_mod, "PI_SESSIONS", tmp_path / "no-pi-sessions")
+    monkeypatch.setattr(_mod, "PI_SUBAGENTS", tmp_path / "no-pi-subagents")
+    monkeypatch.delenv("PI_CODING_AGENT_SESSION_DIR", raising=False)
+    monkeypatch.delenv("MEMENTO_PI_TRANSCRIPT_ROOTS", raising=False)
+    monkeypatch.setattr(_mod, "fold_access_log_into_frontmatter", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "sweep_archive_candidates", lambda vault_path: None)
+    monkeypatch.setattr(_mod, "fleeting_lifecycle_sweep", lambda vault_path: None)
+
+    def _boom(vault_path):
+        raise RuntimeError("backlink pass exploded")
+
+    monkeypatch.setattr(_mod, "apply_supersession_backlinks", _boom)
+
+    with pytest.raises(SystemExit) as exc:
+        _mod.main()
+
+    assert exc.value.code == 0

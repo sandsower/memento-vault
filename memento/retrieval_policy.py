@@ -17,6 +17,7 @@ from typing import Callable
 from memento.config import detect_project as default_detect_project
 from memento.config import get_config, get_vault, slugify
 from memento.graph import lookup_concepts, read_note_metadata
+from memento.query import is_invalidated_record, read_note_record
 from memento.search import (
     MISS_RECOVERY_HINTS,
     build_search_miss,
@@ -479,6 +480,31 @@ def filter_recall_results_by_explicit_project(prompt: str, results: list[dict]) 
         else:
             decisions.append(_candidate_summary(result, "project-mismatch"))
     return filtered, decisions
+
+
+def drop_invalidated_recall_results(vault: Path, results: list[dict]) -> tuple[list[dict], int]:
+    """Drop recall results whose note carries `invalidated_by` (MEM-163).
+
+    Runs at the same site as :func:`filter_recall_results_by_explicit_project`
+    in :class:`PromptRecallRuntime` -- automatic recall has no
+    ``include_invalidated`` opt-in (unlike ``memento_search``/``memento_query``),
+    it always excludes invalidated notes. Fails open: a result whose backing
+    file cannot be read is kept rather than dropped, since this is a
+    default-safety exclusion, not a user-requested constraint. Returns
+    ``(kept_results, excluded_count)``.
+    """
+    if not results:
+        return results, 0
+
+    excluded = 0
+    kept = []
+    for result in results:
+        record = read_note_record(vault, result.get("path", ""))
+        if record is not None and is_invalidated_record(record):
+            excluded += 1
+            continue
+        kept.append(result)
+    return kept, excluded
 
 
 def _strip_injection(text: str) -> str:
@@ -1439,9 +1465,20 @@ class PromptRecallRuntime:
                 decision.metadata["miss"] = remote_miss
             return decision
 
+        excluded_invalidated_count = 0
         if not concrete_enabled:
             results = self.enhance_results(results, config=config, cwd=request.cwd)
             self._log_candidates(config, results, "enhanced", query=query)
+
+            results, excluded_invalidated_count = drop_invalidated_recall_results(vault, results)
+            if excluded_invalidated_count and config.get("recall_diagnostics_include_candidates", False):
+                self._log_diagnostic(
+                    config,
+                    "candidates",
+                    stage="invalidated-filter",
+                    excluded=excluded_invalidated_count,
+                    query=query,
+                )
 
             results, project_decisions = filter_recall_results_by_explicit_project(prompt, results)
             project_filter_applied = bool(project_decisions)
@@ -1464,7 +1501,12 @@ class PromptRecallRuntime:
                     pass
 
         if not results:
-            reason = "project-mismatch-filtered-empty" if project_filter_applied else "filtered-empty"
+            if project_filter_applied:
+                reason = "project-mismatch-filtered-empty"
+            elif excluded_invalidated_count:
+                reason = "invalidated-filtered-empty"
+            else:
+                reason = "filtered-empty"
             self.log_retrieval("recall", reason, query=query, results_before=results_before, latency_ms=latency_ms)
             self._log_diagnostic(config, "decision", decision="skipped", reason=reason, latency_ms=latency_ms)
             return _empty_decision("recall", reason, query=prompt)
@@ -1525,11 +1567,14 @@ class PromptRecallRuntime:
             top_path=top_path,
             pipeline=pipeline_depth,
         )
+        metadata = {"cwd": request.cwd, "session_id": request.session_id, "top_path": top_path}
+        if excluded_invalidated_count:
+            metadata["excluded_invalidated_count"] = excluded_invalidated_count
         return RetrievalDecision(
             True,
             "recall",
             lines=lines,
             results=selected,
             top_path=top_path,
-            metadata={"cwd": request.cwd, "session_id": request.session_id, "top_path": top_path},
+            metadata=metadata,
         )

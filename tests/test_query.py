@@ -66,8 +66,18 @@ class TestBuildMetadataFilter:
 
     def test_no_filters_matches_everything(self):
         predicate, filters = build_metadata_filter()
-        assert all(value is None for value in filters.values())
+        assert all(value is None for key, value in filters.items() if key != "include_invalidated")
+        assert filters["include_invalidated"] is False
         assert predicate({"tags": []}) is True
+
+    def test_default_excludes_invalidated_notes(self):
+        predicate, _ = build_metadata_filter()
+        assert predicate({"tags": [], "invalidated_by": "newer-note"}) is False
+
+    def test_include_invalidated_true_includes_invalidated_notes(self):
+        predicate, filters = build_metadata_filter(include_invalidated=True)
+        assert filters["include_invalidated"] is True
+        assert predicate({"tags": [], "invalidated_by": "newer-note"}) is True
 
     def test_invalid_certainty_range_raises(self):
         try:
