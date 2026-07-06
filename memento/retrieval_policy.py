@@ -6,6 +6,7 @@ structured retrieval decisions that those adapters can format.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import time
@@ -32,6 +33,8 @@ from memento.search import (
     rrf_fuse,
     shape_search_results,
 )
+from memento.store import _frontmatter_scalar, split_frontmatter
+from memento.store import append_stale_citation_review as default_queue_stale_citation
 from memento.store import log_retrieval as default_log_retrieval
 from memento.store import record_access as default_record_access
 
@@ -499,6 +502,200 @@ def _format_result(result: dict) -> str:
     if snippet:
         return f"  - {title}: {snippet}"
     return f"  - {title}"
+
+
+# --- Citation verification at use (MEM-162) ---
+#
+# Notes assert facts about code that keeps changing; nothing checked those
+# facts still held. Citations (`{file, anchor[, commit]}` frontmatter, written
+# once at capture time by hooks/memento-triage.py) are verified here, cheaply,
+# for notes actually selected for injection -- post-ranking, top-k only,
+# never a full-vault scan. A stale citation is injected WITH an explicit
+# marker (never silently skipped) and the note is queued for supersession
+# review; an unverifiable citation (no repo context available) is injected
+# unmarked -- absence of evidence is never evidence of staleness.
+
+STALE_CITATION_PREFIX = "[stale: cited code changed]"
+DEFAULT_CITATION_MAX_VERIFY_BYTES = 262_144
+
+# Filesystem-only repo-root walk bound: a deeply nested cwd/project_path must
+# never turn a "cheap" verification into an unbounded walk to "/".
+_CITATION_REPO_ROOT_MAX_LEVELS = 8
+
+
+def _read_note_citations(vault: Path, rel_path: str) -> tuple[list[dict], str | None]:
+    """Return ``(citations, project_path)`` parsed from one note's frontmatter.
+
+    Only ever called for notes actually selected for injection (post-ranking,
+    top-k) -- never the full result set. Returns ``([], None)`` for any note
+    that can't be read or has no usable ``citations``/``project_path`` lines.
+    """
+    if not rel_path:
+        return [], None
+    try:
+        text = (vault / rel_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [], None
+    frontmatter, _ = split_frontmatter(text)
+    if not frontmatter:
+        return [], None
+
+    citations: list[dict] = []
+    raw_citations = _frontmatter_scalar(frontmatter, "citations")
+    if raw_citations:
+        try:
+            parsed = json.loads(raw_citations)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            citations = [
+                entry
+                for entry in parsed
+                if isinstance(entry, dict)
+                and str(entry.get("file") or "").strip()
+                and str(entry.get("anchor") or "").strip()
+            ]
+
+    project_path = _frontmatter_scalar(frontmatter, "project_path")
+    return citations, project_path
+
+
+def _find_repo_root_fs(start: Path, max_levels: int = _CITATION_REPO_ROOT_MAX_LEVELS) -> Path | None:
+    """Walk upward from ``start`` looking for a ``.git`` entry, stat-only.
+
+    No subprocess spawn -- recall/tool-context injection is latency-bounded,
+    so repo-root resolution here stays to cheap stat() calls capped at
+    ``max_levels``.
+    """
+    current = start
+    for _ in range(max_levels):
+        if (current / ".git").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def _resolve_citation_repo_root(project_path: str | None, cwd: str) -> Path | None:
+    """Resolve the repo root to verify a note's citations against.
+
+    Prefers the note's own ``project_path`` frontmatter (MEM-164 -- the raw
+    cwd/path the note was written from) over the caller's current cwd.
+    Returns ``None`` when neither resolves to an existing directory --
+    unverifiable, never treated as stale.
+    """
+    for candidate in (project_path, cwd):
+        if not candidate:
+            continue
+        try:
+            path = Path(candidate).expanduser()
+        except (TypeError, ValueError):
+            continue
+        try:
+            if not path.is_dir():
+                continue
+        except OSError:
+            continue
+        return _find_repo_root_fs(path) or path
+    return None
+
+
+def _citation_match(repo_root: Path, citation: dict, max_bytes: int) -> str:
+    """Return ``"verified"``, ``"mismatch"``, or ``"missing"`` for one citation.
+
+    ``"missing"`` covers every case where the citation can't be checked (bad
+    path, file gone, unreadable) -- callers must never treat that as stale.
+    ``"mismatch"`` means the file exists but the anchor substring is gone
+    (stale). Reads are bounded to ``max_bytes`` so a large cited file never
+    turns a cheap check into a slow one.
+    """
+    file_value = str(citation.get("file") or "").strip()
+    anchor_value = str(citation.get("anchor") or "").strip()
+    if not file_value or not anchor_value:
+        return "missing"
+    try:
+        resolved_root = repo_root.resolve()
+        target = (repo_root / file_value).resolve()
+        target.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return "missing"
+    if not target.is_file():
+        return "missing"
+    try:
+        with open(target, "r", encoding="utf-8", errors="replace") as handle:
+            content = handle.read(max_bytes)
+    except OSError:
+        return "missing"
+    return "verified" if anchor_value in content else "mismatch"
+
+
+def evaluate_citation_verification(
+    vault: Path,
+    result: dict,
+    *,
+    cwd: str = "",
+    config: dict | None = None,
+    queue_stale: Callable[[str, list[dict]], None] = default_queue_stale_citation,
+) -> str:
+    """Return ``"verified"``, ``"stale"``, ``"unverifiable"``, or ``"no-citations"``.
+
+    Only ever called for a result actually selected for injection --
+    post-ranking, top-k (the whole point of verify-at-use is to keep this off
+    the full result-set path). On ``"stale"``, queues the note for
+    supersession review via ``queue_stale`` before returning.
+    """
+    if config is None:
+        config = get_config()
+    if not config.get("citation_verification_enabled", True):
+        return "no-citations"
+
+    rel_path = result.get("path", "")
+    citations, project_path = _read_note_citations(vault, rel_path)
+    if not citations:
+        return "no-citations"
+
+    repo_root = _resolve_citation_repo_root(project_path, cwd)
+    if repo_root is None:
+        return "unverifiable"
+
+    max_bytes = int(config.get("citation_max_verify_bytes", DEFAULT_CITATION_MAX_VERIFY_BYTES) or 0) or (
+        DEFAULT_CITATION_MAX_VERIFY_BYTES
+    )
+
+    saw_mismatch = False
+    saw_verified = False
+    for citation in citations:
+        outcome = _citation_match(repo_root, citation, max_bytes)
+        if outcome == "mismatch":
+            saw_mismatch = True
+        elif outcome == "verified":
+            saw_verified = True
+
+    if saw_mismatch:
+        try:
+            queue_stale(rel_path, citations)
+        except Exception:
+            pass  # review-queue append must never block injection (fail-open)
+        return "stale"
+    if saw_verified:
+        return "verified"
+    return "unverifiable"
+
+
+def apply_stale_citation_marker(line: str) -> str:
+    """Prefix an already-formatted injected one-liner with the stale marker.
+
+    Decision (MEM-162, made by Vic on 2026-07-06): inject the note WITH an
+    explicit stale marker rather than silently skipping it -- silent skip
+    would hide a note that may still be directionally useful and would never
+    surface the "this needs a look" signal the review queue exists to drive.
+    """
+    stripped = line.strip()
+    if stripped.startswith("- "):
+        stripped = stripped[2:]
+    return f"  - {STALE_CITATION_PREFIX} {stripped}"
 
 
 def _empty_decision(source: str, reason: str, *, query: str = "", details: dict | None = None) -> RetrievalDecision:
@@ -1274,7 +1471,14 @@ class PromptRecallRuntime:
             results = fresh
 
         selected = results[:max_notes]
-        lines = ["[vault] Related memories:", *[_format_result(result) for result in selected]]
+        formatted_lines = []
+        for result in selected:
+            line = _format_result(result)
+            citation_status = evaluate_citation_verification(vault, result, cwd=request.cwd, config=config)
+            if citation_status == "stale":
+                line = apply_stale_citation_marker(line)
+            formatted_lines.append(line)
+        lines = ["[vault] Related memories:", *formatted_lines]
         top_path = selected[0].get("path", "")
         injected_text = "\n".join(lines)
         injected_titles = [result.get("title", "") for result in selected]

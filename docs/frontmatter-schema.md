@@ -37,6 +37,7 @@ These fields are present on ordinary atomic notes written by `write_note` and it
 | `project_path` | string | Raw working-directory path the note was written from, preserved verbatim alongside the derived `project` slug (MEM-164) |
 | `branch` | string | Git branch name |
 | `session_id` | uuid/string | Agent session ID |
+| `citations` | list | Code citations backing a note's claim, each `{file, anchor[, commit]}`; written once at capture time and verified cheaply at recall/tool-context injection time (MEM-162) -- see [Citation verification](#citation-verification-at-use-mem-162) |
 
 ## Variant-specific fields
 
@@ -157,6 +158,53 @@ machinery the MEM-152 sweep uses (`fleeting/<x>.md` archives to
 neither a parseable `date` nor a readable mtime is skipped, never archived
 on ambiguity. Gated by `fleeting_lifecycle_enabled` (config, default `false`
 -- a no-op until enabled).
+
+### Citation verification at use (MEM-162)
+
+Notes assert facts about code that keeps changing, and nothing checked that
+those facts still held -- retrieval is easy to verify even though it is hard
+to solve well. Capture-side writers (currently `hooks/memento-triage.py`) may
+emit a `citations` list on a note: each entry is `{file, anchor[, commit]}`,
+where `file` is a repo-relative path, `anchor` is a short (<=120 chars)
+verbatim code substring that is the actual verification key, and `commit` is
+optional short-sha provenance only. Malformed entries (not a dict, missing
+`file`/`anchor`) are dropped at write time
+(`memento.store._normalize_citations`) -- a bad citation never blocks the
+note itself from being written. Citations accrue on new notes only; there is
+no backfill for existing notes.
+
+Verification happens at use, not at write time. `memento.retrieval_policy`
+(prompt recall) and `memento.lifecycle.build_tool_context` (the tool-context
+path) verify a note's citations only for results actually selected for
+injection -- post-ranking, top-k, never the full result set. Verification
+resolves a repo root from the note's `project_path` frontmatter (MEM-164) or
+the caller's cwd, then checks that the cited file exists and that its anchor
+substring is still present, reading at most `citation_max_verify_bytes`
+(config, default 256KiB) of the file. Three outcomes:
+
+- **verified** -- the file exists and the anchor substring is present.
+  Injected normally.
+- **stale** -- the file exists but the anchor substring is gone. Injected
+  WITH an explicit `[stale: cited code changed]` prefix (a deliberate
+  decision: never silently skip a stale note), and the note path is appended
+  to a runtime-dir review queue (`stale-citations.jsonl`) as a supersession
+  flag.
+- **unverifiable** -- the repo/file context isn't available (different
+  machine, deleted repo, citation-less note). Injected unmarked, exactly
+  like a note with no citations. Absence of evidence is never treated as
+  evidence of staleness.
+
+Gated by `citation_verification_enabled` (config, default `true` -- cheap
+and additive, unlike the disabled-by-default sweeps above).
+
+The review queue is folded into durable frontmatter, never rewritten on the
+hot injection path: `memento.store.fold_stale_citations_into_frontmatter`
+runs from the same `hooks/memento-sweeper.py` periodic sweep as the folds
+above, draining the queue and setting `citation_stale: true` on each flagged
+note (idempotent -- a note already flagged is left unchanged). This is the
+supersession signal MEM-152's archive sweep and MEM-163's supersession
+review consume; MEM-162 itself does not act on `citation_stale` beyond
+setting it.
 
 ## Note types
 

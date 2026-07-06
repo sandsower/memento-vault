@@ -93,6 +93,16 @@ DEFAULT_CONFIG = {
     "fleeting_lifecycle_enabled": False,
     "fleeting_promote_min_resurfaced": 2,
     "fleeting_expire_days": 14,
+    # Citation verification at use (MEM-162): notes may carry `citations`
+    # ({file, anchor[, commit]}) frontmatter written at capture time. Recall
+    # and the tool-context path verify cheaply (file exists + anchor
+    # substring present, read bounded to citation_max_verify_bytes) only for
+    # the top-k notes actually being injected -- never a full-vault scan.
+    # Enabled by default, unlike the sweeps above: it's additive (an
+    # unverifiable citation is injected unmarked, never blocked) and cheap.
+    # See memento.retrieval_policy.evaluate_citation_verification.
+    "citation_verification_enabled": True,
+    "citation_max_verify_bytes": 262_144,
     "wikilink_expansion": True,
     "wikilink_max_hops": 1,
     "wikilink_score_factor": 0.5,

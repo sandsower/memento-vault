@@ -274,12 +274,17 @@ def suggest_store_action(
     origin: str | None = None,
     source: str = "mcp",
     candidate_limit: int = 5,
+    citations: list[dict] | None = None,
 ) -> dict:
     """Return a write decision for a smart-store request.
 
     The returned payload is intentionally write-free unless it says
     ``decision == "created"``. Callers should use the candidate paths/reasons
     to decide whether to append to an existing note or explicitly supersede it.
+
+    ``citations`` (MEM-162) is threaded through to the ``write`` payload
+    verbatim from :func:`memento.store.normalize_note_contract`, which
+    defensively drops malformed entries -- never blocks a decision here.
     """
     if not title or not str(title).strip():
         return {"error": "title is required"}
@@ -304,6 +309,7 @@ def suggest_store_action(
         project=project,
         branch=branch,
         session_id=session_id,
+        citations=citations,
     )
 
     # Fast exact-duplicate check: if a note with the same title/body/contract
@@ -330,6 +336,7 @@ def suggest_store_action(
                 "validity_context": contract["validity_context"],
                 "supersedes": contract["supersedes"],
                 "origin": contract["origin"],
+                "citations": contract["citations"],
             },
         }
 
@@ -447,6 +454,7 @@ def suggest_store_action(
             "validity_context": contract["validity_context"],
             "supersedes": contract["supersedes"],
             "origin": contract["origin"],
+            "citations": contract["citations"],
         },
     }
 
@@ -466,6 +474,7 @@ def write_smart_store_note(
     origin: str | None = None,
     source: str = "mcp",
     candidate_limit: int = 5,
+    citations: list[dict] | None = None,
 ) -> dict:
     """Smart-store helper that writes only when no close match exists.
 
@@ -474,6 +483,11 @@ def write_smart_store_note(
     the check and create duplicates (audit M6). Re-entrant: callers that already
     hold the lock (MCP server, automated run lessons) keep it — it is neither
     re-acquired nor released on their behalf.
+
+    ``citations`` (MEM-162) is only applied on the ``created`` path below --
+    the ``merged_into`` append-merge path does not carry new citations onto
+    the canonical note it appends to (a citation asserted for the new
+    content is not automatically true of the merged note's other claims).
     """
     already_held = owns_vault_write_lock()
     if not already_held and not acquire_vault_write_lock():
@@ -494,6 +508,7 @@ def write_smart_store_note(
             origin=origin,
             source=source,
             candidate_limit=candidate_limit,
+            citations=citations,
         )
         if decision.get("error"):
             return decision
@@ -545,6 +560,7 @@ def write_smart_store_note(
             project_path=payload["project_path"],
             branch=payload["branch"],
             session_id=payload["session_id"],
+            citations=payload["citations"],
         )
 
         if payload["project"]:
