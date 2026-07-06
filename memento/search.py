@@ -7,7 +7,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, repo_slug_from_path, source_for_path
+from memento.config import (
+    RUNTIME_DIR,
+    detect_project,
+    get_config,
+    get_vault,
+    is_curated_path,
+    repo_slug_from_path,
+    source_for_path,
+)
 from memento.search_backend import _clean_snippet, get_backend  # noqa: F401 (_clean_snippet re-exported for compat)
 from memento.store import apply_access_log_boost, log_retrieval, read_durability_tier
 from memento.graph import (
@@ -766,6 +774,11 @@ def apply_temporal_decay(results, config=None):
 
     for result in results:
         path = result.get("path", "")
+        # Curated notes (profile/) are lifecycle-exempt: they retrieve at full
+        # weight and never decay, regardless of resurfacing history.
+        if path and is_curated_path(path, config):
+            result["_durability_tier"] = "curated"
+            continue
         # Derive note name from path
         note_name = Path(path).stem if path else ""
         if not note_name:

@@ -32,3 +32,25 @@ def test_is_curated_path_custom_dir():
 def test_is_curated_path_edge_inputs():
     assert is_curated_path("", config.DEFAULT_CONFIG) is False
     assert is_curated_path("voice.md", config.DEFAULT_CONFIG) is False  # no dir segment
+
+
+def test_curated_result_is_exempt_from_decay(tmp_path, monkeypatch):
+    import memento.search as search
+
+    monkeypatch.setattr(search, "get_vault", lambda: tmp_path)
+    # Only the non-curated note reaches read_note_metadata / durability_tier.
+    monkeypatch.setattr(search, "read_note_metadata", lambda name: {"certainty": 1, "date": "2000-01-01T00:00"})
+    monkeypatch.setattr(search, "read_durability_tier", lambda *a, **k: "cold")
+
+    results = [
+        {"path": "profile/voice.md", "score": 1.0, "backend": "x"},
+        {"path": "notes/old.md", "score": 1.0, "backend": "x"},
+    ]
+    out = search.apply_temporal_decay(results, config=dict(config.DEFAULT_CONFIG))
+    by_path = {r["path"]: r for r in out}
+
+    # Curated profile note: score untouched, tagged with the curated tier.
+    assert by_path["profile/voice.md"]["score"] == 1.0
+    assert by_path["profile/voice.md"]["_durability_tier"] == "curated"
+    # A cold, ancient regular note decays.
+    assert by_path["notes/old.md"]["score"] < 1.0
