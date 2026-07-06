@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -63,8 +65,34 @@ DEFAULT_CONFIG = {
     # Retrieval enhancements
     "temporal_decay": True,
     "temporal_decay_half_life": 90,
+    # Deprecated (MEM-150): no longer confers decay immunity. Kept parseable
+    # for config-file backwards compatibility, but apply_temporal_decay() now
+    # derives immunity from the durability tier (see durability_hot_window_days
+    # below and memento.store.durability_tier) instead of certainty.
     "temporal_decay_certainty_floor": 4,
     "temporal_decay_undated_factor": 0.5,
+    # Durability tiers (MEM-150): "hot" is last_resurfaced within this many
+    # days; "pinned" (manual `pinned: true` frontmatter) and "hot" are the
+    # only decay-immune tiers. See memento.store.durability_tier.
+    "durability_hot_window_days": 30,
+    # Auto-archive sweep (MEM-152): reversibly archives notes/*.md that are
+    # durability_tier "cold" AND older than archive_sweep_age_days AND
+    # certainty < 4, using the existing tombstone machinery in
+    # memento.archive (never a hard delete). Disabled by default -- flip
+    # archive_sweep_enabled once you've reviewed a dry-run report. See
+    # memento.archive.sweep_archive_candidates.
+    "archive_sweep_enabled": False,
+    "archive_sweep_age_days": 90,
+    "archive_sweep_max_per_run": 50,
+    # Fleeting note lifecycle (MEM-153): promotes fleeting/*.md notes to
+    # notes/ when resurfaced_count >= fleeting_promote_min_resurfaced or
+    # they're cited by a session-summary note, and reversibly expires
+    # (archives) whatever's left once older than fleeting_expire_days.
+    # Disabled by default -- flip fleeting_lifecycle_enabled once you've
+    # reviewed a dry-run report. See memento.archive.fleeting_lifecycle_sweep.
+    "fleeting_lifecycle_enabled": False,
+    "fleeting_promote_min_resurfaced": 2,
+    "fleeting_expire_days": 14,
     "wikilink_expansion": True,
     "wikilink_max_hops": 1,
     "wikilink_score_factor": 0.5,
@@ -90,6 +118,14 @@ DEFAULT_CONFIG = {
     "inception_dry_run": False,
     "inception_pre_reason": True,
     "inception_parallel": 4,
+    # Per-run processing budget (MEM-154): the number of notes a single
+    # Inception run aims to consolidate, in notes rather than clusters, so
+    # the backlog doesn't grow unbounded when capture volume spikes. Actual
+    # budget = max(inception_budget_floor, notes ingested since the last
+    # run), capped at inception_budget_cap. See hooks/memento-inception.py's
+    # compute_inception_budget().
+    "inception_budget_floor": 20,
+    "inception_budget_cap": 200,
     # Personalized PageRank expansion
     "ppr_enabled": True,
     "ppr_max_expanded": 5,
@@ -127,7 +163,10 @@ DEFAULT_CONFIG = {
     # Deep recall — background codex analysis (experimental)
     "deep_recall_enabled": False,
     "deep_recall_backend": "codex",
-    # Tag normalization
+    # Tag normalization: controlled-vocabulary merge map applied at write time
+    # (memento/store.py), by the post-write hook fixer (memento/utils.py), and
+    # by scripts/backfill_project_slugs.py (MEM-164). Merging the long tail of
+    # near-duplicate tags is a config change here, never a code change.
     "tag_aliases": {
         "k8s": "kubernetes",
         "js": "javascript",
@@ -481,6 +520,69 @@ def slugify(text):
     return text[:80]
 
 
+@functools.lru_cache(maxsize=256)
+def _repo_toplevel_name(path):
+    """Return the main-repo directory name for the git checkout at ``path``, or None.
+
+    Uses ``--git-common-dir`` (the main repository's ``.git``), not
+    ``--show-toplevel``: in a linked worktree the toplevel is the worktree
+    directory itself (e.g. ``.claude/worktrees/agent-xyz``), which would
+    fragment one project into per-worktree scopes - the exact failure MEM-164
+    removes. The common dir's parent is the main repo for both ordinary
+    checkouts and linked worktrees.
+
+    Cached because the same cwd is resolved repeatedly across a session
+    (every write, every retrieval query) and the repo layout for a given path
+    is stable for the lifetime of the process.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    common_dir = result.stdout.strip()
+    if not common_dir:
+        return None
+    common_path = Path(common_dir)
+    if not common_path.is_absolute():
+        # Relative output is relative to the queried path (e.g. plain ".git").
+        common_path = Path(path) / common_path
+    repo_dir = common_path
+    # Peel the git-dir layer: ordinary checkouts end in ".git"; bare-repo
+    # worktree layouts (repo/.bare + repo/<branch> worktrees) end in ".bare".
+    if repo_dir.name in (".git", ".bare"):
+        repo_dir = repo_dir.parent
+    name = repo_dir.name or None
+    # Bare clone directories are conventionally named "<repo>.git".
+    if name and name != ".git" and name.endswith(".git"):
+        name = name[: -len(".git")]
+    return name or None
+
+
+def repo_slug_from_path(path):
+    """Return a stable project slug for the git repo (or plain dir) at ``path``.
+
+    Resolves the git worktree/toplevel directory first, so per-ticket
+    worktree checkouts (``.claude/worktrees/<slice>/``) and machine-specific
+    absolute paths (``/Users/...`` vs ``/home/...``) for the *same* repo
+    collapse onto one slug instead of fragmenting project scope (MEM-164).
+    Falls back to the directory's own basename when git is unavailable or
+    ``path`` is not inside a repo.
+    """
+    if not path:
+        return None
+    repo_name = _repo_toplevel_name(str(path))
+    if not repo_name:
+        repo_name = Path(path).name
+    return slugify(repo_name) or None
+
+
 def detect_project(cwd, git_branch):
     """Derive a project slug and optional ticket from cwd and branch.
     Returns (project_slug, ticket_or_none).
@@ -498,7 +600,7 @@ def detect_project(cwd, git_branch):
                 match = re.search(rule["ticket_pattern"], git_branch, re.IGNORECASE)
                 if match:
                     ticket = match.group(1).upper() if match.lastindex else match.group(0).upper()
-            return rule.get("slug", slugify(Path(cwd).name)), ticket
+            return rule.get("slug") or repo_slug_from_path(cwd) or "misc", ticket
 
     ticket = None
     if git_branch:
@@ -506,4 +608,4 @@ def detect_project(cwd, git_branch):
         if match:
             ticket = match.group(1).upper()
 
-    return slugify(Path(cwd).name) or "misc", ticket
+    return repo_slug_from_path(cwd) or "misc", ticket

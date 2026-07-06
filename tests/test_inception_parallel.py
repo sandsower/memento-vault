@@ -1,14 +1,28 @@
 """Tests for parallel LLM synthesis in the Inception pipeline."""
 
+import importlib.util
 import json
 import threading
 import time
 from unittest.mock import patch
 
+import pytest
 
 from memento_inception import (
     main,
     parse_args,
+)
+
+# These classes drive main(), which runs the real check_dependencies() gate
+# (hdbscan + scikit-learn) before doing anything else; without those installed
+# main() short-circuits with exit code 2 and no LLM calls happen, failing every
+# assertion below for a reason unrelated to parallelism. TestParallelConfig
+# doesn't depend on main() actually completing synthesis, so it's left runnable.
+_HAS_INCEPTION_DEPS = (
+    importlib.util.find_spec("hdbscan") is not None and importlib.util.find_spec("sklearn") is not None
+)
+_skip_without_inception_deps = pytest.mark.skipif(
+    not _HAS_INCEPTION_DEPS, reason="hdbscan/scikit-learn not installed; install the 'test' extra to run this suite"
 )
 
 
@@ -37,6 +51,7 @@ def _run_main(config, state_path, argv, db_path=None, lock_path=None):
         return main(args, state_path=str(state_path), **kwargs)
 
 
+@_skip_without_inception_deps
 class TestParallelSynthesis:
     """Verify that LLM calls run in parallel via ThreadPoolExecutor."""
 
@@ -132,6 +147,7 @@ class TestParallelSynthesis:
             assert indices == sorted(indices), f"Write order {write_order} should follow queue order"
 
 
+@_skip_without_inception_deps
 class TestParallelDedupAndDryRun:
     """Dedup and dry-run still work correctly with the parallel pipeline."""
 
@@ -217,6 +233,7 @@ class TestParallelDedupAndDryRun:
         assert call_count[0] >= 0
 
 
+@_skip_without_inception_deps
 class TestParallelErrorHandling:
     """A failing LLM call must not crash the pipeline."""
 

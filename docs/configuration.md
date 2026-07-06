@@ -323,6 +323,41 @@ reranker_min_score: 0.01                               # minimum reranker score
 
 Only fires on the deep path (BM25 score below `recall_high_confidence`). Adds ~15-25ms for 10-20 candidates.
 
+### Auto-archive sweep (MEM-152)
+
+Periodically archives `notes/*.md` files that are durability-tier `cold`
+(never resurfaced -- see [frontmatter-schema.md#durability-tier](frontmatter-schema.md#durability-tier)),
+older than `archive_sweep_age_days`, and `certainty` below 4. Archiving moves
+the file to `archive/` and records a reversible tombstone -- never a hard
+delete. Runs from `hooks/memento-sweeper.py`'s periodic sweep.
+
+```yaml
+archive_sweep_enabled: false     # no-op until explicitly enabled
+archive_sweep_age_days: 90       # note `date` frontmatter age threshold
+archive_sweep_max_per_run: 50    # safety valve: max notes archived per run
+```
+
+### Fleeting note lifecycle (MEM-153)
+
+Periodically promotes or expires `fleeting/*.md` notes so they stop
+accumulating forever. A fleeting note is promoted to `notes/` (stamped with
+`promoted_at`) when EITHER its `resurfaced_count` frontmatter is at least
+`fleeting_promote_min_resurfaced`, or it is cited by a `[[stem]]` wikilink
+from a `notes/*.md` note with `source: mcp-capture` (the documented
+"session-summary note writer" -- see
+[frontmatter-schema.md#source-values](frontmatter-schema.md#source-values)).
+Anything left over that is older than `fleeting_expire_days` (`date`
+frontmatter, falling back to file mtime) is reversibly archived the same way
+the MEM-152 sweep above archives notes -- never a hard delete. Runs from
+`hooks/memento-sweeper.py`'s periodic sweep, right after the MEM-152 archive
+sweep.
+
+```yaml
+fleeting_lifecycle_enabled: false        # no-op until explicitly enabled
+fleeting_promote_min_resurfaced: 2       # resurfaced_count threshold for promotion
+fleeting_expire_days: 14                 # age threshold (date frontmatter, else mtime) for expiry
+```
+
 ## Disabling features
 
 **No auto-commit** (commit manually):

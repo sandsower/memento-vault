@@ -2,7 +2,9 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import optuna
+import pytest
+
+optuna = pytest.importorskip("optuna", reason="optuna not installed; install the 'test' extra to run this suite")
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "benchmark"))
 

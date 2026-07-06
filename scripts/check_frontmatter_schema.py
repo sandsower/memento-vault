@@ -55,6 +55,7 @@ MANAGED_FIELD_TYPES = {
     "supersedes": "wikilink or title",
     "synthesized_from": "list",
     "project": "string",
+    "project_path": "string",
     "branch": "string",
     "date": "datetime",
     "session_id": "uuid/string",

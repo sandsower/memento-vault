@@ -25,8 +25,10 @@ _repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 from memento.config import RUNTIME_DIR, get_config, slugify  # noqa: E402
+from memento.embedded_search import EmbeddedSearchBackend  # noqa: E402
 from memento.llm import llm_complete  # noqa: E402
 from memento.search import has_qmd  # noqa: E402
+from memento.search_backend import QMDBackend, get_backend  # noqa: E402
 from memento.store import (  # noqa: E402
     INCEPTION_STATE_PATH,
     acquire_inception_lock,
@@ -50,6 +52,12 @@ class NoteRecord:
     synthesized_from: list = field(default_factory=list)
     body: str = ""
     wikilinks: list = field(default_factory=list)
+    # MEM-148 resurfacing signal (frontmatter resurfaced_count/last_resurfaced,
+    # folded from the access log). Not consumed by any reader on this branch
+    # yet -- MEM-148 landed on a separate branch -- but Inception reads them
+    # here so pattern notes can inherit the signal (see write_pattern_note).
+    resurfaced_count: int = 0
+    last_resurfaced: str | None = None
 
 
 def parse_note(path: Path) -> NoteRecord | None:
@@ -137,6 +145,14 @@ def parse_note(path: Path) -> NoteRecord | None:
         except (ValueError, TypeError):
             pass
 
+    # Parse resurfaced_count as int (MEM-148 signal; defaults to 0 when absent)
+    resurfaced_count = 0
+    if meta.get("resurfaced_count"):
+        try:
+            resurfaced_count = int(meta["resurfaced_count"])
+        except (ValueError, TypeError):
+            resurfaced_count = 0
+
     return NoteRecord(
         stem=path.stem,
         path=path,
@@ -150,6 +166,8 @@ def parse_note(path: Path) -> NoteRecord | None:
         synthesized_from=meta.get("synthesized_from", []),
         body=body,
         wikilinks=wikilinks,
+        resurfaced_count=resurfaced_count,
+        last_resurfaced=meta.get("last_resurfaced") or None,
     )
 
 
@@ -221,11 +239,41 @@ def collect_eligible_notes(config, state, full=False):
     return notes
 
 
+def _detect_qmd_vector_dim(conn, default=768):
+    """Best-effort detection of QMD's embedding dimensionality from its own
+    sqlite-vec schema, instead of assuming a fixed constant.
+
+    sqlite-vec's vec0 virtual tables declare their column width directly in
+    the CREATE VIRTUAL TABLE statement (e.g. ``embedding float[768]``), which
+    is recorded verbatim in ``sqlite_master.sql``. QMD's chunk-storage shadow
+    tables (``vectors_vec_rowids``, ``vectors_vec_vector_chunks00``) are
+    generated from a parent vec0 table conventionally named ``vectors_vec``;
+    read the dimension straight from there.
+
+    Falls back to *default* if the parent table isn't present or its SQL
+    can't be parsed (older/nonstandard QMD schemas), so behavior degrades to
+    the previous fixed assumption rather than misreading the vector layout.
+    """
+    try:
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vectors_vec'").fetchone()
+        if row and row[0]:
+            match = re.search(r"float\[(\d+)\]", row[0])
+            if match:
+                return int(match.group(1))
+    except sqlite3.Error:
+        pass
+    return default
+
+
 def load_embeddings(note_stems, db_path=None, collection="memento"):
     """Load document-level embeddings from QMD's SQLite database.
 
-    QMD stores chunk-level 768-dim float32 embeddings. This function
-    mean-pools chunks into a single vector per document.
+    QMD stores chunk-level float32 embeddings (768-dim for the default
+    model). This function mean-pools chunks into a single vector per
+    document. This is one of several possible vector sources for Inception
+    -- see load_active_backend_embeddings(), which selects between this
+    QMD reader, the embedded search backend, and no source at all based on
+    the vault's configured search backend.
 
     Args:
         note_stems: list of note filename stems (e.g. ["redis-cache-ttl"])
@@ -233,7 +281,9 @@ def load_embeddings(note_stems, db_path=None, collection="memento"):
         collection: QMD collection name
 
     Returns:
-        dict mapping stem -> np.ndarray (768-dim, L2-normalized)
+        dict mapping stem -> np.ndarray (L2-normalized). Dimensionality is
+        detected from QMD's own schema (see _detect_qmd_vector_dim), not
+        hardcoded.
 
     Notes without embeddings are silently skipped.
     """
@@ -301,8 +351,9 @@ def load_embeddings(note_stems, db_path=None, collection="memento"):
             chunk_reads.setdefault(chunk_id, []).append((vec_id, chunk_offset))
 
         # Step 5: Read chunk blobs and extract individual vectors
-        # Each chunk stores up to 1024 vectors of dim floats (768 * 4 bytes each)
-        dim = 768
+        # Each chunk stores up to 1024 vectors of dim floats (dim * 4 bytes
+        # each). Detect dim from QMD's own schema rather than assuming.
+        dim = _detect_qmd_vector_dim(conn)
         vec_size = dim * 4  # float32
 
         doc_chunks = {}
@@ -336,6 +387,99 @@ def load_embeddings(note_stems, db_path=None, collection="memento"):
         return result
     finally:
         conn.close()
+
+
+def load_embedded_vectors(note_stems, backend):
+    """Load per-note embeddings from the embedded search backend's vector index.
+
+    Unlike QMD, the embedded backend (memento/embedded_search.py) stores
+    exactly one whole-document vector per note keyed by path -- notes_vec has
+    no chunking, so no mean-pooling is needed here. Dimensionality comes from
+    the backend's own provider/index metadata (MEM-46 embedding-dimension
+    tracking), never a hardcoded constant, so it stays correct whether the
+    embedding provider emits 512-dim (default Matryoshka-truncated nomic) or
+    any other size.
+
+    Args:
+        note_stems: list of note filename stems (e.g. ["redis-cache-ttl"])
+        backend: an EmbeddedSearchBackend instance
+
+    Returns:
+        dict mapping stem -> np.ndarray. Notes without a stored vector, or
+        whose stored vector doesn't match the backend's declared dimension,
+        are silently skipped (mirrors load_embeddings' QMD behavior).
+    """
+    dim = backend.vector_dimensions()
+    if not dim:
+        return {}
+
+    path_to_stem = {f"notes/{stem}.md": stem for stem in note_stems}
+    if not path_to_stem:
+        return {}
+
+    raw = backend.get_note_vectors(list(path_to_stem.keys()))
+    if not raw:
+        return {}
+
+    result = {}
+    for path, vec in raw.items():
+        stem = path_to_stem.get(path)
+        if stem is None:
+            continue
+        arr = np.array(vec, dtype=np.float32)
+        if arr.shape != (dim,):
+            continue
+        result[stem] = arr
+    return result
+
+
+def load_active_backend_embeddings(note_stems, config, db_path=None):
+    """Select and load note embeddings from the vault's active search backend.
+
+    Inception must not assume QMD is present -- the default, QMD-less install
+    uses the embedded search backend (memento/embedded_search.py), which
+    stores 512-dim vectors in .search/search.db rather than QMD's private
+    768-dim SQLite cache. This resolves the vector source using the same
+    backend selection as memento.search_backend.get_backend() (QMD ->
+    Embedded -> Grep) instead of duplicating that heuristic here.
+
+    Args:
+        note_stems: list of note filename stems to load vectors for
+        config: the loaded memento config dict
+        db_path: optional explicit QMD SQLite path. When given, this forces
+            the QMD reader against that literal path (used by callers/tests
+            that want to bypass backend auto-detection entirely); when None,
+            the active backend is resolved and used.
+
+    Returns:
+        (embeddings, source, reason) where:
+          - embeddings: dict stem -> np.ndarray (possibly empty)
+          - source: "qmd", "embedded", or "none"
+          - reason: short machine-readable string explaining an empty
+            result, e.g. "qmd-empty", "embedded-empty", "no-vector-backend".
+            None when embeddings were found.
+    """
+    if db_path is not None:
+        collection = config.get("qmd_collection", "memento")
+        embeddings = load_embeddings(note_stems, db_path=db_path, collection=collection)
+        return (embeddings, "qmd", None if embeddings else "qmd-empty")
+
+    backend = get_backend()
+
+    if isinstance(backend, QMDBackend) and backend.is_available():
+        collection = config.get("qmd_collection", "memento")
+        embeddings = load_embeddings(note_stems, collection=collection)
+        return (embeddings, "qmd", None if embeddings else "qmd-empty")
+
+    if isinstance(backend, EmbeddedSearchBackend):
+        embeddings = load_embedded_vectors(note_stems, backend)
+        return (embeddings, "embedded", None if embeddings else "embedded-empty")
+
+    # Grep backend (or no backend at all) has no vectors to offer. Inception
+    # cannot cluster without embeddings -- surface this explicitly rather
+    # than silently no-op-ing (the QMD-only assumption this replaces used to
+    # do exactly that on QMD-less installs).
+    return ({}, "none", "no-vector-backend")
 
 
 def score_cluster(stems, notes_dict):
@@ -387,6 +531,65 @@ def score_cluster(stems, notes_dict):
     certainty_score = (sum(certainties) / len(certainties) / 5.0) if certainties else 0.5
 
     return size_score * 1.0 + tag_diversity * 0.8 + temporal_score * 0.6 + project_bonus * 0.5 + certainty_score * 0.3
+
+
+def compute_inception_budget(config, notes_ingested):
+    """Derive this run's note-processing budget from capture volume (MEM-154).
+
+    Consolidation was falling behind ingest (10 runs processed 271 of ~4,788
+    notes while capture adds ~145 notes/day) because the per-run limit was a
+    fixed cluster count, blind to how much backlog had actually accumulated.
+    This ties the budget to ingest volume instead:
+
+        budget = min(max(inception_budget_floor, notes_ingested), inception_budget_cap)
+
+    inception_budget_cap is always the hard ceiling -- even a misconfigured
+    floor above the cap can't exceed it.
+
+    ``notes_ingested`` is the count of eligible notes newly dated since the
+    last Inception run (``len(new_notes)`` from ``collect_eligible_notes``,
+    already computed by ``main()`` for its own eligibility filtering -- the
+    cheapest available signal, since it requires no extra file scans beyond
+    what the run already does).
+
+    Returns:
+        int: the number of notes this run should aim to consolidate.
+    """
+    floor = max(0, int(config.get("inception_budget_floor", 20)))
+    cap = max(0, int(config.get("inception_budget_cap", 200)))
+    budget = max(floor, int(notes_ingested))
+    # cap is a hard ceiling: if a misconfigured floor exceeds it, cap still
+    # wins rather than silently disabling the ceiling.
+    return min(budget, cap)
+
+
+def select_clusters_within_budget(scored_clusters, note_budget):
+    """Greedily select scored clusters (highest score first) up to a note budget.
+
+    Replaces the old fixed ``scored[:max_clusters]`` slice: instead of always
+    processing a fixed number of clusters, this keeps adding the next
+    highest-scored cluster while the cumulative note count is still under
+    budget. Always includes at least one cluster (if any are available) so a
+    run still makes progress when a single cluster already exceeds the
+    budget.
+
+    Args:
+        scored_clusters: list of (cid, stems, score), already sorted by score
+            descending (as produced by the caller's ``scored.sort(...)``).
+        note_budget: max cumulative notes to select for, from
+            compute_inception_budget().
+
+    Returns:
+        list: the selected prefix of scored_clusters.
+    """
+    selected = []
+    notes_so_far = 0
+    for item in scored_clusters:
+        if selected and notes_so_far >= note_budget:
+            break
+        selected.append(item)
+        notes_so_far += len(item[1])
+    return selected
 
 
 def build_synthesis_prompt(cluster_stems, notes_dict, merge_target=None):
@@ -569,7 +772,56 @@ def cluster_notes(embedding_matrix, stem_index, config):
     return sorted_clusters
 
 
-def write_pattern_note(synthesis, cluster_stems, vault_path, merge_target=None):
+def _parse_resurfaced_ts(value):
+    """Parse a last_resurfaced frontmatter value into a datetime for comparison.
+
+    MEM-148 writes this as ``YYYY-MM-DDTHH:MM:SSZ`` (UTC). Tolerate bare
+    ``Z`` suffixes (not accepted by fromisoformat on all supported Python
+    versions) and any other unparseable value by returning None, so a
+    malformed timestamp on one source note never breaks aggregation.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def aggregate_resurfacing_signal(cluster_stems, notes_dict):
+    """Sum resurfaced_count and take the max last_resurfaced across a cluster.
+
+    Carries the MEM-148 resurfacing signal (frontmatter resurfaced_count/
+    last_resurfaced, folded from the access log) forward onto synthesis
+    pattern notes, so consolidating source notes into a pattern doesn't
+    erase how often or how recently they were resurfaced. Nothing on this
+    branch reads these fields back yet (MEM-148 landed on a separate
+    branch), but writing them now means the signal survives once the
+    branches merge.
+
+    Returns:
+        (resurfaced_count, last_resurfaced) -- resurfaced_count is an int
+        (0 if no source note has one), last_resurfaced is the raw string
+        value from whichever source note has the latest timestamp, or None.
+    """
+    total = 0
+    latest_raw = None
+    latest_dt = None
+    for stem in cluster_stems:
+        record = (notes_dict or {}).get(stem)
+        if record is None:
+            continue
+        total += record.resurfaced_count or 0
+        dt = _parse_resurfaced_ts(record.last_resurfaced)
+        if dt is None:
+            continue
+        if latest_dt is None or dt > latest_dt:
+            latest_dt = dt
+            latest_raw = record.last_resurfaced
+    return total, latest_raw
+
+
+def write_pattern_note(synthesis, cluster_stems, vault_path, merge_target=None, notes_dict=None):
     """Write a pattern note to the vault using atomic write.
 
     Args:
@@ -577,6 +829,9 @@ def write_pattern_note(synthesis, cluster_stems, vault_path, merge_target=None):
         cluster_stems: list of source note stems
         vault_path: Path to vault root
         merge_target: if set, overwrite this existing note stem instead of creating new
+        notes_dict: optional dict mapping stem -> NoteRecord, used to inherit
+            the MEM-148 resurfacing signal (see aggregate_resurfacing_signal).
+            When omitted, the pattern note gets resurfaced_count: 0.
 
     Returns:
         Path to the written note, or None if write failed
@@ -601,6 +856,12 @@ def write_pattern_note(synthesis, cluster_stems, vault_path, merge_target=None):
     # Build frontmatter
     tags_str = "[" + ", ".join(synthesis.get("tags", [])) + "]"
     synth_lines = "\n".join(f"  - {s}" for s in cluster_stems)
+    resurfaced_count, last_resurfaced = aggregate_resurfacing_signal(cluster_stems, notes_dict)
+    # No trailing newline: the template below supplies the literal "\n---"
+    # terminator that scripts/check_frontmatter_schema.py anchors on.
+    resurfacing_lines = f"resurfaced_count: {resurfaced_count}"
+    if last_resurfaced:
+        resurfacing_lines += f"\nlast_resurfaced: {last_resurfaced}"
 
     content = f"""---
 title: {synthesis["title"]}
@@ -611,6 +872,7 @@ certainty: {min(synthesis.get("certainty", 3), 3)}
 synthesized_from:
 {synth_lines}
 date: {now}
+{resurfacing_lines}
 ---
 
 {synthesis["body"].strip()}
@@ -775,7 +1037,9 @@ def parse_args(argv=None):
 def main(args=None, state_path=None, db_path=None, lock_path=None):
     """Run the Inception pipeline.
 
-    Returns exit code: 0=success, 1=locked, 2=missing deps, 3=embedding failure, 5=config error.
+    Returns exit code: 0=success, 1=locked, 2=missing deps,
+    3=no vector source available or no embeddings found (see
+    load_active_backend_embeddings), 5=config error.
     """
     if args is None:
         args = parse_args()
@@ -827,24 +1091,43 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         if len(all_notes) < config.get("inception_min_cluster_size", 3):
             if args.verbose:
                 print("Not enough notes to cluster", file=sys.stderr)
-            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run)
+            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run, total_notes=len(all_notes))
             return 0
 
         # Build notes dict for lookups (all notes)
         notes_dict = {n.stem: n for n in all_notes}
 
-        # Load embeddings for all notes
-        collection = config.get("qmd_collection", "memento")
-        embeddings = load_embeddings(
+        # Load embeddings for all notes from whichever search backend is
+        # active (QMD, embedded, or none) -- never assume QMD is present.
+        embeddings, source, reason = load_active_backend_embeddings(
             list(notes_dict.keys()),
+            config,
             db_path=db_path,
-            collection=collection,
         )
 
         if not embeddings:
-            if args.verbose:
-                print("No embeddings found — is QMD indexed?", file=sys.stderr)
+            message = {
+                "qmd-empty": "No embeddings found in QMD index — is QMD indexed?",
+                "embedded-empty": (
+                    "No embeddings found in the embedded search index — run memento_reindex "
+                    "to build vectors, or check that an embedding provider is configured."
+                ),
+                "no-vector-backend": (
+                    "No vector-capable search backend is configured (active backend has no "
+                    "embeddings) — Inception cannot cluster without vectors. Configure "
+                    "search_backend: embedded or qmd to enable clustering."
+                ),
+            }.get(reason, "No embeddings found.")
+            # Always surfaced (not gated behind --verbose): a silent skip here
+            # is exactly the QMD-only failure mode this resolution replaces.
+            print(f"Skipping clustering: {message}", file=sys.stderr)
+            _record_run(
+                state, _state_path, len(new_notes), 0, 0, args.dry_run, skip_reason=reason, total_notes=len(all_notes)
+            )
             return 3
+
+        if args.verbose:
+            print(f"Embeddings loaded from '{source}' backend ({len(embeddings)} notes)", file=sys.stderr)
 
         # Build matrix (all notes with embeddings)
         stem_index = [s for s in notes_dict if s in embeddings]
@@ -865,7 +1148,7 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
             print(f"Found {len(clusters)} total clusters", file=sys.stderr)
 
         if not clusters:
-            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run)
+            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run, total_notes=len(all_notes))
             return 0
 
         # Filter: only clusters containing at least 1 new note OR
@@ -886,16 +1169,31 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
             print(f"Clusters with new notes or refresh candidates: {len(relevant_clusters)}", file=sys.stderr)
 
         if not relevant_clusters:
-            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run)
+            _record_run(state, _state_path, len(new_notes), 0, 0, args.dry_run, total_notes=len(all_notes))
             return 0
 
-        # Score, rank, and cap at max_clusters
+        # Score, rank, and select within this run's note-processing budget.
+        # inception_max_clusters/--max-clusters still bounds how many
+        # clusters HDBSCAN is allowed to surface (the over-fetch multiplier
+        # above); the note budget then decides how many of those
+        # already-found clusters this run actually consolidates, so a
+        # backlogged vault isn't stuck processing the same fixed cluster
+        # count as a quiet one. Setting inception_budget_cap high (so the
+        # budget never binds) reproduces the old fixed-max_clusters
+        # behavior exactly.
         scored = []
         for cid, stems in relevant_clusters.items():
             score = score_cluster(stems, notes_dict)
             scored.append((cid, stems, score))
         scored.sort(key=lambda x: x[2], reverse=True)
-        scored = scored[:max_clusters]
+        note_budget = compute_inception_budget(config, len(new_notes))
+        scored = select_clusters_within_budget(scored, note_budget)
+        if args.verbose:
+            print(
+                f"Note budget: {note_budget} (ingested {len(new_notes)} since last run); "
+                f"selected {len(scored)} of {len(relevant_clusters)} relevant clusters",
+                file=sys.stderr,
+            )
 
         all_existing_stems = [p.stem for p in (vault_path / "notes").glob("*.md")]
 
@@ -972,7 +1270,11 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
 
             # Write (or refresh existing)
             note_path = write_pattern_note(
-                synthesis, stems, vault_path, merge_target=merge_target if action == "merge" else None
+                synthesis,
+                stems,
+                vault_path,
+                merge_target=merge_target if action == "merge" else None,
+                notes_dict=notes_dict,
             )
             if note_path:
                 if action == "merge":
@@ -1026,11 +1328,21 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
                 except Exception:
                     pass  # Non-fatal
 
-        # Always record run metadata; only mark notes that were actually
-        # consolidated (ledger-skip, written, or subsumed by existing pattern).
-        _record_run(state, _state_path, len(new_notes), clusters_processed, notes_written, args.dry_run)
+        # Mark consolidated stems (ledger-skip, written, or subsumed by
+        # existing pattern) *before* recording run metadata, so the
+        # processed_notes_total captured in this run's history entry
+        # reflects what this run actually consolidated.
         if not args.dry_run and consolidated_stems:
             _mark_consolidated(state, _state_path, consolidated_stems)
+        _record_run(
+            state,
+            _state_path,
+            len(new_notes),
+            clusters_processed,
+            notes_written,
+            args.dry_run,
+            total_notes=len(all_notes),
+        )
 
         # Commit and reindex
         total_changes = notes_written + notes_refreshed
@@ -1066,23 +1378,45 @@ def main(args=None, state_path=None, db_path=None, lock_path=None):
         release_inception_lock(lock_path=_lock_path)
 
 
-def _record_run(state, state_path, note_count, clusters_processed, notes_written, dry_run):
+def _record_run(
+    state, state_path, note_count, clusters_processed, notes_written, dry_run, skip_reason=None, total_notes=None
+):
     """Update run metadata. Always called on exit, regardless of outcome.
 
     Does NOT touch processed_notes — that is the job of _mark_consolidated,
-    which is only invoked when pattern notes were actually written.
+    which is only invoked when pattern notes were actually written. Callers
+    that also call _mark_consolidated this run should do so *before*
+    calling _record_run, so processed_notes_total below reflects this run's
+    consolidation rather than the count from before it.
+
+    skip_reason (e.g. "no-vector-backend", "qmd-empty", "embedded-empty")
+    records why a run produced no clusters when the cause was a missing
+    vector source, so the reason is surfaced in the persisted summary and
+    not just a transient stderr line.
+
+    total_notes (MEM-154), when given, is the size of the clusterable note
+    pool this run considered (``len(all_notes)`` -- already computed by the
+    caller, no extra scan). Recording it alongside the post-run
+    processed_notes count on every run entry lets memento/health.py compute
+    a coverage ratio and backlog trend (processed_notes_total / total_notes,
+    and whether the gap is growing run over run) without re-scanning the
+    vault itself.
     """
     now = datetime.now().isoformat(timespec="seconds")
     state["last_run_iso"] = now
     state["last_run_note_count"] = note_count
-    state.setdefault("runs", []).append(
-        {
-            "iso": now,
-            "clusters_found": clusters_processed,
-            "notes_written": notes_written,
-            "dry_run": dry_run,
-        }
-    )
+    run_entry = {
+        "iso": now,
+        "clusters_found": clusters_processed,
+        "notes_written": notes_written,
+        "dry_run": dry_run,
+    }
+    if skip_reason:
+        run_entry["skip_reason"] = skip_reason
+    if total_notes is not None:
+        run_entry["total_notes"] = total_notes
+        run_entry["processed_notes_total"] = len(state.get("processed_notes", []))
+    state.setdefault("runs", []).append(run_entry)
     save_inception_state(state, state_path=state_path)
 
 

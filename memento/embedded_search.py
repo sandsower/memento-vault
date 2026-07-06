@@ -618,6 +618,71 @@ class EmbeddedSearchBackend(SearchBackend):
                 "score": 0.0,
             }
 
+    def vector_dimensions(self) -> int | None:
+        """Return the embedding dimensionality backing this index, or None.
+
+        Prefers the live provider's own metadata (see ``_embedding_signature``,
+        MEM-46) so callers never have to hardcode a dimension. Falls back to
+        the persisted ``index_metadata`` signature so dimensionality is still
+        known when inspecting an index without a live provider attached
+        (e.g. a QMD-less install being read by an external process).
+        Returns None if no vector index has been built yet.
+        """
+        if self._provider is not None:
+            try:
+                return int(self._provider.dimensions())
+            except Exception:
+                pass
+        with self._lock:
+            conn = self._get_conn()
+            raw = self._read_metadata(conn, _EMBEDDING_SIGNATURE_KEY)
+        if not raw:
+            return None
+        try:
+            dims = json.loads(raw).get("dimensions")
+        except (ValueError, AttributeError, json.JSONDecodeError):
+            return None
+        return int(dims) if dims is not None else None
+
+    def get_note_vectors(self, paths: list[str] | None = None) -> dict[str, list[float]]:
+        """Read stored per-note embedding vectors from ``notes_vec``.
+
+        Unlike QMD (which chunks documents and requires mean-pooling), this
+        backend stores exactly one whole-document vector per note keyed by
+        its vault-relative path (e.g. ``"notes/foo.md"``) -- no pooling
+        needed. Returns {} if vector search isn't available (sqlite-vec
+        missing, no embedding provider configured, or nothing indexed yet).
+
+        Returns plain float lists rather than numpy arrays so this module
+        can stay numpy-free; callers that want arrays should wrap the result.
+        """
+        if not self._vec_available:
+            return {}
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                if paths is not None:
+                    if not paths:
+                        return {}
+                    placeholders = ",".join("?" * len(paths))
+                    rows = conn.execute(
+                        f"SELECT path, embedding FROM notes_vec WHERE path IN ({placeholders})",
+                        list(paths),
+                    ).fetchall()
+                else:
+                    rows = conn.execute("SELECT path, embedding FROM notes_vec").fetchall()
+            except sqlite3.Error as exc:
+                logger.warning("Failed to read note vectors: %s", exc)
+                return {}
+
+        result: dict[str, list[float]] = {}
+        for path, blob in rows:
+            if not blob:
+                continue
+            count = len(blob) // 4
+            result[path] = list(struct.unpack(f"<{count}f", blob))
+        return result
+
     def reindex(self, collection: str, embed: bool = True) -> bool:
         """Rebuild the search index from all markdown files in the vault."""
         with self._lock:

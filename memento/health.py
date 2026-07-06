@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from memento import queue as capture_queue
 from memento import remote_client, telemetry
 from memento.search_backend import get_backend, reset_backend
 
@@ -34,6 +35,9 @@ _DEEP_PROBE_QUERY = "memento-vault health probe"
 _STALE_LOCK_SECONDS = 600
 _INCEPTION_RECENT_RUNS_LIMIT = 5
 _INCEPTION_ERROR_DETAIL_LIMIT = 500
+# Consecutive prior runs required to confirm a growing backlog / falling
+# coverage trend (MEM-154), so a single noisy run never trips the flag.
+_INCEPTION_TREND_MIN_CONSECUTIVE = 2
 _RECENT_FAILURE_ACTION_MARKERS = telemetry.RECENT_FAILURE_ACTION_MARKERS
 _RETRIEVAL_SKIP_ACTIONS = telemetry.RETRIEVAL_SKIP_ACTIONS
 _RETRIEVAL_NO_RESULT_REASONS = telemetry.RETRIEVAL_NO_RESULT_REASONS
@@ -1657,9 +1661,7 @@ def _queue_health_thresholds(config: dict[str, Any]) -> dict[str, int]:
 
 
 def _pi_queue_file() -> Path:
-    from memento.pi_bridge import _state_root
-
-    return _state_root() / "queue" / "pi-captures.jsonl"
+    return capture_queue.resolved_queue_file()
 
 
 def _config_int(config: dict[str, Any], key: str, default: int) -> int:
@@ -2143,6 +2145,69 @@ def _last_inception_run(state: dict[str, Any]) -> tuple[datetime | None, str | N
     return None, None, None
 
 
+def _inception_coverage_snapshots(runs: Any) -> list[dict[str, Any]]:
+    """Extract per-run (total_notes, processed_notes_total) pairs, in order.
+
+    Both fields are recorded by hooks/memento-inception.py's _record_run
+    (MEM-154). Older run entries recorded before this change -- or any
+    malformed entry -- lack one or both fields and are skipped, so this
+    degrades gracefully on state files that predate MEM-154 rather than
+    reporting bogus coverage numbers.
+    """
+    if not isinstance(runs, list):
+        return []
+    snapshots = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        total = run.get("total_notes")
+        processed = run.get("processed_notes_total")
+        if not isinstance(total, int) or not isinstance(processed, int) or total <= 0:
+            continue
+        snapshots.append({"iso": run.get("iso"), "total_notes": total, "processed_notes_total": processed})
+    return snapshots
+
+
+def _inception_coverage_summary(
+    runs: Any, min_consecutive: int = _INCEPTION_TREND_MIN_CONSECUTIVE
+) -> dict[str, Any] | None:
+    """Summarize consolidation coverage and backlog trend from run history.
+
+    Returns None when no run has recorded total_notes/processed_notes_total
+    yet (state predates MEM-154, or no run has completed since upgrading).
+    Otherwise returns the latest coverage ratio and backlog size, plus
+    backlog_growing/coverage_falling trend flags. Those flags only ever
+    become True when at least `min_consecutive` consecutive prior runs
+    strictly confirm the direction, so a single fluctuating run never trips
+    the flag -- callers should WARN, not FAIL, on either flag (MEM-154
+    treats this as a drift signal, not a hard error).
+    """
+    snapshots = _inception_coverage_snapshots(runs)
+    if not snapshots:
+        return None
+
+    latest = snapshots[-1]
+    result: dict[str, Any] = {
+        "total_notes": latest["total_notes"],
+        "processed_notes_total": latest["processed_notes_total"],
+        "coverage_ratio": round(latest["processed_notes_total"] / latest["total_notes"], 4),
+        "backlog": latest["total_notes"] - latest["processed_notes_total"],
+        "backlog_growing": False,
+        "coverage_falling": False,
+    }
+
+    if len(snapshots) >= min_consecutive + 1:
+        tail = snapshots[-(min_consecutive + 1) :]
+        backlogs = [s["total_notes"] - s["processed_notes_total"] for s in tail]
+        coverages = [s["processed_notes_total"] / s["total_notes"] for s in tail]
+        result["backlog_growing"] = all(backlogs[i] > backlogs[i - 1] for i in range(1, len(backlogs)))
+        result["coverage_falling"] = all(coverages[i] < coverages[i - 1] for i in range(1, len(coverages)))
+        result["recent_backlog"] = backlogs
+        result["recent_coverage"] = [round(c, 4) for c in coverages]
+
+    return result
+
+
 def _check_inception(config: dict[str, Any]) -> CheckResult:
     if not config.get("inception_enabled", False):
         return CheckResult("inception", PASS, "inception disabled")
@@ -2236,6 +2301,23 @@ def _check_inception(config: dict[str, Any]) -> CheckResult:
         details["last_error_source"] = last_error["source"]
         details["last_error_truncated"] = last_error["truncated"]
         summary_messages.append(f'last error: "{last_error["error"]}"')
+
+    coverage = _inception_coverage_summary(runs)
+    if coverage:
+        details["coverage"] = coverage
+        summary_messages.append(
+            f"coverage {coverage['coverage_ratio']:.1%} "
+            f"({coverage['processed_notes_total']}/{coverage['total_notes']} notes, "
+            f"backlog {coverage['backlog']})"
+        )
+        if coverage["backlog_growing"]:
+            issue_messages.append(f"consolidation backlog growing across recent runs: {coverage['recent_backlog']}")
+            if status == PASS:
+                status = WARN
+        if coverage["coverage_falling"]:
+            issue_messages.append(f"consolidation coverage falling across recent runs: {coverage['recent_coverage']}")
+            if status == PASS:
+                status = WARN
 
     message_parts = issue_messages + summary_messages
     message = "; ".join(message_parts) if message_parts else "inception enabled"

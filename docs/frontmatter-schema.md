@@ -33,7 +33,8 @@ These fields are present on ordinary atomic notes written by `write_note` and it
 | `validity-context` | string | What makes this note true or false |
 | `supersedes` | wikilink or title | `[[older-note-name]]` or note title if this replaces an older note |
 | `synthesized_from` | list | Source note slugs (required on Inception pattern notes) |
-| `project` | string | Full path to the working directory |
+| `project` | string | Stable project slug (git repo toplevel basename, normalized via `repo_slug_from_path`); never a raw path or bare branch name (MEM-164) |
+| `project_path` | string | Raw working-directory path the note was written from, preserved verbatim alongside the derived `project` slug (MEM-164) |
 | `branch` | string | Git branch name |
 | `session_id` | uuid/string | Agent session ID |
 
@@ -71,6 +72,92 @@ Older Pi bridge captures may have been written as `type: session` without `certa
 | 4 | shipped | PR merged, tested in production |
 | 5 | established | Seen across multiple tickets, reliable pattern |
 
+Certainty is purely epistemic -- how sure this is true. It no longer confers
+decay immunity on its own (MEM-150); see [Durability tier](#durability-tier)
+for what does. Values outside 1-5 are clamped into range at write time with a
+logged warning rather than rejected (`memento.store._coerce_certainty`);
+`scripts/fix_certainty_values.py` is a one-shot fixer for notes written
+before that guard existed.
+
+## Durability tier
+
+Retrieval decay immunity is driven by a tier derived from frontmatter, not
+certainty: `memento.store.durability_tier(frontmatter, now)`. It is not a
+managed frontmatter field written by any current writer -- it's computed at
+read time by `apply_temporal_decay` and by the auto-archive sweep (below)
+from the fields below.
+
+- **`pinned`** -- optional bool frontmatter field, manually set
+  (`pinned: true`). Permanent decay immunity.
+- **`hot`** -- `last_resurfaced` (see [Compatibility](#compatibility)-adjacent
+  resurfacing fields below) is within `durability_hot_window_days`
+  (default 30) of now. Decay-immune.
+- **`warm`** -- `resurfaced_count` > 0 at some point, but not within the hot
+  window. Decays normally.
+- **`cold`** -- never resurfaced. Decays normally. A certainty-5 note that
+  has never been resurfaced decays exactly like a certainty-1 note (only
+  certainty 3 gets a slower, not zero, decay rate).
+
+`resurfaced_count` (int) and `last_resurfaced` (datetime) are folded into a
+note's frontmatter from the access log by
+`memento.store.fold_access_log_into_frontmatter` -- they are durable
+retrieval-history fields, not something writers set directly.
+
+### Auto-archive sweep (MEM-152)
+
+`memento.archive.sweep_archive_candidates` is a scheduled sweep (triggered
+from `hooks/memento-sweeper.py`'s periodic `main()`, alongside the MEM-148
+fold) that reversibly archives `notes/*.md` files matching ALL of:
+
+- `durability_tier` is `"cold"` (never resurfaced; `pinned`/`hot`/`warm` are
+  never touched)
+- `date` frontmatter age exceeds `archive_sweep_age_days` (config, default
+  90)
+- `certainty` is present and below 4
+
+Notes missing a parseable `date` or `certainty` are skipped, not archived --
+the sweep fails safe when a criterion can't be proven. Archiving moves the
+file from `notes/` to `archive/` and appends a tombstone record via the same
+ledger (`memento.archive.record_tombstone`) portable export/import already
+use, so it is reversible (`memento.archive.restore_note`) and never a hard
+delete. Gated by `archive_sweep_enabled` (config, default `false` -- a no-op
+until enabled) and capped per run by `archive_sweep_max_per_run` (config,
+default 50).
+
+### Fleeting note lifecycle (MEM-153)
+
+`memento.archive.fleeting_lifecycle_sweep` runs from the same
+`hooks/memento-sweeper.py` periodic sweep, right after the MEM-152 archive
+sweep above, and promotes or expires `fleeting/*.md` notes (see
+`memento.store.append_fleeting_session` -- these are per-UTC-day session log
+files and, as written today, carry no YAML frontmatter block of their own).
+
+A fleeting note is promoted (moved to `notes/`, stamped with
+`promoted_at: <ISO date>`, all other frontmatter preserved verbatim) when
+EITHER:
+
+- its `resurfaced_count` frontmatter (folded in by
+  `memento.store.fold_access_log_into_frontmatter`, same as the durability
+  tier above) is at least `fleeting_promote_min_resurfaced` (config, default
+  2), or
+- it is cited by a session-summary note: a `[[stem]]` wikilink to the
+  fleeting note's filename stem appears in the body of any `notes/*.md` note
+  whose `source` frontmatter is `mcp-capture`. There is no distinct
+  `type: session-summary` frontmatter value in this schema -- `mcp-capture`
+  is the literal, documented signal (see
+  [Source values](#source-values) above: "`memento_capture` session-summary
+  note writer") used to recognize a session-summary note. The check is a
+  plain content scan, not the wikilink graph.
+
+Anything left over whose age -- `date` frontmatter first, file mtime
+otherwise -- exceeds `fleeting_expire_days` (config, default 14) is
+reversibly archived via the same `archive_note`/`restore_note`/tombstone
+machinery the MEM-152 sweep uses (`fleeting/<x>.md` archives to
+`archive/fleeting/<x>.md`, never a second archive mechanism). A note with
+neither a parseable `date` nor a readable mtime is skipped, never archived
+on ambiguity. Gated by `fleeting_lifecycle_enabled` (config, default `false`
+-- a no-op until enabled).
+
 ## Note types
 
 | Type | When to use |
@@ -88,6 +175,8 @@ Older Pi bridge captures may have been written as `type: session` without `certa
 ### `write_note` / atomic captures
 
 `write_note` normalizes canonical note types, tags, certainty, source, origin, validity context, supersedes, project, branch, and session id before writing. It always writes `title`, `type`, `tags`, `source`, and `date`; optional fields are written only when present.
+
+Callers pass `project` as either a raw cwd/path (the historical shape) or an already-derived slug; `write_note` splits path-like values into a stable `project` slug plus a separate `project_path` field carrying the original raw value verbatim (MEM-164). Tags are also normalized at write time: lowercased, trimmed, and spaces collapsed to dashes, with a config-driven `tag_aliases` map available to merge controlled-vocabulary synonyms.
 
 ### `write_daily_snapshot`
 
@@ -122,7 +211,8 @@ source: session
 origin: claude_triage:claude
 certainty: 4
 validity-context: while using Redis 7.x with cluster mode
-project: /home/user/work/my-api
+project: my-api
+project_path: /home/user/work/my-api
 branch: feat/cache-layer
 date: 2026-03-15T14:30
 session_id: abc12345-def6-7890-ghij-klmnopqrstuv

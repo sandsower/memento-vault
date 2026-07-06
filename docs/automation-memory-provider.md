@@ -108,6 +108,44 @@ By default, `approve_write` is false and the normalized candidate is queued for 
 
 The schema rejects raw run stores, ledgers, event streams, transcripts, proof/evidence dumps, stdout/stderr/log fields, oversized multiline strings, and patch/diff blobs. Secret-shaped strings are redacted defense-in-depth, but callers MUST still sanitize before calling.
 
+#### CLI ingest: `pi_bridge run-lesson`
+
+Runners without MCP transport (Rondo running headless, or an operator working from a shell) MAY ingest a lesson through the CLI adapter instead of `memento_capture_run_lesson`. This is an explicit, one-shot command — nothing about a run's completion triggers it automatically; the caller decides when a run produced a lesson worth keeping, then runs:
+
+```bash
+python3 -m memento.pi_bridge run-lesson --payload /path/to/lesson.json
+```
+
+`--payload` points at a JSON file (a JSON object) with this contract:
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `run_id` | yes | External run identifier for provenance |
+| `ticket_id` | yes | Tracker ticket the run is tied to |
+| `title` | no | Curated note title; defaults to `Automated run lesson: <ticket_id> (<run_id>)` |
+| `lesson_text` | no | The lesson body and evidence summary; defaults to the title |
+| `evidence_paths` | no | List of artifact references/URLs/IDs — references only, never artifact bodies |
+| `tags` | no | Extra tags merged onto the automatic `automation`, `automated-run`, lesson-type, outcome, and ticket tags |
+
+The command always writes a curated note — unlike `memento_capture_run_lesson`, there is no queue-for-review mode here, because a queued-only candidate cannot satisfy the recall guarantee below. Internally it maps the payload onto the same typed `automated_run_lesson_candidate/v1` shape (`ticket_id` → `ticket`, `lesson_text` → `body`/`evidence_summary`, `evidence_paths` → `artifact_refs`) and calls the same `capture_automated_run_lesson(..., approve_write=True)` used by the MCP tool, so the same raw-dump/patch-blob rejection and secret redaction apply. A payload may also include any of the optional typed-schema fields (`repo`, `project`, `branch`, `slice`, `outcome`, `lesson_type`, `note_type`, `certainty`, `validity_context`, `related_refs`, `external_system`) to enrich the note; unrecognized fields are ignored.
+
+**Recall guarantee.** The produced note's `## Automated run provenance` section embeds `run_id` and `ticket_id` verbatim (for example `` - Run ID: `RON-160-20260705T031413Z-d846d0b8` `` and `- Ticket: MEM-145`), and `ticket_id` is also added as a frontmatter tag. Identifiers shaped like these (hyphenated run ids, `PROJECT-123`-style tickets) trip `search.is_literal_like_query`'s digit/hyphen heuristics, so `memento_search`/`pi_bridge search` route a query for either identifier to literal/concrete matching and return the note deterministically — this is what closes the MEM-145 gap where a finished run left nothing queued or recallable.
+
+Example payload:
+
+```json
+{
+  "run_id": "RON-160-20260705T031413Z-d846d0b8",
+  "ticket_id": "MEM-145",
+  "title": "OLI-17 specimen run: queue path was silently dropped",
+  "lesson_text": "The specimen run finished but nothing was queued or recallable afterward.",
+  "evidence_paths": ["rondo://runs/RON-160/proof-summary"],
+  "tags": ["oli-17"]
+}
+```
+
+Today this command is invoked explicitly by an operator or a Rondo step that calls out to it; automatic emission straight from Rondo's own run lifecycle (so a run always ends with an ingest call with no manual step) is tracked as a separate Rondo-side follow-up, not part of this contract.
+
 For older integrations, `memento_capture` remains available for session-summary style capture:
 
 ```json

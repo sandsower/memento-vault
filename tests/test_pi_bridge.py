@@ -11,6 +11,7 @@ import pytest
 from memento.lifecycle import LifecycleResult
 from memento.llm import LLMResult
 from memento import pi_bridge
+from memento import queue as capture_queue
 
 
 @pytest.fixture(autouse=True)
@@ -397,7 +398,10 @@ def test_pi_bridge_capture_writes_manual_note(capsys, tmp_path):
     assert "source: pi-capture" in note_text
     assert "origin: pi_bridge:manual" in note_text
     assert "certainty: 2" in note_text
-    assert "project: /repo" in note_text
+    # write_note splits the raw cwd into a project slug plus a separate
+    # project_path field carrying the original value verbatim (MEM-164).
+    assert "project: repo" in note_text
+    assert "project_path: /repo" in note_text
 
 
 def test_pi_bridge_capture_runs_commit_and_reindex_under_vault_lock(capsys, tmp_path, monkeypatch):
@@ -1315,7 +1319,10 @@ def test_pi_bridge_capture_writes_type_tags_certainty_and_session_metadata_as_fr
     assert "type: decision" in frontmatter
     assert 'tags: ["pi", "manual", "repo", "dedup", "curation"]' in frontmatter
     assert "certainty: 4" in frontmatter
-    assert "project: /repo" in frontmatter
+    # write_note splits the raw cwd into a project slug plus a separate
+    # project_path field carrying the original value verbatim (MEM-164).
+    assert "project: repo" in frontmatter
+    assert "project_path: /repo" in frontmatter
     assert "branch: original/pi-branch" in frontmatter
     assert "session_id: /Users/vic/.pi/agent/sessions/session.jsonl" in frontmatter
     assert "/Users/vic/.pi/agent/sessions/session.jsonl" not in body
@@ -1366,7 +1373,10 @@ def test_pi_bridge_queue_migrates_to_local_state_and_processes(capsys, tmp_path,
         + "\n"
     )
 
-    with patch("memento.pi_bridge.get_vault", return_value=tmp_path):
+    with (
+        patch("memento.pi_bridge.get_vault", return_value=tmp_path),
+        patch("memento.queue.get_vault", return_value=tmp_path),
+    ):
         code = pi_bridge.main(["queue", "list"])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1385,6 +1395,28 @@ def test_pi_bridge_queue_migrates_to_local_state_and_processes(capsys, tmp_path,
     assert payload["selected_capture_count"] == 1
     assert payload["group_count"] == 1
     assert payload["groups"][0]["capture_ids"] == ["q1"]
+
+
+def test_pi_bridge_queue_path_resolution_characterization(tmp_path, monkeypatch):
+    """Freeze queue-path/state-home resolution semantics across the queue-module extraction."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    monkeypatch.setenv("MEMENTO_PI_STATE_HOME", str(tmp_path / "pi-state"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ignored-xdg"))
+    assert pi_bridge._state_root() == tmp_path / "pi-state"
+    assert pi_bridge._queue_file(vault) == tmp_path / "pi-state" / "queue" / "pi-captures.jsonl"
+    assert pi_bridge._legacy_queue_file(vault) == vault / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("MEMENTO_PI_STATE_HOME")
+    assert pi_bridge._state_root() == tmp_path / "ignored-xdg" / "memento" / "pi"
+    assert pi_bridge._queue_file(vault) == tmp_path / "ignored-xdg" / "memento" / "pi" / "queue" / "pi-captures.jsonl"
+
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    default_root = tmp_path / "home" / ".local" / "state" / "memento" / "pi"
+    assert pi_bridge._state_root() == default_root
+    assert pi_bridge._queue_file(vault) == default_root / "queue" / "pi-captures.jsonl"
 
 
 def test_pi_bridge_process_start_rejects_active_lock(capsys, tmp_path, monkeypatch):
@@ -2833,7 +2865,7 @@ def test_pi_bridge_concurrent_append_during_finalize_preserves_new_capture(capsy
     write_started = threading.Event()
     release_write = threading.Event()
     write_paused = {"value": False}
-    original_write_queue_file = pi_bridge._write_queue_file
+    original_write_queue_file = capture_queue.write_queue_file
     errors: list[BaseException] = []
 
     def gated_write(captures, path):
@@ -2883,7 +2915,7 @@ def test_pi_bridge_concurrent_append_during_finalize_preserves_new_capture(capsy
         except BaseException as exc:  # pragma: no cover - surfaced through assertions below
             errors.append(exc)
 
-    with patch("memento.pi_bridge._write_queue_file", new=gated_write):
+    with patch("memento.queue.write_queue_file", new=gated_write):
         finalize_thread = threading.Thread(target=run_finalize, name="finalize-thread")
         finalize_thread.start()
         assert write_started.wait(5)
