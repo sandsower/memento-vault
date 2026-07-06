@@ -1,6 +1,7 @@
 """Tests for note writing and store helpers."""
 
 import json
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,7 +15,9 @@ from memento.store import (
     find_dedup_candidates,
     log_triage_health,
     release_vault_write_lock,
+    replace_note_at_path,
     update_project_index,
+    write_daily_snapshot,
     write_note,
 )
 
@@ -298,6 +301,194 @@ class TestWriteNote:
         assert second.name == "redis-cache-requires-ttl-2.md"
 
 
+class TestUniqueTmpNames:
+    """Concurrent same-target writers must never share an in-flight tmp file (audit M6)."""
+
+    def _run_interleaved(self, monkeypatch, first_writer, second_writer):
+        """Run two writers where the first is paused inside ``os.replace`` until the second finishes.
+
+        This deterministically reproduces the audit M6 race: with slug-derived
+        tmp names the second writer clobbers/steals the first writer's tmp file,
+        so the first writer's resume crashes or corrupts the note.
+        """
+        real_replace = os.replace
+        first_paused = threading.Event()
+        second_done = threading.Event()
+
+        def gated_replace(src, dst):
+            if threading.current_thread().name == "writer-first":
+                first_paused.set()
+                assert second_done.wait(timeout=10), "second writer never finished"
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("memento.store.os.replace", gated_replace)
+
+        results = {}
+        errors = {}
+
+        def run(name, writer):
+            try:
+                results[name] = writer()
+            except Exception as exc:  # noqa: BLE001 - the assertion below surfaces it
+                errors[name] = exc
+
+        first = threading.Thread(target=run, args=("first", first_writer), name="writer-first")
+        first.start()
+        assert first_paused.wait(timeout=10), "first writer never reached os.replace"
+        second = threading.Thread(target=run, args=("second", second_writer), name="writer-second")
+        second.start()
+        second.join(timeout=10)
+        second_done.set()
+        first.join(timeout=10)
+        assert not first.is_alive() and not second.is_alive()
+        return results, errors
+
+    def test_write_note_parallel_same_slug_writers_do_not_collide(self, tmp_vault, monkeypatch):
+        results, errors = self._run_interleaved(
+            monkeypatch,
+            lambda: write_note(
+                tmp_vault,
+                title="Same slug title",
+                body="Body from first writer.",
+                note_type="discovery",
+                tags=["race"],
+            ),
+            lambda: write_note(
+                tmp_vault,
+                title="Same slug title",
+                body="Body from second writer.",
+                note_type="discovery",
+                tags=["race"],
+            ),
+        )
+
+        assert errors == {}
+        notes_dir = tmp_vault / "notes"
+        assert list(notes_dir.glob(".tmp-*")) == []
+        assert set(results) == {"first", "second"}
+        for path in {results["first"], results["second"]}:
+            text = path.read_text()
+            assert text.startswith("---\n")
+            # Each surviving note is one writer's complete render, never a mix.
+            assert ("Body from first writer." in text) ^ ("Body from second writer." in text)
+            assert text.rstrip().endswith("## Related")
+
+    def test_write_daily_snapshot_parallel_same_target_writers_do_not_collide(self, tmp_vault, monkeypatch):
+        results, errors = self._run_interleaved(
+            monkeypatch,
+            lambda: write_daily_snapshot(tmp_vault, "2026-07-06", "api-service", "First writer content."),
+            lambda: write_daily_snapshot(tmp_vault, "2026-07-06", "api-service", "Second writer content."),
+        )
+
+        assert errors == {}
+        notes_dir = tmp_vault / "notes"
+        assert list(notes_dir.glob(".tmp-*")) == []
+        for result in results.values():
+            assert "error" not in result
+        target = notes_dir / "daily-2026-07-06-api-service.md"
+        text = target.read_text()
+        assert text.startswith("---\n")
+        assert ("First writer content." in text) ^ ("Second writer content." in text)
+
+    def test_replace_note_at_path_parallel_same_target_writers_do_not_collide(self, tmp_vault, monkeypatch):
+        existing = write_note(
+            tmp_vault,
+            title="Replace race target",
+            body="Original body.",
+            note_type="discovery",
+            tags=["race"],
+        )
+        rel_path = f"notes/{existing.name}"
+
+        results, errors = self._run_interleaved(
+            monkeypatch,
+            lambda: replace_note_at_path(
+                tmp_vault,
+                rel_path,
+                title="Replace race target",
+                body="Replacement from first writer.",
+                note_type="discovery",
+                tags=["race"],
+            ),
+            lambda: replace_note_at_path(
+                tmp_vault,
+                rel_path,
+                title="Replace race target",
+                body="Replacement from second writer.",
+                note_type="discovery",
+                tags=["race"],
+            ),
+        )
+
+        assert errors == {}
+        notes_dir = tmp_vault / "notes"
+        assert list(notes_dir.glob(".tmp-*")) == []
+        assert set(results) == {"first", "second"}
+        text = existing.read_text()
+        assert text.startswith("---\n")
+        assert ("Replacement from first writer." in text) ^ ("Replacement from second writer." in text)
+        assert "Original body." not in text
+
+
+class TestReplaceNotePreservesUnknownFrontmatter:
+    """Rewrites must round-trip frontmatter keys the write path does not manage (audit M6)."""
+
+    def test_replace_note_at_path_preserves_unknown_frontmatter_keys(self, tmp_vault):
+        path = write_note(
+            tmp_vault,
+            title="Sync target",
+            body="Original body.",
+            note_type="discovery",
+            tags=["sync"],
+        )
+        text = path.read_text()
+        text = text.replace(
+            "---\n",
+            "---\ncustom-key: keep me\nreview:\n  status: pending\n  owner: vic\n",
+            1,
+        )
+        path.write_text(text)
+
+        target = replace_note_at_path(
+            tmp_vault,
+            f"notes/{path.name}",
+            title="Sync target",
+            body="Replaced body.",
+            note_type="decision",
+            tags=["sync", "updated"],
+            certainty=4,
+        )
+
+        new_text = target.read_text()
+        frontmatter = new_text.split("\n---\n", 1)[0]
+        assert "custom-key: keep me" in frontmatter
+        assert "review:\n  status: pending\n  owner: vic" in frontmatter
+        # Managed keys stay managed (updated, not duplicated).
+        assert frontmatter.count("title:") == 1
+        assert frontmatter.count("\ntype: ") == 1
+        assert "type: decision" in frontmatter
+        assert "certainty: 4" in frontmatter
+        assert "Replaced body." in new_text
+        assert "Original body." not in new_text
+
+    def test_replace_note_at_path_does_not_fabricate_frontmatter_from_body_dashes(self, tmp_vault):
+        path = tmp_vault / "notes" / "no-frontmatter.md"
+        path.write_text("Intro paragraph.\n\n---\nnot: frontmatter\n---\n\nEnd of body.")
+
+        target = replace_note_at_path(
+            tmp_vault,
+            "notes/no-frontmatter.md",
+            title="No frontmatter",
+            body="Clean replacement body.",
+            note_type="discovery",
+            tags=["sync"],
+        )
+
+        new_text = target.read_text()
+        assert "not: frontmatter" not in new_text
+        assert "Clean replacement body." in new_text
+
+
 class TestFindDedupCandidates:
     def test_find_dedup_candidates_exact_match(self, tmp_vault):
         _write_note_file(tmp_vault / "notes", "redis-cache-ttl", "Redis cache requires TTL", ["redis", "caching"])
@@ -520,6 +711,28 @@ class TestUpdateProjectIndex:
         new_line_pos = text.index("- 2026-04-15 MCP store: New note title")
         assert sessions_pos < new_line_pos
         assert text.count("## Activity log") == 1
+
+    def test_update_project_index_writes_via_atomic_replace(self, tmp_vault, monkeypatch):
+        """The project index must be written tmp-then-rename like every other write path (audit M6)."""
+        project_file = tmp_vault / "projects" / "api-service.md"
+        replace_calls = []
+        real_replace = os.replace
+
+        def recording_replace(src, dst):
+            replace_calls.append((Path(src), Path(dst)))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("memento.store.os.replace", recording_replace)
+
+        update_project_index(tmp_vault, "api-service", "redis-cache-ttl", "Fixed cache invalidation")
+
+        index_writes = [(src, dst) for src, dst in replace_calls if dst == project_file]
+        assert index_writes, "update_project_index must write via tmp + os.replace"
+        assert all(src.parent == project_file.parent for src, _ in index_writes)
+        assert list(project_file.parent.glob(".tmp-*")) == []
+        text = project_file.read_text()
+        assert "- [[redis-cache-ttl]]" in text
+        assert "Fixed cache invalidation" in text
 
     def test_update_project_index_falls_back_to_sessions(self, tmp_vault):
         """Hubs without an Activity log section still receive auto-captures in Sessions."""
