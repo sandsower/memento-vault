@@ -33,7 +33,8 @@ These fields are present on ordinary atomic notes written by `write_note` and it
 | `validity-context` | string | What makes this note true or false |
 | `supersedes` | wikilink or title | `[[older-note-name]]` or note title if this replaces an older note |
 | `synthesized_from` | list | Source note slugs (required on Inception pattern notes) |
-| `project` | string | Full path to the working directory |
+| `project` | string | Stable project slug (git repo toplevel basename, normalized via `repo_slug_from_path`); never a raw path or bare branch name (MEM-164) |
+| `project_path` | string | Raw working-directory path the note was written from, preserved verbatim alongside the derived `project` slug (MEM-164) |
 | `branch` | string | Git branch name |
 | `session_id` | uuid/string | Agent session ID |
 
@@ -89,6 +90,8 @@ Older Pi bridge captures may have been written as `type: session` without `certa
 
 `write_note` normalizes canonical note types, tags, certainty, source, origin, validity context, supersedes, project, branch, and session id before writing. It always writes `title`, `type`, `tags`, `source`, and `date`; optional fields are written only when present.
 
+Callers pass `project` as either a raw cwd/path (the historical shape) or an already-derived slug; `write_note` splits path-like values into a stable `project` slug plus a separate `project_path` field carrying the original raw value verbatim (MEM-164). Tags are also normalized at write time: lowercased, trimmed, and spaces collapsed to dashes, with a config-driven `tag_aliases` map available to merge controlled-vocabulary synonyms.
+
 ### `write_daily_snapshot`
 
 Daily snapshots are deterministic path-controlled notes named `notes/daily-<date>-<repo_slug>.md`. Their managed frontmatter is:
@@ -122,7 +125,8 @@ source: session
 origin: claude_triage:claude
 certainty: 4
 validity-context: while using Redis 7.x with cluster mode
-project: /home/user/work/my-api
+project: my-api
+project_path: /home/user/work/my-api
 branch: feat/cache-layer
 date: 2026-03-15T14:30
 session_id: abc12345-def6-7890-ghij-klmnopqrstuv

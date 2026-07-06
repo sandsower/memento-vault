@@ -17,6 +17,7 @@ from memento.config import (
     get_runtime_dir,
     get_vault,
     load_config,
+    repo_slug_from_path,
     reset_config,
     slugify,
 )
@@ -269,3 +270,61 @@ class TestDetectProject:
     def test_unknown_when_no_cwd(self):
         slug, ticket = detect_project(None, None)
         assert slug == "unknown"
+
+    def test_worktree_cwd_collapses_to_repo_slug(self, tmp_path):
+        """MEM-164: per-ticket worktree checkouts must scope to the main repo, not the worktree dir."""
+        repo, worktree = _repo_with_worktree(tmp_path)
+        with patch("memento.config.get_config", return_value=dict(DEFAULT_CONFIG)):
+            slug, _ticket = detect_project(str(worktree), None)
+        assert slug == "my-repo"
+
+
+def _repo_with_worktree(tmp_path):
+    import subprocess
+
+    repo = tmp_path / "My-Repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    (repo / "seed.txt").write_text("seed\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "seed"],
+        check=True,
+    )
+    worktree = tmp_path / "worktrees" / "agent-abc123"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", str(worktree), "-b", "ticket-branch"],
+        check=True,
+    )
+    return repo, worktree
+
+
+class TestRepoSlugFromPath:
+    def test_git_repo_path_uses_repo_dir_name(self, tmp_path):
+        repo, _worktree = _repo_with_worktree(tmp_path)
+        assert repo_slug_from_path(str(repo)) == "my-repo"
+
+    def test_linked_worktree_collapses_to_main_repo_name(self, tmp_path):
+        _repo, worktree = _repo_with_worktree(tmp_path)
+        assert repo_slug_from_path(str(worktree)) == "my-repo"
+
+    def test_non_repo_directory_falls_back_to_basename(self, tmp_path):
+        plain = tmp_path / "Plain Dir"
+        plain.mkdir()
+        assert repo_slug_from_path(str(plain)) == "plain-dir"
+
+    def test_nonexistent_path_falls_back_to_basename(self):
+        assert repo_slug_from_path("/home/vic/Projects/memento-vault") == "memento-vault"
+
+    def test_empty_path_returns_none(self):
+        assert repo_slug_from_path("") is None
+        assert repo_slug_from_path(None) is None
+
+
+class TestTagAliasesDefault:
+    def test_tag_aliases_default_is_a_string_map(self):
+        aliases = DEFAULT_CONFIG["tag_aliases"]
+        assert isinstance(aliases, dict)
+        assert all(isinstance(k, str) and isinstance(v, str) for k, v in aliases.items())
+        # A stable representative entry from the stock controlled vocabulary.
+        assert aliases["k8s"] == "kubernetes"
