@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import memento.frontmatter as frontmatter_module
 from memento.config import RUNTIME_DIR, get_config, get_vault_id, repo_slug_from_path, slugify
 
 RETRIEVAL_LOG_PATH = os.path.join(
@@ -1297,20 +1298,14 @@ def _write_text_atomic(target, text):
         raise
 
 
-_LEADING_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)(.*)\Z", re.DOTALL)
-
-
-def split_frontmatter(text):
-    """Split note text into ``(frontmatter, body)``.
-
-    Only a LEADING ``---`` block counts as frontmatter — ``---`` lines inside
-    the body must never fabricate one (audit M6). Returns ``("", text)`` when
-    the text does not start with a closed frontmatter block.
-    """
-    match = _LEADING_FRONTMATTER_RE.match(text or "")
-    if not match:
-        return "", text or ""
-    return match.group(1), match.group(2)
+# split_frontmatter() and the _frontmatter_*() typed accessors below are thin
+# delegating wrappers over memento.frontmatter (MEM-166 consolidated the
+# hand-rolled parsers that used to live here, in memento.graph, memento.query,
+# and memento.contradictions into that one shared module). Re-exported here
+# under their original names so every existing call site --
+# `from memento.store import split_frontmatter`, `memento.store._frontmatter_scalar`,
+# etc. across memento/ and hooks/ -- keeps working unchanged.
+split_frontmatter = frontmatter_module.split_frontmatter
 
 
 # Frontmatter keys owned by _render_note_markdown. Anything else found on an
@@ -1340,8 +1335,6 @@ _MANAGED_NOTE_FRONTMATTER_KEYS = {
     "session_id",
 }
 
-_FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:")
-
 # Keys owned by fold_access_log_into_frontmatter(). Kept deliberately out of
 # _MANAGED_NOTE_FRONTMATTER_KEYS: from the write path's point of view these
 # are just another unmanaged key it round-trips unchanged, which is exactly
@@ -1355,45 +1348,26 @@ _CITATION_FRONTMATTER_KEYS = {"citation_stale"}
 
 
 def _frontmatter_scalar(frontmatter, key):
-    """Return the raw single-line scalar value for a frontmatter key, or None.
-
-    Same tiny per-key regex lookup smart_store.py already uses for its own
-    read-only frontmatter comparisons (MEM-166 will consolidate frontmatter
-    parsing later) — this is this module's copy of that existing convention
-    for the two keys it owns (resurfacing), not a new parsing strategy.
-    """
-    match = re.search(rf"^{re.escape(key)}:\s*(.+)$", frontmatter or "", re.MULTILINE)
-    if not match:
-        return None
-    return match.group(1).strip().strip("\"'")
+    """Thin delegating wrapper -- see :func:`memento.frontmatter.get_scalar` (MEM-166)."""
+    return frontmatter_module.get_scalar(frontmatter, key)
 
 
 def _frontmatter_int(frontmatter, key):
-    """Return a frontmatter scalar as ``int``, or None if absent/unparseable."""
-    raw = _frontmatter_scalar(frontmatter, key)
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
-
-
-_FRONTMATTER_TRUE_VALUES = {"true", "yes", "1"}
+    """Thin delegating wrapper -- see :func:`memento.frontmatter.get_int` (MEM-166)."""
+    return frontmatter_module.get_int(frontmatter, key)
 
 
 def _frontmatter_bool(frontmatter, key):
-    """Return a frontmatter scalar as ``bool``. Absent/unparseable values are False."""
-    raw = _frontmatter_scalar(frontmatter, key)
-    if raw is None:
-        return False
-    return raw.strip().lower() in _FRONTMATTER_TRUE_VALUES
+    """Thin delegating wrapper -- see :func:`memento.frontmatter.get_bool` (MEM-166)."""
+    return frontmatter_module.get_bool(frontmatter, key)
 
 
 def _unmanaged_frontmatter_lines(frontmatter, managed_keys=None):
     """Return raw frontmatter lines for keys ``managed_keys`` does not cover.
 
-    Defaults to ``_MANAGED_NOTE_FRONTMATTER_KEYS`` (the write-path contract
+    Thin delegating wrapper over :func:`memento.frontmatter.unmanaged_lines`
+    (MEM-166) that keeps this module's historical default: ``managed_keys``
+    defaults to ``_MANAGED_NOTE_FRONTMATTER_KEYS`` (the write-path contract
     fields) — this is what ``replace_note_at_path`` uses to round-trip
     unknown keys on rewrite. ``fold_access_log_into_frontmatter`` instead
     passes ``_RESURFACING_FRONTMATTER_KEYS`` so it can drop just the two
@@ -1405,18 +1379,7 @@ def _unmanaged_frontmatter_lines(frontmatter, managed_keys=None):
     """
     if managed_keys is None:
         managed_keys = _MANAGED_NOTE_FRONTMATTER_KEYS
-    preserved = []
-    keep = False
-    for line in (frontmatter or "").splitlines():
-        if line[:1] in (" ", "\t"):
-            if keep:
-                preserved.append(line)
-            continue
-        match = _FRONTMATTER_KEY_RE.match(line)
-        keep = bool(match) and match.group(1) not in managed_keys
-        if keep:
-            preserved.append(line)
-    return preserved
+    return frontmatter_module.unmanaged_lines(frontmatter, managed_keys)
 
 
 def write_note(
