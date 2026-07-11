@@ -119,6 +119,19 @@ def test_lifecycle_payload_fails_closed_when_frame_cannot_fit():
     assert framed["content"] == ""
 
 
+@pytest.mark.parametrize("packet_budget", [0, 1])
+def test_impossible_serialized_packet_budget_is_rejected(packet_budget):
+    with pytest.raises(ValueError, match="at least 2"):
+        frame_lifecycle_payload(
+            {
+                "should_inject": True,
+                "content": "memory",
+                "source": "session-context",
+            },
+            max_serialized_chars=packet_budget,
+        )
+
+
 def test_non_injecting_fallback_fits_tight_minimal_boundary():
     original = {
         "should_inject": True,

@@ -204,6 +204,8 @@ def frame_lifecycle_payload(
     complete JSON response has a configured budget.  The search operates on raw
     content and re-renders candidates, so it cannot emit a cut JSON envelope.
     """
+    if max_serialized_chars is not None and int(max_serialized_chars) < len(json.dumps({})):
+        raise ValueError("serialized packet budget must be at least 2 characters")
     if not payload.get("should_inject") or not payload.get("content"):
         return copy.deepcopy(payload)
 
