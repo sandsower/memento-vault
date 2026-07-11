@@ -184,6 +184,19 @@ def parse_note(path: Path) -> NoteRecord | None:
     )
 
 
+def _parse_naive_dt(value):
+    """Parse an ISO datetime string to a naive datetime (tz stripped).
+
+    Vault frontmatter mixes tz-aware (``…+00:00`` / ``…Z``) and naive
+    date-only values; comparing the two raises TypeError. Normalizing to
+    naive lets ordering/eligibility comparisons work regardless of format.
+    """
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return dt
+
+
 def collect_eligible_notes(config, state, full=False):
     """Collect notes eligible for Inception clustering.
 
@@ -232,16 +245,16 @@ def collect_eligible_notes(config, state, full=False):
         if not full and last_run:
             try:
                 if record.date:
-                    note_dt = datetime.fromisoformat(record.date)
+                    note_dt = _parse_naive_dt(record.date)
                 else:
                     note_dt = datetime.fromtimestamp(md_file.stat().st_mtime)
-                last_dt = datetime.fromisoformat(last_run)
+                last_dt = _parse_naive_dt(last_run)
                 if note_dt <= last_dt:
                     continue
             except (ValueError, OSError):
                 try:
                     note_dt = datetime.fromtimestamp(md_file.stat().st_mtime)
-                    last_dt = datetime.fromisoformat(last_run)
+                    last_dt = _parse_naive_dt(last_run)
                     if note_dt <= last_dt:
                         continue
                 except (ValueError, OSError):
@@ -526,7 +539,7 @@ def score_cluster(stems, notes_dict):
     for r in records:
         if r.date:
             try:
-                dates.append(datetime.fromisoformat(r.date))
+                dates.append(_parse_naive_dt(r.date))
             except ValueError:
                 pass
     if len(dates) >= 2:
@@ -1089,8 +1102,8 @@ def find_contradiction_candidates(stem_index, embedding_matrix, notes_dict, conf
 def _order_by_date(rec_a, rec_b):
     """Return ``(older, newer)`` NoteRecords by parsed date, or ``(None, None)`` if unorderable."""
     try:
-        date_a = datetime.fromisoformat(rec_a.date) if rec_a.date else None
-        date_b = datetime.fromisoformat(rec_b.date) if rec_b.date else None
+        date_a = _parse_naive_dt(rec_a.date) if rec_a.date else None
+        date_b = _parse_naive_dt(rec_b.date) if rec_b.date else None
     except ValueError:
         return None, None
     if date_a is None or date_b is None or date_a == date_b:
