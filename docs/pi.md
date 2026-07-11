@@ -61,7 +61,7 @@ Environment variables override file config:
 | `MEMENTO_PI_BRIEFING` | `true` | First-turn project briefing. |
 | `MEMENTO_PI_PROMPT_RECALL` | `true` | Prompt recall before each agent turn. |
 | `MEMENTO_PI_TOOL_CONTEXT` | `true` | Read-tool context injection. |
-| `MEMENTO_PI_MAX_INJECTED_CHARS` | `4000` | Per-injection character cap. |
+| `MEMENTO_PI_MAX_INJECTED_CHARS` | `4000` | Raw retrieved-content cap before trust framing. `0` means unlimited. |
 | `MEMENTO_PI_MAX_TOOL_CONTEXT_PER_SESSION` | `5` | Tool-context injection cap per pi session. |
 | `MEMENTO_PI_AUTO_CAPTURE` | `true` | Run SessionEnd-style triage from the persisted Pi transcript on compaction/shutdown lifecycle events. |
 | `MEMENTO_PI_CAPTURE_QUEUE` | `false` | Legacy/manual queue mode flag. Automatic capture does not append to the queue by default; use `memento_capture(queue: true)` or `/memento-process` for explicit queue review. |

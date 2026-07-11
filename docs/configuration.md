@@ -193,6 +193,18 @@ The Anthropic API backend retries 429/5xx responses and transient network errors
 
 ## Tenet — retrieval hooks
 
+All automatically resurfaced vault content is treated as untrusted data regardless of note source, origin, certainty, or citations.
+Claude, Pi, and MCP lifecycle adapters wrap non-empty briefing, recall, tool-context, and combined session-context content in the same `MEMENTO_UNTRUSTED_DATA_V1` envelope before it enters an agent context.
+The envelope tells the agent to use retrieved memory only as evidence and encodes the payload so note text cannot close or forge the surrounding reminder boundary.
+This framing is defense in depth, not an authorization boundary or a claim that prompt injection is impossible.
+Explicit `search`, `get`, and query tools remain deliberate read operations rather than automatic injection surfaces.
+
+```yaml
+# Raw retrieved-content cap before trust framing for Claude and MCP lifecycle surfaces.
+# Set to 0 for unlimited. Negative values are rejected.
+automatic_context_max_chars: 4000
+```
+
 ### Session briefing
 
 At session start, `vault-briefing` injects a compact summary of your project's vault state into Claude's context. Includes recent sessions and the most relevant notes.
@@ -241,6 +253,9 @@ Deduplication is automatic -- if the top result matches the last injection, it s
 ### Tool context
 
 When Claude reads a file, `vault-tool-context` extracts cwd-relative keywords from the file path and injects matching vault notes. Tool context is on by default in fresh installs. It is an unsolicited surface, so it is deliberately gated: it skips vendor/config/system/agent files, requires QMD, requires a positive project match, deduplicates against recall and prior tool-context injections, and uses a higher default BM25 threshold than prompt recall. Requires QMD.
+
+The tool-context hook supplies framed `additionalContext` only.
+It does not approve or alter the permission decision for the Read operation.
 
 ```yaml
 # Disable tool context

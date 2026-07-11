@@ -52,12 +52,6 @@ interface LoadedBridgeConfig {
 	sources: string[];
 }
 
-function capText(text: string, maxChars: number): string {
-	if (maxChars <= 0 || text.length <= maxChars) return text;
-	return `${text.slice(0, maxChars)}\n[vault] truncated by memento pi bridge cap (${maxChars} chars)`;
-}
-
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "..");
@@ -165,7 +159,10 @@ async function runLifecycle(
 	health?: { cwd?: string; sessionId?: string; project?: string; config?: BridgeConfig; configSources?: string[] },
 ): Promise<LifecycleResult> {
 	try {
-		const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...args], {
+		const boundedArgs = health?.config
+			? [...args, "--max-injected-chars", String(health.config.maxInjectedChars)]
+			: args;
+		const result = await pi.exec("python3", ["-m", "memento.pi_bridge", ...boundedArgs], {
 			cwd: repoRoot,
 			signal: ctx.signal,
 			timeout: 15_000,
@@ -701,7 +698,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			);
 			lastLifecycleReason = briefing.reason ?? (briefing.should_inject ? "briefing-inject" : "briefing-skip");
 			if (briefing.should_inject && briefing.content) {
-				messages.push({ customType: "memento-briefing", content: capText(briefing.content, config.maxInjectedChars), display: true });
+				messages.push({ customType: "memento-briefing", content: briefing.content, display: true });
 			}
 		}
 
@@ -715,7 +712,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 			);
 			lastLifecycleReason = recall.reason ?? (recall.should_inject ? "recall-inject" : "recall-skip");
 			if (recall.should_inject && recall.content) {
-				messages.push({ customType: "memento-recall", content: capText(recall.content, config.maxInjectedChars), display: true });
+				messages.push({ customType: "memento-recall", content: recall.content, display: true });
 			}
 		}
 
@@ -753,7 +750,7 @@ export default function mementoExtension(pi: ExtensionAPI) {
 		toolContextCount += 1;
 
 		return {
-			content: [...event.content, textPart(`\n\n${capText(toolContext.content, config.maxInjectedChars)}`)],
+			content: [...event.content, textPart(`\n\n${toolContext.content}`)],
 		};
 	});
 
@@ -828,6 +825,8 @@ export default function mementoExtension(pi: ExtensionAPI) {
 				sessionFile,
 				"--token-budget",
 				String(params.token_budget ?? 2000),
+				"--max-injected-chars",
+				String(config.maxInjectedChars),
 			];
 			if (params.include_status === false) args.push("--no-include-status");
 			if (params.include_recent === false) args.push("--no-include-recent");

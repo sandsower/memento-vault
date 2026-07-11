@@ -60,6 +60,7 @@ from memento import store as store_module
 from memento.remote_client import get as remote_get
 from memento.remote_client import is_remote, search_envelope as remote_search_envelope, status as remote_status
 from memento.store import log_triage_health
+from memento.trust import frame_lifecycle_payload
 from memento.utils import sanitize_secrets
 
 
@@ -169,9 +170,11 @@ def _run_lifecycle(
     fn,
     *args: Any,
     health_metadata: dict[str, Any] | None = None,
+    max_injected_chars: int | None = None,
 ) -> int:
     try:
-        return _emit(fn(*args).to_dict())
+        payload = frame_lifecycle_payload(fn(*args).to_dict(), max_content_chars=max_injected_chars)
+        return _emit(payload)
     except Exception as exc:  # pragma: no cover - traceback branch asserted by payload shape
         traceback.print_exc(file=sys.stderr)
         metadata = dict(health_metadata or {})
@@ -2878,6 +2881,16 @@ def _build_pi_briefing(cwd: str, session_id: str) -> Any:
     return build_briefing(cwd, session_id, allow_deferred=False, host_id="pi")
 
 
+def _frame_pi_session_context(payload: dict, max_injected_chars: int | None) -> dict:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    packet_budget = metadata.get("packet_char_budget")
+    return frame_lifecycle_payload(
+        payload,
+        max_content_chars=max_injected_chars,
+        max_serialized_chars=packet_budget if isinstance(packet_budget, int) else None,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Memento pi lifecycle JSON adapter")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2885,11 +2898,13 @@ def build_parser() -> argparse.ArgumentParser:
     briefing = sub.add_parser("briefing", help="Build first-turn/session briefing context")
     briefing.add_argument("--cwd", default="")
     briefing.add_argument("--session-id", default="unknown")
+    briefing.add_argument("--max-injected-chars", type=int, default=None)
 
     recall = sub.add_parser("recall", help="Build prompt recall context")
     recall.add_argument("--prompt", default="")
     recall.add_argument("--cwd", default="")
     recall.add_argument("--session-id", default="unknown")
+    recall.add_argument("--max-injected-chars", type=int, default=None)
 
     session_context = sub.add_parser("session-context", help="Build budgeted session context packet")
     session_context.add_argument("--cwd", default="")
@@ -2900,12 +2915,14 @@ def build_parser() -> argparse.ArgumentParser:
     session_context.add_argument("--include-recent", action=argparse.BooleanOptionalAction, default=True)
     session_context.add_argument("--include-recall", action=argparse.BooleanOptionalAction, default=True)
     session_context.add_argument("--include-tool-context-preview", action="store_true")
+    session_context.add_argument("--max-injected-chars", type=int, default=None)
 
     tool_context = sub.add_parser("tool-context", help="Build read-tool context")
     tool_context.add_argument("--tool-name", default="")
     tool_context.add_argument("--file-path", default="")
     tool_context.add_argument("--cwd", default="")
     tool_context.add_argument("--session-id", default="unknown")
+    tool_context.add_argument("--max-injected-chars", type=int, default=None)
 
     status = sub.add_parser("status", help="Show memento status")
     status.add_argument("--cwd", default="")
@@ -3060,6 +3077,7 @@ def main(argv: list[str] | None = None) -> int:
             args.cwd,
             args.session_id,
             health_metadata={"cwd": args.cwd, "session_id": args.session_id},
+            max_injected_chars=args.max_injected_chars,
         )
     if args.command == "recall":
         return _run_lifecycle(
@@ -3069,21 +3087,25 @@ def main(argv: list[str] | None = None) -> int:
             args.cwd,
             args.session_id,
             health_metadata={"cwd": args.cwd, "session_id": args.session_id},
+            max_injected_chars=args.max_injected_chars,
         )
     if args.command == "session-context":
         return _run_json(
             "session-context",
-            lambda cwd, prompt, session_id, token_budget, include_status, include_recent, include_recall, include_preview: (
-                build_session_context(
-                    cwd,
-                    prompt,
-                    session_id,
-                    token_budget,
-                    include_status,
-                    include_recent,
-                    include_recall,
-                    include_preview,
-                    host_id="pi",
+            lambda cwd, prompt, session_id, token_budget, include_status, include_recent, include_recall, include_preview, max_chars: (
+                _frame_pi_session_context(
+                    build_session_context(
+                        cwd,
+                        prompt,
+                        session_id,
+                        token_budget,
+                        include_status,
+                        include_recent,
+                        include_recall,
+                        include_preview,
+                        host_id="pi",
+                    ),
+                    max_chars,
                 )
             ),
             args.cwd,
@@ -3094,6 +3116,7 @@ def main(argv: list[str] | None = None) -> int:
             args.include_recent,
             args.include_recall,
             args.include_tool_context_preview,
+            args.max_injected_chars,
         )
     if args.command == "tool-context":
         return _run_lifecycle(
@@ -3106,6 +3129,7 @@ def main(argv: list[str] | None = None) -> int:
             args.cwd,
             args.session_id,
             health_metadata={"cwd": args.cwd, "session_id": args.session_id},
+            max_injected_chars=args.max_injected_chars,
         )
     if args.command == "status":
         return _run_json("status", _status, args.cwd)

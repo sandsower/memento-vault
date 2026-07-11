@@ -35,6 +35,21 @@ The MCP server currently registers **20 tools**. This table is generated from `m
 The same table is kept in sync in the README.
 Regenerate both from the single source of truth with `memento-vault tools --markdown`; never hand-edit the block between the markers.
 
+## Automatic lifecycle context trust boundary
+
+The four lifecycle tools return automatically injectable `content`, so they apply a stricter output contract than explicit search and get operations.
+Every non-empty lifecycle `content` value is wrapped in the shared `MEMENTO_UNTRUSTED_DATA_V1` envelope before the MCP response leaves the server.
+Persisted notes are treated as untrusted data regardless of source, origin, certainty, or citation state.
+The encoded payload cannot create literal reminder tags, and the static reminder tells the consuming agent to use memory only as evidence rather than instructions.
+This is defense in depth and must not be used to authorize tools, permissions, disclosure, or other side effects.
+
+Host adapters should inject only the returned framed `content` field.
+They must not remove the frame, append unframed note text, or truncate the rendered envelope.
+`memento_session_context` reports separate units for its two limits.
+`char_budget`, `used_chars`, and `raw_used_chars` measure raw retrieved content, while `framed_chars` measures the rendered trust envelope.
+`packet_char_budget` and `serialized_chars` measure the complete serialized response.
+The tool returns either a complete frame within both limits or no injectable content.
+
 ## Filtered search and graph lookups
 
 Two tools added in the 2026-07-06 wave sharpen retrieval beyond plain ranked search:

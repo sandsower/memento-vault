@@ -35,6 +35,9 @@ DEFAULT_CONFIG = {
     "briefing_max_notes": 5,
     "briefing_min_score": 0.55,
     "prompt_recall": True,
+    # Raw retrieved-content cap applied before trust framing on automatic
+    # Claude and MCP lifecycle surfaces. 0 preserves unlimited behavior.
+    "automatic_context_max_chars": 4000,
     "recall_concrete_mode": False,
     # Recalibrated 0.6 -> 0.25 (MEM-127). 0.6 was tuned for QMD's native BM25
     # band (0.9+ per docs/quality-analysis-2026-07-02.md); applied uniformly

@@ -12,6 +12,7 @@ from pathlib import Path
 _repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_repo_root))
 
+from memento.config import get_config  # noqa: E402
 from memento.lifecycle import (  # noqa: E402
     build_recall,
     consume_deep_recall,
@@ -19,6 +20,7 @@ from memento.lifecycle import (  # noqa: E402
     run_deep_recall_worker,
 )
 from memento.store import log_retrieval  # noqa: E402
+from memento.trust import frame_untrusted_context  # noqa: E402
 from memento.utils import read_hook_input  # noqa: E402
 
 
@@ -50,7 +52,14 @@ def main() -> None:
     if result.should_inject:
         output.append(result.content)
     if output:
-        print("\n".join(output))
+        max_content_chars = get_config().get("automatic_context_max_chars", 4000)
+        framed = frame_untrusted_context(
+            "\n".join(output),
+            surface="recall",
+            max_content_chars=max_content_chars,
+        )
+        if framed:
+            print(framed)
 
 
 if __name__ == "__main__":

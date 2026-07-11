@@ -15,6 +15,11 @@ from memento import pi_bridge
 from memento import queue as capture_queue
 from memento import sync_ledger
 from memento.queue import QueueLockUnavailable
+from memento.trust import DATA_MARKER
+
+
+def _decode_frame(frame: str) -> dict:
+    return json.loads(frame.split(DATA_MARKER, 1)[1].strip())
 
 
 @pytest.fixture(autouse=True)
@@ -73,7 +78,9 @@ def test_pi_bridge_briefing_disables_deferred_search(capsys):
 
     assert code == 0
     mock_build.assert_called_once_with("/repo", "s1", allow_deferred=False, host_id="pi")
-    assert json.loads(capsys.readouterr().out) == result.to_dict()
+    payload = json.loads(capsys.readouterr().out)
+    assert _decode_frame(payload["content"])["content"] == result.content
+    assert payload["results"] == result.results
 
 
 def test_pi_bridge_recall_outputs_lifecycle_json(capsys):
@@ -84,7 +91,44 @@ def test_pi_bridge_recall_outputs_lifecycle_json(capsys):
 
     assert code == 0
     mock_build.assert_called_once_with("What changed?", "/repo", "s1", host_id="pi")
-    assert json.loads(capsys.readouterr().out) == result.to_dict()
+    payload = json.loads(capsys.readouterr().out)
+    assert _decode_frame(payload["content"]) == {
+        "kind": "memento-untrusted-data-v1",
+        "surface": "recall",
+        "content_utf8_bytes": len(result.content.encode("utf-8")),
+        "content": result.content,
+    }
+    assert payload["results"] == result.results
+
+
+@pytest.mark.parametrize(
+    ("content", "budget", "expected"),
+    [
+        ("memory", 7, "memory"),
+        ("memory", 6, "memory"),
+        ("memory", 4, "memo"),
+        ("memory", 0, "memory"),
+    ],
+)
+def test_pi_bridge_recall_caps_raw_memory_before_framing(capsys, content, budget, expected):
+    result = LifecycleResult(True, content, "recall")
+
+    with patch("memento.pi_bridge.build_recall", return_value=result):
+        code = pi_bridge.main(
+            [
+                "recall",
+                "--prompt",
+                "What changed?",
+                "--max-injected-chars",
+                str(budget),
+            ]
+        )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["should_inject"] is True
+    assert _decode_frame(payload["content"])["content"] == expected
+    assert len(payload["content"]) > max(budget, 0)
 
 
 def test_pi_bridge_tool_context_outputs_lifecycle_json(capsys):
@@ -137,7 +181,9 @@ def test_pi_bridge_session_context_outputs_json(capsys):
         )
 
     assert code == 0
-    assert json.loads(capsys.readouterr().out) == expected
+    payload = json.loads(capsys.readouterr().out)
+    assert _decode_frame(payload["content"])["content"] == expected["content"]
+    assert payload["sections"] == expected["sections"]
     mock_build.assert_called_once_with("/repo", "cache", "s1", 500, True, True, True, True, host_id="pi")
 
 

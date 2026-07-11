@@ -13,18 +13,27 @@ from pathlib import Path
 _repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_repo_root))
 
+from memento.config import get_config  # noqa: E402
 from memento.lifecycle import build_tool_context  # noqa: E402
 from memento.store import log_retrieval  # noqa: E402
+from memento.trust import frame_untrusted_context  # noqa: E402
 from memento.utils import read_hook_input  # noqa: E402
 
 
 def output_context(context_text: str) -> None:
     """Print the PreToolUse JSON response with additionalContext."""
+    max_content_chars = get_config().get("automatic_context_max_chars", 4000)
+    framed = frame_untrusted_context(
+        context_text,
+        surface="tool-context",
+        max_content_chars=max_content_chars,
+    )
+    if not framed:
+        return
     response = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "additionalContext": context_text,
+            "additionalContext": framed,
         }
     }
     print(json.dumps(response))

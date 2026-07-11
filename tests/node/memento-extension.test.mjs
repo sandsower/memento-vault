@@ -110,6 +110,13 @@ test('memento TypeScript extension wires lifecycle events, tools, queue behavior
   assert.match(source, /join\(__dirname, "memento-process-worker\.mjs"\)/);
   assert.match(source, /pi\.exec\("node", \[worker, \.\.\.workerArgs\]/);
   assert.match(source, /processQueueModel \? \["--processor-model", config\.processQueueModel/);
+  assert.match(source, /--max-injected-chars/);
+  assert.match(source, /async function runLifecycle[\s\S]*const boundedArgs[\s\S]*--max-injected-chars/);
+  const runJsonSource = source.slice(source.indexOf('async function runJson'), source.indexOf('async function runLifecycle'));
+  assert.doesNotMatch(runJsonSource, /boundedArgs|--max-injected-chars/);
+  assert.doesNotMatch(source, /capText\(briefing\.content/);
+  assert.doesNotMatch(source, /capText\(recall\.content/);
+  assert.doesNotMatch(source, /capText\(toolContext\.content/);
 
   const uiSource = await readFile(uiPath, 'utf8');
   assert.match(uiSource, /groupStatus === "running" && group\.log_tail/, 'running groups should render a live log tail');
