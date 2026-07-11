@@ -81,6 +81,11 @@ def test_zero_content_budget_preserves_unlimited_legacy_semantics():
     assert _decode_frame(frame)["content"] == "memory"
 
 
+def test_negative_content_budget_is_rejected():
+    with pytest.raises(ValueError, match="must not be negative"):
+        frame_untrusted_context("memory", surface="briefing", max_content_chars=-1)
+
+
 def test_lifecycle_payload_frames_copy_without_mutating_input():
     original = {
         "should_inject": True,

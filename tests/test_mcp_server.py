@@ -1286,6 +1286,20 @@ assert.match(pointer, /Sanitized lifecycle summary:/);
 
 
 class TestLifecycleRetrievalTools:
+    @patch("memento.mcp_server.get_config", return_value={"automatic_context_max_chars": 12})
+    @patch("memento.mcp_server.build_briefing")
+    def test_automatic_context_uses_shared_raw_content_cap(self, mock_build_briefing, _mock_config):
+        mock_build_briefing.return_value.to_dict.return_value = {
+            "should_inject": True,
+            "content": "memory " * 100,
+            "source": "briefing",
+            "results": [],
+        }
+
+        result = mcp_server.memento_briefing(cwd="/repo", session_id="s1")
+
+        assert len(_decode_automatic_context(result["content"])["content"]) <= 12
+
     @patch("memento.mcp_server.build_briefing")
     def test_briefing_delegates_to_lifecycle(self, mock_build_briefing):
         expected = {

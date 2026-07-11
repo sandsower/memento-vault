@@ -12,6 +12,7 @@ from pathlib import Path
 _repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_repo_root))
 
+from memento.config import get_config  # noqa: E402
 from memento.lifecycle import build_briefing, run_deferred_briefing_search  # noqa: E402
 from memento.store import log_retrieval  # noqa: E402
 from memento.trust import frame_untrusted_context  # noqa: E402
@@ -40,7 +41,12 @@ def main() -> None:
         host_id="claude",
     )
     if result.should_inject:
-        framed = frame_untrusted_context(result.content, surface="briefing")
+        max_content_chars = get_config().get("automatic_context_max_chars", 4000)
+        framed = frame_untrusted_context(
+            result.content,
+            surface="briefing",
+            max_content_chars=max_content_chars,
+        )
         if framed:
             print(framed)
 

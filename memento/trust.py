@@ -57,7 +57,9 @@ def _content_budget(value: int | None) -> int | None:
     if value is None:
         return None
     budget = int(value)
-    return budget if budget > 0 else None
+    if budget < 0:
+        raise ValueError("automatic context content budget must not be negative")
+    return budget or None
 
 
 def _truncate_content(content: str, max_content_chars: int | None) -> tuple[str, bool]:
@@ -202,12 +204,11 @@ def frame_lifecycle_payload(
     complete JSON response has a configured budget.  The search operates on raw
     content and re-renders candidates, so it cannot emit a cut JSON envelope.
     """
-    framed_payload = copy.deepcopy(payload)
-    if not framed_payload.get("should_inject") or not framed_payload.get("content"):
-        return framed_payload
+    if not payload.get("should_inject") or not payload.get("content"):
+        return copy.deepcopy(payload)
 
-    surface = _validate_surface(str(framed_payload.get("source") or ""))
-    raw_content = str(framed_payload["content"])
+    surface = _validate_surface(str(payload.get("source") or ""))
+    raw_content = str(payload["content"])
     capped_content, content_was_truncated = _truncate_content(raw_content, max_content_chars)
 
     content_note = "retrieved content truncated to max injected chars before trust framing"

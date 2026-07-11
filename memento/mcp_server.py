@@ -862,6 +862,10 @@ def memento_contradictions(topic: str, limit: int = 20, min_certainty: int = 2) 
     return payload
 
 
+def _automatic_context_max_chars() -> int:
+    return int(get_config().get("automatic_context_max_chars", 4000))
+
+
 @mcp.tool()
 def memento_briefing(cwd: str = "", session_id: str = "") -> dict:
     """Host-adapter primitive for automatic first-turn/session briefing.
@@ -871,7 +875,10 @@ def memento_briefing(cwd: str = "", session_id: str = "") -> dict:
     context. For interactive questions about prior work, use memento_search and
     then memento_get if full note content is needed.
     """
-    return frame_lifecycle_payload(build_briefing(cwd, session_id, host_id="mcp").to_dict())
+    return frame_lifecycle_payload(
+        build_briefing(cwd, session_id, host_id="mcp").to_dict(),
+        max_content_chars=_automatic_context_max_chars(),
+    )
 
 
 @mcp.tool()
@@ -883,7 +890,10 @@ def memento_recall(prompt: str, cwd: str = "", session_id: str = "") -> dict:
     questions about past decisions, prior fixes, or project history, call
     memento_search and then memento_get if full note content is needed.
     """
-    return frame_lifecycle_payload(build_recall(prompt, cwd, session_id, host_id="mcp").to_dict())
+    return frame_lifecycle_payload(
+        build_recall(prompt, cwd, session_id, host_id="mcp").to_dict(),
+        max_content_chars=_automatic_context_max_chars(),
+    )
 
 
 @mcp.tool()
@@ -894,7 +904,10 @@ def memento_tool_context(tool_name: str, file_path: str, cwd: str = "", session_
     reads to attach code-area memories. For explicit recall/search requests,
     call memento_search and then memento_get if full note content is needed.
     """
-    return frame_lifecycle_payload(build_tool_context(tool_name, file_path, cwd, session_id, host_id="mcp").to_dict())
+    return frame_lifecycle_payload(
+        build_tool_context(tool_name, file_path, cwd, session_id, host_id="mcp").to_dict(),
+        max_content_chars=_automatic_context_max_chars(),
+    )
 
 
 @mcp.tool()
@@ -931,6 +944,7 @@ def memento_session_context(
     packet_budget = metadata.get("packet_char_budget")
     return frame_lifecycle_payload(
         payload,
+        max_content_chars=_automatic_context_max_chars(),
         max_serialized_chars=packet_budget if isinstance(packet_budget, int) else None,
     )
 

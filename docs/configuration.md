@@ -199,6 +199,12 @@ The envelope tells the agent to use retrieved memory only as evidence and encode
 This framing is defense in depth, not an authorization boundary or a claim that prompt injection is impossible.
 Explicit `search`, `get`, and query tools remain deliberate read operations rather than automatic injection surfaces.
 
+```yaml
+# Raw retrieved-content cap before trust framing for Claude and MCP lifecycle surfaces.
+# Set to 0 for unlimited. Negative values are rejected.
+automatic_context_max_chars: 4000
+```
+
 ### Session briefing
 
 At session start, `vault-briefing` injects a compact summary of your project's vault state into Claude's context. Includes recent sessions and the most relevant notes.

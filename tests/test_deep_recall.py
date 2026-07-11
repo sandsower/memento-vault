@@ -781,6 +781,11 @@ class TestMainIntegration:
             patch.object(vault_recall_hook, "consume_deferred_briefing", return_value=[]),
             patch.object(vault_recall_hook, "build_recall", return_value=recall_result),
             patch.object(
+                vault_recall_hook,
+                "get_config",
+                return_value={"automatic_context_max_chars": 125},
+            ),
+            patch.object(
                 vault_recall_hook, "read_hook_input", return_value={"prompt": "cache", "cwd": "", "session_id": "s1"}
             ),
         ):
@@ -792,7 +797,7 @@ class TestMainIntegration:
         assert payload["surface"] == "recall"
         assert "Deep analysis suggests also reviewing" in payload["content"]
         assert "Cache strategy" in payload["content"]
-        assert "Related memories" in payload["content"]
+        assert len(payload["content"]) <= 125
 
     def test_main_deep_recall_worker_mode(self, runtime_dir):
         """--deep-recall flag routes to worker."""

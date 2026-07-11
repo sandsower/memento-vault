@@ -12,6 +12,7 @@ from pathlib import Path
 _repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_repo_root))
 
+from memento.config import get_config  # noqa: E402
 from memento.lifecycle import (  # noqa: E402
     build_recall,
     consume_deep_recall,
@@ -51,7 +52,12 @@ def main() -> None:
     if result.should_inject:
         output.append(result.content)
     if output:
-        framed = frame_untrusted_context("\n".join(output), surface="recall")
+        max_content_chars = get_config().get("automatic_context_max_chars", 4000)
+        framed = frame_untrusted_context(
+            "\n".join(output),
+            surface="recall",
+            max_content_chars=max_content_chars,
+        )
         if framed:
             print(framed)
 
