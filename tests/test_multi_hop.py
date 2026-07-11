@@ -74,7 +74,7 @@ class TestQmdGet:
         mock_output = '{"file": "notes/foo.md", "title": "Foo", "content": "Some content with [[bar]]."}'
         with (
             patch("memento.search_backend.shutil.which", return_value="/usr/bin/qmd"),
-            patch("memento.search_backend.subprocess.run") as mock_run,
+            patch("memento.search_backend._run_qmd") as mock_run,
         ):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = mock_output
@@ -87,7 +87,7 @@ class TestQmdGet:
     def test_returns_none_on_failure(self):
         with (
             patch("memento.search_backend.shutil.which", return_value="/usr/bin/qmd"),
-            patch("memento.search_backend.subprocess.run") as mock_run,
+            patch("memento.search_backend._run_qmd") as mock_run,
         ):
             mock_run.return_value.returncode = 1
             mock_run.return_value.stdout = ""
@@ -100,7 +100,7 @@ class TestQmdGet:
 
         with (
             patch("memento.search_backend.shutil.which", return_value="/usr/bin/qmd"),
-            patch("memento.search_backend.subprocess.run", side_effect=subprocess.TimeoutExpired("qmd", 5)),
+            patch("memento.search_backend._run_qmd", side_effect=subprocess.TimeoutExpired("qmd", 5)),
         ):
             result = qmd_get("notes/slow.md")
 
@@ -109,7 +109,7 @@ class TestQmdGet:
     def test_calls_qmd_with_correct_args(self):
         with (
             patch("memento.search_backend.shutil.which", return_value="/usr/bin/qmd"),
-            patch("memento.search_backend.subprocess.run") as mock_run,
+            patch("memento.search_backend._run_qmd") as mock_run,
         ):
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = '{"file": "notes/foo.md", "content": "text"}'
