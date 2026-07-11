@@ -232,9 +232,7 @@ class TestQMDAvailabilityCache:
     def test_cache_expires_after_ttl(self, monkeypatch):
         backend = QMDBackend()
         probes = {"n": 0}
-        monkeypatch.setattr(
-            backend, "_probe_available", lambda: probes.__setitem__("n", probes["n"] + 1) or True
-        )
+        monkeypatch.setattr(backend, "_probe_available", lambda: probes.__setitem__("n", probes["n"] + 1) or True)
 
         clock = {"t": 1000.0}
         monkeypatch.setattr("memento.search_backend.time.monotonic", lambda: clock["t"])
