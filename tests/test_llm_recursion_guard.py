@@ -10,8 +10,6 @@ entry points so they no-op inside a child.
 
 import subprocess
 
-import pytest
-
 from memento import llm
 from memento.llm import LLM_SUBPROCESS_ENV, _run_cli, in_llm_subprocess
 from memento.lifecycle import build_briefing, build_recall
