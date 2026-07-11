@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -279,6 +280,65 @@ class SearchBackend(ABC):
         return {"checked": False, "reason": "backend_no_index", "stale": False, "status": "pass"}
 
 
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    """Kill ``proc`` and every process it spawned.
+
+    On POSIX the child is started in its own session (``start_new_session``),
+    so its PID doubles as the process-group ID and a single ``killpg`` reaps
+    the launcher together with any grandchildren. Falls back to killing just
+    the direct child where process groups are unavailable.
+    """
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _run_qmd(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """Run a ``qmd`` CLI command, tearing down the whole process tree on timeout.
+
+    The ``qmd`` launcher is a Node shim that spawns the real CLI as a child, so
+    the process Python sees is a parent of the process doing the work. A plain
+    ``subprocess.run(..., timeout=...)`` only signals that direct child: on
+    timeout the launcher is killed but the Node grandchild keeps running and
+    keeps the inherited stdout/stderr pipes open. ``run``'s post-timeout
+    ``communicate()`` then blocks forever waiting for pipe EOF, leaking a
+    permanently hung worker (stuck in ``select``) for every timed-out search.
+    Running qmd in its own session and killing the group reaps the whole tree,
+    closing the pipes so the call returns instead of hanging.
+    """
+    popen_kwargs: dict = {}
+    if os.name == "posix":
+        # Own session/process group so _terminate_process_tree can killpg it.
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **popen_kwargs,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
+        # The tree is dead, so the pipes are closed and this drains promptly
+        # rather than blocking on a grandchild that outlived its parent.
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 class QMDBackend(SearchBackend):
     """Search backend that wraps the QMD CLI tool."""
 
@@ -290,10 +350,8 @@ class QMDBackend(SearchBackend):
 
         collection = get_config().get("qmd_collection", "memento")
         try:
-            result = subprocess.run(
+            result = _run_qmd(
                 ["qmd", "search", "test", "-c", collection, "-n", "1"],
-                capture_output=True,
-                text=True,
                 timeout=5,
             )
             return result.returncode == 0
@@ -325,7 +383,7 @@ class QMDBackend(SearchBackend):
         cmd = ["qmd", cmd_name, query, "-c", collection, "-n", str(limit), "--json"]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            result = _run_qmd(cmd, timeout=timeout)
             if result.returncode != 0:
                 return []
 
@@ -384,7 +442,7 @@ class QMDBackend(SearchBackend):
         cmd = ["qmd", "get", path, "-c", collection, "--json"]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            result = _run_qmd(cmd, timeout=timeout)
             if result.returncode != 0:
                 return None
 
@@ -418,20 +476,16 @@ class QMDBackend(SearchBackend):
             return False
 
         try:
-            result = subprocess.run(
+            result = _run_qmd(
                 ["qmd", "update", "-c", collection],
-                capture_output=True,
-                text=True,
                 timeout=60,
             )
             if result.returncode != 0:
                 return False
 
             if embed:
-                subprocess.run(
+                _run_qmd(
                     ["qmd", "embed"],
-                    capture_output=True,
-                    text=True,
                     timeout=120,
                 )
 
