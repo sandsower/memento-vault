@@ -201,6 +201,59 @@ class TestConcreteDetection:
         assert exact > substring
 
 
+class TestQMDAvailabilityCache:
+    """is_available() must not re-spawn a `qmd search` preflight on every call:
+    get_backend selection + qmd_search guard + search()/get() guard would
+    otherwise each pay for a fresh Node process."""
+
+    def test_probe_runs_once_within_ttl(self, monkeypatch):
+        backend = QMDBackend()
+        probes = {"n": 0}
+
+        def fake_probe():
+            probes["n"] += 1
+            return True
+
+        monkeypatch.setattr(backend, "_probe_available", fake_probe)
+
+        assert backend.is_available() is True
+        assert backend.is_available() is True
+        assert backend.is_available() is True
+        assert probes["n"] == 1
+
+    def test_cached_value_is_returned(self, monkeypatch):
+        backend = QMDBackend()
+        monkeypatch.setattr(backend, "_probe_available", lambda: False)
+        assert backend.is_available() is False
+        # Even if the underlying probe would now say True, the cached False holds.
+        monkeypatch.setattr(backend, "_probe_available", lambda: True)
+        assert backend.is_available() is False
+
+    def test_cache_expires_after_ttl(self, monkeypatch):
+        backend = QMDBackend()
+        probes = {"n": 0}
+        monkeypatch.setattr(backend, "_probe_available", lambda: probes.__setitem__("n", probes["n"] + 1) or True)
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("memento.search_backend.time.monotonic", lambda: clock["t"])
+
+        assert backend.is_available() is True
+        assert backend.is_available() is True
+        assert probes["n"] == 1
+
+        clock["t"] += QMDBackend._AVAILABILITY_TTL_SECONDS + 1
+        assert backend.is_available() is True
+        assert probes["n"] == 2
+
+    def test_each_instance_has_independent_cache(self, monkeypatch):
+        first = QMDBackend()
+        second = QMDBackend()
+        monkeypatch.setattr(first, "_probe_available", lambda: True)
+        monkeypatch.setattr(second, "_probe_available", lambda: False)
+        assert first.is_available() is True
+        assert second.is_available() is False
+
+
 class TestBackendIndexHook:
     def test_qmd_index_note_conservatively_reindexes_collection(self, monkeypatch):
         backend = QMDBackend()

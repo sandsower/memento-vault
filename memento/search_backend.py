@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -282,7 +283,28 @@ class SearchBackend(ABC):
 class QMDBackend(SearchBackend):
     """Search backend that wraps the QMD CLI tool."""
 
+    # An availability probe spawns a real `qmd search` preflight (a Node
+    # process), which is expensive. A single logical search pays for it up to
+    # three times: get_backend() probes once while selecting the backend,
+    # qmd_search() guards with is_available(), and search()/get()/reindex()
+    # guard again. Cache the probe for a short window so those collapse into
+    # one spawn. The TTL keeps the result fresh enough that a vault becoming
+    # (un)available is picked up quickly by long-lived processes, while a burst
+    # of calls from the same process shares a single probe.
+    _AVAILABILITY_TTL_SECONDS = 30
+
+    def __init__(self) -> None:
+        self._availability_cache: tuple[float, bool] | None = None
+
     def is_available(self) -> bool:
+        cached = self._availability_cache
+        if cached is not None and (time.monotonic() - cached[0]) < self._AVAILABILITY_TTL_SECONDS:
+            return cached[1]
+        value = self._probe_available()
+        self._availability_cache = (time.monotonic(), value)
+        return value
+
+    def _probe_available(self) -> bool:
         if not shutil.which("qmd"):
             return False
         # Verify the configured collection actually exists
