@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,6 +13,25 @@ import time
 from urllib import request
 
 from memento.config import get_config
+
+
+# Environment marker set on every headless LLM CLI child memento spawns (see
+# _run_cli). A `claude --print` child starts a fresh Claude Code session, which
+# re-fires memento's SessionStart/UserPromptSubmit/SessionEnd hooks. Those hooks
+# run agentic retrieval and triage synthesis, which spawn another LLM child,
+# which fires the hooks again — an unbounded fork bomb that pins every core.
+# Hooks check in_llm_subprocess() and no-op when this is set, breaking the loop.
+LLM_SUBPROCESS_ENV = "MEMENTO_LLM_CHILD"
+
+
+def in_llm_subprocess() -> bool:
+    """True when running inside a memento-spawned LLM CLI child process."""
+    return os.environ.get(LLM_SUBPROCESS_ENV) == "1"
+
+
+def _llm_child_env() -> dict:
+    """Parent environment plus the re-entrancy marker for LLM CLI children."""
+    return {**os.environ, LLM_SUBPROCESS_ENV: "1"}
 
 
 @dataclass(frozen=True)
@@ -116,11 +136,16 @@ def _failure_message(result):
 
 
 def _run_cli(cmd, output_path=None, timeout=30, stdin_input=None):
+    child_env = _llm_child_env()
     try:
         if stdin_input is None:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=child_env
+            )
         else:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=stdin_input)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, input=stdin_input, env=child_env
+            )
     except subprocess.TimeoutExpired:
         if output_path:
             output_path.unlink(missing_ok=True)

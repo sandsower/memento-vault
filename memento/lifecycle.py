@@ -20,7 +20,7 @@ from memento.hub import vault_map
 from memento import queue as capture_queue
 from memento import telemetry
 from memento.health import build_automation_memory_readiness
-from memento.llm import is_invalid_mcp_config_error, llm_complete
+from memento.llm import in_llm_subprocess, is_invalid_mcp_config_error, llm_complete
 from memento.retrieval_agent import agentic_retrieve
 from memento.retrieval_policy import (
     PromptRecallRequest,
@@ -887,6 +887,11 @@ def build_briefing(
     cwd: str, session_id: str = "unknown", *, allow_deferred: bool = True, host_id: str | None = None
 ) -> LifecycleResult:
     """Build session-start briefing content."""
+    # Never brief inside a memento-spawned LLM child: that session exists only
+    # to answer a retrieval/synthesis prompt, and briefing it would spawn its
+    # own deferred search -> another LLM child -> recursion (see llm.py).
+    if in_llm_subprocess():
+        return empty_result("briefing", "llm-subprocess")
     config = get_config()
     host_id = runtime_host_id(host_id)
     metadata = {"cwd": cwd, "session_id": session_id, "host_id": host_id}
@@ -1932,6 +1937,10 @@ def build_recall(
     host_id: str | None = None,
 ) -> LifecycleResult:
     """Build prompt recall content."""
+    # Skip recall inside a memento-spawned LLM child: recall runs agentic
+    # retrieval, which spawns another LLM child and recurses (see llm.py).
+    if in_llm_subprocess():
+        return empty_result("recall", "llm-subprocess")
     host_id = runtime_host_id(host_id)
     lines, top_path, results, reason = _run_recall_lines(prompt, cwd, session_id, host_id=host_id)
     if not lines:
