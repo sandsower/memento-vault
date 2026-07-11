@@ -14,6 +14,7 @@ sys.path.insert(0, str(_repo_root))
 
 from memento.lifecycle import build_briefing, run_deferred_briefing_search  # noqa: E402
 from memento.store import log_retrieval  # noqa: E402
+from memento.trust import frame_untrusted_context  # noqa: E402
 from memento.utils import read_hook_input  # noqa: E402
 
 
@@ -39,7 +40,9 @@ def main() -> None:
         host_id="claude",
     )
     if result.should_inject:
-        print(result.content)
+        framed = frame_untrusted_context(result.content, surface="briefing")
+        if framed:
+            print(framed)
 
 
 if __name__ == "__main__":

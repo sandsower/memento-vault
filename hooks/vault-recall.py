@@ -19,6 +19,7 @@ from memento.lifecycle import (  # noqa: E402
     run_deep_recall_worker,
 )
 from memento.store import log_retrieval  # noqa: E402
+from memento.trust import frame_untrusted_context  # noqa: E402
 from memento.utils import read_hook_input  # noqa: E402
 
 
@@ -50,7 +51,9 @@ def main() -> None:
     if result.should_inject:
         output.append(result.content)
     if output:
-        print("\n".join(output))
+        framed = frame_untrusted_context("\n".join(output), surface="recall")
+        if framed:
+            print(framed)
 
 
 if __name__ == "__main__":

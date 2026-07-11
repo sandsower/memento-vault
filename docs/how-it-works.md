@@ -42,6 +42,10 @@ memento-triage.py reads the transcript
 
 Past knowledge flows back into active sessions via three hooks:
 
+Every non-empty automatic injection passes through one shared trust boundary immediately before host delivery.
+Memento treats persisted notes as untrusted data regardless of provenance, encodes the retrieved text in a delimiter-safe `MEMENTO_UNTRUSTED_DATA_V1` JSON envelope, and precedes it with a static reminder that the data is evidence rather than instructions.
+The frame does not authorize actions and does not replace host permissions or other containment controls.
+
 ```
 Session starts
     |
@@ -50,7 +54,7 @@ vault-briefing.py (SessionStart hook)
     |
     +---> detect project from cwd + git branch
     +---> SYNC: read projects/{slug}.md for recent sessions (<50ms)
-    +---> print [vault] project + sessions to stdout --> Claude sees it
+    +---> frame retrieved content as untrusted data --> Claude sees it
     +---> project maps fast path (if inception has built maps):
     |       if maps have enough notes for this project: write ready immediately
     |       else: fall through to async vsearch
@@ -92,7 +96,7 @@ vault-recall.py (UserPromptSubmit hook)
     |       loop (memento/retrieval_agent.py) instead of a single
     |       suggest-titles completion; falls back on any failure
     +---> dedup: skip if same top result as last injection (within 3 prompts)
-    +---> print [vault] related memories to stdout --> Claude sees them
+    +---> combine deferred + deep + current recall, then frame once --> Claude sees it
     |
     v
 Claude reads a file
@@ -108,10 +112,13 @@ vault-tool-context.py (PreToolUse hook, Read matcher)
     +---> BM25 search against keywords (default min_score 0.75)
     +---> enhance_results() pipeline with positive project-match required
     +---> dedup against recall + prior tool-context injections
-    +---> return JSON with additionalContext --> Claude sees it before the file
+    +---> return framed additionalContext without changing Read permission
 ```
 
-All three hooks are zero-cost when they have nothing relevant to say -- no output, no context overhead. When `retrieval_log: true` or `MEMENTO_DEBUG=1` is enabled, tool context records one terminal `tool-context/decision` event per call so usefulness can be audited from skip reasons, injected paths, cache/search source, latency, and optional candidate summaries. When the hooks do inject, overhead is ~150 input units per session on average. See [performance-analysis.md](performance-analysis.md) for benchmarks.
+All three hooks are zero-cost when they have nothing relevant to say - no output and no context overhead.
+When `retrieval_log: true` or `MEMENTO_DEBUG=1` is enabled, tool context records one terminal `tool-context/decision` event per call so usefulness can be audited from skip reasons, injected paths, cache/search source, latency, and optional candidate summaries.
+The trust envelope adds a small fixed overhead to non-empty injections.
+See [performance-analysis.md](performance-analysis.md) for retrieval benchmarks.
 
 ## What gets captured
 

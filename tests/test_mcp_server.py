@@ -19,6 +19,7 @@ from memento.mcp_inventory import (
     render_mcp_tool_markdown,
 )
 from memento.search import MISS_RECOVERY_HINTS, build_search_miss
+from memento.trust import DATA_MARKER
 from memento.mcp_server import (
     _bind_host,
     _strip_injection,
@@ -87,6 +88,10 @@ def _write_opencode_db(path):
     )
     conn.commit()
     conn.close()
+
+
+def _decode_automatic_context(frame: str) -> dict:
+    return json.loads(frame.split(DATA_MARKER, 1)[1].strip())
 
 
 # --- _bind_host ---
@@ -1293,7 +1298,8 @@ class TestLifecycleRetrievalTools:
 
         result = mcp_server.memento_briefing(cwd="/home/vic/Projects/memento-vault", session_id="s1")
 
-        assert result == expected
+        assert _decode_automatic_context(result["content"])["content"] == expected["content"]
+        assert result["results"] == expected["results"]
         mock_build_briefing.assert_called_once_with("/home/vic/Projects/memento-vault", "s1", host_id="mcp")
 
     @patch("memento.mcp_server.build_recall")
@@ -1312,7 +1318,8 @@ class TestLifecycleRetrievalTools:
             session_id="s1",
         )
 
-        assert result == expected
+        assert _decode_automatic_context(result["content"])["content"] == expected["content"]
+        assert result["results"] == expected["results"]
         mock_build_recall.assert_called_once_with(
             "How should we handle Redis cache invalidation?", "/repo", "s1", host_id="mcp"
         )
@@ -1334,7 +1341,8 @@ class TestLifecycleRetrievalTools:
             session_id="s1",
         )
 
-        assert result == expected
+        assert _decode_automatic_context(result["content"])["content"] == expected["content"]
+        assert result["results"] == expected["results"]
         mock_build_tool_context.assert_called_once_with(
             "read", "src/server/authMiddleware.ts", "/repo", "s1", host_id="mcp"
         )
@@ -1362,7 +1370,8 @@ class TestLifecycleRetrievalTools:
             include_tool_context_preview=True,
         )
 
-        assert result == expected
+        assert _decode_automatic_context(result["content"])["content"] == expected["content"]
+        assert result["results"] == expected["results"]
         mock_build_session_context.assert_called_once_with(
             "/repo",
             "cache",
@@ -1373,6 +1382,25 @@ class TestLifecycleRetrievalTools:
             True,
             True,
             host_id="mcp",
+        )
+
+    @patch("memento.mcp_server.build_session_context")
+    def test_session_context_preserves_packet_budget_after_framing(self, mock_build_session_context):
+        mock_build_session_context.return_value = {
+            "should_inject": True,
+            "content": "memory " * 1000,
+            "source": "session-context",
+            "sections": {},
+            "results": [],
+            "metadata": {"packet_char_budget": 1000},
+        }
+
+        result = mcp_server.memento_session_context(cwd="/repo", prompt="cache")
+
+        assert len(json.dumps(result)) <= 1000
+        assert result["should_inject"] is True
+        assert _decode_automatic_context(result["content"])["content"].endswith(
+            "[vault] truncated to fit the automatic-injection budget"
         )
 
 

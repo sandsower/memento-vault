@@ -11,6 +11,7 @@ import pytest
 from memento.llm import LLMResult
 
 from memento import lifecycle
+from memento.trust import DATA_MARKER
 
 _vr_spec = _ilu.spec_from_file_location(
     "vault_recall_hook",
@@ -786,9 +787,12 @@ class TestMainIntegration:
             vault_recall_hook.main()
 
         captured = capsys.readouterr()
-        assert "Deep analysis suggests also reviewing" in captured.out
-        assert "Cache strategy" in captured.out
-        assert "Related memories" in captured.out
+        assert sum(line.startswith(f"{DATA_MARKER} ") for line in captured.out.splitlines()) == 1
+        payload = json.loads(captured.out.split(DATA_MARKER, 1)[1].strip())
+        assert payload["surface"] == "recall"
+        assert "Deep analysis suggests also reviewing" in payload["content"]
+        assert "Cache strategy" in payload["content"]
+        assert "Related memories" in payload["content"]
 
     def test_main_deep_recall_worker_mode(self, runtime_dir):
         """--deep-recall flag routes to worker."""
