@@ -19,7 +19,7 @@ _repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 from memento.config import detect_project, get_config, get_vault  # noqa: E402
-from memento.llm import llm_complete  # noqa: E402
+from memento.llm import in_llm_subprocess, llm_complete  # noqa: E402
 from memento.smart_store import write_smart_store_note  # noqa: E402
 from memento.store import (  # noqa: E402
     acquire_vault_write_lock,
@@ -1220,6 +1220,12 @@ def run_remote_triage(hook_input):
 
 
 def main():
+    # SessionEnd fires for the headless `claude` children memento spawns for
+    # triage synthesis too. Triaging them would call llm_complete -> spawn
+    # another child -> fire SessionEnd -> recurse (see memento/llm.py). No-op.
+    if in_llm_subprocess():
+        sys.exit(0)
+
     try:
         hook_input = read_hook_input()
     except Exception as exc:
