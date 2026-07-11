@@ -4,6 +4,8 @@ import io
 import json
 import math
 import os
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -291,6 +293,57 @@ class TestModelCachePath:
 
         p = NomicLocalProvider(cache_dir=tmp_path / "custom-models")
         assert p._model_cache_dir() == tmp_path / "custom-models"
+
+
+class TestDownloadModel:
+    """Regression coverage for the Hugging Face Hub download path."""
+
+    def test_download_copies_into_flat_layout_without_removed_kwargs(self, tmp_path, monkeypatch):
+        """hf_hub_download must be called without local_dir_use_symlinks.
+
+        That kwarg was removed in huggingface_hub 1.0, so passing it raises
+        TypeError and breaks the model download. Simulate a 1.x hub whose
+        signature rejects it, and assert the files land in the flat layout
+        _load_model() expects.
+        """
+        from memento.embedding import NomicLocalProvider
+
+        hub_cache = tmp_path / "hf-cache"
+        hub_cache.mkdir()
+        calls = []
+
+        def fake_hf_hub_download(repo_id, filename, **kwargs):
+            # huggingface_hub >= 1.0 no longer accepts these.
+            assert "local_dir_use_symlinks" not in kwargs
+            assert "local_dir" not in kwargs
+            calls.append(filename)
+            src = hub_cache / filename.replace("/", "__")
+            src.write_bytes(b"onnx-bytes" if filename.endswith(".onnx") else b"{}")
+            return str(src)
+
+        monkeypatch.setitem(
+            sys.modules,
+            "huggingface_hub",
+            types.SimpleNamespace(hf_hub_download=fake_hf_hub_download),
+        )
+
+        model_dir = tmp_path / "models" / "nomic-embed-text-v1.5"
+        provider = NomicLocalProvider(cache_dir=tmp_path / "models")
+        provider._download_model(model_dir)
+
+        assert (model_dir / "model_quantized.onnx").read_bytes() == b"onnx-bytes"
+        assert (model_dir / "tokenizer.json").exists()
+        assert len(calls) == 2
+
+    def test_download_without_huggingface_hub_raises_actionable_error(self, tmp_path, monkeypatch):
+        from memento.embedding import NomicLocalProvider
+
+        # Force `from huggingface_hub import hf_hub_download` to raise ImportError.
+        monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+
+        provider = NomicLocalProvider(cache_dir=tmp_path / "models")
+        with pytest.raises(RuntimeError, match="huggingface_hub is required"):
+            provider._download_model(tmp_path / "models" / "nomic-embed-text-v1.5")
 
 
 # ---------------------------------------------------------------------------

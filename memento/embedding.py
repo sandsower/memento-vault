@@ -13,6 +13,7 @@ import importlib
 import json
 import logging
 import os
+import shutil
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -212,36 +213,28 @@ class NomicLocalProvider(EmbeddingProvider):
 
         try:
             from huggingface_hub import hf_hub_download
-
-            logger.info("Downloading %s model from Hugging Face Hub...", self._model_name)
-
-            hf_hub_download(
-                repo_id=_HF_REPO,
-                filename=_ONNX_FILENAME,
-                local_dir=model_dir,
-                local_dir_use_symlinks=False,
-            )
-            hf_hub_download(
-                repo_id=_HF_REPO,
-                filename=_TOKENIZER_FILENAME,
-                local_dir=model_dir,
-                local_dir_use_symlinks=False,
-            )
-
-            # hf_hub_download puts files in subdirs matching the repo structure.
-            # Move them to the expected flat locations if needed.
-            onnx_subdir = model_dir / "onnx" / "model_quantized.onnx"
-            onnx_flat = model_dir / "model_quantized.onnx"
-            if onnx_subdir.exists() and not onnx_flat.exists():
-                os.replace(onnx_subdir, onnx_flat)
-
-            logger.info("Model downloaded to %s", model_dir)
-
-        except ImportError:
+        except ImportError as exc:
             raise RuntimeError(
                 "huggingface_hub is required to download the embedding model. "
                 "Install it with: pip install huggingface_hub"
-            )
+            ) from exc
+
+        try:
+            logger.info("Downloading %s model from Hugging Face Hub...", self._model_name)
+
+            # Download into huggingface_hub's own cache, then copy into our flat
+            # layout. We deliberately do NOT pass ``local_dir`` /
+            # ``local_dir_use_symlinks``: the latter was removed in
+            # huggingface_hub 1.0 (passing it raises TypeError), and copying from
+            # the returned cache path is stable across huggingface_hub versions
+            # while sidestepping the repo's ``onnx/`` subfolder structure.
+            onnx_src = hf_hub_download(repo_id=_HF_REPO, filename=_ONNX_FILENAME)
+            tokenizer_src = hf_hub_download(repo_id=_HF_REPO, filename=_TOKENIZER_FILENAME)
+
+            shutil.copyfile(onnx_src, model_dir / "model_quantized.onnx")
+            shutil.copyfile(tokenizer_src, model_dir / "tokenizer.json")
+
+            logger.info("Model downloaded to %s", model_dir)
         except Exception as exc:
             raise RuntimeError(f"Failed to download embedding model: {exc}") from exc
 
