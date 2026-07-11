@@ -539,16 +539,8 @@ class TestRunQmd:
         # would kill only the direct child and block forever draining the
         # pipe the grandchild still holds; _run_qmd must kill the whole group.
         pidfile = tmp_path / "grandchild.pid"
-        inner = (
-            "import os, time; "
-            f"open({str(pidfile)!r}, 'w').write(str(os.getpid())); "
-            "time.sleep(60)"
-        )
-        outer = (
-            "import subprocess, sys, time; "
-            f"subprocess.Popen([sys.executable, '-c', {inner!r}]); "
-            "time.sleep(60)"
-        )
+        inner = f"import os, time; open({str(pidfile)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+        outer = f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {inner!r}]); time.sleep(60)"
 
         start = time.monotonic()
         with pytest.raises(subprocess.TimeoutExpired):
