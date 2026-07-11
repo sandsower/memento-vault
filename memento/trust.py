@@ -149,11 +149,19 @@ def _compact_non_injecting_payload(payload: dict, max_serialized_chars: int) -> 
         compact_metadata: dict = {}
         if isinstance(original_metadata, dict) and "packet_char_budget" in original_metadata:
             compact_metadata["packet_char_budget"] = original_metadata["packet_char_budget"]
-        compact_metadata.update({"used_chars": 0, "truncated": True})
+        compact_metadata.update(
+            {
+                "used_chars": 0,
+                "raw_used_chars": 0,
+                "framed_chars": 0,
+                "truncated": True,
+            }
+        )
         _append_budget_note(compact_metadata, "trust frame suppressed")
         fallback["metadata"] = compact_metadata
 
     def fits(candidate: dict) -> bool:
+        _record_serialized_chars(candidate)
         return len(json.dumps(candidate)) <= budget
 
     if fits(fallback):
@@ -168,6 +176,18 @@ def _compact_non_injecting_payload(payload: dict, max_serialized_chars: int) -> 
     if fits(minimal):
         return minimal
     return {} if budget >= len(json.dumps({})) else minimal
+
+
+def _record_serialized_chars(payload: dict) -> None:
+    """Record the final JSON size without making the measurement self-inconsistent."""
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return
+    while True:
+        measured = len(json.dumps(payload))
+        if metadata.get("serialized_chars") == measured:
+            return
+        metadata["serialized_chars"] = measured
 
 
 def frame_lifecycle_payload(
@@ -203,13 +223,16 @@ def frame_lifecycle_payload(
             if not isinstance(metadata, dict):
                 metadata = {}
                 candidate["metadata"] = metadata
-            metadata["used_chars"] = len(candidate_frame)
+            metadata["used_chars"] = len(candidate_content)
+            metadata["raw_used_chars"] = len(candidate_content)
+            metadata["framed_chars"] = len(candidate_frame)
             if content_was_truncated or packet_was_truncated:
                 metadata["truncated"] = True
             if content_was_truncated:
                 _append_budget_note(metadata, content_note)
             if packet_was_truncated:
                 _append_budget_note(metadata, packet_note)
+            _record_serialized_chars(candidate)
         return candidate
 
     def fits(candidate_content: str, *, packet_was_truncated: bool) -> bool:

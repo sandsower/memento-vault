@@ -45,7 +45,10 @@ This is defense in depth and must not be used to authorize tools, permissions, d
 
 Host adapters should inject only the returned framed `content` field.
 They must not remove the frame, append unframed note text, or truncate the rendered envelope.
-`memento_session_context` applies its budget to raw retrieved content and returns either a complete frame or no injectable content.
+`memento_session_context` reports separate units for its two limits.
+`char_budget`, `used_chars`, and `raw_used_chars` measure raw retrieved content, while `framed_chars` measures the rendered trust envelope.
+`packet_char_budget` and `serialized_chars` measure the complete serialized response.
+The tool returns either a complete frame within both limits or no injectable content.
 
 ## Filtered search and graph lookups
 

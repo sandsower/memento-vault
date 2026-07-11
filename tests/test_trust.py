@@ -144,7 +144,11 @@ def test_lifecycle_payload_preserves_serialized_packet_budget():
     assert len(json.dumps(framed)) <= 1000
     assert framed["should_inject"] is True
     _decode_frame(framed["content"])
-    assert framed["metadata"]["used_chars"] == len(framed["content"])
+    decoded = _decode_frame(framed["content"])["content"]
+    assert framed["metadata"]["used_chars"] == len(decoded)
+    assert framed["metadata"]["raw_used_chars"] == len(decoded)
+    assert framed["metadata"]["framed_chars"] == len(framed["content"])
+    assert framed["metadata"]["serialized_chars"] == len(json.dumps(framed))
     assert framed["metadata"]["truncated"] is True
     assert any("trust frame" in note for note in framed["metadata"]["budget_notes"])
 

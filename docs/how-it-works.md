@@ -117,7 +117,8 @@ vault-tool-context.py (PreToolUse hook, Read matcher)
 
 All three hooks are zero-cost when they have nothing relevant to say - no output and no context overhead.
 When `retrieval_log: true` or `MEMENTO_DEBUG=1` is enabled, tool context records one terminal `tool-context/decision` event per call so usefulness can be audited from skip reasons, injected paths, cache/search source, latency, and optional candidate summaries.
-The trust envelope adds a small fixed overhead to non-empty injections.
+The trust envelope adds structural overhead to non-empty injections.
+The frame structure is fixed, but JSON escaping means the rendered size can vary with the retrieved content.
 See [performance-analysis.md](performance-analysis.md) for retrieval benchmarks.
 
 ## What gets captured
