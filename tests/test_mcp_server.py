@@ -1402,6 +1402,9 @@ class TestLifecycleRetrievalTools:
         assert _decode_automatic_context(result["content"])["content"].endswith(
             "[vault] truncated to fit the automatic-injection budget"
         )
+        assert result["metadata"]["used_chars"] == len(result["content"])
+        assert result["metadata"]["truncated"] is True
+        assert any("trust frame" in note for note in result["metadata"]["budget_notes"])
 
 
 class TestContradictionInspectionTool:

@@ -173,7 +173,7 @@ def _run_lifecycle(
     max_injected_chars: int | None = None,
 ) -> int:
     try:
-        payload = frame_lifecycle_payload(fn(*args).to_dict(), max_rendered_chars=max_injected_chars)
+        payload = frame_lifecycle_payload(fn(*args).to_dict(), max_content_chars=max_injected_chars)
         return _emit(payload)
     except Exception as exc:  # pragma: no cover - traceback branch asserted by payload shape
         traceback.print_exc(file=sys.stderr)
@@ -2886,7 +2886,7 @@ def _frame_pi_session_context(payload: dict, max_injected_chars: int | None) -> 
     packet_budget = metadata.get("packet_char_budget")
     return frame_lifecycle_payload(
         payload,
-        max_rendered_chars=max_injected_chars,
+        max_content_chars=max_injected_chars,
         max_serialized_chars=packet_budget if isinstance(packet_budget, int) else None,
     )
 

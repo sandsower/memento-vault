@@ -65,17 +65,20 @@ def test_unknown_surface_is_rejected():
         frame_untrusted_context("memory", surface="search")
 
 
-def test_render_budget_truncates_data_without_cutting_frame():
-    frame = frame_untrusted_context("memory " * 1000, surface="tool-context", max_rendered_chars=700)
+def test_content_budget_truncates_data_before_framing():
+    frame = frame_untrusted_context("memory " * 1000, surface="tool-context", max_content_chars=700)
 
-    assert len(frame) <= 700
     payload = _decode_frame(frame)
+    assert len(payload["content"]) <= 700
     assert payload["content"].endswith("[vault] truncated to fit the automatic-injection budget")
     assert payload["content_utf8_bytes"] == len(payload["content"].encode("utf-8"))
+    assert len(frame) > 700
 
 
-def test_too_small_render_budget_returns_empty():
-    assert frame_untrusted_context("memory", surface="briefing", max_rendered_chars=10) == ""
+def test_zero_content_budget_preserves_unlimited_legacy_semantics():
+    frame = frame_untrusted_context("memory", surface="briefing", max_content_chars=0)
+
+    assert _decode_frame(frame)["content"] == "memory"
 
 
 def test_lifecycle_payload_frames_copy_without_mutating_input():
@@ -95,13 +98,36 @@ def test_lifecycle_payload_frames_copy_without_mutating_input():
 
 
 def test_lifecycle_payload_fails_closed_when_frame_cannot_fit():
-    original = {"should_inject": True, "content": "memory", "source": "recall", "results": []}
+    original = {
+        "should_inject": True,
+        "content": "memory",
+        "source": "session-context",
+        "results": [{"path": "notes/" + ("x" * 1000)}],
+        "sections": {"status": {"message": "x" * 1000}},
+        "metadata": {"packet_char_budget": 100},
+    }
 
-    framed = frame_lifecycle_payload(original, max_rendered_chars=10)
+    framed = frame_lifecycle_payload(original, max_serialized_chars=100)
 
+    assert len(json.dumps(framed)) <= 100
     assert framed["should_inject"] is False
     assert framed["content"] == ""
-    assert framed["reason"] == "frame-budget-too-small"
+
+
+def test_non_injecting_fallback_fits_tight_minimal_boundary():
+    original = {
+        "should_inject": True,
+        "content": "memory",
+        "source": "session-context",
+        "results": [{"path": "notes/" + ("x" * 1000)}],
+        "metadata": {"packet_char_budget": 50, "warnings": ["x" * 1000]},
+    }
+
+    framed = frame_lifecycle_payload(original, max_serialized_chars=50)
+
+    assert len(json.dumps(framed)) <= 50
+    assert framed["should_inject"] is False
+    assert framed["content"] == ""
 
 
 def test_lifecycle_payload_preserves_serialized_packet_budget():
@@ -118,6 +144,27 @@ def test_lifecycle_payload_preserves_serialized_packet_budget():
     assert len(json.dumps(framed)) <= 1000
     assert framed["should_inject"] is True
     _decode_frame(framed["content"])
+    assert framed["metadata"]["used_chars"] == len(framed["content"])
+    assert framed["metadata"]["truncated"] is True
+    assert any("trust frame" in note for note in framed["metadata"]["budget_notes"])
+
+
+def test_session_context_suppression_updates_budget_metadata_when_it_fits():
+    original = {
+        "should_inject": True,
+        "content": "memory",
+        "source": "session-context",
+        "results": [],
+        "metadata": {"packet_char_budget": 300},
+    }
+
+    framed = frame_lifecycle_payload(original, max_serialized_chars=300)
+
+    assert len(json.dumps(framed)) <= 300
+    assert framed["should_inject"] is False
+    assert framed["metadata"]["used_chars"] == 0
+    assert framed["metadata"]["truncated"] is True
+    assert any("suppressed" in note for note in framed["metadata"]["budget_notes"])
 
 
 def test_non_injected_payload_remains_unframed():

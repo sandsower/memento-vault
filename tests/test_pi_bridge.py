@@ -101,8 +101,17 @@ def test_pi_bridge_recall_outputs_lifecycle_json(capsys):
     assert payload["results"] == result.results
 
 
-def test_pi_bridge_recall_fails_closed_when_frame_budget_is_too_small(capsys):
-    result = LifecycleResult(True, "memory", "recall")
+@pytest.mark.parametrize(
+    ("content", "budget", "expected"),
+    [
+        ("memory", 7, "memory"),
+        ("memory", 6, "memory"),
+        ("memory", 4, "memo"),
+        ("memory", 0, "memory"),
+    ],
+)
+def test_pi_bridge_recall_caps_raw_memory_before_framing(capsys, content, budget, expected):
+    result = LifecycleResult(True, content, "recall")
 
     with patch("memento.pi_bridge.build_recall", return_value=result):
         code = pi_bridge.main(
@@ -111,15 +120,15 @@ def test_pi_bridge_recall_fails_closed_when_frame_budget_is_too_small(capsys):
                 "--prompt",
                 "What changed?",
                 "--max-injected-chars",
-                "10",
+                str(budget),
             ]
         )
 
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["should_inject"] is False
-    assert payload["content"] == ""
-    assert payload["reason"] == "frame-budget-too-small"
+    assert payload["should_inject"] is True
+    assert _decode_frame(payload["content"])["content"] == expected
+    assert len(payload["content"]) > max(budget, 0)
 
 
 def test_pi_bridge_tool_context_outputs_lifecycle_json(capsys):

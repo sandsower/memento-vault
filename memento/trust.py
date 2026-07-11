@@ -52,15 +52,48 @@ def _render_frame(content: str, surface: str) -> str:
     return f"{_REMINDER}{DATA_MARKER} {_encode_payload(content, surface)}"
 
 
-def _bounded_content(content: str, fits: Callable[[str], bool]) -> str | None:
+def _content_budget(value: int | None) -> int | None:
+    """Normalize host content limits while preserving zero as unlimited."""
+    if value is None:
+        return None
+    budget = int(value)
+    return budget if budget > 0 else None
+
+
+def _truncate_content(content: str, max_content_chars: int | None) -> tuple[str, bool]:
+    budget = _content_budget(max_content_chars)
+    if budget is None or len(content) <= budget:
+        return content, False
+    if budget <= len(_TRUNCATION_MARKER):
+        return content[:budget], True
+    prefix = content[: budget - len(_TRUNCATION_MARKER)].rstrip()
+    return f"{prefix}{_TRUNCATION_MARKER}", True
+
+
+def _bounded_content(
+    content: str,
+    fits: Callable[[str], bool],
+    *,
+    max_content_chars: int | None = None,
+) -> str | None:
     """Return the longest marked prefix whose rendered frame satisfies ``fits``."""
+    content_budget = _content_budget(max_content_chars)
     low = 0
-    high = len(content)
+    if content_budget is None:
+        high = len(content)
+    elif content_budget <= len(_TRUNCATION_MARKER):
+        high = min(len(content), content_budget)
+    else:
+        high = min(len(content), content_budget - len(_TRUNCATION_MARKER))
     best = None
     while low <= high:
         midpoint = (low + high) // 2
         prefix = content[:midpoint].rstrip()
-        candidate = f"{prefix}{_TRUNCATION_MARKER}"
+        candidate = (
+            prefix
+            if content_budget is not None and content_budget <= len(_TRUNCATION_MARKER)
+            else f"{prefix}{_TRUNCATION_MARKER}"
+        )
         if fits(candidate):
             best = candidate
             low = midpoint + 1
@@ -73,7 +106,7 @@ def frame_untrusted_context(
     content: str,
     *,
     surface: str,
-    max_rendered_chars: int | None = None,
+    max_content_chars: int | None = None,
 ) -> str:
     """Render one complete automatic-injection frame.
 
@@ -85,19 +118,62 @@ def frame_untrusted_context(
     if not content:
         return ""
     content = str(content)
-    frame = _render_frame(content, surface)
-    if max_rendered_chars is None or len(frame) <= max_rendered_chars:
-        return frame
+    bounded, _ = _truncate_content(content, max_content_chars)
+    return _render_frame(bounded, surface)
 
-    budget = max(0, int(max_rendered_chars))
-    bounded = _bounded_content(content, lambda candidate: len(_render_frame(candidate, surface)) <= budget)
-    return _render_frame(bounded, surface) if bounded is not None else ""
+
+def _append_budget_note(metadata: dict, note: str) -> None:
+    notes = metadata.get("budget_notes")
+    if not isinstance(notes, list):
+        notes = []
+        metadata["budget_notes"] = notes
+    if note not in notes:
+        notes.append(note)
+
+
+def _compact_non_injecting_payload(payload: dict, max_serialized_chars: int) -> dict:
+    """Return the richest truthful non-injecting payload that fits the packet budget."""
+    budget = max(0, int(max_serialized_chars))
+    source = str(payload.get("source") or "")
+    fallback = copy.deepcopy(payload)
+    fallback["should_inject"] = False
+    fallback["content"] = ""
+    fallback["reason"] = "frame-budget-too-small"
+    if "results" in fallback:
+        fallback["results"] = []
+    if "sections" in fallback:
+        fallback["sections"] = {}
+
+    if source == "session-context":
+        original_metadata = payload.get("metadata")
+        compact_metadata: dict = {}
+        if isinstance(original_metadata, dict) and "packet_char_budget" in original_metadata:
+            compact_metadata["packet_char_budget"] = original_metadata["packet_char_budget"]
+        compact_metadata.update({"used_chars": 0, "truncated": True})
+        _append_budget_note(compact_metadata, "trust frame suppressed")
+        fallback["metadata"] = compact_metadata
+
+    def fits(candidate: dict) -> bool:
+        return len(json.dumps(candidate)) <= budget
+
+    if fits(fallback):
+        return fallback
+
+    for optional_key in ("sections", "results", "metadata", "reason", "source"):
+        fallback.pop(optional_key, None)
+        if fits(fallback):
+            return fallback
+
+    minimal = {"should_inject": False, "content": ""}
+    if fits(minimal):
+        return minimal
+    return {} if budget >= len(json.dumps({})) else minimal
 
 
 def frame_lifecycle_payload(
     payload: dict,
     *,
-    max_rendered_chars: int | None = None,
+    max_content_chars: int | None = None,
     max_serialized_chars: int | None = None,
 ) -> dict:
     """Return a copied lifecycle payload with its injectable content framed.
@@ -112,30 +188,47 @@ def frame_lifecycle_payload(
 
     surface = _validate_surface(str(framed_payload.get("source") or ""))
     raw_content = str(framed_payload["content"])
+    capped_content, content_was_truncated = _truncate_content(raw_content, max_content_chars)
 
-    def candidate_payload(candidate_content: str) -> dict:
+    content_note = "retrieved content truncated to max injected chars before trust framing"
+    packet_note = "retrieved content shortened so the complete trust frame fits the serialized packet budget"
+
+    def candidate_payload(candidate_content: str, *, packet_was_truncated: bool) -> dict:
         candidate_frame = _render_frame(candidate_content, surface)
         candidate = copy.deepcopy(payload)
         candidate["content"] = candidate_frame
         candidate["should_inject"] = True
+        if surface == "session-context":
+            metadata = candidate.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+                candidate["metadata"] = metadata
+            metadata["used_chars"] = len(candidate_frame)
+            if content_was_truncated or packet_was_truncated:
+                metadata["truncated"] = True
+            if content_was_truncated:
+                _append_budget_note(metadata, content_note)
+            if packet_was_truncated:
+                _append_budget_note(metadata, packet_note)
         return candidate
 
-    def fits(candidate_content: str) -> bool:
-        candidate = candidate_payload(candidate_content)
-        if max_rendered_chars is not None and len(candidate["content"]) > max(0, int(max_rendered_chars)):
-            return False
+    def fits(candidate_content: str, *, packet_was_truncated: bool) -> bool:
+        candidate = candidate_payload(candidate_content, packet_was_truncated=packet_was_truncated)
         if max_serialized_chars is not None and len(json.dumps(candidate)) > max(0, int(max_serialized_chars)):
             return False
         return True
 
-    if fits(raw_content):
-        return candidate_payload(raw_content)
+    if fits(capped_content, packet_was_truncated=False):
+        return candidate_payload(capped_content, packet_was_truncated=False)
 
-    bounded = _bounded_content(raw_content, fits)
+    bounded = _bounded_content(
+        raw_content,
+        lambda candidate: fits(candidate, packet_was_truncated=True),
+        max_content_chars=max_content_chars,
+    )
     if bounded is not None:
-        return candidate_payload(bounded)
+        return candidate_payload(bounded, packet_was_truncated=True)
 
-    framed_payload["content"] = ""
-    framed_payload["should_inject"] = False
-    framed_payload["reason"] = "frame-budget-too-small"
-    return framed_payload
+    if max_serialized_chars is None:
+        return candidate_payload(capped_content, packet_was_truncated=False)
+    return _compact_non_injecting_payload(payload, max_serialized_chars)
