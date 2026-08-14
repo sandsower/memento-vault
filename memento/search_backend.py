@@ -16,6 +16,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 
+from memento.config import indexed_dir_names
+
 # Index staleness thresholds (seconds). Canonical source shared by every
 # backend and imported by health.py, so the pass/warn/fail boundaries stay
 # consistent if they are ever tuned.
@@ -162,7 +164,7 @@ def _literal_file_search(
     import time
 
     deadline = time.monotonic() + timeout
-    search_dirs = [vault / d for d in ("notes", "fleeting", "projects") if (vault / d).exists()]
+    search_dirs = [vault / d for d in indexed_dir_names() if (vault / d).exists()]
     vault_resolved = vault.resolve()
     md_files: list[Path] = []
     for directory in search_dirs:
@@ -519,7 +521,7 @@ class GrepBackend(SearchBackend):
         from memento.config import get_vault
 
         vault = get_vault()
-        return vault.exists() and any((vault / d).exists() for d in ("notes", "fleeting", "projects"))
+        return vault.exists() and any((vault / d).exists() for d in indexed_dir_names())
 
     def search(
         self,
@@ -547,7 +549,7 @@ class GrepBackend(SearchBackend):
         deadline = time.monotonic() + timeout
 
         # Search notes/, fleeting/, and projects/ for full coverage
-        search_dirs = [vault / d for d in ("notes", "fleeting", "projects") if (vault / d).exists()]
+        search_dirs = [vault / d for d in indexed_dir_names() if (vault / d).exists()]
         if not search_dirs:
             return []
 

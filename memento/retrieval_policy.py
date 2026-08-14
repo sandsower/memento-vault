@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from memento.config import detect_project as default_detect_project
-from memento.config import get_config, get_vault, slugify
+from memento.config import get_config, get_vault, indexed_dir_names, slugify
 from memento.graph import lookup_concepts, read_note_metadata
 from memento.query import is_invalidated_record, read_note_record
 from memento.search import (
@@ -834,9 +834,7 @@ class ExplicitSearchRuntime:
 
         vault = self.vault_loader()
         search_metadata = self._search_metadata(request, vault)
-        if not vault.exists() or not any(
-            (vault / directory).exists() for directory in ("notes", "fleeting", "projects")
-        ):
+        if not vault.exists() or not any((vault / directory).exists() for directory in indexed_dir_names()):
             miss = miss_envelope("empty_vault", details={"vault": str(vault)}, metadata=search_metadata)
             self.log_retrieval("mcp", "search_miss", query=query, reason=miss["miss"]["reason"])
             return miss

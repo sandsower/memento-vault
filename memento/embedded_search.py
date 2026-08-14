@@ -16,6 +16,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+from memento.config import indexed_dir_names
 from memento.search_backend import (
     STALE_INDEX_WARN_SECONDS,
     SearchBackend,
@@ -816,9 +817,7 @@ class EmbeddedSearchBackend(SearchBackend):
     def _reindex_unlocked(self, collection: str, embed: bool = True) -> bool:
         try:
             conn = self._get_conn()
-            search_dirs = [
-                self._vault_path / d for d in ("notes", "fleeting", "projects") if (self._vault_path / d).exists()
-            ]
+            search_dirs = [self._vault_path / d for d in indexed_dir_names() if (self._vault_path / d).exists()]
 
             indexed_paths = set()
             notes_for_embedding: list[tuple[str, str]] = []  # (path, content)

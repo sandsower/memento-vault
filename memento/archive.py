@@ -15,10 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
+from memento.config import archive_root_names
+
 ARCHIVE_FORMAT = "memento-portable-archive"
 ARCHIVE_VERSION = 1
 PAYLOAD_PREFIX = "payload/"
-CONTENT_ROOTS = ("notes", "fleeting", "projects", "archive")
 STATE_FILES = ("vault-identity.json", ".sync/ledger.jsonl", ".memento/tombstones.jsonl")
 TOMBSTONES_REL = ".memento/tombstones.jsonl"
 
@@ -224,7 +225,7 @@ def _active_tombstones(vault: Path) -> list[dict]:
 def _iter_export_files(vault: Path, *, exclude_paths: Iterable[Path] = ()):
     seen: set[str] = set()
     excluded = {p.resolve() for p in exclude_paths}
-    for root_name in CONTENT_ROOTS:
+    for root_name in archive_root_names():
         root = vault / root_name
         if not root.exists():
             continue
@@ -258,7 +259,7 @@ def export_archive(vault: Path, archive_path: Path, *, include_manifest_hashes: 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for root_name in CONTENT_ROOTS:
+        for root_name in archive_root_names():
             zf.writestr(f"{PAYLOAD_PREFIX}{root_name}/", b"")
         for rel, path in _iter_export_files(vault, exclude_paths=(archive_path,)):
             data = path.read_bytes()
@@ -283,7 +284,7 @@ def export_archive(vault: Path, archive_path: Path, *, include_manifest_hashes: 
             "archive_version": ARCHIVE_VERSION,
             "created_at": _utcnow_iso(),
             "vault_id": identity.get("vault_id"),
-            "content_roots": list(CONTENT_ROOTS),
+            "content_roots": list(archive_root_names()),
             "state_files": list(STATE_FILES),
             "files": files,
             "tombstones": active_tombstones,
@@ -309,7 +310,7 @@ def _read_manifest(zf: zipfile.ZipFile) -> dict:
 
 
 def _is_allowed_payload_rel(rel: str) -> bool:
-    return rel in STATE_FILES or any(rel.startswith(f"{root}/") for root in CONTENT_ROOTS)
+    return rel in STATE_FILES or any(rel.startswith(f"{root}/") for root in archive_root_names())
 
 
 def _payload_members(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
@@ -329,14 +330,15 @@ def _payload_members(zf: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
 
 
 def _manifest_content_roots(manifest: dict) -> list[str]:
-    roots = manifest.get("content_roots") or list(CONTENT_ROOTS)
+    allowed_roots = archive_root_names()
+    roots = manifest.get("content_roots") or list(allowed_roots)
     normalized = []
     for root in roots:
         try:
             rel = _normalize_rel(root)
         except (TypeError, ValueError) as exc:
             raise ArchiveError(f"archive manifest contains unsafe content root: {root}") from exc
-        if rel not in CONTENT_ROOTS:
+        if rel not in allowed_roots:
             raise ArchiveError(f"archive manifest contains unsupported content root: {rel}")
         normalized.append(rel)
     return normalized

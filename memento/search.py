@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, repo_slug_from_path
+from memento.config import RUNTIME_DIR, detect_project, get_config, get_vault, repo_slug_from_path, source_for_path
 from memento.search_backend import _clean_snippet, get_backend  # noqa: F401 (_clean_snippet re-exported for compat)
 from memento.store import apply_access_log_boost, log_retrieval, read_durability_tier
 from memento.graph import (
@@ -165,6 +165,11 @@ def shape_search_results(
             # didn't originate from a backend.search() call (e.g. wikilink
             # -expansion entries fetched via backend.get()).
             "backend": result.get("backend", "unknown"),
+            # Origin of the note: "profile" for curated cross-agent facts
+            # (profile/ dir), "note" for append-only session captures. Lets
+            # callers distinguish authoritative profile facts from ordinary
+            # notes in a mixed result set.
+            "source": source_for_path(path),
         }
         snippet = _strip_injection(str(result.get("snippet", "")).strip())
         if normalized_detail in ("summary", "full") and snippet:
