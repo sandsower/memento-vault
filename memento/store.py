@@ -1225,7 +1225,7 @@ def _render_note_markdown(
 
     lines = [
         "---",
-        f"title: {safe_title}",
+        f"title: {frontmatter_module.quote_scalar(safe_title)}",
         f"type: {contract['note_type']}",
         f"tags: {json.dumps(contract['tags'], ensure_ascii=False)}",
         f"source: {contract['source']}",
@@ -1235,7 +1235,7 @@ def _render_note_markdown(
     if contract["certainty"] is not None:
         lines.append(f"certainty: {contract['certainty']}")
     if contract["validity_context"]:
-        lines.append(f"validity-context: {contract['validity_context']}")
+        lines.append(f"validity-context: {frontmatter_module.quote_scalar(contract['validity_context'])}")
     if contract["supersedes"]:
         lines.append(f"supersedes: {json.dumps(contract['supersedes'], ensure_ascii=False)}")
     if contract["citations"]:
@@ -2007,7 +2007,7 @@ def write_daily_snapshot(
             safe_items = [_safe_yaml_scalar(v) for v in value]
             lines.append(f"{safe_key}: [{', '.join(safe_items)}]")
         else:
-            lines.append(f"{safe_key}: {_safe_yaml_scalar(value)}")
+            lines.append(f"{safe_key}: {frontmatter_module.quote_scalar(_safe_yaml_scalar(value))}")
 
     body = sanitized.strip()
     if _body_has_related_heading(body):

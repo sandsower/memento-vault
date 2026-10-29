@@ -165,6 +165,63 @@ class TestWriteNote:
         assert 'tags: ["cache,redis", "alice-\\"beta\\""]' in text
         assert 'supersedes: "Alice \\"beta\\" note"' in text
 
+    def test_write_note_quotes_free_text_that_plain_yaml_would_reject(self, tmp_vault):
+        """A ": " in a title or validity-context made Obsidian reject the whole
+        frontmatter block ("Invalid properties"); so did a leading quote."""
+        yaml = pytest.importorskip("yaml")
+        title = 'FUT-640 S2a: "external" senders are first-class'
+        validity = "Valid until the spec is ratified: see FUT-593"
+        path = write_note(
+            tmp_vault,
+            title=title,
+            body="Body",
+            note_type="decision",
+            tags=["yaml"],
+            validity_context=validity,
+        )
+
+        text = path.read_text()
+        loaded = yaml.safe_load(text.split("---\n")[1])
+        assert loaded["title"] == title
+        assert loaded["validity-context"] == validity
+
+        quoted_lead = write_note(
+            tmp_vault,
+            title='"Tutto" is not a customer-facing term',
+            body="Body",
+            note_type="decision",
+            tags=["yaml"],
+        )
+        loaded = yaml.safe_load(quoted_lead.read_text().split("---\n")[1])
+        assert loaded["title"] == '"Tutto" is not a customer-facing term'
+
+    def test_write_daily_snapshot_quotes_colon_bearing_extras(self, tmp_vault):
+        yaml = pytest.importorskip("yaml")
+        result = write_daily_snapshot(
+            tmp_vault,
+            "2026-07-06",
+            "api-service",
+            "Content.",
+            frontmatter_extra={"focus": "S2a: external senders"},
+        )
+
+        text = (tmp_vault / result["path"]).read_text()
+        assert yaml.safe_load(text.split("---\n")[1])["focus"] == "S2a: external senders"
+
+    def test_write_note_leaves_safe_titles_unquoted(self, tmp_vault):
+        path = write_note(
+            tmp_vault,
+            title="Redis cache requires TTL",
+            body="Body",
+            note_type="discovery",
+            tags=["redis"],
+            validity_context="until v2",
+        )
+
+        text = path.read_text()
+        assert "title: Redis cache requires TTL\n" in text
+        assert "validity-context: until v2\n" in text
+
     def test_write_note_maps_bug_fix_alias_to_bugfix(self, tmp_vault):
         underscore = write_note(
             tmp_vault,

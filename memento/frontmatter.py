@@ -46,6 +46,7 @@ parser dependency for a read-mostly hot path).
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -251,6 +252,31 @@ def unmanaged_lines(frontmatter: str, managed_keys: frozenset[str] | set[str] = 
     return preserved
 
 
+# A plain scalar may not start with one of these YAML indicator characters.
+_YAML_LEADING_INDICATORS = frozenset("\"'#&*!%@`{}[],?|>-")
+
+
+def quote_scalar(value: str) -> str:
+    """Double-quote a free-text scalar when plain YAML would misread it.
+
+    This module's own :func:`parse` tolerates an unquoted ``title: A: b``,
+    but YAML does not: a second ``": "`` (or a ``" #"`` comment marker, a
+    trailing colon, or a leading indicator such as a quote) makes Obsidian
+    and every real YAML parser reject the whole frontmatter block. Values
+    that are already safe are returned unchanged, so existing notes keep
+    their plain form. The quoted form is a JSON string, which is valid YAML.
+    """
+    if value and (
+        ": " in value
+        or " #" in value
+        or value.endswith(":")
+        or value[0] in _YAML_LEADING_INDICATORS
+        or value != value.strip()
+    ):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
 def _encode_value(value: Any) -> str | None:
     """Render one field value as the text that follows ``key: `` on its line.
 
@@ -264,10 +290,8 @@ def _encode_value(value: Any) -> str | None:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (list, tuple)):
-        import json
-
         return json.dumps(list(value), ensure_ascii=False)
-    return str(value)
+    return quote_scalar(str(value))
 
 
 def serialize(fields: dict[str, Any], body: str, *, key_order: list[str] | None = None) -> str:

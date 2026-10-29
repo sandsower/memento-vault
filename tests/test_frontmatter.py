@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 import memento.frontmatter as fm
 
 # --- Fixture corpus ----------------------------------------------------------
@@ -253,6 +255,15 @@ class TestSerializeRoundTrip:
         assert reparsed_fields["certainty"] == "4"
         assert reparsed_body.strip() == "Body text."
 
+    def test_colon_bearing_scalar_is_valid_yaml_and_round_trips(self):
+        yaml = pytest.importorskip("yaml")
+        fields = {"title": "S2a: external senders", "type": "discovery"}
+        text = fm.serialize(fields, "Body.")
+
+        assert yaml.safe_load(text.split("---\n")[1])["title"] == "S2a: external senders"
+        reparsed_fields, _ = fm.parse(text)
+        assert reparsed_fields["title"] == "S2a: external senders"
+
     def test_none_values_are_omitted(self):
         text = fm.serialize({"title": "T", "origin": None}, "Body.")
         assert "origin" not in text
@@ -272,3 +283,27 @@ class TestKnownFieldsDriftLock:
         assert "title" in fm.KNOWN_FIELDS
         assert "tags" in fm.KNOWN_FIELDS
         assert fm.KNOWN_FIELDS["tags"] == "list"
+
+
+class TestQuoteScalar:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "FUT-640 S2a: external senders",
+            "ends with a colon:",
+            "has a #comment marker",
+            '"Quoted" lead',
+            "'Single' lead",
+            "[not a list",
+            "*not an alias",
+            " padded ",
+        ],
+    )
+    def test_values_yaml_would_misread_are_quoted(self, value):
+        yaml = pytest.importorskip("yaml")
+        line = f"title: {fm.quote_scalar(value)}"
+        assert yaml.safe_load(line)["title"] == value
+
+    @pytest.mark.parametrize("value", ["Plain title", "origin pi_bridge:tool", "C# notes", "a-b", ""])
+    def test_safe_values_are_unchanged(self, value):
+        assert fm.quote_scalar(value) == value
