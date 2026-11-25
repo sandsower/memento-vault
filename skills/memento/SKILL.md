@@ -101,7 +101,7 @@ The vault location is configured in `memento.yml` (default: `~/memento`). Check 
 9. **Trigger Inception check.** Manual captures bypass SessionEnd triage, so Inception's threshold check doesn't fire automatically. Run it explicitly:
 
    ```bash
-   python3 ~/.claude/hooks/memento-inception.py --verbose 2>&1 | tail -5
+   if [ -f ~/.claude/hooks/memento-inception.py ]; then python3 ~/.claude/hooks/memento-inception.py --verbose 2>&1 | tail -5; fi
    ```
 
    This is a no-op if Inception is disabled, if there aren't enough new notes, or if another instance is already running. It runs in the foreground but returns quickly (~20ms) if the threshold isn't met.
